@@ -1,0 +1,24 @@
+{
+  "connections": [
+    {
+      "label": "Hermes for user_test",
+      "url": "http://127.0.0.1:8643/v1",
+      "key": "test-shared-key",
+      "config": {
+        "enable": true,
+        "connection_type": "external",
+        "prefix_id": "hermes-user-test",
+        "tags": [
+          "hermes",
+          "isolated",
+          "private",
+          "user_test"
+        ]
+      },
+      "advertised_model_name": "Hermes",
+      "resolved_base_model_id": "hermes-user-test.Hermes",
+      "wrapper_model_id": "hermes-user-test",
+      "wrapper_model_name": "Hermes"
+    }
+  ]
+}

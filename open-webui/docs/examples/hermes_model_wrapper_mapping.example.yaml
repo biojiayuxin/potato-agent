@@ -1,0 +1,40 @@
+# Example mapping for backend/open_webui/tools/hermes_model_wrapper_helper.py
+#
+# Generates one private wrapper model per listed user. Import output into
+# Open WebUI via POST /api/v1/models/import or the admin import UI.
+
+base_model_id: hermes-alice.Hermes
+base_display_name: Hermes
+owner_user_id: admin
+model_id_prefix: hermes-
+model_name_template: "Hermes"
+description_template: "Private Hermes wrapper for {target_label}"
+
+meta_defaults:
+  profile_image_url: /static/favicon.png
+  tags:
+    - name: hermes
+    - name: private
+
+params_defaults:
+  temperature: 0.2
+
+users:
+  - user_id: user_123
+    username: alice
+    label: Alice
+    model_id: hermes-alice
+    include_target_user_read: true
+    include_target_user_write: true
+
+  - user_id: user_456
+    email: bob@example.com
+    label: Bob
+    model_id: hermes-bob
+    base_model_id: hermes-bob.Hermes
+    read_group_ids:
+      - team-hermes-reviewers
+    meta:
+      description: Bob's private Hermes wrapper
+    params:
+      temperature: 0.1

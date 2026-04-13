@@ -1,0 +1,9 @@
+model:
+  default: gpt-5.4
+  provider: custom
+  base_url: https://tokenx24.com/v1
+  api_key: test-shared-key
+terminal:
+  backend: local
+  timeout: 180
+  cwd: /home/hmx_user_test/work

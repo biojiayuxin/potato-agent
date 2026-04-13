@@ -1,0 +1,34 @@
+base_model_id: Hermes
+owner_user_id: system
+model_id_prefix: hermes-
+model_name_template: Hermes
+description_template: Private Hermes wrapper for {target_label}
+meta_defaults:
+  profile_image_url: /static/favicon.png
+  tags:
+  - name: hermes
+  - name: isolated
+params_defaults: {}
+users:
+- user_id: user_alice
+  label: Alice
+  model_id: hermes-alice
+  name: Hermes
+  base_model_id: hermes-alice.Hermes
+  include_target_user_read: true
+  include_target_user_write: false
+  meta:
+    tags:
+    - name: private
+    - name: alice
+- user_id: user_bob
+  label: Bob
+  model_id: hermes-bob
+  name: Hermes
+  base_model_id: hermes-bob.Hermes
+  include_target_user_read: true
+  include_target_user_write: false
+  meta:
+    tags:
+    - name: private
+    - name: bob

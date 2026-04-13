@@ -1,0 +1,17 @@
+[Unit]
+Description=Hermes Agent for Alice
+After=network.target
+
+[Service]
+Type=simple
+User=hmx_alice
+Group=hmx_alice
+WorkingDirectory=/home/hmx_alice
+Environment=HOME=/home/hmx_alice
+Environment=HERMES_HOME=/home/hmx_alice/.hermes
+ExecStart=/usr/local/bin/hermes gateway run --replace
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

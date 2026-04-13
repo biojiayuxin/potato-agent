@@ -1,0 +1,24 @@
+{
+  "users": [
+    {
+      "username": "user_test",
+      "webui_user": "user_test@example.com",
+      "webui_display_name": "user_test",
+      "openwebui_user_id": "342f9bf2-7cda-4408-8124-bff02a4f6ed7",
+      "linux_user": "hmx_user_test",
+      "home_dir": "/home/hmx_user_test",
+      "hermes_home": "/home/hmx_user_test/.hermes",
+      "workdir": "/home/hmx_user_test/work",
+      "api_server_host": "127.0.0.1",
+      "api_port": 8643,
+      "api_key": "test-shared-key",
+      "api_server_model_name": "Hermes",
+      "connection_url": "http://127.0.0.1:8643/v1",
+      "connection_prefix": "hermes-user-test",
+      "base_model_id": "hermes-user-test.Hermes",
+      "model_id": "hermes-user-test",
+      "model_name": "Hermes",
+      "systemd_service": "hermes-user-test.service"
+    }
+  ]
+}

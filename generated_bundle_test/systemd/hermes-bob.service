@@ -1,0 +1,17 @@
+[Unit]
+Description=Hermes Agent for Bob
+After=network.target
+
+[Service]
+Type=simple
+User=hmx_bob
+Group=hmx_bob
+WorkingDirectory=/home/hmx_bob
+Environment=HOME=/home/hmx_bob
+Environment=HERMES_HOME=/home/hmx_bob/.hermes
+ExecStart=/usr/local/bin/hermes gateway run --replace
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

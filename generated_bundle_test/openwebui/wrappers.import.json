@@ -1,0 +1,56 @@
+{
+  "models": [
+    {
+      "id": "hermes-alice",
+      "base_model_id": "hermes-alice.Hermes",
+      "name": "Hermes",
+      "meta": {
+        "profile_image_url": "/static/favicon.png",
+        "tags": [
+          {
+            "name": "private"
+          },
+          {
+            "name": "alice"
+          }
+        ],
+        "description": "Private Hermes wrapper for Alice"
+      },
+      "params": {},
+      "access_grants": [
+        {
+          "principal_type": "user",
+          "principal_id": "user_alice",
+          "permission": "read"
+        }
+      ],
+      "is_active": true
+    },
+    {
+      "id": "hermes-bob",
+      "base_model_id": "hermes-bob.Hermes",
+      "name": "Hermes",
+      "meta": {
+        "profile_image_url": "/static/favicon.png",
+        "tags": [
+          {
+            "name": "private"
+          },
+          {
+            "name": "bob"
+          }
+        ],
+        "description": "Private Hermes wrapper for Bob"
+      },
+      "params": {},
+      "access_grants": [
+        {
+          "principal_type": "user",
+          "principal_id": "user_bob",
+          "permission": "read"
+        }
+      ],
+      "is_active": true
+    }
+  ]
+}
