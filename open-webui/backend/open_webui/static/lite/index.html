@@ -61,7 +61,7 @@
                 <textarea
                   id="prompt-input"
                   rows="4"
-                  placeholder="输入消息，按 Ctrl+Enter 发送"
+                  placeholder="输入消息，按 Enter 发送，Ctrl/Cmd + Enter 或 Shift + Enter 换行"
                 ></textarea>
                 <div class="composer-actions">
                   <div id="chat-error" class="error" hidden></div>
@@ -95,10 +95,15 @@
     <template id="message-template">
       <article class="message">
         <div class="message-role"></div>
+        <div class="message-meta-sections"></div>
         <div class="message-content"></div>
+        <div class="message-actions">
+          <button type="button" class="message-copy-button">复制</button>
+        </div>
       </article>
     </template>
 
+    <script src="/static/lite/vendor/marked.umd.js"></script>
     <script type="module" src="/static/lite/app.js"></script>
   </body>
 </html>

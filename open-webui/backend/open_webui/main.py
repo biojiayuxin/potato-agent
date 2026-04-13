@@ -72,6 +72,13 @@ from open_webui.routers import (
     chats,
 )
 
+from open_webui.routers.retrieval import (
+    get_embedding_function,
+    get_reranking_function,
+    get_ef,
+    get_rf,
+)
+
 
 from sqlalchemy.orm import Session
 from open_webui.internal.db import ScopedSession, engine, get_session
@@ -487,9 +494,7 @@ from open_webui.utils.models import (
 )
 from open_webui.utils.chat import (
     generate_chat_completion as chat_completion_handler,
-    chat_completed as chat_completed_handler,
 )
-from open_webui.utils.actions import chat_action as chat_action_handler
 from open_webui.utils.embeddings import generate_embeddings
 from open_webui.utils.middleware import (
     build_chat_response_context,
@@ -1440,10 +1445,10 @@ async def check_url(request: Request, call_next):
 
         request.state.token = HTTPAuthorizationCredentials(scheme='Bearer', credentials=request.cookies.get('token'))
 
-    # Fallback to x-api-key header for Anthropic Messages API routes
+    # Fallback to x-api-key header for remaining provider-compatible routes
     if request.state.token is None and request.headers.get('x-api-key'):
         request_path = request.url.path
-        if request_path in ('/api/message', '/api/v1/messages') or request_path.startswith('/ollama/v1/messages'):
+        if request_path.startswith('/ollama/v1/messages'):
             from fastapi.security import HTTPAuthorizationCredentials
 
             request.state.token = HTTPAuthorizationCredentials(
@@ -1836,100 +1841,6 @@ async def chat_completion(
 # Alias for chat_completion (Legacy)
 generate_chat_completions = chat_completion
 generate_chat_completion = chat_completion
-
-
-##################################
-#
-# Anthropic Messages API Compatible Endpoint
-#
-##################################
-
-
-from open_webui.utils.anthropic import (
-    convert_anthropic_to_openai_payload,
-    convert_openai_to_anthropic_response,
-    openai_stream_to_anthropic_stream,
-)
-
-
-@app.post('/api/message')
-@app.post('/api/v1/messages')  # Anthropic Messages API compatible endpoint
-async def generate_messages(
-    request: Request,
-    form_data: dict,
-    user=Depends(get_verified_user),
-):
-    """
-    Anthropic Messages API compatible endpoint.
-
-    Accepts the Anthropic Messages API format, converts internally to OpenAI
-    Chat Completions format, routes through the existing chat completion
-    pipeline, then converts the response back to Anthropic Messages format.
-
-    Supports both streaming and non-streaming requests.
-    All models configured in Open WebUI are accessible via this endpoint.
-
-    Authentication: Supports both standard Authorization header and
-    Anthropic's x-api-key header (via middleware translation).
-    """
-    # Convert Anthropic payload to OpenAI format
-    requested_model = form_data.get('model', '')
-
-    openai_payload = convert_anthropic_to_openai_payload(form_data)
-
-    # Route through the existing chat_completion handler
-    response = await chat_completion(request, openai_payload, user)
-
-    # Convert response back to Anthropic format
-    if isinstance(response, StreamingResponse):
-        # Streaming response: wrap the generator to convert SSE format
-        return StreamingResponse(
-            openai_stream_to_anthropic_stream(response.body_iterator, model=requested_model),
-            media_type='text/event-stream',
-            headers={
-                'Cache-Control': 'no-cache',
-                'Connection': 'keep-alive',
-            },
-        )
-    elif isinstance(response, dict):
-        return convert_openai_to_anthropic_response(response, model=requested_model)
-    else:
-        # Passthrough for error responses (JSONResponse, PlainTextResponse, etc.)
-        return response
-
-
-@app.post('/api/chat/completed')
-async def chat_completed(request: Request, form_data: dict, user=Depends(get_verified_user)):
-    try:
-        model_item = form_data.pop('model_item', {})
-
-        if model_item.get('direct', False):
-            request.state.direct = True
-            request.state.model = model_item
-
-        return await chat_completed_handler(request, form_data, user)
-    except Exception as e:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=str(e),
-        )
-
-
-@app.post('/api/chat/actions/{action_id}')
-async def chat_action(request: Request, action_id: str, form_data: dict, user=Depends(get_verified_user)):
-    try:
-        model_item = form_data.pop('model_item', {})
-
-        if model_item.get('direct', False):
-            request.state.direct = True
-            request.state.model = model_item
-
-        return await chat_action_handler(request, action_id, form_data, user)
-    except Exception as e:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=str(e),
-        )
 
 
 ##################################
@@ -2512,6 +2423,9 @@ async def lite_files_tree(path: Optional[str] = None, user=Depends(get_verified_
 
     entries = []
     for child in sorted(target.iterdir(), key=lambda item: (not item.is_dir(), item.name.lower())):
+        if child.name.startswith('.'):
+            continue
+
         stat = child.stat()
         child_rel = _lite_relative_path(root, child)
         entries.append(

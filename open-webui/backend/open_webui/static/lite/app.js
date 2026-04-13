@@ -100,6 +100,109 @@ const escapeHtml = (text) =>
     .replaceAll('"', '&quot;')
     .replaceAll("'", '&#39;');
 
+const sanitizeRenderedHtml = (html) => {
+  const template = document.createElement('template');
+  template.innerHTML = html;
+
+  const blockedTags = new Set(['script', 'style', 'iframe', 'object', 'embed', 'link', 'meta']);
+  const allowedTags = new Set([
+    'a',
+    'blockquote',
+    'br',
+    'code',
+    'del',
+    'em',
+    'h1',
+    'h2',
+    'h3',
+    'h4',
+    'h5',
+    'h6',
+    'hr',
+    'li',
+    'ol',
+    'p',
+    'pre',
+    'strong',
+    'table',
+    'tbody',
+    'td',
+    'th',
+    'thead',
+    'tr',
+    'ul'
+  ]);
+
+  const walker = document.createTreeWalker(template.content, NodeFilter.SHOW_ELEMENT);
+  const elements = [];
+  while (walker.nextNode()) {
+    elements.push(walker.currentNode);
+  }
+
+  for (const element of elements) {
+    const tag = element.tagName.toLowerCase();
+
+    if (blockedTags.has(tag)) {
+      element.remove();
+      continue;
+    }
+
+    if (!allowedTags.has(tag)) {
+      const textNode = document.createTextNode(element.textContent || '');
+      element.replaceWith(textNode);
+      continue;
+    }
+
+    for (const attr of [...element.attributes]) {
+      const name = attr.name.toLowerCase();
+      const value = attr.value || '';
+
+      if (name.startsWith('on')) {
+        element.removeAttribute(attr.name);
+        continue;
+      }
+
+      if (tag === 'a' && name === 'href') {
+        if (!/^https?:\/\//i.test(value) && !/^mailto:/i.test(value)) {
+          element.removeAttribute(attr.name);
+        }
+        continue;
+      }
+
+      if (tag === 'a' && (name === 'target' || name === 'rel')) {
+        continue;
+      }
+
+      element.removeAttribute(attr.name);
+    }
+
+    if (tag === 'a' && element.getAttribute('href')) {
+      element.setAttribute('target', '_blank');
+      element.setAttribute('rel', 'noopener noreferrer');
+    }
+  }
+
+  return template.innerHTML;
+};
+
+const renderMarkdown = (text) => {
+  const source = String(text ?? '');
+  const markedApi = globalThis.marked;
+
+  if (!markedApi?.parse) {
+    return escapeHtml(source).replaceAll('\n', '<br>');
+  }
+
+  const rendered = markedApi.parse(source, {
+    gfm: true,
+    breaks: true,
+    headerIds: false,
+    mangle: false
+  });
+
+  return sanitizeRenderedHtml(rendered);
+};
+
 const formatTimestamp = (ts) => {
   if (!ts) return '';
   const date = new Date(ts * 1000);
@@ -109,6 +212,160 @@ const formatTimestamp = (ts) => {
     hour: '2-digit',
     minute: '2-digit',
   });
+};
+
+const getRawMessageText = (message) => {
+  const blocks = [];
+
+  const content = message?.content;
+  if (typeof content === 'string' && content.trim()) {
+    blocks.push(content);
+  } else if (content != null && typeof content !== 'string') {
+    try {
+      blocks.push(JSON.stringify(content, null, 2));
+    } catch {
+      blocks.push(String(content));
+    }
+  }
+
+  if (typeof message?.reasoningContent === 'string' && message.reasoningContent.trim()) {
+    blocks.push(`[Reasoning]\n${message.reasoningContent}`);
+  }
+
+  if (Array.isArray(message?.toolCalls) && message.toolCalls.length > 0) {
+    blocks.push(`[Tool Calls]\n${JSON.stringify(message.toolCalls, null, 2)}`);
+  }
+
+  return blocks.join('\n\n').trim();
+};
+
+const normalizeToolCall = (toolCall) => {
+  const normalized = {
+    id: toolCall?.id || '',
+    index: toolCall?.index ?? 0,
+    function: {
+      name: toolCall?.function?.name || '',
+      arguments: toolCall?.function?.arguments || '',
+    },
+  };
+
+  if (toolCall?.type) {
+    normalized.type = toolCall.type;
+  }
+
+  return normalized;
+};
+
+const mergeToolCallDelta = (existingToolCalls, deltaToolCalls) => {
+  const merged = Array.isArray(existingToolCalls) ? existingToolCalls.map((item) => normalizeToolCall(item)) : [];
+
+  for (const deltaToolCall of deltaToolCalls || []) {
+    const index = deltaToolCall?.index ?? merged.length;
+    while (merged.length <= index) {
+      merged.push(normalizeToolCall({ index: merged.length }));
+    }
+
+    const current = merged[index];
+
+    if (deltaToolCall?.id) {
+      current.id = deltaToolCall.id;
+    }
+
+    if (deltaToolCall?.type) {
+      current.type = deltaToolCall.type;
+    }
+
+    const nameDelta = deltaToolCall?.function?.name;
+    if (nameDelta) {
+      current.function.name = nameDelta;
+    }
+
+    const argsDelta = deltaToolCall?.function?.arguments;
+    if (argsDelta) {
+      current.function.arguments += argsDelta;
+    }
+  }
+
+  return merged;
+};
+
+const extractInlineProgressLines = (text) => {
+  if (!text) return [];
+  const matches = text.match(/`(?:💻|🔍|🧠|📁|🌐|📝|⚙️|🛠️)[^`]*`/g) || [];
+  return matches;
+};
+
+const appendProgressEntries = (message, entries) => {
+  const nextEntries = Array.isArray(message.progressLines) ? [...message.progressLines] : [];
+  for (const entry of entries || []) {
+    if (!entry) continue;
+    if (nextEntries[nextEntries.length - 1] === entry) continue;
+    nextEntries.push(entry);
+  }
+  message.progressLines = nextEntries;
+};
+
+const createMetaSection = (title, bodyHtml, className = '') => {
+  const section = document.createElement('details');
+  section.className = `message-meta ${className}`.trim();
+  section.open = true;
+
+  const summary = document.createElement('summary');
+  summary.textContent = title;
+  section.append(summary);
+
+  const body = document.createElement('div');
+  body.className = 'message-meta-body';
+  body.innerHTML = bodyHtml;
+  section.append(body);
+
+  return section;
+};
+
+const renderMessageMetaSections = (container, message) => {
+  container.innerHTML = '';
+
+  if (typeof message?.reasoningContent === 'string' && message.reasoningContent.trim()) {
+    container.append(
+      createMetaSection('推理过程', renderMarkdown(message.reasoningContent), 'message-meta-reasoning')
+    );
+  }
+
+  if (Array.isArray(message?.toolCalls) && message.toolCalls.length > 0) {
+    const items = message.toolCalls
+      .map((toolCall) => {
+        const name = escapeHtml(toolCall?.function?.name || 'unknown_tool');
+        const args = escapeHtml(toolCall?.function?.arguments || '{}');
+        return `<div class="tool-call-item"><div class="tool-call-name">${name}</div><pre><code>${args}</code></pre></div>`;
+      })
+      .join('');
+
+    container.append(createMetaSection('工具调用', items, 'message-meta-tools'));
+  }
+
+  if (Array.isArray(message?.progressLines) && message.progressLines.length > 0) {
+    const lines = message.progressLines
+      .map((line) => `<div class="progress-line">${escapeHtml(line)}</div>`)
+      .join('');
+    container.append(createMetaSection('执行进度', lines, 'message-meta-progress'));
+  }
+};
+
+const copyTextToClipboard = async (text) => {
+  if (navigator.clipboard?.writeText) {
+    await navigator.clipboard.writeText(text);
+    return;
+  }
+
+  const textarea = document.createElement('textarea');
+  textarea.value = text;
+  textarea.setAttribute('readonly', '');
+  textarea.style.position = 'absolute';
+  textarea.style.left = '-9999px';
+  document.body.append(textarea);
+  textarea.select();
+  document.execCommand('copy');
+  textarea.remove();
 };
 
 const getMessageChain = (chat) => {
@@ -193,10 +450,29 @@ const renderMessages = () => {
     const fragment = dom.messageTemplate.content.cloneNode(true);
     const article = fragment.querySelector('.message');
     const role = fragment.querySelector('.message-role');
+    const metaSections = fragment.querySelector('.message-meta-sections');
     const content = fragment.querySelector('.message-content');
+    const copyButton = fragment.querySelector('.message-copy-button');
+    const rawContent = getRawMessageText(message);
     article.classList.add(message.role === 'user' ? 'user' : 'assistant');
     role.textContent = message.role === 'user' ? '你' : 'Hermes';
-    content.innerHTML = escapeHtml(String(message.content ?? '')).replaceAll('\n', '<br>');
+    renderMessageMetaSections(metaSections, message);
+    content.innerHTML = renderMarkdown(String(message.content ?? ''));
+    copyButton.addEventListener('click', async () => {
+      if (!rawContent) return;
+
+      const originalLabel = copyButton.textContent;
+      try {
+        await copyTextToClipboard(rawContent);
+        copyButton.textContent = '已复制';
+      } catch (error) {
+        showError(dom.chatError, '复制失败，请重试。');
+      } finally {
+        window.setTimeout(() => {
+          copyButton.textContent = originalLabel;
+        }, 1200);
+      }
+    });
     dom.messages.append(fragment);
   }
 
@@ -508,11 +784,15 @@ const streamChatCompletion = async (payload, assistantMessage) => {
     buffer = chunks.pop() || '';
 
     for (const chunk of chunks) {
-      const line = chunk
-        .split('\n')
-        .find((part) => part.startsWith('data: '));
-      if (!line) continue;
-      const data = line.slice(6).trim();
+      const lines = chunk.split('\n');
+      const eventLine = lines.find((part) => part.startsWith('event: '));
+      const eventName = eventLine ? eventLine.slice(7).trim() : '';
+      const data = lines
+        .filter((part) => part.startsWith('data: '))
+        .map((part) => part.slice(6))
+        .join('\n')
+        .trim();
+
       if (!data || data === '[DONE]') continue;
 
       let json;
@@ -522,9 +802,33 @@ const streamChatCompletion = async (payload, assistantMessage) => {
         continue;
       }
 
-      const delta = json?.choices?.[0]?.delta?.content;
-      if (!delta) continue;
-      assistantMessage.content += delta;
+      if (eventName === 'hermes.tool.progress') {
+        const emoji = json?.emoji || '🛠️';
+        const label = json?.label || json?.tool || 'tool';
+        appendProgressEntries(assistantMessage, [`${emoji} ${label}`]);
+        renderMessages();
+        continue;
+      }
+
+      const delta = json?.choices?.[0]?.delta || {};
+
+      if (typeof delta.reasoning_content === 'string' && delta.reasoning_content) {
+        assistantMessage.reasoningContent = `${assistantMessage.reasoningContent || ''}${delta.reasoning_content}`;
+      }
+
+      if (Array.isArray(delta.tool_calls) && delta.tool_calls.length > 0) {
+        assistantMessage.toolCalls = mergeToolCallDelta(assistantMessage.toolCalls, delta.tool_calls);
+      }
+
+      if (typeof delta.content === 'string' && delta.content) {
+        assistantMessage.content += delta.content;
+
+        const progressLines = extractInlineProgressLines(delta.content);
+        if (progressLines.length > 0) {
+          appendProgressEntries(assistantMessage, progressLines);
+        }
+      }
+
       renderMessages();
     }
   }
@@ -568,6 +872,9 @@ const submitPrompt = async (prompt) => {
     childrenIds: [],
     role: 'assistant',
     content: '',
+    reasoningContent: '',
+    toolCalls: [],
+    progressLines: [],
     timestamp: nowSeconds(),
     model: state.selectedModel.id,
     done: false,
@@ -720,10 +1027,11 @@ dom.composerForm.addEventListener('submit', async (event) => {
 });
 
 dom.promptInput.addEventListener('keydown', (event) => {
-  if ((event.ctrlKey || event.metaKey) && event.key === 'Enter') {
-    event.preventDefault();
-    dom.composerForm.requestSubmit();
-  }
+  if (event.key !== 'Enter' || event.isComposing) return;
+  if (event.ctrlKey || event.metaKey || event.shiftKey) return;
+
+  event.preventDefault();
+  dom.composerForm.requestSubmit();
 });
 
 dom.refreshFilesButton.addEventListener('click', async () => {
