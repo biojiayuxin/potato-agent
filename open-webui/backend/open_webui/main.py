@@ -64,47 +64,12 @@ from open_webui.utils.logger import start_logger
 from open_webui.socket.main import (
     MODELS,
     app as socket_app,
-    periodic_usage_pool_cleanup,
-    periodic_session_pool_cleanup,
     get_event_emitter,
     get_models_in_use,
 )
 from open_webui.routers import (
-    analytics,
-    audio,
-    images,
-    ollama,
-    openai,
-    retrieval,
-    pipelines,
-    tasks,
     auths,
-    channels,
     chats,
-    notes,
-    folders,
-    configs,
-    groups,
-    files,
-    functions,
-    memories,
-    models,
-    knowledge,
-    prompts,
-    evaluations,
-    skills,
-    tools,
-    users,
-    utils,
-    scim,
-    terminals,
-)
-
-from open_webui.routers.retrieval import (
-    get_embedding_function,
-    get_reranking_function,
-    get_ef,
-    get_rf,
 )
 
 
@@ -531,7 +496,6 @@ from open_webui.utils.middleware import (
     process_chat_payload,
     process_chat_response,
 )
-from open_webui.utils.tools import set_tool_servers, set_terminal_servers
 
 from open_webui.utils.auth import (
     get_license_data,
@@ -541,7 +505,6 @@ from open_webui.utils.auth import (
     get_verified_user,
     create_admin_user,
 )
-from open_webui.utils.plugin import install_tool_and_function_dependencies
 from open_webui.utils.oauth import (
     get_oauth_client_info_with_dynamic_client_registration,
     get_oauth_client_info_with_static_credentials,
@@ -553,14 +516,6 @@ from open_webui.utils.oauth import (
 )
 from open_webui.utils.security_headers import SecurityHeadersMiddleware
 from open_webui.utils.redis import get_redis_connection
-
-from open_webui.tasks import (
-    redis_task_command_listener,
-    list_task_ids_by_item_id,
-    create_task,
-    stop_task,
-    list_tasks,
-)  # Import from tasks.py
 
 from open_webui.utils.redis import get_sentinels_from_env
 
@@ -736,11 +691,6 @@ async def lifespan(app: FastAPI):
             # Disable signup since we now have an admin
             app.state.config.ENABLE_SIGNUP = False
 
-    # This should be blocking (sync) so functions are not deactivated on first /get_models calls
-    # when the first user lands on the / route.
-    log.info('Installing external dependencies of functions and tools...')
-    install_tool_and_function_dependencies()
-
     app.state.redis = get_redis_connection(
         redis_url=REDIS_URL,
         redis_sentinels=get_sentinels_from_env(REDIS_SENTINEL_HOSTS, REDIS_SENTINEL_PORT),
@@ -748,74 +698,14 @@ async def lifespan(app: FastAPI):
         async_mode=True,
     )
 
-    if app.state.redis is not None:
-        app.state.redis_task_command_listener = asyncio.create_task(redis_task_command_listener(app))
-
     if THREAD_POOL_SIZE and THREAD_POOL_SIZE > 0:
         limiter = anyio.to_thread.current_default_thread_limiter()
         limiter.total_tokens = THREAD_POOL_SIZE
-
-    asyncio.create_task(periodic_usage_pool_cleanup())
-    asyncio.create_task(periodic_session_pool_cleanup())
-
-    if app.state.config.ENABLE_BASE_MODELS_CACHE:
-        try:
-            await get_all_models(
-                Request(
-                    # Creating a mock request object to pass to get_all_models
-                    {
-                        'type': 'http',
-                        'asgi.version': '3.0',
-                        'asgi.spec_version': '2.0',
-                        'method': 'GET',
-                        'path': '/internal',
-                        'query_string': b'',
-                        'headers': Headers({}).raw,
-                        'client': ('127.0.0.1', 12345),
-                        'server': ('127.0.0.1', 80),
-                        'scheme': 'http',
-                        'app': app,
-                    }
-                ),
-                None,
-            )
-        except Exception as e:
-            log.warning(f'Failed to pre-fetch models at startup: {e}')
-
-    # Pre-fetch tool server specs so the first request doesn't pay the latency cost
-    if len(app.state.config.TOOL_SERVER_CONNECTIONS) > 0:
-        log.info('Initializing tool servers...')
-        try:
-            mock_request = Request(
-                {
-                    'type': 'http',
-                    'asgi.version': '3.0',
-                    'asgi.spec_version': '2.0',
-                    'method': 'GET',
-                    'path': '/internal',
-                    'query_string': b'',
-                    'headers': Headers({}).raw,
-                    'client': ('127.0.0.1', 12345),
-                    'server': ('127.0.0.1', 80),
-                    'scheme': 'http',
-                    'app': app,
-                }
-            )
-            await set_tool_servers(mock_request)
-            log.info(f'Initialized {len(app.state.TOOL_SERVERS)} tool server(s)')
-
-            await set_terminal_servers(mock_request)
-            log.info(f'Initialized {len(app.state.TERMINAL_SERVERS)} terminal server(s)')
-        except Exception as e:
-            log.warning(f'Failed to initialize tool/terminal servers at startup: {e}')
 
     # Mark application as ready to accept traffic from a startup perspective.
     app.state.startup_complete = True
 
     yield
-
-    if hasattr(app.state, 'redis_task_command_listener'):
-        app.state.redis_task_command_listener.cancel()
 
 
 app = FastAPI(
@@ -1594,48 +1484,8 @@ app.add_middleware(
 app.mount('/ws', socket_app)
 
 
-app.include_router(ollama.router, prefix='/ollama', tags=['ollama'])
-app.include_router(openai.router, prefix='/openai', tags=['openai'])
-
-
-app.include_router(pipelines.router, prefix='/api/v1/pipelines', tags=['pipelines'])
-app.include_router(tasks.router, prefix='/api/v1/tasks', tags=['tasks'])
-app.include_router(images.router, prefix='/api/v1/images', tags=['images'])
-
-app.include_router(audio.router, prefix='/api/v1/audio', tags=['audio'])
-app.include_router(retrieval.router, prefix='/api/v1/retrieval', tags=['retrieval'])
-
-app.include_router(configs.router, prefix='/api/v1/configs', tags=['configs'])
-
 app.include_router(auths.router, prefix='/api/v1/auths', tags=['auths'])
-app.include_router(users.router, prefix='/api/v1/users', tags=['users'])
-
-
-app.include_router(channels.router, prefix='/api/v1/channels', tags=['channels'])
 app.include_router(chats.router, prefix='/api/v1/chats', tags=['chats'])
-app.include_router(notes.router, prefix='/api/v1/notes', tags=['notes'])
-
-
-app.include_router(models.router, prefix='/api/v1/models', tags=['models'])
-app.include_router(knowledge.router, prefix='/api/v1/knowledge', tags=['knowledge'])
-app.include_router(prompts.router, prefix='/api/v1/prompts', tags=['prompts'])
-app.include_router(tools.router, prefix='/api/v1/tools', tags=['tools'])
-app.include_router(skills.router, prefix='/api/v1/skills', tags=['skills'])
-
-app.include_router(memories.router, prefix='/api/v1/memories', tags=['memories'])
-app.include_router(folders.router, prefix='/api/v1/folders', tags=['folders'])
-app.include_router(groups.router, prefix='/api/v1/groups', tags=['groups'])
-app.include_router(files.router, prefix='/api/v1/files', tags=['files'])
-app.include_router(functions.router, prefix='/api/v1/functions', tags=['functions'])
-app.include_router(evaluations.router, prefix='/api/v1/evaluations', tags=['evaluations'])
-if ENABLE_ADMIN_ANALYTICS:
-    app.include_router(analytics.router, prefix='/api/v1/analytics', tags=['analytics'])
-app.include_router(utils.router, prefix='/api/v1/utils', tags=['utils'])
-app.include_router(terminals.router, prefix='/api/v1/terminals', tags=['terminals'])
-
-# SCIM 2.0 API for identity management
-if ENABLE_SCIM:
-    app.include_router(scim.router, prefix='/api/v1/scim/v2', tags=['scim'])
 
 
 try:
@@ -2080,32 +1930,6 @@ async def chat_action(request: Request, action_id: str, form_data: dict, user=De
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=str(e),
         )
-
-
-@app.post('/api/tasks/stop/{task_id}')
-async def stop_task_endpoint(request: Request, task_id: str, user=Depends(get_verified_user)):
-    try:
-        result = await stop_task(request.app.state.redis, task_id)
-        return result
-    except ValueError as e:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(e))
-
-
-@app.get('/api/tasks')
-async def list_tasks_endpoint(request: Request, user=Depends(get_verified_user)):
-    return {'tasks': await list_tasks(request.app.state.redis)}
-
-
-@app.get('/api/tasks/chat/{chat_id}')
-async def list_tasks_by_chat_id_endpoint(request: Request, chat_id: str, user=Depends(get_verified_user)):
-    chat = Chats.get_chat_by_id(chat_id)
-    if chat is None or chat.user_id != user.id:
-        return {'task_ids': []}
-
-    task_ids = await list_task_ids_by_item_id(request.app.state.redis, chat_id)
-
-    log.debug(f'Task IDs for chat {chat_id}: {task_ids}')
-    return {'task_ids': task_ids}
 
 
 ##################################
