@@ -5,37 +5,39 @@
 
 ## 当前目标
 
-当前项目目标已经明确并保持不变：
+当前项目目标保持不变：
 
-- Open WebUI 作为统一前端
+- Open WebUI 作为统一前端入口
 - Hermes 作为后端执行层
 - 每个 Open WebUI 用户绑定一个独立 Linux 用户
 - 每个 Linux 用户运行一个独立 Hermes systemd 服务
 - 用户前端最终只看到一个模型名 `Hermes`
-- 后台使用唯一 wrapper `model_id` 做隔离和授权
+- 后台通过唯一 wrapper `model_id`、唯一 `prefix_id` 和 Linux 用户隔离实现多租户隔离
 
 ## 当前目录状态
 
-当前项目根目录已经收敛为以下主线内容：
+当前项目根目录主线内容：
 
-- `Hermes_OpenWebUI_multiuser_SOP.md`
 - `README.md`
 - `CURRENT_PROGRESS.md`
+- `Hermes_OpenWebUI_multiuser_SOP.md`
+- `end_to_end_multiuser_integration.md`
 - `users_mapping.example.yaml`
 - `users_mapping.yaml`
 - `generate_multiuser_bundle.py`
 - `provision_openwebui_hermes_user.py`
 - `deprovision_openwebui_hermes_user.py`
-- `end_to_end_multiuser_integration.md`
+- `deploy_openwebui_from_workspace.sh`
+- `deploy_lite_to_installed_openwebui.sh`
+- `LITE_FRONTEND.md`
 - `hermes-agent/`
 - `open-webui/`
-- `opencode.jsonc`
 
 说明：
 
-- 旧目录名 `hermes_webUI_SOP` 已废弃，项目现已改名为 `potato_agent`
-- 项目自身文档中的调用路径已经统一改成相对路径
-- `hermes-agent/` 和 `open-webui/` 仍然是源码快照，不是 git clone 工作树
+- 旧目录名 `hermes_webUI_SOP` 已废弃，项目已统一改名为 `potato_agent`
+- 项目文档中的调用路径已经统一为相对路径
+- `hermes-agent/` 和 `open-webui/` 是源码工作区，不等于线上运行目录
 
 ## 当前已完成能力
 
@@ -122,17 +124,79 @@
 
 这是为了避免 Open WebUI 将多个 OpenAI-compatible 连接返回的基础模型按同名 `id` 合并冲突。
 
+### 5. Lite 轻量前端已落地
+
+当前已经实现一套不依赖 npm 构建的 Lite 前端。
+
+入口：
+
+- `/lite`
+
+代码位置：
+
+- `open-webui/backend/open_webui/static/lite/index.html`
+- `open-webui/backend/open_webui/static/lite/styles.css`
+- `open-webui/backend/open_webui/static/lite/app.js`
+- `open-webui/backend/open_webui/main.py`
+
+当前支持：
+
+- 登录
+- 聊天
+- 聊天切换
+- 右侧文件树
+- 文件下载
+
+### 6. Lite 文件树已经从 terminal server 依赖切换为专用后端接口
+
+已经确认 Hermes 本身不提供 Open WebUI 原生 terminal server 所需接口，因此当前实现已切换为 Lite 专用文件接口。
+
+后端接口：
+
+- `GET /api/lite/files/tree`
+- `GET /api/lite/files/download`
+
+当前目录边界策略：
+
+- 优先使用 `home_dir`
+- 没有 `home_dir` 时退回 `workdir`
+
+这意味着 Lite 文件树当前默认从：
+
+- `/home/<linux_user>`
+
+开始，而不是只从：
+
+- `/home/<linux_user>/work`
+
+开始。
+
+### 7. Open WebUI 部署脚本已补齐
+
+为了适配“开发环境 + 部署环境”分离，当前已经新增两个部署脚本：
+
+- `./deploy_openwebui_from_workspace.sh`
+- `./deploy_lite_to_installed_openwebui.sh`
+
+作用：
+
+- 把仓库里的 Open WebUI 工作区源码部署到已安装的 Open WebUI 路径
+- 适合当前这台机器的运行方式：
+  - 源码在 `/root/potato_agent/open-webui/...`
+  - 在线运行代码在 `/opt/open-webui-venv/...`
+
 ## 当前已验证状态
 
-### 1. 共享 Hermes 运行时可用
+### 1. Hermes 运行时可用
 
-当前机器上已经确认：
+当前机器上已确认：
 
-- Hermes 共享入口：`/usr/local/bin/hermes`
+- Hermes 可执行入口：`/usr/local/bin/hermes`
+- Hermes Python 环境：`/opt/hermes-agent-venv`
 
 ### 2. 当前关键服务状态正常
 
-当前已确认处于运行状态：
+当前已确认正常运行：
 
 - `open-webui.service`
 - `hermes-user-test.service`
@@ -153,7 +217,20 @@
 - email: `user_test@example.com`
 - password: `jia123456`
 
-### 4. 一键新增和删除流程都做过真实验证
+### 4. Lite 前端已在 3000 服务上可用
+
+当前可访问：
+
+- `http://<host>:3000/lite`
+
+已验证：
+
+- 登录成功
+- 聊天页面可进入
+- 聊天历史可显示和切换
+- Lite 文件树接口已返回 `/home/hmx_user_test` 下的目录内容
+
+### 5. 一键新增和删除流程都做过真实验证
 
 已验证新增：
 
@@ -164,7 +241,7 @@
 
 - `auto_test`
 
-删除验证确认了以下内容都能被自动移除：
+删除验证确认以下内容都能被自动移除：
 
 - Open WebUI 用户
 - wrapper model
@@ -195,9 +272,21 @@ export POTATO_AGENT_SHARED_API_KEY='sk-...'
 python3 ./generate_multiuser_bundle.py ./users_mapping.yaml --output-dir ./generated_bundle
 ```
 
+### 将工作区 Open WebUI 后端部署到已安装环境
+
+```bash
+sudo ./deploy_openwebui_from_workspace.sh
+```
+
+### 只部署 Lite 相关改动
+
+```bash
+sudo ./deploy_lite_to_installed_openwebui.sh
+```
+
 补充说明：
 
-- `users_mapping.yaml` 现在支持 `${ENV_NAME}` 形式的环境变量占位符
+- `users_mapping.yaml` 支持 `${ENV_NAME}` 形式的环境变量占位符
 - 当前共享 API key 推荐写成 `${POTATO_AGENT_SHARED_API_KEY}`
 - 生成 bundle 和执行 provision/deprovision 脚本前，需要先在当前 shell 导出该变量
 
@@ -212,25 +301,41 @@ python3 ./generate_multiuser_bundle.py ./users_mapping.yaml --output-dir ./gener
 - `systemd User=`
 - 文件系统权限
 
-不是只靠 Open WebUI 授权，也不是只靠 `terminal.cwd`。
+不是只靠 Open WebUI 授权，也不是只靠目录树展示逻辑。
 
-### 2. `pwd` 默认落点目前不是必须收口项
+### 2. 当前仓库源码不等于线上运行代码
 
-当前真实测试中，`pwd` 返回到用户 home 目录也是可接受的。
+当前机器上：
 
-如果后续需要更强的默认目录约束，可以再通过提示词或环境桥接，把工作目录进一步引导到 `/home/<linux_user>/work`。
+- 开发源码目录：`/root/potato_agent/open-webui`
+- 在线运行目录：`/opt/open-webui-venv/lib64/python3.11/site-packages/open_webui`
 
-### 3. 当前目录不是 git 仓库
+因此改完源码后，必须额外部署一次，线上才会生效。
 
-不要依赖 git 状态来判断当前改动。
+### 3. 当前目录不是 git 工作树主仓库
 
-## 下一步建议
+不要依赖 git 状态判断当前改动是否已经在线上生效。
 
-下一步重点开发内容已经明确为 Open WebUI 升级，而不是继续扩展运维脚本。
+## 下一步开发重点
 
-具体目标是：
+下一步重点不再是继续补外围运维脚本，也不是继续围绕 Open WebUI 现有前端做小修补。
 
-1. 在聊天窗口增加右侧边栏
-2. 在右侧边栏展示当前用户目录下的文件结构树
-3. 文件树必须绑定当前登录用户的目录边界，不能跨用户读取
-4. 这个文件树视图应直接服务聊天场景，帮助用户在对话时浏览和定位自己的工作区文件
+下一阶段重点已经明确为：
+
+1. 魔改 Open WebUI 后端
+2. 删除当前项目不需要的后端功能
+3. 精简 Open WebUI 后端代码体积
+4. 收缩启动路径和依赖链，降低部署复杂度
+5. 保留当前项目真正需要的最小能力集：
+   - 登录
+   - 聊天
+   - 聊天切换
+   - Hermes OpenAI-compatible 转发
+   - Lite 文件树与文件下载
+
+具体方向：
+
+1. 识别并裁剪当前项目不需要的 Open WebUI 模块
+2. 减少与当前目标无关的 routers、models、utils、前端静态资源
+3. 让 Lite 前端逐步成为主界面，而不是 Open WebUI 原前端的附属页面
+4. 最终形成一个更轻量、可维护、可重新部署的定制化后端分支
