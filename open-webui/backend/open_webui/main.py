@@ -10,6 +10,7 @@ import time
 import random
 import re
 from uuid import uuid4
+from pathlib import Path
 
 
 from contextlib import asynccontextmanager
@@ -572,6 +573,115 @@ if SAFE_MODE:
 
 logging.basicConfig(stream=sys.stdout, level=GLOBAL_LOG_LEVEL)
 log = logging.getLogger(__name__)
+
+ROOT_DIR = Path(__file__).resolve().parents[3]
+
+
+def _resolve_users_mapping_path() -> Path:
+    candidates: list[Path] = []
+
+    env_path = os.environ.get('LITE_USERS_MAPPING_PATH') or os.environ.get('POTATO_AGENT_USERS_MAPPING_PATH')
+    if env_path:
+        candidates.append(Path(env_path).expanduser())
+
+    candidates.extend(
+        [
+            Path('/root/potato_agent/users_mapping.yaml'),
+            Path.cwd() / 'users_mapping.yaml',
+            ROOT_DIR / 'users_mapping.yaml',
+            Path('/opt/open-webui-data/users_mapping.yaml'),
+        ]
+    )
+
+    for candidate in candidates:
+        if candidate.exists():
+            return candidate.resolve()
+
+    return candidates[0].resolve() if candidates else (ROOT_DIR / 'users_mapping.yaml').resolve()
+
+
+USERS_MAPPING_PATH = _resolve_users_mapping_path()
+_LITE_USER_WORKDIR_CACHE: dict[str, str] | None = None
+
+
+def _load_lite_user_workdirs() -> dict[str, str]:
+    global _LITE_USER_WORKDIR_CACHE
+    if _LITE_USER_WORKDIR_CACHE is not None:
+        return _LITE_USER_WORKDIR_CACHE
+
+    try:
+        import yaml
+    except Exception as exc:
+        log.warning(f'Lite frontend: failed to import yaml: {exc}')
+        _LITE_USER_WORKDIR_CACHE = {}
+        return _LITE_USER_WORKDIR_CACHE
+
+    try:
+        with USERS_MAPPING_PATH.open('r', encoding='utf-8') as handle:
+            data = yaml.safe_load(handle) or {}
+    except FileNotFoundError:
+        log.warning(f'Lite frontend: users_mapping.yaml not found at {USERS_MAPPING_PATH}')
+        _LITE_USER_WORKDIR_CACHE = {}
+        return _LITE_USER_WORKDIR_CACHE
+    except Exception as exc:
+        log.warning(f'Lite frontend: failed to read users_mapping.yaml: {exc}')
+        _LITE_USER_WORKDIR_CACHE = {}
+        return _LITE_USER_WORKDIR_CACHE
+
+    workdirs: dict[str, str] = {}
+    for entry in data.get('users', []) or []:
+        if not isinstance(entry, dict):
+            continue
+
+        root_dir = entry.get('home_dir') or entry.get('workdir')
+        if not root_dir:
+            continue
+
+        for key in ('openwebui_user_id', 'webui_user', 'username', 'webui_display_name'):
+            value = entry.get(key)
+            if isinstance(value, str) and value.strip():
+                workdirs[value.strip()] = str(root_dir)
+
+    _LITE_USER_WORKDIR_CACHE = workdirs
+    return workdirs
+
+
+def _resolve_lite_user_root(user) -> Path:
+    candidates = [
+        getattr(user, 'id', None),
+        getattr(user, 'email', None),
+        getattr(user, 'username', None),
+        getattr(user, 'name', None),
+    ]
+    workdirs = _load_lite_user_workdirs()
+
+    for candidate in candidates:
+        if isinstance(candidate, str) and candidate in workdirs:
+            return Path(workdirs[candidate]).expanduser().resolve()
+
+    raise HTTPException(status_code=404, detail='No workspace directory configured for current user')
+
+
+def _resolve_lite_requested_path(root: Path, requested_path: Optional[str]) -> Path:
+    relative = (requested_path or '').strip().replace('\\', '/')
+    if relative in ('', '.', '/'):  # root
+        target = root
+    else:
+        relative = relative.lstrip('/')
+        target = (root / relative).resolve()
+
+    try:
+        target.relative_to(root)
+    except ValueError:
+        raise HTTPException(status_code=400, detail='Requested path is outside the workspace root')
+
+    return target
+
+
+def _lite_relative_path(root: Path, target: Path) -> str:
+    relative = target.relative_to(root)
+    text = relative.as_posix()
+    return '' if text == '.' else text
 
 
 class SPAStaticFiles(StaticFiles):
@@ -2554,6 +2664,62 @@ async def healthcheck_with_db():
 
 
 app.mount('/static', StaticFiles(directory=STATIC_DIR), name='static')
+
+
+@app.get('/lite')
+async def serve_lite_frontend():
+    file_path = os.path.join(STATIC_DIR, 'lite', 'index.html')
+    if not os.path.isfile(file_path):
+        raise HTTPException(status_code=404, detail='Lite frontend not found')
+    return FileResponse(file_path)
+
+
+@app.get('/api/lite/files/tree')
+async def lite_files_tree(path: Optional[str] = None, user=Depends(get_verified_user)):
+    root = _resolve_lite_user_root(user)
+    target = _resolve_lite_requested_path(root, path)
+
+    if not root.exists():
+        raise HTTPException(status_code=404, detail='Workspace root does not exist')
+    if not target.exists():
+        raise HTTPException(status_code=404, detail='Requested path does not exist')
+    if not target.is_dir():
+        raise HTTPException(status_code=400, detail='Requested path is not a directory')
+
+    entries = []
+    for child in sorted(target.iterdir(), key=lambda item: (not item.is_dir(), item.name.lower())):
+        stat = child.stat()
+        child_rel = _lite_relative_path(root, child)
+        entries.append(
+            {
+                'name': child.name,
+                'path': child_rel,
+                'type': 'directory' if child.is_dir() else 'file',
+                'size': stat.st_size,
+                'modified': int(stat.st_mtime),
+            }
+        )
+
+    return {
+        'root': str(root),
+        'path': _lite_relative_path(root, target),
+        'entries': entries,
+    }
+
+
+@app.get('/api/lite/files/download')
+async def lite_files_download(path: str, user=Depends(get_verified_user)):
+    root = _resolve_lite_user_root(user)
+    target = _resolve_lite_requested_path(root, path)
+
+    if not root.exists():
+        raise HTTPException(status_code=404, detail='Workspace root does not exist')
+    if not target.exists():
+        raise HTTPException(status_code=404, detail='Requested file does not exist')
+    if not target.is_file():
+        raise HTTPException(status_code=400, detail='Requested path is not a file')
+
+    return FileResponse(target, filename=target.name)
 
 
 @app.get('/cache/{path:path}')

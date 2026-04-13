@@ -57,6 +57,29 @@
 
 	let version;
 
+	const getTerminalSelectionValue = (terminal) => terminal?.id || terminal?.url || null;
+
+	const syncSelectedTerminal = () => {
+		const availableTerminals = ($terminalServers ?? [])
+			.map((terminal) => getTerminalSelectionValue(terminal))
+			.filter((value, index, array) => value && array.indexOf(value) === index);
+
+		if ($selectedTerminalId && availableTerminals.includes($selectedTerminalId)) {
+			return;
+		}
+
+		if (availableTerminals.length === 1) {
+			selectedTerminalId.set(availableTerminals[0]);
+			return;
+		}
+
+		if ($selectedTerminalId && !availableTerminals.includes($selectedTerminalId)) {
+			selectedTerminalId.set(null);
+		}
+	};
+
+	$: syncSelectedTerminal();
+
 	const clearChatInputStorage = () => {
 		const chatInputKeys = Object.keys(localStorage).filter((key) => key.startsWith('chat-input'));
 		if (chatInputKeys.length > 0) {
@@ -353,6 +376,7 @@
 
 		// Persist selectedTerminalId across page loads
 		selectedTerminalId.set(localStorage.selectedTerminalId ?? null);
+		syncSelectedTerminal();
 		selectedTerminalId.subscribe((value) => {
 			if (value === null) {
 				delete localStorage.selectedTerminalId;

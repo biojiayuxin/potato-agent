@@ -37,6 +37,7 @@
 	import Tooltip from '../common/Tooltip.svelte';
 	import ConfirmDialog from '../common/ConfirmDialog.svelte';
 
+	import FileTree from './FileNav/FileTree.svelte';
 	import FileNavToolbar from './FileNav/FileNavToolbar.svelte';
 	import FilePreview from './FileNav/FilePreview.svelte';
 	import FileEntryRow from './FileNav/FileEntryRow.svelte';
@@ -90,6 +91,8 @@
 	let entries: FileEntry[] = [];
 	let loading = false;
 	let error: string | null = null;
+	let treeRootPath = '';
+	let treeRefreshToken = 0;
 
 	// ── Navigation history ──────────────────────────────────────────────
 	type NavEntry = { path: string; file: string | null };
@@ -222,6 +225,9 @@
 		($selectedTerminalId, $terminalServers, $settings);
 		const terminal = getTerminal();
 		selectedTerminal = terminal;
+		if (!terminal) {
+			treeRootPath = '';
+		}
 
 		if (terminal && terminal.url !== prevTerminalUrl) {
 			prevTerminalUrl = terminal.url;
@@ -236,6 +242,7 @@
 				const rawCwd = await getCwd(terminal.url, terminal.key);
 				const cwd = rawCwd ? normalizePath(rawCwd) : null;
 				const dir = cwd ? (cwd.endsWith('/') ? cwd : cwd + '/') : '/';
+				treeRootPath = dir;
 				savedPath = dir;
 				loadDir(dir);
 			})();
@@ -328,6 +335,8 @@
 				return a.name.localeCompare(b.name);
 			});
 		}
+
+		treeRefreshToken += 1;
 	};
 
 	const openEntry = async (entry: FileEntry) => {
@@ -835,6 +844,28 @@
 					/>
 				</svg>
 				<span class="text-xs text-gray-400 dark:text-gray-500">{currentPath}</span>
+			</div>
+		{/if}
+
+		{#if treeRootPath}
+			<div class="shrink-0 border-b border-gray-100 bg-gray-50/70 dark:border-gray-800 dark:bg-gray-900/30">
+				<div class="flex items-center justify-between gap-3 px-3 pt-2 pb-1">
+					<div class="text-[11px] font-medium uppercase tracking-wide text-gray-500 dark:text-gray-400">
+						{$i18n.t('Workspace Tree')}
+					</div>
+					<div class="truncate text-[10px] text-gray-400 dark:text-gray-500">{treeRootPath}</div>
+				</div>
+				<div class="max-h-64 overflow-y-auto px-2 pb-2 scrollbar-hidden">
+					<FileTree
+						baseUrl={selectedTerminal.url}
+						apiKey={selectedTerminal.key}
+						rootPath={treeRootPath}
+						{currentPath}
+						refreshToken={treeRefreshToken}
+						on:navigate={(event) => loadDir(event.detail.path)}
+						on:download={(event) => downloadFile(event.detail.path)}
+					/>
+				</div>
 			</div>
 		{/if}
 

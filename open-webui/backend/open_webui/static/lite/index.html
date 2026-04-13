@@ -1,0 +1,104 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Potato Agent Lite</title>
+    <link rel="stylesheet" href="/static/lite/styles.css" />
+  </head>
+  <body>
+    <div id="app" class="app-shell">
+      <section id="login-view" class="login-view">
+        <div class="login-card">
+          <div class="brand">Potato Agent Lite</div>
+          <h1>登录</h1>
+          <p class="muted">使用 Open WebUI 账号登录，进入轻量聊天工作台。</p>
+          <form id="login-form" class="stack gap-12">
+            <label class="stack gap-6">
+              <span>邮箱</span>
+              <input id="email" name="email" type="email" autocomplete="username" required />
+            </label>
+            <label class="stack gap-6">
+              <span>密码</span>
+              <input id="password" name="password" type="password" autocomplete="current-password" required />
+            </label>
+            <button type="submit" class="primary">登录</button>
+            <div id="login-error" class="error" hidden></div>
+          </form>
+        </div>
+      </section>
+
+      <section id="workspace-view" class="workspace-view" hidden>
+        <aside class="sidebar">
+          <div class="sidebar-header">
+            <div>
+              <div class="brand small">Potato Agent Lite</div>
+              <div id="user-email" class="muted tiny"></div>
+            </div>
+            <button id="logout-button" class="ghost small">退出</button>
+          </div>
+
+          <div class="sidebar-actions">
+            <button id="new-chat-button" class="primary small stretch">新建聊天</button>
+          </div>
+
+          <div class="sidebar-section-title">聊天列表</div>
+          <div id="chat-list" class="chat-list"></div>
+        </aside>
+
+        <main class="main-panel">
+          <header class="topbar">
+            <div>
+              <h1 id="chat-title">新聊天</h1>
+              <div id="model-name" class="muted tiny"></div>
+            </div>
+          </header>
+
+          <div class="content-grid">
+            <section class="chat-panel">
+              <div id="messages" class="messages"></div>
+              <form id="composer-form" class="composer">
+                <textarea
+                  id="prompt-input"
+                  rows="4"
+                  placeholder="输入消息，按 Ctrl+Enter 发送"
+                ></textarea>
+                <div class="composer-actions">
+                  <div id="chat-error" class="error" hidden></div>
+                  <button id="send-button" type="submit" class="primary">发送</button>
+                </div>
+              </form>
+            </section>
+
+            <aside class="files-panel">
+              <div class="files-header">
+                <div>
+                  <div class="sidebar-section-title no-margin">文件浏览</div>
+                  <div id="cwd-label" class="muted tiny"></div>
+                </div>
+                <button id="refresh-files-button" class="ghost small">刷新</button>
+              </div>
+              <div id="file-tree" class="file-tree"></div>
+            </aside>
+          </div>
+        </main>
+      </section>
+    </div>
+
+    <template id="chat-item-template">
+      <button class="chat-item">
+        <span class="chat-item-title"></span>
+        <span class="chat-item-meta"></span>
+      </button>
+    </template>
+
+    <template id="message-template">
+      <article class="message">
+        <div class="message-role"></div>
+        <div class="message-content"></div>
+      </article>
+    </template>
+
+    <script type="module" src="/static/lite/app.js"></script>
+  </body>
+</html>
