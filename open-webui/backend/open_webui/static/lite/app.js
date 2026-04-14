@@ -186,7 +186,9 @@ const sanitizeRenderedHtml = (html) => {
 };
 
 const renderMarkdown = (text) => {
-  const source = String(text ?? '');
+  const source = String(text ?? '')
+    .replace(/\r\n/g, '\n')
+    .replace(/\n{3,}/g, '\n\n');
   const markedApi = globalThis.marked;
 
   if (!markedApi?.parse) {

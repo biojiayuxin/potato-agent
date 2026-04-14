@@ -147,6 +147,19 @@
 - 右侧文件树
 - 文件下载
 
+当前已完成的 Lite 前端体验优化包括：
+
+- 页面高度固定为浏览器窗口高度
+- 聊天区、左侧聊天列表、右侧文件树都已具备各自独立滚动
+- 文件树长文件名不再换行，改为横向滚动
+- 文件树隐藏以 `.` 开头的隐藏文件和隐藏目录
+- 输入框改为：
+  - `Enter` 发送
+  - `Ctrl + Enter` / `Cmd + Enter` / `Shift + Enter` 换行
+- 消息正文已支持 Markdown 渲染
+- 用户消息和助手消息都已支持“复制原始内容”按钮
+- 已开始接入 Hermes 流式过程信息展示
+
 ### 6. Lite 文件树已经从 terminal server 依赖切换为专用后端接口
 
 已经确认 Hermes 本身不提供 Open WebUI 原生 terminal server 所需接口，因此当前实现已切换为 Lite 专用文件接口。
@@ -171,7 +184,67 @@
 
 开始。
 
-### 7. Open WebUI 部署脚本已补齐
+### 7. Lite 聊天消息已支持 Markdown 渲染
+
+当前 Lite 聊天页已经不再只是纯文本加换行，而是支持基础 Markdown 渲染。
+
+已支持的展示包括：
+
+- 标题
+- 列表
+- 粗体 / 斜体
+- 行内代码
+- 代码块
+- 引用块
+- 表格
+- 链接
+
+当前实现策略：
+
+- 后端仍返回原始 Markdown
+- 前端本地用 `marked` 做渲染
+- 再做一层基础 HTML 清理
+
+### 8. Hermes 流式过程信息已开始接入 Lite 聊天页
+
+当前已经确认：
+
+- Hermes 在流式返回中会发出 `event: hermes.tool.progress`
+- 某些 provider / 场景下还可能返回：
+  - `delta.reasoning_content`
+  - `delta.tool_calls`
+
+Lite 前端当前已经开始解析并尝试展示：
+
+- 推理过程
+- 工具调用
+- 执行进度
+
+其中当前最稳定、已确认存在的数据来源是：
+
+- `event: hermes.tool.progress`
+
+### 9. Open WebUI 第一批精简已完成
+
+当前已经完成一轮“只删确认无用代码”的后端精简，且上线后验证主链仍然正常。
+
+已删除或停用的内容包括：
+
+- 不必要 startup 初始化
+- 大量当前 Lite 产品不需要的 router 注册
+- tasks API endpoint
+- Anthropic Messages 兼容入口：
+  - `/api/message`
+  - `/api/v1/messages`
+- `/api/chat/completed`
+- `/api/chat/actions/{action_id}`
+
+说明：
+
+- 这轮精简是先对照代码运行链确认后再删除
+- 当前仍保留聊天主链真实依赖的模块，例如 `utils/middleware.py`、`utils/chat.py`、`socket.main` 等
+
+### 10. Open WebUI 部署脚本已补齐
 
 为了适配“开发环境 + 部署环境”分离，当前已经新增两个部署脚本：
 
@@ -229,6 +302,10 @@
 - 聊天页面可进入
 - 聊天历史可显示和切换
 - Lite 文件树接口已返回 `/home/hmx_user_test` 下的目录内容
+- Lite 文件树已隐藏隐藏文件
+- Lite 消息已支持 Markdown 渲染
+- Lite 消息气泡下方已支持复制原始内容
+- Lite 已开始显示 Hermes 流式工具进度
 
 ### 5. 一键新增和删除流程都做过真实验证
 
@@ -316,26 +393,36 @@ sudo ./deploy_lite_to_installed_openwebui.sh
 
 不要依赖 git 状态判断当前改动是否已经在线上生效。
 
-## 下一步开发重点
+## 下一步优化方向
 
-下一步重点不再是继续补外围运维脚本，也不是继续围绕 Open WebUI 现有前端做小修补。
+下一步优化重点暂时从“继续裁后端”切换回当前直接影响使用体验的两项工作：
 
-下一阶段重点已经明确为：
+1. 优化聊天页面显示
+2. 调整 Hermes 智能体默认思考深入程度
 
-1. 魔改 Open WebUI 后端
-2. 删除当前项目不需要的后端功能
-3. 精简 Open WebUI 后端代码体积
-4. 收缩启动路径和依赖链，降低部署复杂度
-5. 保留当前项目真正需要的最小能力集：
-   - 登录
-   - 聊天
-   - 聊天切换
-   - Hermes OpenAI-compatible 转发
-   - Lite 文件树与文件下载
+### 1. 优化聊天页面显示
 
-具体方向：
+当前已知问题：
 
-1. 识别并裁剪当前项目不需要的 Open WebUI 模块
-2. 减少与当前目标无关的 routers、models、utils、前端静态资源
-3. 让 Lite 前端逐步成为主界面，而不是 Open WebUI 原前端的附属页面
-4. 最终形成一个更轻量、可维护、可重新部署的定制化后端分支
+- Markdown 渲染后的换行和段落间距仍不够自然
+- 某些换行符会导致段落间距过大
+- 视觉上还不够紧凑、美观
+
+下一步需要重点调整：
+
+- 普通段落间距
+- 列表项间距
+- 代码块与正文的上下间距
+- 连续换行在消息气泡中的展示逻辑
+
+### 2. 调整 Hermes 智能体默认思考深入程度为 `high`
+
+下一步需要确认并统一：
+
+- Hermes 当前默认 reasoning / thinking / reasoning_effort 配置入口
+- 当前部署实例的默认值
+- `users_mapping.yaml` / Hermes 配置生成链路中是否需要显式写入
+
+目标：
+
+- 让当前默认智能体推理深度统一为 `high`
