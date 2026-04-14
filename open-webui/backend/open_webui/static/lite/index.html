@@ -46,6 +46,8 @@
           <div id="chat-list" class="chat-list"></div>
         </aside>
 
+        <div id="sidebar-resizer" class="panel-resizer" aria-hidden="true"></div>
+
         <main class="main-panel">
           <header class="topbar">
             <div>
@@ -70,6 +72,8 @@
               </form>
             </section>
 
+            <div id="files-resizer" class="panel-resizer inner" aria-hidden="true"></div>
+
             <aside class="files-panel">
               <div class="files-header">
                 <div>
@@ -86,10 +90,17 @@
     </div>
 
     <template id="chat-item-template">
-      <button class="chat-item">
-        <span class="chat-item-title"></span>
-        <span class="chat-item-meta"></span>
-      </button>
+      <div class="chat-item-shell">
+        <button class="chat-item">
+          <span class="chat-item-title"></span>
+          <span class="chat-item-meta"></span>
+        </button>
+        <div class="chat-item-actions">
+          <button type="button" class="chat-delete-button" aria-label="删除聊天" title="删除聊天">
+            <img src="/static/lite/icons/delete.png" alt="" class="chat-delete-icon" />
+          </button>
+        </div>
+      </div>
     </template>
 
     <template id="message-template">
@@ -101,7 +112,9 @@
           <span></span><span></span><span></span>
         </div>
         <div class="message-actions">
-          <button type="button" class="message-copy-button">复制</button>
+          <button type="button" class="message-copy-button" aria-label="复制消息" title="复制消息">
+            <img src="/static/lite/icons/copy_button.png" alt="" class="message-copy-icon" />
+          </button>
         </div>
       </article>
     </template>

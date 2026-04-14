@@ -33,12 +33,55 @@ const dom = {
   fileTree: document.getElementById('file-tree'),
   cwdLabel: document.getElementById('cwd-label'),
   refreshFilesButton: document.getElementById('refresh-files-button'),
+  sidebarResizer: document.getElementById('sidebar-resizer'),
+  filesResizer: document.getElementById('files-resizer'),
   chatItemTemplate: document.getElementById('chat-item-template'),
   messageTemplate: document.getElementById('message-template'),
 };
 
 let loginInFlight = false;
 let bootstrapInFlight = false;
+
+const SIDEBAR_WIDTH_KEY = 'lite_sidebar_width';
+const FILES_WIDTH_KEY = 'lite_files_width';
+
+const setCssSize = (name, value) => {
+  document.documentElement.style.setProperty(name, `${Math.round(value)}px`);
+};
+
+const loadPanelSizes = () => {
+  const savedSidebarWidth = Number(localStorage.getItem(SIDEBAR_WIDTH_KEY) || 300);
+  const savedFilesWidth = Number(localStorage.getItem(FILES_WIDTH_KEY) || 340);
+  setCssSize('--sidebar-width', Math.min(Math.max(savedSidebarWidth, 240), 420));
+  setCssSize('--files-width', Math.min(Math.max(savedFilesWidth, 260), 520));
+};
+
+const attachHorizontalResizer = (resizer, { getNextSize, setSize, storageKey }) => {
+  if (!resizer) return;
+
+  const handlePointerDown = (event) => {
+    if (window.innerWidth <= 800) return;
+    event.preventDefault();
+    resizer.classList.add('dragging');
+
+    const move = (moveEvent) => {
+      const next = getNextSize(moveEvent.clientX);
+      setSize(next);
+      localStorage.setItem(storageKey, String(Math.round(next)));
+    };
+
+    const up = () => {
+      resizer.classList.remove('dragging');
+      window.removeEventListener('pointermove', move);
+      window.removeEventListener('pointerup', up);
+    };
+
+    window.addEventListener('pointermove', move);
+    window.addEventListener('pointerup', up);
+  };
+
+  resizer.addEventListener('pointerdown', handlePointerDown);
+};
 
 const api = async (path, options = {}) => {
   const headers = new Headers(options.headers || {});
@@ -457,6 +500,7 @@ const renderMessages = () => {
     const content = fragment.querySelector('.message-content');
     const streamingIndicator = fragment.querySelector('.message-streaming-indicator');
     const copyButton = fragment.querySelector('.message-copy-button');
+    const copyIcon = fragment.querySelector('.message-copy-icon');
     const rawContent = getRawMessageText(message);
     const isStreaming = message.role === 'assistant' && state.streamingMessageIds.has(message.id);
     article.classList.add(message.role === 'user' ? 'user' : 'assistant');
@@ -493,16 +537,15 @@ const renderMessages = () => {
     copyButton.addEventListener('click', async () => {
       if (!rawContent) return;
 
-      const originalLabel = copyButton.textContent;
       try {
         await copyTextToClipboard(rawContent);
-        copyButton.textContent = '已复制';
+        copyIcon.src = '/static/lite/icons/copied.png';
       } catch (error) {
         showError(dom.chatError, '复制失败，请重试。');
       } finally {
         window.setTimeout(() => {
-          copyButton.textContent = originalLabel;
-        }, 1200);
+          copyIcon.src = '/static/lite/icons/copy_button.png';
+        }, 3000);
       }
     });
     dom.messages.append(fragment);
@@ -527,6 +570,7 @@ const renderChatList = () => {
     const button = fragment.querySelector('.chat-item');
     const title = fragment.querySelector('.chat-item-title');
     const meta = fragment.querySelector('.chat-item-meta');
+    const deleteButton = fragment.querySelector('.chat-delete-button');
 
     title.textContent = getChatDisplayTitle(chat);
     meta.textContent = formatTimestamp(chat.updated_at || chat.created_at);
@@ -535,8 +579,37 @@ const renderChatList = () => {
     }
 
     button.addEventListener('click', () => openChat(chat.id));
+    deleteButton.addEventListener('click', async (event) => {
+      event.stopPropagation();
+      const confirmed = window.confirm(`确定删除聊天“${getChatDisplayTitle(chat)}”吗？`);
+      if (!confirmed) return;
+      await deleteChat(chat.id);
+    });
     dom.chatList.append(fragment);
   }
+};
+
+const deleteChat = async (chatId) => {
+  await api(`/api/v1/chats/${chatId}`, { method: 'DELETE' });
+
+  const deletingActive = chatId === state.activeChatId;
+  state.chats = state.chats.filter((chat) => chat.id !== chatId);
+
+  if (!deletingActive) {
+    renderChatList();
+    return;
+  }
+
+  state.activeChat = null;
+  state.activeChatId = null;
+  renderWorkspace();
+
+  if (state.chats.length > 0) {
+    await openChat(state.chats[0].id);
+    return;
+  }
+
+  await createChat();
 };
 
 const renderWorkspaceHeader = () => {
@@ -990,6 +1063,26 @@ const initializeWorkspaceData = async () => {
   }
 };
 
+const initResizablePanels = () => {
+  loadPanelSizes();
+
+  attachHorizontalResizer(dom.sidebarResizer, {
+    storageKey: SIDEBAR_WIDTH_KEY,
+    getNextSize: (clientX) => Math.min(Math.max(clientX, 240), 420),
+    setSize: (value) => setCssSize('--sidebar-width', value),
+  });
+
+  attachHorizontalResizer(dom.filesResizer, {
+    storageKey: FILES_WIDTH_KEY,
+    getNextSize: (clientX) => {
+      const viewportWidth = window.innerWidth;
+      const desired = viewportWidth - clientX;
+      return Math.min(Math.max(desired, 260), 520);
+    },
+    setSize: (value) => setCssSize('--files-width', value),
+  });
+};
+
 const bootstrapSession = async () => {
   if (bootstrapInFlight) return;
   if (!state.token) {
@@ -1077,4 +1170,5 @@ dom.refreshFilesButton.addEventListener('click', async () => {
   await fetchWorkspaceFiles().catch((error) => showError(dom.chatError, error.message));
 });
 
+initResizablePanels();
 bootstrapSession();
