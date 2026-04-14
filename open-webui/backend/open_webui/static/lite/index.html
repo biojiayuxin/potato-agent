@@ -54,20 +54,34 @@
               <h1 id="chat-title">新聊天</h1>
               <div id="model-name" class="muted tiny"></div>
             </div>
+            <div class="topbar-actions">
+              <label class="theme-select-wrap" for="theme-select">
+                <span class="tiny muted">主题</span>
+                <select id="theme-select" class="theme-select" aria-label="切换主题">
+                  <option value="system">跟随系统</option>
+                  <option value="light">浅色</option>
+                  <option value="dark">深色</option>
+                </select>
+              </label>
+            </div>
           </header>
 
           <div class="content-grid">
             <section class="chat-panel">
               <div id="messages" class="messages"></div>
               <form id="composer-form" class="composer">
-                <textarea
-                  id="prompt-input"
-                  rows="4"
-                  placeholder="输入消息，按 Enter 发送，Ctrl/Cmd + Enter 或 Shift + Enter 换行"
-                ></textarea>
                 <div class="composer-actions">
                   <div id="chat-error" class="error" hidden></div>
-                  <button id="send-button" type="submit" class="primary">发送</button>
+                  <div class="composer-input-wrap">
+                    <textarea
+                      id="prompt-input"
+                      rows="1"
+                      placeholder="输入消息，按 Enter 发送，Ctrl/Cmd + Enter 或 Shift + Enter 换行"
+                    ></textarea>
+                    <button id="send-button" type="submit" class="composer-icon-button" aria-label="发送消息" title="发送消息">
+                      <img id="send-button-icon" src="/static/lite/icons/send.png" alt="" class="composer-icon" />
+                    </button>
+                  </div>
                 </div>
               </form>
             </section>

@@ -12,6 +12,7 @@ const state = {
   treeCache: new Map(),
   streamingMessageIds: new Set(),
   isSending: false,
+  currentAbortController: null,
 };
 
 const dom = {
@@ -27,6 +28,7 @@ const dom = {
   composerForm: document.getElementById('composer-form'),
   promptInput: document.getElementById('prompt-input'),
   sendButton: document.getElementById('send-button'),
+  sendButtonIcon: document.getElementById('send-button-icon'),
   newChatButton: document.getElementById('new-chat-button'),
   logoutButton: document.getElementById('logout-button'),
   userEmail: document.getElementById('user-email'),
@@ -44,6 +46,45 @@ let bootstrapInFlight = false;
 
 const SIDEBAR_WIDTH_KEY = 'lite_sidebar_width';
 const FILES_WIDTH_KEY = 'lite_files_width';
+const THEME_MODE_KEY = 'lite_theme_mode';
+
+const getSystemTheme = () =>
+  window.matchMedia?.('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
+
+const applyThemeMode = (mode) => {
+  const normalizedMode = ['light', 'dark', 'system'].includes(mode) ? mode : 'system';
+  const resolvedTheme = normalizedMode === 'system' ? getSystemTheme() : normalizedMode;
+  document.documentElement.dataset.themeMode = normalizedMode;
+  document.documentElement.dataset.theme = resolvedTheme;
+
+  const themeSelect = document.getElementById('theme-select');
+  if (themeSelect) {
+    themeSelect.value = normalizedMode;
+  }
+};
+
+const initThemeControls = () => {
+  const themeSelect = document.getElementById('theme-select');
+  const saved = localStorage.getItem(THEME_MODE_KEY) || 'system';
+  applyThemeMode(saved);
+
+  if (themeSelect) {
+    themeSelect.addEventListener('change', (event) => {
+      const mode = event.target.value;
+      localStorage.setItem(THEME_MODE_KEY, mode);
+      applyThemeMode(mode);
+    });
+  }
+
+  const media = window.matchMedia?.('(prefers-color-scheme: dark)');
+  if (!media) return;
+  media.addEventListener('change', () => {
+    const mode = document.documentElement.dataset.themeMode || 'system';
+    if (mode === 'system') {
+      applyThemeMode('system');
+    }
+  });
+};
 
 const setCssSize = (name, value) => {
   document.documentElement.style.setProperty(name, `${Math.round(value)}px`);
@@ -81,6 +122,36 @@ const attachHorizontalResizer = (resizer, { getNextSize, setSize, storageKey }) 
   };
 
   resizer.addEventListener('pointerdown', handlePointerDown);
+};
+
+const setComposerBusyState = (busy) => {
+  state.isSending = busy;
+  if (dom.sendButton) {
+    dom.sendButton.type = busy ? 'button' : 'submit';
+    dom.sendButton.ariaLabel = busy ? '停止响应' : '发送消息';
+    dom.sendButton.title = busy ? '停止响应' : '发送消息';
+  }
+  if (dom.sendButtonIcon) {
+    dom.sendButtonIcon.src = busy ? '/static/lite/icons/stop.png' : '/static/lite/icons/send.png';
+  }
+};
+
+const autoResizePromptInput = () => {
+  if (!dom.promptInput) return;
+
+  const computed = window.getComputedStyle(dom.promptInput);
+  const lineHeight = parseFloat(computed.lineHeight || '24') || 24;
+  const paddingTop = parseFloat(computed.paddingTop || '0');
+  const paddingBottom = parseFloat(computed.paddingBottom || '0');
+  const borderTop = parseFloat(computed.borderTopWidth || '0');
+  const borderBottom = parseFloat(computed.borderBottomWidth || '0');
+  const minHeight = lineHeight + paddingTop + paddingBottom + borderTop + borderBottom;
+  const maxHeight = lineHeight * 8 + paddingTop + paddingBottom;
+
+  dom.promptInput.style.height = `${minHeight}px`;
+  const nextHeight = Math.min(dom.promptInput.scrollHeight, maxHeight);
+  dom.promptInput.style.height = `${nextHeight}px`;
+  dom.promptInput.style.overflowY = dom.promptInput.scrollHeight > maxHeight ? 'auto' : 'hidden';
 };
 
 const api = async (path, options = {}) => {
@@ -858,10 +929,11 @@ const fetchModels = async () => {
   renderWorkspaceHeader();
 };
 
-const streamChatCompletion = async (payload, assistantMessage) => {
+const streamChatCompletion = async (payload, assistantMessage, abortController) => {
   const response = await fetch('/api/chat/completions', {
     method: 'POST',
     credentials: 'include',
+    signal: abortController.signal,
     headers: {
       Authorization: `Bearer ${state.token}`,
       'Content-Type': 'application/json',
@@ -953,8 +1025,9 @@ const submitPrompt = async (prompt) => {
   }
 
   showError(dom.chatError, '');
-  state.isSending = true;
-  dom.sendButton.disabled = true;
+  const abortController = new AbortController();
+  state.currentAbortController = abortController;
+  setComposerBusyState(true);
 
   const chatPayload = state.activeChat.chat;
   chatPayload.models = [state.selectedModel.id];
@@ -1003,7 +1076,7 @@ const submitPrompt = async (prompt) => {
   };
 
   try {
-    await streamChatCompletion(payload, assistantMessage);
+    await streamChatCompletion(payload, assistantMessage, abortController);
     assistantMessage.done = true;
     state.streamingMessageIds.delete(assistantMessage.id);
     assistantMessage.timestamp = nowSeconds();
@@ -1011,15 +1084,29 @@ const submitPrompt = async (prompt) => {
     renderMessages();
     await persistActiveChat();
   } catch (error) {
-    assistantMessage.content = `${assistantMessage.content}\n\n[Error] ${error.message}`.trim();
-    assistantMessage.done = true;
-    state.streamingMessageIds.delete(assistantMessage.id);
-    upsertMessage(chatPayload, assistantMessage);
-    renderMessages();
-    showError(dom.chatError, error.message);
+    if (error.name === 'AbortError') {
+      assistantMessage.done = true;
+      state.streamingMessageIds.delete(assistantMessage.id);
+      assistantMessage.timestamp = nowSeconds();
+
+      if (!assistantMessage.content.trim()) {
+        assistantMessage.content = '[已停止响应]';
+      }
+
+      upsertMessage(chatPayload, assistantMessage);
+      renderMessages();
+      await persistActiveChat();
+    } else {
+      assistantMessage.content = `${assistantMessage.content}\n\n[Error] ${error.message}`.trim();
+      assistantMessage.done = true;
+      state.streamingMessageIds.delete(assistantMessage.id);
+      upsertMessage(chatPayload, assistantMessage);
+      renderMessages();
+      showError(dom.chatError, error.message);
+    }
   } finally {
-    state.isSending = false;
-    dom.sendButton.disabled = false;
+    state.currentAbortController = null;
+    setComposerBusyState(false);
   }
 };
 
@@ -1152,8 +1239,10 @@ dom.newChatButton.addEventListener('click', () => {
 
 dom.composerForm.addEventListener('submit', async (event) => {
   event.preventDefault();
+  if (state.isSending) return;
   const prompt = dom.promptInput.value;
   dom.promptInput.value = '';
+  autoResizePromptInput();
   await submitPrompt(prompt);
 });
 
@@ -1165,10 +1254,23 @@ dom.promptInput.addEventListener('keydown', (event) => {
   dom.composerForm.requestSubmit();
 });
 
+dom.promptInput.addEventListener('input', () => {
+  autoResizePromptInput();
+});
+
+dom.sendButton.addEventListener('click', async (event) => {
+  if (!state.isSending) return;
+  event.preventDefault();
+  event.stopPropagation();
+  state.currentAbortController?.abort();
+});
+
 dom.refreshFilesButton.addEventListener('click', async () => {
   state.treeCache.clear();
   await fetchWorkspaceFiles().catch((error) => showError(dom.chatError, error.message));
 });
 
 initResizablePanels();
+initThemeControls();
+autoResizePromptInput();
 bootstrapSession();
