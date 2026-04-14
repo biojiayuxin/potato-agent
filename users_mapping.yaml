@@ -3,6 +3,9 @@ hermes:
   executable: /usr/local/bin/hermes
   api_server_host: 127.0.0.1
   api_server_model_name: Hermes
+  config_overrides:
+    agent:
+      reasoning_effort: high
   terminal:
     backend: local
     timeout: 180

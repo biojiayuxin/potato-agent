@@ -10,6 +10,7 @@ const state = {
   currentPath: '',
   expandedPaths: new Set(),
   treeCache: new Map(),
+  streamingMessageIds: new Set(),
   isSending: false,
 };
 
@@ -454,12 +455,41 @@ const renderMessages = () => {
     const role = fragment.querySelector('.message-role');
     const metaSections = fragment.querySelector('.message-meta-sections');
     const content = fragment.querySelector('.message-content');
+    const streamingIndicator = fragment.querySelector('.message-streaming-indicator');
     const copyButton = fragment.querySelector('.message-copy-button');
     const rawContent = getRawMessageText(message);
+    const isStreaming = message.role === 'assistant' && state.streamingMessageIds.has(message.id);
     article.classList.add(message.role === 'user' ? 'user' : 'assistant');
     role.textContent = message.role === 'user' ? '你' : 'Hermes';
     renderMessageMetaSections(metaSections, message);
-    content.innerHTML = renderMarkdown(String(message.content ?? ''));
+    content.classList.remove('streaming-placeholder');
+
+    const hasVisibleContent = Boolean(
+      String(message.content ?? '').trim() ||
+      (typeof message?.reasoningContent === 'string' && message.reasoningContent.trim()) ||
+      (Array.isArray(message?.toolCalls) && message.toolCalls.length > 0) ||
+      (Array.isArray(message?.progressLines) && message.progressLines.length > 0)
+    );
+
+    if (isStreaming && !hasVisibleContent) {
+      content.classList.add('streaming-placeholder');
+      content.innerHTML = '<span class="message-inline-streaming"><span></span><span></span><span></span></span>';
+      streamingIndicator.hidden = true;
+      streamingIndicator.classList.remove('inline', 'footer');
+    } else {
+      content.innerHTML = renderMarkdown(String(message.content ?? ''));
+      if (isStreaming && hasVisibleContent) {
+        streamingIndicator.hidden = false;
+        streamingIndicator.classList.remove('inline');
+        streamingIndicator.classList.add('footer');
+      } else {
+        streamingIndicator.hidden = true;
+        streamingIndicator.classList.remove('inline', 'footer');
+      }
+    }
+
+    copyButton.hidden = !rawContent;
+
     copyButton.addEventListener('click', async () => {
       if (!rawContent) return;
 
@@ -703,6 +733,7 @@ const persistActiveChat = async () => {
 };
 
 const openChat = async (chatId) => {
+  state.streamingMessageIds.clear();
   const response = await api(`/api/v1/chats/${chatId}`, { method: 'GET' });
   state.activeChat = await response.json();
   state.activeChatId = state.activeChat.id;
@@ -710,6 +741,7 @@ const openChat = async (chatId) => {
 };
 
 const createChat = async () => {
+  state.streamingMessageIds.clear();
   const response = await api('/api/v1/chats/new', {
     method: 'POST',
     body: JSON.stringify({ chat: createEmptyChatPayload(), folder_id: null }),
@@ -881,6 +913,7 @@ const submitPrompt = async (prompt) => {
     model: state.selectedModel.id,
     done: false,
   };
+  state.streamingMessageIds.add(assistantMessage.id);
   appendChildLink(chatPayload, userMessage.id, assistantMessage.id);
   upsertMessage(chatPayload, assistantMessage);
   renderMessages();
@@ -899,12 +932,15 @@ const submitPrompt = async (prompt) => {
   try {
     await streamChatCompletion(payload, assistantMessage);
     assistantMessage.done = true;
+    state.streamingMessageIds.delete(assistantMessage.id);
     assistantMessage.timestamp = nowSeconds();
     upsertMessage(chatPayload, assistantMessage);
+    renderMessages();
     await persistActiveChat();
   } catch (error) {
     assistantMessage.content = `${assistantMessage.content}\n\n[Error] ${error.message}`.trim();
     assistantMessage.done = true;
+    state.streamingMessageIds.delete(assistantMessage.id);
     upsertMessage(chatPayload, assistantMessage);
     renderMessages();
     showError(dom.chatError, error.message);

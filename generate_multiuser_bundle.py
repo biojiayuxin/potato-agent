@@ -427,6 +427,7 @@ def build_config_data(config: dict[str, Any], user: UserSpec) -> dict[str, Any]:
     if model_cfg:
         data["model"] = model_cfg
     data["terminal"] = terminal_cfg
+    data["agent"] = {"reasoning_effort": "high"}
 
     deep_merge(data, global_overrides)
     deep_merge(data, deepcopy(user.config_overrides))
