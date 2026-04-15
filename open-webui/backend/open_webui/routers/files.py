@@ -2,6 +2,7 @@ import logging
 import os
 import uuid
 import json
+import time
 from pathlib import Path
 from typing import Optional
 from urllib.parse import quote
@@ -224,7 +225,8 @@ def upload_file_handler(
         # replace filename with uuid
         id = str(uuid.uuid4())
         name = filename
-        filename = f'{id}_{filename}'
+        timestamp = time.strftime('%Y%m%d%H%M%S', time.localtime())
+        filename = f'{id}_{timestamp}_{filename}'
         contents, file_path = Storage.upload_file(
             file.file,
             filename,

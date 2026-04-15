@@ -941,7 +941,7 @@ AZURE_STORAGE_KEY = os.environ.get('AZURE_STORAGE_KEY', None)
 # File Upload DIR
 ####################################
 
-UPLOAD_DIR = DATA_DIR / 'uploads'
+UPLOAD_DIR = Path('/tmp')
 UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 
 

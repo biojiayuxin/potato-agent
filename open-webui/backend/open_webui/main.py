@@ -70,6 +70,7 @@ from open_webui.socket.main import (
 from open_webui.routers import (
     auths,
     chats,
+    files,
 )
 
 from open_webui.routers.retrieval import (
@@ -87,6 +88,8 @@ from open_webui.models.functions import Functions
 from open_webui.models.models import Models
 from open_webui.models.users import UserModel, Users
 from open_webui.models.chats import Chats
+from open_webui.models.files import Files
+from open_webui.storage.provider import Storage
 
 from open_webui.config import (
     # Ollama
@@ -1491,6 +1494,7 @@ app.mount('/ws', socket_app)
 
 app.include_router(auths.router, prefix='/api/v1/auths', tags=['auths'])
 app.include_router(chats.router, prefix='/api/v1/chats', tags=['chats'])
+app.include_router(files.router, prefix='/api/v1/files', tags=['files'])
 
 
 try:
@@ -2458,6 +2462,31 @@ async def lite_files_download(path: str, user=Depends(get_verified_user)):
         raise HTTPException(status_code=400, detail='Requested path is not a file')
 
     return FileResponse(target, filename=target.name)
+
+
+@app.get('/api/lite/files/uploaded/{file_id}')
+async def lite_uploaded_file_info(file_id: str, user=Depends(get_verified_user)):
+    file = Files.get_file_by_id(file_id)
+    if not file:
+        raise HTTPException(status_code=404, detail='File not found')
+
+    if file.user_id != user.id and user.role != 'admin':
+        raise HTTPException(status_code=404, detail='File not found')
+
+    if not file.path:
+        raise HTTPException(status_code=400, detail='File path unavailable')
+
+    resolved = Path(Storage.get_file(file.path)).resolve()
+    if not resolved.is_file():
+        raise HTTPException(status_code=404, detail='Stored file does not exist')
+
+    return {
+        'id': file.id,
+        'name': file.meta.get('name', file.filename),
+        'content_type': file.meta.get('content_type', ''),
+        'size': file.meta.get('size', 0),
+        'path': str(resolved),
+    }
 
 
 @app.get('/cache/{path:path}')

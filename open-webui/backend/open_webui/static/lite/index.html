@@ -107,11 +107,20 @@
                 <div class="composer-actions">
                   <div id="chat-error" class="error" hidden></div>
                   <div class="composer-input-wrap">
-                    <textarea
-                      id="prompt-input"
-                      rows="1"
-                      placeholder="输入消息，按 Enter 发送，Ctrl/Cmd + Enter 或 Shift + Enter 换行"
-                    ></textarea>
+                    <div class="composer-entry-shell">
+                      <div id="attachment-list" class="attachment-list" hidden></div>
+                      <div class="composer-input-row">
+                        <input id="file-input" type="file" class="file-input" multiple hidden />
+                        <button id="attach-button" type="button" class="composer-icon-button attach-button" aria-label="上传文件" title="上传文件">
+                          <span class="composer-plus">+</span>
+                        </button>
+                        <textarea
+                          id="prompt-input"
+                          rows="1"
+                          placeholder="输入消息，可附加图片、PDF、Word、PPT 等文件；Enter 发送，Ctrl/Cmd + Enter 或 Shift + Enter 换行"
+                        ></textarea>
+                      </div>
+                    </div>
                     <button id="send-button" type="submit" class="composer-icon-button" aria-label="发送消息" title="发送消息">
                       <img id="send-button-icon" src="/static/lite/icons/send.png" alt="" class="composer-icon" />
                     </button>
@@ -155,6 +164,7 @@
       <article class="message">
         <div class="message-role"></div>
         <div class="message-meta-sections"></div>
+        <div class="message-files" hidden></div>
         <div class="message-content"></div>
         <div class="message-streaming-indicator" hidden>
           <span></span><span></span><span></span>

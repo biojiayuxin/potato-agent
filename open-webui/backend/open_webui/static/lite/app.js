@@ -11,6 +11,7 @@ const state = {
   expandedPaths: new Set(),
   treeCache: new Map(),
   streamingMessageIds: new Set(),
+  pendingAttachments: [],
   isSending: false,
   currentAbortController: null,
 };
@@ -27,6 +28,9 @@ const dom = {
   modelName: document.getElementById('model-name'),
   composerForm: document.getElementById('composer-form'),
   promptInput: document.getElementById('prompt-input'),
+  fileInput: document.getElementById('file-input'),
+  attachButton: document.getElementById('attach-button'),
+  attachmentList: document.getElementById('attachment-list'),
   sendButton: document.getElementById('send-button'),
   sendButtonIcon: document.getElementById('send-button-icon'),
   newChatButton: document.getElementById('new-chat-button'),
@@ -126,6 +130,9 @@ const attachHorizontalResizer = (resizer, { getNextSize, setSize, storageKey }) 
 
 const setComposerBusyState = (busy) => {
   state.isSending = busy;
+  if (dom.attachButton) {
+    dom.attachButton.disabled = busy;
+  }
   if (dom.sendButton) {
     dom.sendButton.type = busy ? 'button' : 'submit';
     dom.sendButton.ariaLabel = busy ? '停止响应' : '发送消息';
@@ -152,6 +159,190 @@ const autoResizePromptInput = () => {
   const nextHeight = Math.min(dom.promptInput.scrollHeight, maxHeight);
   dom.promptInput.style.height = `${nextHeight}px`;
   dom.promptInput.style.overflowY = dom.promptInput.scrollHeight > maxHeight ? 'auto' : 'hidden';
+};
+
+const createAttachmentItem = (file) => ({
+  itemId: uuid(),
+  type: file.type?.startsWith('image/') ? 'image' : 'file',
+  name: file.name,
+  size: file.size,
+  content_type: file.type || '',
+  status: 'uploading',
+  id: null,
+  file: null,
+  url: '',
+  localPath: '',
+  error: '',
+});
+
+const formatFileSize = (size) => {
+  const bytes = Number(size || 0);
+  if (!Number.isFinite(bytes) || bytes <= 0) return '0 B';
+  const units = ['B', 'KB', 'MB', 'GB'];
+  let value = bytes;
+  let unitIndex = 0;
+  while (value >= 1024 && unitIndex < units.length - 1) {
+    value /= 1024;
+    unitIndex += 1;
+  }
+  const digits = value >= 10 || unitIndex === 0 ? 0 : 1;
+  return `${value.toFixed(digits)} ${units[unitIndex]}`;
+};
+
+const getAttachmentStatusLabel = (item) => {
+  if (item.status === 'uploading') return '上传中';
+  if (item.status === 'error') return item.error || '上传失败';
+  return formatFileSize(item.size);
+};
+
+const getAttachmentLocalPath = (item) => item?.localPath || item?.file?.path || '';
+
+const buildHermesMessageContent = (message) => {
+  const attachments = Array.isArray(message?.files) ? message.files : [];
+  if (!attachments.length) {
+    return message?.content || '';
+  }
+
+  const notes = [];
+  for (const item of attachments) {
+    const localPath = getAttachmentLocalPath(item);
+    if (!localPath) continue;
+
+    const name = item?.name || item?.file?.filename || 'attachment';
+    notes.push(
+      `[The user sent an attachment: '${name}'. The file is saved at: ${localPath}. Use tools as needed to inspect it and answer the user's request.]`
+    );
+  }
+
+  const text = typeof message?.content === 'string' ? message.content : '';
+  return [...notes, text].filter(Boolean).join('\n\n');
+};
+
+const renderAttachments = () => {
+  if (!dom.attachmentList) return;
+  dom.attachmentList.innerHTML = '';
+
+  if (!state.pendingAttachments.length) {
+    dom.attachmentList.hidden = true;
+    return;
+  }
+
+  dom.attachmentList.hidden = false;
+
+  for (const item of state.pendingAttachments) {
+    const chip = document.createElement('div');
+    chip.className = 'attachment-chip';
+    if (item.status === 'uploading') chip.classList.add('uploading');
+    if (item.status === 'error') chip.classList.add('error');
+
+    const body = document.createElement('div');
+    body.className = 'attachment-chip-body';
+
+    const name = document.createElement('div');
+    name.className = 'attachment-chip-name';
+    name.textContent = item.name || '未命名文件';
+
+    const meta = document.createElement('div');
+    meta.className = 'attachment-chip-meta';
+    meta.textContent = getAttachmentStatusLabel(item);
+
+    body.append(name, meta);
+
+    const removeButton = document.createElement('button');
+    removeButton.type = 'button';
+    removeButton.className = 'attachment-chip-remove';
+    removeButton.textContent = '×';
+    removeButton.ariaLabel = `移除附件 ${item.name || ''}`.trim();
+    removeButton.title = '移除附件';
+    removeButton.disabled = state.isSending;
+    removeButton.addEventListener('click', () => {
+      state.pendingAttachments = state.pendingAttachments.filter((entry) => entry.itemId !== item.itemId);
+      renderAttachments();
+    });
+
+    chip.append(body, removeButton);
+    dom.attachmentList.append(chip);
+  }
+};
+
+const uploadAttachment = async (file) => {
+  const formData = new FormData();
+  formData.append('file', file);
+
+  const uploadResponse = await api('/api/v1/files/?process=false', {
+    method: 'POST',
+    body: formData,
+  });
+
+  const uploadedFile = await uploadResponse.json();
+  if (!uploadedFile?.id) {
+    throw new Error('文件上传失败');
+  }
+
+  const fileDetailsResponse = await api(`/api/v1/files/${uploadedFile.id}`, { method: 'GET' });
+  const fileDetails = await fileDetailsResponse.json();
+  const resolvedFile = fileDetails?.id ? fileDetails : uploadedFile;
+
+  const localInfoResponse = await api(`/api/lite/files/uploaded/${resolvedFile.id}`, { method: 'GET' });
+  const localInfo = await localInfoResponse.json();
+  const localPath = localInfo?.path || '';
+
+  if (!localPath) {
+    throw new Error('文件已上传，但无法获取本地路径');
+  }
+
+  return {
+    type: file.type?.startsWith('image/') ? 'image' : 'file',
+    id: resolvedFile.id,
+    file: resolvedFile,
+    url: resolvedFile.id,
+    localPath,
+    name: resolvedFile.filename || resolvedFile.meta?.name || file.name,
+    size: resolvedFile.meta?.size || file.size,
+    content_type: resolvedFile.meta?.content_type || file.type || '',
+    status: 'uploaded',
+    error: resolvedFile.error || '',
+  };
+};
+
+const handleSelectedFiles = async (files) => {
+  const incoming = Array.from(files || []);
+  if (!incoming.length) return;
+
+  for (const file of incoming) {
+    if (!file || !file.size) {
+      showError(dom.chatError, '不能上传空文件。');
+      continue;
+    }
+
+    const attachment = createAttachmentItem(file);
+    state.pendingAttachments = [...state.pendingAttachments, attachment];
+    renderAttachments();
+
+    try {
+      const uploaded = await uploadAttachment(file);
+      state.pendingAttachments = state.pendingAttachments.map((item) =>
+        item.itemId === attachment.itemId ? { ...item, ...uploaded } : item
+      );
+    } catch (error) {
+      state.pendingAttachments = state.pendingAttachments.map((item) =>
+        item.itemId === attachment.itemId
+          ? {
+              ...item,
+              status: 'error',
+              error: String(error.message || '上传失败'),
+            }
+          : item
+      );
+      showError(dom.chatError, String(error.message || '上传失败'));
+    }
+
+    renderAttachments();
+  }
+
+  if (dom.fileInput) {
+    dom.fileInput.value = '';
+  }
 };
 
 const api = async (path, options = {}) => {
@@ -468,6 +659,47 @@ const renderMessageMetaSections = (container, message) => {
   }
 };
 
+const getAttachmentKindLabel = (file) => {
+  if ((file?.content_type || '').startsWith('image/')) return '图片';
+  return '附件';
+};
+
+const renderMessageFiles = (container, message) => {
+  container.innerHTML = '';
+  const files = Array.isArray(message?.files) ? message.files : [];
+
+  if (!files.length) {
+    container.hidden = true;
+    return;
+  }
+
+  container.hidden = false;
+
+  for (const file of files) {
+    const chip = document.createElement('div');
+    chip.className = 'message-file-chip';
+
+    const icon = document.createElement('span');
+    icon.className = 'message-file-icon';
+    icon.textContent = (file?.content_type || '').startsWith('image/') ? 'IMG' : 'FILE';
+
+    const body = document.createElement('div');
+    body.className = 'message-file-body';
+
+    const name = document.createElement('div');
+    name.className = 'message-file-name';
+    name.textContent = file?.name || file?.file?.filename || file?.id || '附件';
+
+    const meta = document.createElement('div');
+    meta.className = 'message-file-meta';
+    meta.textContent = `${getAttachmentKindLabel(file)}${file?.size ? ` · ${formatFileSize(file.size)}` : ''}`;
+
+    body.append(name, meta);
+    chip.append(icon, body);
+    container.append(chip);
+  }
+};
+
 const copyTextToClipboard = async (text) => {
   if (navigator.clipboard?.writeText) {
     await navigator.clipboard.writeText(text);
@@ -568,6 +800,7 @@ const renderMessages = () => {
     const article = fragment.querySelector('.message');
     const role = fragment.querySelector('.message-role');
     const metaSections = fragment.querySelector('.message-meta-sections');
+    const fileSection = fragment.querySelector('.message-files');
     const content = fragment.querySelector('.message-content');
     const streamingIndicator = fragment.querySelector('.message-streaming-indicator');
     const copyButton = fragment.querySelector('.message-copy-button');
@@ -577,6 +810,7 @@ const renderMessages = () => {
     article.classList.add(message.role === 'user' ? 'user' : 'assistant');
     role.textContent = message.role === 'user' ? '你' : 'Hermes';
     renderMessageMetaSections(metaSections, message);
+    renderMessageFiles(fileSection, message);
     content.classList.remove('streaming-placeholder');
 
     const hasVisibleContent = Boolean(
@@ -693,6 +927,7 @@ const renderWorkspace = () => {
   renderChatList();
   renderWorkspaceHeader();
   renderMessages();
+  renderAttachments();
 };
 
 const normalizeDirectory = (path) => {
@@ -878,6 +1113,7 @@ const persistActiveChat = async () => {
 
 const openChat = async (chatId) => {
   state.streamingMessageIds.clear();
+  state.pendingAttachments = [];
   const response = await api(`/api/v1/chats/${chatId}`, { method: 'GET' });
   state.activeChat = await response.json();
   state.activeChatId = state.activeChat.id;
@@ -886,6 +1122,7 @@ const openChat = async (chatId) => {
 
 const createChat = async () => {
   state.streamingMessageIds.clear();
+  state.pendingAttachments = [];
   const response = await api('/api/v1/chats/new', {
     method: 'POST',
     body: JSON.stringify({ chat: createEmptyChatPayload(), folder_id: null }),
@@ -1014,9 +1251,22 @@ const streamChatCompletion = async (payload, assistantMessage, abortController) 
 };
 
 const submitPrompt = async (prompt) => {
-  if (!prompt.trim()) return;
+  const trimmedPrompt = prompt.trim();
+  const uploadedAttachments = state.pendingAttachments.filter((item) => item.status === 'uploaded' && item.id);
+  const hasFailedUploads = state.pendingAttachments.some((item) => item.status === 'error');
+  const hasUploadingFiles = state.pendingAttachments.some((item) => item.status === 'uploading');
+
+  if (!trimmedPrompt && uploadedAttachments.length === 0) return;
   if (!state.selectedModel) {
     showError(dom.chatError, '当前没有可用模型。');
+    return;
+  }
+  if (hasUploadingFiles) {
+    showError(dom.chatError, '文件仍在上传处理中，请稍后发送。');
+    return;
+  }
+  if (hasFailedUploads) {
+    showError(dom.chatError, '存在上传失败的文件，请移除后重试。');
     return;
   }
 
@@ -1038,10 +1288,11 @@ const submitPrompt = async (prompt) => {
     parentId,
     childrenIds: [],
     role: 'user',
-    content: prompt,
+    content: trimmedPrompt,
     timestamp: nowSeconds(),
     models: [state.selectedModel.id],
     done: true,
+    ...(uploadedAttachments.length ? { files: uploadedAttachments } : {}),
   };
   appendChildLink(chatPayload, parentId, userMessage.id);
   upsertMessage(chatPayload, userMessage);
@@ -1066,13 +1317,20 @@ const submitPrompt = async (prompt) => {
 
   const chain = getMessageChain(state.activeChat)
     .filter((message) => message.id !== assistantMessage.id)
-    .map((message) => ({ role: message.role, content: message.content }));
+    .map((message) => ({
+      role: message.role,
+      content: buildHermesMessageContent(message),
+    }));
 
   const payload = {
     stream: true,
     model: state.selectedModel.id,
     messages: chain,
     features: {},
+    chat_id: state.activeChat.id,
+    id: assistantMessage.id,
+    parent_id: userMessage.id,
+    parent_message: userMessage,
   };
 
   try {
@@ -1081,7 +1339,9 @@ const submitPrompt = async (prompt) => {
     state.streamingMessageIds.delete(assistantMessage.id);
     assistantMessage.timestamp = nowSeconds();
     upsertMessage(chatPayload, assistantMessage);
+    state.pendingAttachments = [];
     renderMessages();
+    renderAttachments();
     await persistActiveChat();
   } catch (error) {
     if (error.name === 'AbortError') {
@@ -1229,11 +1489,14 @@ dom.loginForm.addEventListener('submit', async (event) => {
 dom.logoutButton.addEventListener('click', () => {
   state.token = '';
   state.user = null;
+  state.pendingAttachments = [];
   localStorage.removeItem('lite_token');
   showLogin();
 });
 
 dom.newChatButton.addEventListener('click', () => {
+  state.pendingAttachments = [];
+  renderAttachments();
   createChat().catch((error) => showError(dom.chatError, error.message));
 });
 
@@ -1244,6 +1507,16 @@ dom.composerForm.addEventListener('submit', async (event) => {
   dom.promptInput.value = '';
   autoResizePromptInput();
   await submitPrompt(prompt);
+});
+
+dom.attachButton.addEventListener('click', () => {
+  if (state.isSending) return;
+  dom.fileInput?.click();
+});
+
+dom.fileInput.addEventListener('change', async (event) => {
+  const files = event.target?.files;
+  await handleSelectedFiles(files);
 });
 
 dom.promptInput.addEventListener('keydown', (event) => {
