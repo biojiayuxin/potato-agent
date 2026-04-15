@@ -55,7 +55,7 @@ hermes-agent/
 ├── gateway/              # Messaging platform gateway
 │   ├── run.py            # Main loop, slash commands, message dispatch
 │   ├── session.py        # SessionStore — conversation persistence
-│   └── platforms/        # Adapters: telegram, discord, slack, whatsapp, homeassistant, signal
+│   └── platforms/        # Adapters: telegram, discord, slack, whatsapp, homeassistant, signal, qqbot
 ├── acp_adapter/          # ACP server (VS Code / Zed / JetBrains integration)
 ├── cron/                 # Scheduler (jobs.py, scheduler.py)
 ├── environments/         # RL training environments (Atropos)
@@ -351,8 +351,9 @@ Cache-breaking forces dramatically higher costs. The ONLY time we alter context 
 
 ### Background Process Notifications (Gateway)
 
-When `terminal(background=true, check_interval=...)` is used, the gateway runs a watcher that
-pushes status updates to the user's chat. Control verbosity with `display.background_process_notifications`
+When `terminal(background=true, notify_on_complete=true)` is used, the gateway runs a watcher that
+detects process completion and triggers a new agent turn. Control verbosity of background process
+messages with `display.background_process_notifications`
 in config.yaml (or `HERMES_BACKGROUND_NOTIFICATIONS` env var):
 
 - `all` — running-output updates + final message (default)

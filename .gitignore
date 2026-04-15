@@ -1,3 +1,6 @@
 opencode.jsonc
 __pycache__/
 **/__pycache__/
+hermes-agent/.mailmap
+hermes-agent/.gitattributes
+hermes-agent/.github/

@@ -243,128 +243,35 @@ Any frontend that supports the OpenAI API format works. Tested/documented integr
 | OpenAI Python SDK | — | `OpenAI(base_url="http://localhost:8642/v1")` |
 | curl | — | Direct HTTP requests |
 
-## Multi-User Setup with Linux Accounts
+## Multi-User Setup with Profiles
 
-For a real multi-user Open WebUI deployment, run one Hermes API server per user and bind each instance to a dedicated Linux account.
-
-The production isolation boundary should be:
-- one Open WebUI user
-- one Linux user such as `hmx_alice`
-- one Hermes home such as `/home/hmx_alice/.hermes`
-- one workdir such as `/home/hmx_alice/work`
-- one systemd unit such as `hermes-alice.service`
-
-Hermes already has the isolation primitives needed for this:
-- `HERMES_HOME` scopes config, sessions, memory, logs, and skills.
-- `HERMES_HOME/home/` becomes subprocess `HOME`, isolating git/ssh/gh/npm state.
-- `terminal.cwd` sets the default workspace for tool calls.
-- Running the service as `User=hmx_alice` gives the real filesystem and process-level isolation.
-
-### Fast path: generate a deployment bundle
-
-Use the helper script with a single users-mapping YAML:
+To give multiple users their own isolated Hermes instance (separate config, memory, skills), use [profiles](/docs/user-guide/features/profiles):
 
 ```bash
-python3 scripts/generate_openwebui_multiuser.py \
-  --mapping /path/to/users_mapping.yaml \
-  --output-dir /tmp/hermes-multiuser
+# Create a profile per user
+hermes profile create alice
+hermes profile create bob
+
+# Configure each profile's API server on a different port
+hermes -p alice config set API_SERVER_ENABLED true
+hermes -p alice config set API_SERVER_PORT 8643
+hermes -p alice config set API_SERVER_KEY alice-secret
+
+hermes -p bob config set API_SERVER_ENABLED true
+hermes -p bob config set API_SERVER_PORT 8644
+hermes -p bob config set API_SERVER_KEY bob-secret
+
+# Start each profile's gateway
+hermes -p alice gateway &
+hermes -p bob gateway &
 ```
 
-Example output includes:
-- per-user `.env`
-- per-user `config.yaml`
-- per-user systemd units with `User=<linux_user>`
-- a root-only `apply_host.sh`
+Each profile's API server automatically advertises the profile name as the model ID:
 
-The generated `.env` files can advertise the same model name `Hermes` on every Hermes instance. To avoid collisions inside Open WebUI, configure a unique Open WebUI connection `prefix_id` per connection, such as `hermes-alice` and `hermes-bob`.
+- `http://localhost:8643/v1/models` → model `alice`
+- `http://localhost:8644/v1/models` → model `bob`
 
-### Manual setup
-
-```bash
-# Create one Linux user per WebUI user
-useradd -m -s /bin/bash hmx_alice
-useradd -m -s /bin/bash hmx_bob
-
-mkdir -p /home/hmx_alice/work /home/hmx_bob/work
-mkdir -p /home/hmx_alice/.hermes/home /home/hmx_bob/.hermes/home
-chown -R hmx_alice:hmx_alice /home/hmx_alice
-chown -R hmx_bob:hmx_bob /home/hmx_bob
-chmod 700 /home/hmx_alice /home/hmx_bob
-chmod 700 /home/hmx_alice/work /home/hmx_bob/work
-
-cat > /home/hmx_alice/.hermes/.env <<'EOF'
-API_SERVER_ENABLED=true
-API_SERVER_HOST=127.0.0.1
-API_SERVER_PORT=8643
-API_SERVER_KEY=alice-secret
-API_SERVER_MODEL_NAME=Hermes
-EOF
-
-cat > /home/hmx_bob/.hermes/.env <<'EOF'
-API_SERVER_ENABLED=true
-API_SERVER_HOST=127.0.0.1
-API_SERVER_PORT=8644
-API_SERVER_KEY=bob-secret
-API_SERVER_MODEL_NAME=Hermes
-EOF
-```
-
-Each user also needs a `config.yaml` with `terminal.cwd` pointing at their own workdir.
-
-### systemd per user
-
-```bash
-/etc/systemd/system/hermes-alice.service
-
-[Unit]
-Description=Hermes Agent for Alice
-After=network.target
-
-[Service]
-Type=simple
-User=hmx_alice
-Group=hmx_alice
-WorkingDirectory=/home/hmx_alice
-Environment=HOME=/home/hmx_alice
-Environment=HERMES_HOME=/home/hmx_alice/.hermes
-ExecStart=/usr/local/bin/hermes gateway run --replace
-Restart=always
-RestartSec=5
-
-[Install]
-WantedBy=multi-user.target
-```
-
-Duplicate that for Bob with `hmx_bob`, `8644`, and `hermes-bob.service`, then:
-
-```bash
-systemctl daemon-reload
-systemctl enable --now hermes-alice.service hermes-bob.service
-```
-
-Why this matters: `terminal.cwd` controls the default workspace, but only `User=hmx_alice` gives operating-system-level protection against cross-user reads and writes.
-
-### Open WebUI connections
-
-Add one OpenAI-compatible connection per user in Open WebUI:
-- Alice → `http://host.docker.internal:8643/v1` with `alice-secret`, `prefix_id=hermes-alice`
-- Bob → `http://host.docker.internal:8644/v1` with `bob-secret`, `prefix_id=hermes-bob`
-
-Each Hermes instance can advertise the same `/v1/models` id `Hermes`, and Open WebUI will resolve them as:
-- `hermes-alice.Hermes`
-- `hermes-bob.Hermes`
-
-Those prefixed base model ids are what your private wrapper models should point at. The wrappers can then use unique ids like `hermes-alice` and `hermes-bob` while both display the same user-facing name `Hermes`.
-
-### Operational notes
-
-- Keep `API_SERVER_HOST=127.0.0.1` unless you intentionally need remote network access.
-- Use a distinct `API_SERVER_KEY` per profile so one leaked key only affects one user.
-- Keep `API_SERVER_HOST=127.0.0.1` unless you intentionally need remote network access.
-- Use a distinct `API_SERVER_KEY` per user.
-- Use a unique Open WebUI `prefix_id` per connection whenever multiple Hermes instances advertise the same base model name.
-- The helper script is dry-run by default and can also write a deployment bundle with `--output-dir`.
-
+In Open WebUI, add each as a separate connection. The model dropdown shows `alice` and `bob` as distinct models, each backed by a fully isolated Hermes instance. See the [Open WebUI guide](/docs/user-guide/messaging/open-webui#multi-user-setup-with-profiles) for details.
 
 ## Limitations
 
