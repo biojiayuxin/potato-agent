@@ -3,28 +3,62 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>Potato Agent Lite</title>
+    <title>Potato Agent</title>
     <link rel="stylesheet" href="/static/lite/styles.css" />
   </head>
   <body>
     <div id="app" class="app-shell">
       <section id="login-view" class="login-view">
-        <div class="login-card">
-          <div class="brand">Potato Agent Lite</div>
-          <h1>登录</h1>
-          <p class="muted">使用 Open WebUI 账号登录，进入轻量聊天工作台。</p>
-          <form id="login-form" class="stack gap-12">
-            <label class="stack gap-6">
-              <span>邮箱</span>
-              <input id="email" name="email" type="email" autocomplete="username" required />
-            </label>
-            <label class="stack gap-6">
-              <span>密码</span>
-              <input id="password" name="password" type="password" autocomplete="current-password" required />
-            </label>
-            <button type="submit" class="primary">登录</button>
-            <div id="login-error" class="error" hidden></div>
-          </form>
+        <div class="login-stage">
+          <div class="login-hero">
+            <div class="login-hero-mark">PA</div>
+            <div class="brand">Potato Agent</div>
+            <h1>面向多用户隔离执行环境的统一智能工作台</h1>
+            <p class="muted login-hero-copy">
+              通过统一登录入口接入你的专属 Hermes 运行实例，在同一个界面里完成对话、工具调用与文件协作。
+            </p>
+            <div class="login-hero-points">
+              <div class="login-point">
+                <span class="login-point-kicker">隔离执行</span>
+                <strong>每个用户对应独立 Linux 用户与 Hermes 服务</strong>
+              </div>
+              <div class="login-point">
+                <span class="login-point-kicker">统一入口</span>
+                <strong>前端统一展示为同一个模型名 `Hermes`</strong>
+              </div>
+              <div class="login-point">
+                <span class="login-point-kicker">工作台体验</span>
+                <strong>支持聊天、流式工具进度、文件浏览与后续扩展</strong>
+              </div>
+            </div>
+          </div>
+
+          <div class="login-card-shell">
+            <div class="login-card login-card-form">
+              <div class="login-card-header">
+                <div class="login-card-label">账号登录</div>
+                <h2>进入 Potato Agent</h2>
+                <p class="muted">使用你的 Open WebUI 账号登录，继续进入正式工作台。</p>
+              </div>
+
+              <form id="login-form" class="stack gap-12">
+                <label class="stack gap-6">
+                  <span>邮箱</span>
+                  <input id="email" name="email" type="email" autocomplete="username" required />
+                </label>
+                <label class="stack gap-6">
+                  <span>密码</span>
+                  <input id="password" name="password" type="password" autocomplete="current-password" required />
+                </label>
+                <button type="submit" class="primary login-submit">登录</button>
+                <div id="login-error" class="error" hidden></div>
+              </form>
+
+              <div class="login-card-footer muted tiny">
+                登录后将自动路由到与你账号绑定的专属 Hermes 实例。
+              </div>
+            </div>
+          </div>
         </div>
       </section>
 
@@ -32,7 +66,7 @@
         <aside class="sidebar">
           <div class="sidebar-header">
             <div>
-              <div class="brand small">Potato Agent Lite</div>
+              <div class="brand small">Potato Agent</div>
               <div id="user-email" class="muted tiny"></div>
             </div>
             <button id="logout-button" class="ghost small">退出</button>
