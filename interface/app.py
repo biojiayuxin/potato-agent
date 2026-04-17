@@ -35,6 +35,12 @@ from interface.auth_db import (
     get_user_with_password_by_login,
     verify_password,
 )
+from interface.display_store import (
+    delete_display_messages,
+    ensure_display_store,
+    get_display_messages,
+    save_display_messages,
+)
 from interface.mapping import DEFAULT_MAPPING_PATH, HermesTarget, MappingStore
 
 
@@ -79,6 +85,10 @@ class SigninRequest(BaseModel):
 
 class UpdateSessionTitleRequest(BaseModel):
     title: str = ""
+
+
+def _now_seconds() -> int:
+    return int(datetime.now(UTC).timestamp())
 
 
 def _create_session_token(user_id: str) -> str:
@@ -251,6 +261,271 @@ def _normalize_message_row(message: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _normalize_display_message(message: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "id": str(message.get("id") or uuid.uuid4().hex),
+        "role": str(message.get("role") or "assistant"),
+        "content": str(message.get("content") or ""),
+        "reasoningContent": str(message.get("reasoningContent") or ""),
+        "toolCalls": message.get("toolCalls")
+        if isinstance(message.get("toolCalls"), list)
+        else [],
+        "progressLines": message.get("progressLines")
+        if isinstance(message.get("progressLines"), list)
+        else [],
+        "files": message.get("files") if isinstance(message.get("files"), list) else [],
+        "timestamp": int(message.get("timestamp") or 0),
+        "done": bool(message.get("done", True)),
+        "source": str(message.get("source") or "display_store"),
+    }
+
+
+def _normalize_tool_call(tool_call: dict[str, Any]) -> dict[str, Any]:
+    function = (
+        tool_call.get("function") if isinstance(tool_call.get("function"), dict) else {}
+    )
+    normalized = {
+        "id": str(tool_call.get("id") or ""),
+        "index": int(tool_call.get("index") or 0),
+        "function": {
+            "name": str(function.get("name") or ""),
+            "arguments": str(function.get("arguments") or ""),
+        },
+    }
+    if tool_call.get("type"):
+        normalized["type"] = str(tool_call.get("type"))
+    return normalized
+
+
+def _merge_tool_call_deltas(
+    existing_tool_calls: list[dict[str, Any]], delta_tool_calls: list[dict[str, Any]]
+) -> list[dict[str, Any]]:
+    merged = [_normalize_tool_call(item) for item in existing_tool_calls]
+
+    for delta_tool_call in delta_tool_calls:
+        index = int(delta_tool_call.get("index") or len(merged))
+        while len(merged) <= index:
+            merged.append(_normalize_tool_call({"index": len(merged)}))
+
+        current = merged[index]
+        if delta_tool_call.get("id"):
+            current["id"] = str(delta_tool_call["id"])
+        if delta_tool_call.get("type"):
+            current["type"] = str(delta_tool_call["type"])
+
+        function_delta = (
+            delta_tool_call.get("function")
+            if isinstance(delta_tool_call.get("function"), dict)
+            else {}
+        )
+        if function_delta.get("name"):
+            current["function"]["name"] = str(function_delta["name"])
+        if function_delta.get("arguments"):
+            current["function"]["arguments"] += str(function_delta["arguments"])
+
+    return merged
+
+
+def _append_progress_entries(message: dict[str, Any], entries: list[str]) -> None:
+    progress_lines = message.setdefault("progressLines", [])
+    if not isinstance(progress_lines, list):
+        progress_lines = []
+        message["progressLines"] = progress_lines
+    for entry in entries:
+        if not entry:
+            continue
+        if progress_lines and progress_lines[-1] == entry:
+            continue
+        progress_lines.append(entry)
+
+
+def _build_user_display_message(body: dict[str, Any]) -> dict[str, Any]:
+    messages = body.get("messages") if isinstance(body.get("messages"), list) else []
+    user_payload = messages[-1] if messages and isinstance(messages[-1], dict) else {}
+    raw_content = str(user_payload.get("content") or "")
+    visible_content = raw_content
+    files: list[dict[str, Any]] = []
+
+    attachment_start = raw_content.find("<potato-files>")
+    attachment_end = raw_content.find("</potato-files>")
+    if attachment_start == 0 and attachment_end != -1:
+        json_text = raw_content[len("<potato-files>") : attachment_end].strip()
+        remainder = raw_content[attachment_end + len("</potato-files>") :].lstrip()
+        hint_line = (
+            "Use the attachment local paths above if you need to inspect the files."
+        )
+        if remainder.startswith(hint_line):
+            remainder = remainder[len(hint_line) :].lstrip()
+        visible_content = remainder
+        try:
+            parsed_files = json.loads(json_text)
+        except json.JSONDecodeError:
+            parsed_files = []
+        if isinstance(parsed_files, list):
+            files = parsed_files
+
+    return _normalize_display_message(
+        {
+            "id": f"user-{uuid.uuid4().hex}",
+            "role": "user",
+            "content": visible_content,
+            "reasoningContent": "",
+            "toolCalls": [],
+            "progressLines": [],
+            "files": files,
+            "timestamp": _now_seconds(),
+            "done": True,
+            "source": "display_store",
+        }
+    )
+
+
+def _build_assistant_display_message() -> dict[str, Any]:
+    return _normalize_display_message(
+        {
+            "id": f"assistant-{uuid.uuid4().hex}",
+            "role": "assistant",
+            "content": "",
+            "reasoningContent": "",
+            "toolCalls": [],
+            "progressLines": [],
+            "files": [],
+            "timestamp": _now_seconds(),
+            "done": False,
+            "source": "display_store",
+        }
+    )
+
+
+def _get_or_create_display_transcript(
+    user_id: str,
+    session_id: str,
+    *,
+    user_message: dict[str, Any] | None = None,
+) -> list[dict[str, Any]]:
+    existing = get_display_messages(user_id, session_id)
+    transcript = (
+        [_normalize_display_message(item) for item in existing]
+        if isinstance(existing, list)
+        else []
+    )
+    if user_message is not None:
+        transcript.append(_normalize_display_message(user_message))
+    return transcript
+
+
+def _extract_progress_lines(text: str) -> list[str]:
+    return re.findall(r"`(?:💻|🔍|🧠|📁|🌐|📝|⚙️|🛠️)[^`]*`", text or "")
+
+
+def _build_fallback_display_messages(
+    messages: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    normalized: list[dict[str, Any]] = []
+    pending_assistant: dict[str, Any] | None = None
+
+    def has_payload(message: dict[str, Any]) -> bool:
+        return bool(
+            str(message.get("content") or "").strip()
+            or str(message.get("reasoningContent") or "").strip()
+            or message.get("toolCalls")
+            or message.get("progressLines")
+            or message.get("files")
+        )
+
+    def flush_pending() -> None:
+        nonlocal pending_assistant
+        if pending_assistant and has_payload(pending_assistant):
+            normalized.append(pending_assistant)
+        pending_assistant = None
+
+    for raw_message in messages:
+        role = str(raw_message.get("role") or "")
+        if role == "tool":
+            continue
+
+        if role == "user":
+            flush_pending()
+            content = str(raw_message.get("content") or "")
+            normalized.append(
+                {
+                    "id": f"fallback-{raw_message.get('id') or uuid.uuid4().hex}",
+                    "role": "user",
+                    "content": content,
+                    "reasoningContent": "",
+                    "toolCalls": [],
+                    "progressLines": [],
+                    "files": [],
+                    "timestamp": int(raw_message.get("timestamp") or 0),
+                    "done": True,
+                    "source": "fallback",
+                }
+            )
+            continue
+
+        if role != "assistant":
+            continue
+
+        display_message = {
+            "id": f"fallback-{raw_message.get('id') or uuid.uuid4().hex}",
+            "role": "assistant",
+            "content": str(raw_message.get("content") or ""),
+            "reasoningContent": str(raw_message.get("reasoning") or ""),
+            "toolCalls": raw_message.get("tool_calls")
+            if isinstance(raw_message.get("tool_calls"), list)
+            else [],
+            "progressLines": _extract_progress_lines(
+                str(raw_message.get("content") or "")
+            ),
+            "files": [],
+            "timestamp": int(raw_message.get("timestamp") or 0),
+            "done": True,
+            "source": "fallback",
+        }
+
+        has_text = bool(
+            display_message["content"].strip()
+            or display_message["reasoningContent"].strip()
+        )
+        has_tool_context = bool(
+            display_message["toolCalls"] or display_message["progressLines"]
+        )
+
+        if pending_assistant is None:
+            if has_tool_context and not has_text:
+                pending_assistant = display_message
+            elif has_payload(display_message):
+                normalized.append(display_message)
+            continue
+
+        if display_message["content"].strip():
+            pending_assistant["content"] = (
+                f"{pending_assistant['content']}\n\n{display_message['content']}"
+                if pending_assistant["content"].strip()
+                else display_message["content"]
+            )
+        if display_message["reasoningContent"].strip():
+            pending_assistant["reasoningContent"] = (
+                f"{pending_assistant['reasoningContent']}\n\n{display_message['reasoningContent']}"
+                if pending_assistant["reasoningContent"].strip()
+                else display_message["reasoningContent"]
+            )
+        if display_message["toolCalls"]:
+            pending_assistant["toolCalls"].extend(display_message["toolCalls"])
+        if display_message["progressLines"]:
+            pending_assistant["progressLines"].extend(display_message["progressLines"])
+        pending_assistant["timestamp"] = max(
+            int(pending_assistant.get("timestamp") or 0),
+            int(display_message.get("timestamp") or 0),
+        )
+
+        if has_text:
+            flush_pending()
+
+    flush_pending()
+    return normalized
+
+
 def _sanitize_filename(filename: str) -> str:
     base = Path(filename or "upload.bin").name
     cleaned = FILENAME_SANITIZE_RE.sub("_", base).strip("._")
@@ -286,6 +561,7 @@ app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 @app.on_event("startup")
 async def on_startup() -> None:
     ensure_auth_db()
+    ensure_display_store()
     app.state.http = httpx.AsyncClient(timeout=httpx.Timeout(60.0, read=None))
 
 
@@ -447,10 +723,15 @@ async def get_session_detail(
         session = db.get_session(resolved)
         if not session or session.get("source") != "api_server":
             raise HTTPException(status_code=404, detail="Session not found")
-        messages = db.get_messages(resolved)
+        raw_messages = db.get_messages(resolved)
+
+    display_messages = get_display_messages(user.id, resolved)
+    if display_messages is None:
+        display_messages = _build_fallback_display_messages(raw_messages)
+
     return {
         "session": _normalize_session_row(session),
-        "messages": [_normalize_message_row(item) for item in messages],
+        "messages": [_normalize_display_message(item) for item in display_messages],
     }
 
 
@@ -492,6 +773,7 @@ async def delete_session(
         if not session or session.get("source") != "api_server":
             raise HTTPException(status_code=404, detail="Session not found")
         db.delete_session(resolved)
+    delete_display_messages(user.id, resolved)
     return {"ok": True}
 
 
@@ -599,6 +881,9 @@ async def chat_completions(
     if not isinstance(body, dict):
         raise HTTPException(status_code=400, detail="Invalid request body")
 
+    user_display_message = _build_user_display_message(body)
+    assistant_display_message = _build_assistant_display_message()
+
     session_id = str(body.pop("session_id", "") or "").strip()
     upstream_headers = {
         "Authorization": f"Bearer {user.target.api_key}",
@@ -637,12 +922,159 @@ async def chat_completions(
     if upstream.headers.get("x-accel-buffering"):
         response_headers["X-Accel-Buffering"] = upstream.headers["x-accel-buffering"]
 
+    resolved_session_id = (
+        response_headers.get("X-Hermes-Session-Id")
+        or session_id
+        or str(upstream.headers.get("x-hermes-session-id") or "")
+    ).strip()
+    display_transcript = (
+        _get_or_create_display_transcript(
+            user.id, resolved_session_id, user_message=user_display_message
+        )
+        if resolved_session_id
+        else []
+    )
+
+    def persist_transcript() -> None:
+        if not resolved_session_id:
+            return
+        payload = [*display_transcript, assistant_display_message]
+        save_display_messages(user.id, resolved_session_id, payload)
+
+    if body.get("stream") is False:
+        payload = await upstream.aread()
+        try:
+            response_json = json.loads(payload.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            response_json = {}
+
+        assistant_content = ""
+        if isinstance(response_json.get("choices"), list) and response_json["choices"]:
+            first_choice = response_json["choices"][0]
+            if isinstance(first_choice, dict):
+                message = (
+                    first_choice.get("message")
+                    if isinstance(first_choice.get("message"), dict)
+                    else {}
+                )
+                assistant_content = str(message.get("content") or "")
+
+        if resolved_session_id:
+            display_transcript = _get_or_create_display_transcript(
+                user.id, resolved_session_id, user_message=user_display_message
+            )
+            assistant_display_message["content"] = assistant_content
+            assistant_display_message["done"] = True
+            assistant_display_message["timestamp"] = _now_seconds()
+            persist_transcript()
+
+        await upstream.aclose()
+        return Response(
+            content=payload,
+            status_code=upstream.status_code,
+            media_type=upstream.headers.get("content-type", "application/json"),
+            headers=response_headers,
+        )
+
     async def stream_upstream() -> Iterator[bytes]:
+        nonlocal resolved_session_id, display_transcript
         try:
             async for chunk in upstream.aiter_bytes():
                 if chunk:
+                    if not resolved_session_id:
+                        header_session_id = str(
+                            upstream.headers.get("x-hermes-session-id") or ""
+                        ).strip()
+                        if header_session_id:
+                            resolved_session_id = header_session_id
+                            display_transcript = _get_or_create_display_transcript(
+                                user.id,
+                                resolved_session_id,
+                                user_message=user_display_message,
+                            )
+
+                    text = chunk.decode("utf-8", errors="ignore")
+                    for block in text.split("\n\n"):
+                        if not block.strip():
+                            continue
+
+                        lines = block.split("\n")
+                        event_name = ""
+                        data_lines: list[str] = []
+                        for line in lines:
+                            if line.startswith("event: "):
+                                event_name = line[7:].strip()
+                            elif line.startswith("data: "):
+                                data_lines.append(line[6:])
+
+                        data = "\n".join(data_lines).strip()
+                        if not data or data == "[DONE]":
+                            continue
+
+                        try:
+                            event_payload = json.loads(data)
+                        except json.JSONDecodeError:
+                            continue
+
+                        if event_name == "hermes.tool.progress":
+                            emoji = str(event_payload.get("emoji") or "🛠️")
+                            label = str(
+                                event_payload.get("label")
+                                or event_payload.get("tool")
+                                or "tool"
+                            )
+                            _append_progress_entries(
+                                assistant_display_message, [f"{emoji} {label}"]
+                            )
+                            assistant_display_message["timestamp"] = _now_seconds()
+                            persist_transcript()
+                            continue
+
+                        delta = {}
+                        if (
+                            isinstance(event_payload.get("choices"), list)
+                            and event_payload["choices"]
+                        ):
+                            first_choice = event_payload["choices"][0]
+                            if isinstance(first_choice, dict):
+                                delta = (
+                                    first_choice.get("delta")
+                                    if isinstance(first_choice.get("delta"), dict)
+                                    else {}
+                                )
+
+                        if delta.get("reasoning_content"):
+                            assistant_display_message["reasoningContent"] += str(
+                                delta["reasoning_content"]
+                            )
+                        if (
+                            isinstance(delta.get("tool_calls"), list)
+                            and delta["tool_calls"]
+                        ):
+                            assistant_display_message["toolCalls"] = (
+                                _merge_tool_call_deltas(
+                                    assistant_display_message.get("toolCalls", []),
+                                    delta["tool_calls"],
+                                )
+                            )
+                        if delta.get("content"):
+                            content_delta = str(delta["content"])
+                            assistant_display_message["content"] += content_delta
+                            progress_lines = _extract_progress_lines(content_delta)
+                            if progress_lines:
+                                _append_progress_entries(
+                                    assistant_display_message, progress_lines
+                                )
+
+                        if delta:
+                            assistant_display_message["timestamp"] = _now_seconds()
+                            persist_transcript()
+
                     yield chunk
         finally:
+            assistant_display_message["done"] = True
+            assistant_display_message["timestamp"] = _now_seconds()
+            persist_transcript()
             await upstream.aclose()
 
     return StreamingResponse(

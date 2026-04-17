@@ -592,30 +592,66 @@ const parseStoredUserContent = (content) => {
   return { content: visible, files };
 };
 
+const extractDisplayProgressLines = (text) => {
+  if (!text) return [];
+  const matches = text.match(/`(?:💻|🔍|🧠|📁|🌐|📝|⚙️|🛠️)[^`]*`/g) || [];
+  return matches;
+};
+
 const normalizeMessageForDisplay = (message) => {
   const role = String(message?.role || 'assistant');
+  const hasDisplayShape =
+    'reasoningContent' in (message || {}) ||
+    'toolCalls' in (message || {}) ||
+    'progressLines' in (message || {}) ||
+    'done' in (message || {});
+  const normalizedContent = typeof message?.content === 'string' ? message.content : String(message?.content ?? '');
   const base = {
     id: `msg-${message?.id ?? uuid()}`,
     role,
     content: '',
-    reasoningContent: typeof message?.reasoning === 'string' ? message.reasoning : '',
-    toolCalls: Array.isArray(message?.tool_calls) ? message.tool_calls : [],
-    progressLines: [],
+    reasoningContent: hasDisplayShape
+      ? String(message?.reasoningContent ?? '')
+      : (typeof message?.reasoning === 'string' ? message.reasoning : ''),
+    toolCalls: hasDisplayShape
+      ? (Array.isArray(message?.toolCalls) ? message.toolCalls.map((item) => normalizeToolCall(item)) : [])
+      : (Array.isArray(message?.tool_calls) ? message.tool_calls.map((item) => normalizeToolCall(item)) : []),
+    progressLines: hasDisplayShape
+      ? (Array.isArray(message?.progressLines) ? [...message.progressLines] : [])
+      : (role === 'assistant' ? extractDisplayProgressLines(normalizedContent) : []),
     timestamp: Number(message?.timestamp || 0),
-    files: [],
-    done: true,
+    files: hasDisplayShape && Array.isArray(message?.files) ? [...message.files] : [],
+    done: hasDisplayShape ? Boolean(message?.done ?? true) : true,
   };
 
   if (role === 'user') {
-    const parsed = parseStoredUserContent(message?.content);
-    base.content = parsed.content;
-    base.files = parsed.files;
+    if (hasDisplayShape) {
+      base.content = normalizedContent;
+      if ((!base.files || base.files.length === 0) && normalizedContent.includes(ATTACHMENT_BLOCK_START)) {
+        const parsed = parseStoredUserContent(normalizedContent);
+        base.content = parsed.content;
+        base.files = parsed.files;
+      }
+    } else {
+      const parsed = parseStoredUserContent(message?.content);
+      base.content = parsed.content;
+      base.files = parsed.files;
+    }
   } else {
-    base.content = typeof message?.content === 'string' ? message.content : String(message?.content ?? '');
+    base.content = normalizedContent;
   }
 
   return base;
 };
+
+const hasDisplayContent = (message) =>
+  Boolean(
+    String(message?.content ?? '').trim() ||
+    (typeof message?.reasoningContent === 'string' && message.reasoningContent.trim()) ||
+    (Array.isArray(message?.toolCalls) && message.toolCalls.length > 0) ||
+    (Array.isArray(message?.progressLines) && message.progressLines.length > 0) ||
+    (Array.isArray(message?.files) && message.files.length > 0)
+  );
 
 const getCurrentChatEntries = () => {
   if (state.draftSession) {
@@ -696,6 +732,131 @@ const normalizeToolCall = (toolCall) => {
   return normalized;
 };
 
+const mergeDisplayToolCalls = (existingToolCalls, nextToolCalls) => {
+  const merged = Array.isArray(existingToolCalls)
+    ? existingToolCalls.map((item) => normalizeToolCall(item))
+    : [];
+  const seen = new Set(
+    merged.map((item, index) => item.id || `${item.function.name}:${item.function.arguments}:${index}`)
+  );
+
+  for (const toolCall of nextToolCalls || []) {
+    const normalizedToolCall = normalizeToolCall(toolCall);
+    const key = normalizedToolCall.id || `${normalizedToolCall.function.name}:${normalizedToolCall.function.arguments}`;
+    if (seen.has(key)) continue;
+    merged.push(normalizedToolCall);
+    seen.add(key);
+  }
+
+  return merged;
+};
+
+const mergeAssistantDisplayMessage = (target, source) => {
+  const merged = {
+    ...target,
+    files: Array.isArray(target?.files) ? [...target.files] : [],
+    toolCalls: Array.isArray(target?.toolCalls) ? target.toolCalls.map((item) => normalizeToolCall(item)) : [],
+    progressLines: Array.isArray(target?.progressLines) ? [...target.progressLines] : [],
+  };
+
+  const sourceContent = String(source?.content ?? '').trim();
+  if (sourceContent) {
+    merged.content = merged.content ? `${merged.content}\n\n${source.content}` : source.content;
+  }
+
+  const sourceReasoning = String(source?.reasoningContent ?? '').trim();
+  if (sourceReasoning) {
+    merged.reasoningContent = merged.reasoningContent
+      ? `${merged.reasoningContent}\n\n${source.reasoningContent}`
+      : source.reasoningContent;
+  }
+
+  if (Array.isArray(source?.toolCalls) && source.toolCalls.length > 0) {
+    merged.toolCalls = mergeDisplayToolCalls(merged.toolCalls, source.toolCalls);
+  }
+
+  if (Array.isArray(source?.progressLines) && source.progressLines.length > 0) {
+    appendProgressEntries(merged, source.progressLines);
+  }
+
+  if (Array.isArray(source?.files) && source.files.length > 0) {
+    merged.files = [...merged.files, ...source.files];
+  }
+
+  if (Number(source?.timestamp || 0) >= Number(merged.timestamp || 0)) {
+    merged.timestamp = Number(source?.timestamp || merged.timestamp || 0);
+    if (sourceContent || sourceReasoning) {
+      merged.id = source.id;
+    }
+  }
+
+  merged.done = source?.done ?? merged.done;
+  return merged;
+};
+
+const normalizeSessionMessagesForDisplay = (messages) => {
+  const normalizedMessages = [];
+  let pendingAssistant = null;
+
+  const flushPendingAssistant = () => {
+    if (!pendingAssistant) return;
+    if (hasDisplayContent(pendingAssistant)) {
+      normalizedMessages.push(pendingAssistant);
+    }
+    pendingAssistant = null;
+  };
+
+  for (const rawMessage of messages || []) {
+    const normalizedMessage = normalizeMessageForDisplay(rawMessage);
+
+    if (normalizedMessage.role === 'user') {
+      flushPendingAssistant();
+      normalizedMessages.push(normalizedMessage);
+      continue;
+    }
+
+    if (normalizedMessage.role === 'tool') {
+      continue;
+    }
+
+    if (normalizedMessage.role !== 'assistant') {
+      flushPendingAssistant();
+      if (hasDisplayContent(normalizedMessage)) {
+        normalizedMessages.push(normalizedMessage);
+      }
+      continue;
+    }
+
+    const hasToolContext =
+      (Array.isArray(normalizedMessage.toolCalls) && normalizedMessage.toolCalls.length > 0) ||
+      (Array.isArray(normalizedMessage.progressLines) && normalizedMessage.progressLines.length > 0);
+    const hasTextualContent = Boolean(
+      String(normalizedMessage.content ?? '').trim() ||
+      String(normalizedMessage.reasoningContent ?? '').trim()
+    );
+
+    if (pendingAssistant) {
+      pendingAssistant = mergeAssistantDisplayMessage(pendingAssistant, normalizedMessage);
+      if (hasTextualContent) {
+        flushPendingAssistant();
+      }
+      continue;
+    }
+
+    if (hasToolContext && !hasTextualContent) {
+      pendingAssistant = normalizedMessage;
+      continue;
+    }
+
+    if (hasDisplayContent(normalizedMessage)) {
+      normalizedMessages.push(normalizedMessage);
+    }
+  }
+
+  flushPendingAssistant();
+  return normalizedMessages;
+};
+
 const mergeToolCallDelta = (existingToolCalls, deltaToolCalls) => {
   const merged = Array.isArray(existingToolCalls)
     ? existingToolCalls.map((item) => normalizeToolCall(item))
@@ -730,12 +891,6 @@ const mergeToolCallDelta = (existingToolCalls, deltaToolCalls) => {
   return merged;
 };
 
-const extractInlineProgressLines = (text) => {
-  if (!text) return [];
-  const matches = text.match(/`(?:💻|🔍|🧠|📁|🌐|📝|⚙️|🛠️)[^`]*`/g) || [];
-  return matches;
-};
-
 const appendProgressEntries = (message, entries) => {
   const nextEntries = Array.isArray(message.progressLines) ? [...message.progressLines] : [];
   for (const entry of entries || []) {
@@ -746,10 +901,10 @@ const appendProgressEntries = (message, entries) => {
   message.progressLines = nextEntries;
 };
 
-const createMetaSection = (title, bodyHtml, className = '') => {
+const createMetaSection = (title, bodyHtml, className = '', open = true) => {
   const section = document.createElement('details');
   section.className = `message-meta ${className}`.trim();
-  section.open = true;
+  section.open = open;
 
   const summary = document.createElement('summary');
   summary.textContent = title;
@@ -788,7 +943,14 @@ const renderMessageMetaSections = (container, message) => {
     const lines = message.progressLines
       .map((line) => `<div class="progress-line">${escapeHtml(line)}</div>`)
       .join('');
-    container.append(createMetaSection('Execution Progress', lines, 'message-meta-progress'));
+    container.append(
+      createMetaSection(
+        'Execution Progress',
+        lines,
+        'message-meta-progress',
+        !Boolean(message?.done)
+      )
+    );
   }
 };
 
@@ -890,12 +1052,7 @@ const renderMessages = () => {
     renderMessageFiles(fileSection, message);
     content.classList.remove('streaming-placeholder');
 
-    const hasVisibleContent = Boolean(
-      String(message.content ?? '').trim() ||
-      (typeof message?.reasoningContent === 'string' && message.reasoningContent.trim()) ||
-      (Array.isArray(message?.toolCalls) && message.toolCalls.length > 0) ||
-      (Array.isArray(message?.progressLines) && message.progressLines.length > 0)
-    );
+    const hasVisibleContent = hasDisplayContent(message);
 
     if (isStreaming && !hasVisibleContent) {
       content.classList.add('streaming-placeholder');
@@ -1192,8 +1349,33 @@ const openSession = async (sessionId) => {
   state.draftSession = null;
   state.activeSession = json?.session || null;
   state.activeSessionId = state.activeSession?.id || null;
-  state.messages = Array.isArray(json?.messages) ? json.messages.map(normalizeMessageForDisplay) : [];
+  state.messages = Array.isArray(json?.messages)
+    ? json.messages.map(normalizeMessageForDisplay)
+    : [];
   renderWorkspace();
+};
+
+const syncActiveSessionFromSessions = (sessionId) => {
+  if (!sessionId) return;
+
+  const matchedSession = state.sessions.find((session) => session.id === sessionId);
+  if (matchedSession) {
+    state.draftSession = null;
+    state.activeSession = matchedSession;
+    state.activeSessionId = matchedSession.id;
+    return;
+  }
+
+  if (state.activeSession?.isDraft || state.activeSessionId === sessionId) {
+    state.draftSession = null;
+    state.activeSession = {
+      ...(state.activeSession || {}),
+      id: sessionId,
+      title: getActiveChatTitle(),
+      isDraft: false,
+    };
+    state.activeSessionId = sessionId;
+  }
 };
 
 const deleteChat = async (chatId, isDraft = false) => {
@@ -1327,7 +1509,7 @@ const streamChatCompletion = async (payload, assistantMessage, abortController, 
 
       if (typeof delta.content === 'string' && delta.content) {
         assistantMessage.content += delta.content;
-        const progressLines = extractInlineProgressLines(delta.content);
+        const progressLines = extractDisplayProgressLines(delta.content);
         if (progressLines.length > 0) {
           appendProgressEntries(assistantMessage, progressLines);
         }
@@ -1434,10 +1616,12 @@ const submitPrompt = async (prompt) => {
     assistantMessage.done = true;
     assistantMessage.timestamp = nowSeconds();
     state.streamingMessageIds.delete(assistantMessage.id);
+    renderMessages();
 
     await ensureSessionTitle(streamState.sessionId);
     await refreshSessions();
-    await openSession(streamState.sessionId);
+    syncActiveSessionFromSessions(streamState.sessionId);
+    renderWorkspace();
   } catch (error) {
     state.streamingMessageIds.delete(assistantMessage.id);
     assistantMessage.done = true;
@@ -1450,7 +1634,8 @@ const submitPrompt = async (prompt) => {
       renderMessages();
       if (streamState.sessionId) {
         await refreshSessions().catch(() => {});
-        await openSession(streamState.sessionId).catch(() => {});
+        syncActiveSessionFromSessions(streamState.sessionId);
+        renderWorkspace();
       }
     } else {
       assistantMessage.content = `${assistantMessage.content}\n\n[Error] ${error.message}`.trim();
