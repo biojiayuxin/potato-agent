@@ -16,7 +16,7 @@
 
 ## 当前目录状态
 
-当前项目根目录主线内容：
+当前项目主线内容：
 
 - `README.md`
 - `CURRENT_PROGRESS.md`
@@ -33,8 +33,6 @@
 - `hermes-agent/`
 - `open-webui/`
 
-说明：
-
 - 旧目录名 `hermes_webUI_SOP` 已废弃，项目已统一改名为 `potato_agent`
 - 项目文档中的调用路径已经统一为相对路径
 - `hermes-agent/` 和 `open-webui/` 是源码工作区，不等于线上运行目录
@@ -43,15 +41,9 @@
 
 ### 1. 统一 mapping 驱动
 
-入口：
-
 - `./generate_multiuser_bundle.py`
 
-作用：
-
-- 从一份 `users_mapping.yaml` 同时生成 Hermes 侧与 Open WebUI 侧部署产物
-
-当前可生成：
+- 从一份 `users_mapping.yaml` 生成 Hermes 和 Open WebUI 的部署产物，包括：
 
 - 每用户 `.env`
 - 每用户 `config.yaml`
@@ -65,17 +57,10 @@
 
 ### 2. 一键创建用户并绑定 Hermes
 
-入口：
-
 - `./provision_openwebui_hermes_user.py`
 
-输入：
-
-- `username`
-- `email`
-- `password`
-
-自动完成：
+- 输入：`username`、`email`、`password`
+- 自动完成：
 
 - 创建或更新 Open WebUI 用户
 - 更新 `users_mapping.yaml`
@@ -88,16 +73,10 @@
 
 ### 3. 一键删除用户并解绑 Hermes
 
-入口：
-
 - `./deprovision_openwebui_hermes_user.py`
 
-输入：
-
-- `username`
-- `password`
-
-默认自动完成：
+- 输入：`username`、`password`
+- 默认自动完成：
 
 - 删除 Open WebUI wrapper model 与 access grants
 - 删除 Open WebUI connection 配置
@@ -108,10 +87,7 @@
 - 从 `users_mapping.yaml` 中移除该用户
 - 重启 Open WebUI 并验证该用户不能再登录
 
-附加选项：
-
-- `--delete-home`
-- `--keep-openwebui-user`
+- 附加选项：`--delete-home`、`--keep-openwebui-user`
 
 ### 4. Hermes / Open WebUI 命名策略已收口
 
@@ -126,69 +102,58 @@
 
 ### 5. Lite 轻量前端已落地
 
-当前已经实现一套不依赖 npm 构建的 Lite 前端。
-
-入口：
-
-- `/lite`
-
-代码位置：
+- 已实现一套不依赖 npm 构建的 Lite 前端。
+- 入口：`/lite`
+- 代码位置：
 
 - `open-webui/backend/open_webui/static/lite/index.html`
 - `open-webui/backend/open_webui/static/lite/styles.css`
 - `open-webui/backend/open_webui/static/lite/app.js`
 - `open-webui/backend/open_webui/main.py`
 
-当前支持：
-
-- 登录
-- 聊天
-- 聊天切换
-- 右侧文件树
-- 文件下载
-
-当前已完成的 Lite 前端体验优化包括：
+- 当前支持：登录、聊天、聊天切换、右侧文件树、文件下载
+- 已完成的前端体验优化包括：
 
 - 页面高度固定为浏览器窗口高度
 - 聊天区、左侧聊天列表、右侧文件树都已具备各自独立滚动
 - 文件树长文件名不再换行，改为横向滚动
 - 文件树隐藏以 `.` 开头的隐藏文件和隐藏目录
-- 输入框改为：
-  - `Enter` 发送
-  - `Ctrl + Enter` / `Cmd + Enter` / `Shift + Enter` 换行
+- 输入框支持 `Enter` 发送，`Ctrl/Cmd + Enter` 或 `Shift + Enter` 换行
 - 消息正文已支持 Markdown 渲染
 - 用户消息和助手消息都已支持“复制原始内容”按钮
 - 已开始接入 Hermes 流式过程信息展示
 
-### 6. Lite 文件树已经从 terminal server 依赖切换为专用后端接口
+### 6. Lite 附件上传已切换为 Hermes 原生处理
+
+- 当前附件链路不再依赖 Open WebUI 解析 PDF / 图片，而是：
+
+- 前端上传文件到本地存储
+- Lite 通过专用接口获取真实文件路径
+- 聊天请求将“附件名 + 本地路径”提示交给 Hermes
+- Hermes 自行用工具处理 PDF、图片和 Office 文档
+
+- 上传文件落到 `/tmp`
+- 文件名格式：`<uuid>_<年月日时分秒>_<filename>`
+- 支持点击 `+` 上传
+- 支持在聊天输入框直接粘贴剪贴板文件/图片上传
+
+- PDF 可正常解析
+- 图片可正常解析
+- 附件统一按同一条链路提交给 Hermes
+
+### 7. Lite 文件树已经从 terminal server 依赖切换为专用后端接口
 
 已经确认 Hermes 本身不提供 Open WebUI 原生 terminal server 所需接口，因此当前实现已切换为 Lite 专用文件接口。
-
-后端接口：
 
 - `GET /api/lite/files/tree`
 - `GET /api/lite/files/download`
 
-当前目录边界策略：
-
 - 优先使用 `home_dir`
 - 没有 `home_dir` 时退回 `workdir`
 
-这意味着 Lite 文件树当前默认从：
+Lite 文件树当前默认从 `/home/<linux_user>` 开始，而不是只从 `/home/<linux_user>/work` 开始。
 
-- `/home/<linux_user>`
-
-开始，而不是只从：
-
-- `/home/<linux_user>/work`
-
-开始。
-
-### 7. Lite 聊天消息已支持 Markdown 渲染
-
-当前 Lite 聊天页已经不再只是纯文本加换行，而是支持基础 Markdown 渲染。
-
-已支持的展示包括：
+### 8. Lite 聊天消息已支持 Markdown 渲染
 
 - 标题
 - 列表
@@ -199,36 +164,22 @@
 - 表格
 - 链接
 
-当前实现策略：
+- 实现方式：后端仍返回原始 Markdown，前端用 `marked` 渲染并做基础 HTML 清理
 
-- 后端仍返回原始 Markdown
-- 前端本地用 `marked` 做渲染
-- 再做一层基础 HTML 清理
-
-### 8. Hermes 流式过程信息已开始接入 Lite 聊天页
-
-当前已经确认：
+### 9. Hermes 流式过程信息已开始接入 Lite 聊天页
 
 - Hermes 在流式返回中会发出 `event: hermes.tool.progress`
-- 某些 provider / 场景下还可能返回：
-  - `delta.reasoning_content`
-  - `delta.tool_calls`
-
-Lite 前端当前已经开始解析并尝试展示：
+- 某些 provider / 场景下还可能返回 `delta.reasoning_content`、`delta.tool_calls`
 
 - 推理过程
 - 工具调用
 - 执行进度
 
-其中当前最稳定、已确认存在的数据来源是：
+其中当前最稳定的来源是 `event: hermes.tool.progress`。
 
-- `event: hermes.tool.progress`
+### 10. Open WebUI 第一批精简已完成
 
-### 9. Open WebUI 第一批精简已完成
-
-当前已经完成一轮“只删确认无用代码”的后端精简，且上线后验证主链仍然正常。
-
-已删除或停用的内容包括：
+- 已完成一轮“只删确认无用代码”的后端精简，主链验证通过。已删除或停用：
 
 - 不必要 startup 初始化
 - 大量当前 Lite 产品不需要的 router 注册
@@ -239,30 +190,20 @@ Lite 前端当前已经开始解析并尝试展示：
 - `/api/chat/completed`
 - `/api/chat/actions/{action_id}`
 
-说明：
-
-- 这轮精简是先对照代码运行链确认后再删除
 - 当前仍保留聊天主链真实依赖的模块，例如 `utils/middleware.py`、`utils/chat.py`、`socket.main` 等
 
-### 10. Open WebUI 部署脚本已补齐
+### 11. Open WebUI 部署脚本已补齐
 
-为了适配“开发环境 + 部署环境”分离，当前已经新增两个部署脚本：
+为适配“开发环境 + 部署环境”分离，当前已新增：
 
 - `./deploy_openwebui_from_workspace.sh`
 - `./deploy_lite_to_installed_openwebui.sh`
 
-作用：
+- 用于把仓库里的 Open WebUI 工作区源码部署到已安装环境；当前机器的源码路径在 `/root/potato_agent/open-webui/...`，在线运行代码在 `/opt/open-webui-venv/...`
 
-- 把仓库里的 Open WebUI 工作区源码部署到已安装的 Open WebUI 路径
-- 适合当前这台机器的运行方式：
-  - 源码在 `/root/potato_agent/open-webui/...`
-  - 在线运行代码在 `/opt/open-webui-venv/...`
+### 12. Hermes 源码工作区与运行时已同步升级到 `0.9.0`
 
-### 11. Hermes 源码工作区与运行时已同步升级到 `0.9.0`
-
-当前已经完成 Hermes 版本收口，避免出现“项目工作区还是旧代码、线上运行已经是新版本”的错位。
-
-当前状态：
+- 当前已完成 Hermes 版本收口，避免“工作区旧版、线上新版”的错位。当前状态：
 
 - 工作区源码目录：`/root/potato_agent/hermes-agent`
 - 在线部署源码目录：`/opt/hermes-agent-src`
@@ -270,18 +211,11 @@ Lite 前端当前已经开始解析并尝试展示：
 - 在线命令入口：`/usr/local/bin/hermes`
 - 当前 Hermes 版本：`v0.9.0 (2026.4.13)`
 
-本次升级时已完成：
-
-- 先备份升级前工作区、部署源码和运行时 venv
-- 再将 `/root/hermes-agent.260413` 的新源码同步到项目工作区
-- 再从项目工作区同步到 `/opt/hermes-agent-src`
-- 最后刷新 `/opt/hermes-agent-venv` 的 editable 安装并重启 per-user Hermes 服务
+- 升级过程：先备份，再同步工作区与部署源码，最后刷新 `/opt/hermes-agent-venv` 并重启 per-user Hermes 服务
 
 ## 当前已验证状态
 
 ### 1. Hermes 运行时可用
-
-当前机器上已确认：
 
 - Hermes 工作区源码：`/root/potato_agent/hermes-agent`
 - Hermes 在线部署源码：`/opt/hermes-agent-src`
@@ -291,15 +225,11 @@ Lite 前端当前已经开始解析并尝试展示：
 
 ### 2. 当前关键服务状态正常
 
-当前已确认正常运行：
-
 - `open-webui.service`
 - `hermes-user-test.service`
 - `hermes-user1.service`
 
 ### 3. `user_test` 真实用户链路已跑通
-
-当前已确认：
 
 - Open WebUI 用户存在：`user_test@example.com`
 - Open WebUI 用户 id：`342f9bf2-7cda-4408-8124-bff02a4f6ed7`
@@ -308,18 +238,12 @@ Lite 前端当前已经开始解析并尝试展示：
 - wrapper 显示名：`Hermes`
 - 该模型只授予对应用户读取权限
 
-当前可用测试登录信息：
-
 - email: `user_test@example.com`
 - password: `jia123456`
 
 ### 4. Lite 前端已在 3000 服务上可用
 
-当前可访问：
-
 - `http://<host>:3000/lite`
-
-已验证：
 
 - 登录成功
 - 聊天页面可进入
@@ -329,68 +253,29 @@ Lite 前端当前已经开始解析并尝试展示：
 - Lite 消息已支持 Markdown 渲染
 - Lite 消息气泡下方已支持复制原始内容
 - Lite 已开始显示 Hermes 流式工具进度
-- Lite 回复气泡的等待动画逻辑已修复：
-  - 不会再错误显示在用户消息下方
-  - 模型输出完成后会自动消失
-  - 刷新历史聊天后不会残留思考动画
-- Lite 聊天消息区域已去除横向滚动：
-  - 过长单行内容会自动换行
-  - 横向滚动只保留在文件树窗口
-- Lite 三栏布局已支持桌面端拖拽调整宽度：
-  - 聊天列表
-  - 聊天消息
-  - 文件树
+- Lite 回复等待动画逻辑已修复，刷新历史聊天不会残留
+- Lite 聊天区已去除横向滚动，长行自动换行
+- Lite 三栏布局已支持桌面端拖拽调整宽度
 - 聊天列表已新增删除按钮，可删除当前聊天及服务器保存记录
-- 删除按钮已改为图标按钮，位置调整到聊天卡片下方
-- 消息复制按钮已改为图标按钮：
-  - 默认显示 `copy_button.png`
-  - 点击后切换为 `copied.png`
-  - 3 秒后自动恢复
-- 删除按钮和复制按钮已支持 hover 显示逻辑：
-  - hover 聊天列表项时显示删除按钮
-  - hover 消息气泡时显示复制按钮
-- Lite 页面颜色主题切换功能已完成：
-  - 支持 `light`
-  - 支持 `dark`
-  - 支持 `system`
-  - 主题选择结果会持久化保存
-- Lite 输入框与发送交互已完成：
-  - 输入框默认单行显示
-  - 输入内容会自动增高
-  - 最高增长到 8 行
-  - 超过 8 行后在输入框内部滚动
-  - 发送按钮已改为图标按钮并放到输入框右侧
-  - 发送中会切换为停止按钮
-  - 响应完成后会恢复为发送按钮
-  - 用户可以主动停止当前模型响应
+- 删除按钮与复制按钮已改为图标按钮，并支持 hover 显示
+- 主题切换支持 `light` / `dark` / `system`，并持久化保存
+- 输入框默认单行显示，自动增高到 8 行，发送中可切换为停止按钮
+- 已支持附件上传、粘贴上传，并统一交给 Hermes 处理
+- 上传文件当前落在 `/tmp`
+- 用户发送消息后，输入区附件会立即清空，不再等 AI 回复结束
+- Lite 附件上传已增加单文件 `20 MB` 大小限制，超限会直接拒绝上传
+- 聊天区错误提示已挪到输入框上方，并会在 `10s` 后自动消失
+- 附件超限提示已统一为英文固定文案：`Upload file too large (> 20 MB).`
+- 上传附件按钮已从 `+` 改为 PNG 图标
 - 当前 `user_test` 的 Hermes 配置已显式写入 `agent.reasoning_effort: high`
 - 当前 `hermes-user-test.service` 已按 `high` 默认推理深度重启成功
-- 本次 Hermes `0.9.0` 升级后已再次验证：
-  - `http://127.0.0.1:8643/v1/models` 正常
-  - `http://127.0.0.1:8644/v1/models` 正常
-  - 非流式聊天正常
-  - 流式聊天正常
-  - `event: hermes.tool.progress` 仍正常返回
+- Hermes `0.9.0` 升级后，`8643` / `8644` 的 `/v1/models`、非流式聊天、流式聊天、`event: hermes.tool.progress` 均已验证正常
 
 ### 5. 一键新增和删除流程都做过真实验证
 
-已验证新增：
-
-- `user_test`
-- `auto_test`
-
-已验证删除：
-
-- `auto_test`
-
-删除验证确认以下内容都能被自动移除：
-
-- Open WebUI 用户
-- wrapper model
-- access grants
-- per-user Hermes service
-- Linux 用户
-- `users_mapping.yaml` 中对应条目
+- 已验证新增：`user_test`、`auto_test`
+- 已验证删除：`auto_test`
+- 删除后会自动清理：Open WebUI 用户、wrapper model、access grants、per-user Hermes service、Linux 用户、`users_mapping.yaml` 条目
 
 ## 当前使用入口
 
@@ -426,8 +311,6 @@ sudo ./deploy_openwebui_from_workspace.sh
 sudo ./deploy_lite_to_installed_openwebui.sh
 ```
 
-补充说明：
-
 - `users_mapping.yaml` 支持 `${ENV_NAME}` 形式的环境变量占位符
 - 当前共享 API key 推荐写成 `${POTATO_AGENT_SHARED_API_KEY}`
 - 生成 bundle 和执行 provision/deprovision 脚本前，需要先在当前 shell 导出该变量
@@ -435,8 +318,6 @@ sudo ./deploy_lite_to_installed_openwebui.sh
 ## 当前边界与已知说明
 
 ### 1. 强隔离依赖 Linux 用户层
-
-真正的隔离边界来自：
 
 - Linux 用户
 - `HOME`
@@ -446,8 +327,6 @@ sudo ./deploy_lite_to_installed_openwebui.sh
 不是只靠 Open WebUI 授权，也不是只靠目录树展示逻辑。
 
 ### 2. 当前仓库源码不等于线上运行代码
-
-当前机器上：
 
 - 开发源码目录：`/root/potato_agent/open-webui`
 - 在线运行目录：`/opt/open-webui-venv/lib64/python3.11/site-packages/open_webui`
@@ -462,8 +341,6 @@ sudo ./deploy_lite_to_installed_openwebui.sh
 
 ### 1. 聊天页面显示优化已完成
 
-之前标记为“下一步”的聊天显示优化现在已经落地，当前已完成：
-
 - Markdown 渲染后的段落、列表、代码块显示已做过一轮收口
 - 模型尚未开始输出时，回复气泡会显示等待动画
 - 模型开始真实输出后，等待动画会自动消失
@@ -474,8 +351,6 @@ sudo ./deploy_lite_to_installed_openwebui.sh
 
 ### 2. Hermes 默认推理深度已统一为 `high`
 
-这项工作当前已经完成并收口：
-
 - 已确认 Hermes 使用 `agent.reasoning_effort` 作为配置入口
 - 生成链默认值已统一调整为 `high`
 - `users_mapping.yaml` 与 `users_mapping.example.yaml` 已显式写入该默认
@@ -483,8 +358,6 @@ sudo ./deploy_lite_to_installed_openwebui.sh
 - 当前在线 per-user Hermes 服务已按该默认值重启验证通过
 
 ### 3. Lite 页面布局与聊天管理问题已完成
-
-之前列出的布局和聊天管理问题当前都已处理：
 
 - 三栏布局支持桌面端拖拽调整宽度
 - 聊天列表已增加删除按钮
@@ -494,8 +367,6 @@ sudo ./deploy_lite_to_installed_openwebui.sh
 - 删除操作会同步删除 Open WebUI 后端保存的对应聊天记录
 
 ### 4. 消息输入框与发送/停止交互已完成
-
-之前列出的输入区交互优化当前已经完成：
 
 - 输入框默认缩减为单行高度
 - 输入框高度会随内容自动增长
@@ -508,17 +379,13 @@ sudo ./deploy_lite_to_installed_openwebui.sh
 
 ### 5. Hermes 版本升级已完成并完成联动验证
 
-本次会话已经完成 Hermes 的源码工作区、部署源码和运行时三处同步升级。
-
-当前状态：
+- 已完成 Hermes 源码工作区、部署源码和运行时三处同步升级。当前状态：
 
 - 项目工作区源码：`/root/potato_agent/hermes-agent`
 - 在线部署源码：`/opt/hermes-agent-src`
 - 在线运行环境：`/opt/hermes-agent-venv`
 - 在线命令入口：`/usr/local/bin/hermes`
 - 当前在线版本：`Hermes Agent v0.9.0 (2026.4.13)`
-
-本次升级已经验证：
 
 - `hermes-user-test.service` 重启成功并保持运行
 - `hermes-user1.service` 重启成功并保持运行
@@ -527,8 +394,16 @@ sudo ./deploy_lite_to_installed_openwebui.sh
 - 流式 `chat/completions` 正常
 - `event: hermes.tool.progress` 仍然正常返回
 
-说明：
-
 - 当前网页访问到的 Hermes 继续走 per-user systemd 服务，而不是 `/root` 下手动启动的 root Hermes
 - 这次升级已经避免“项目工作区还是旧版、线上运行已经新版”的源码错位问题
 - 如需回滚，可使用备份目录：`/root/hermes-upgrade-backup-20260414-230811`
+
+### 6. Lite 附件与提示体验优化已完成
+
+- 用户消息发送后，输入区附件会立即清空，不再等 AI 回复完成后才消失
+- Lite 附件上传已增加单文件 `20 MB` 限制
+- 超过限制时会直接拒绝上传，并显示固定英文提示：`Upload file too large (> 20 MB).`
+- 聊天区错误提示已改到输入框上方，避免把 `+` / 附件按钮和输入框挤偏
+- 聊天区错误提示会在 `10s` 后自动消失
+- 上传附件按钮已从文本 `+` 改为 PNG 图标
+- `deploy_lite_to_installed_openwebui.sh` 已补充同步 `static/lite/icons/attachment.png`，后续重部署会自动带上该资源

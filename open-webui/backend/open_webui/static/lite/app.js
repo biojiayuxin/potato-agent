@@ -14,6 +14,7 @@ const state = {
   pendingAttachments: [],
   isSending: false,
   currentAbortController: null,
+  chatErrorTimer: null,
 };
 
 const dom = {
@@ -51,6 +52,7 @@ let bootstrapInFlight = false;
 const SIDEBAR_WIDTH_KEY = 'lite_sidebar_width';
 const FILES_WIDTH_KEY = 'lite_files_width';
 const THEME_MODE_KEY = 'lite_theme_mode';
+const MAX_ATTACHMENT_SIZE_BYTES = 20 * 1024 * 1024;
 
 const getSystemTheme = () =>
   window.matchMedia?.('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
@@ -135,8 +137,8 @@ const setComposerBusyState = (busy) => {
   }
   if (dom.sendButton) {
     dom.sendButton.type = busy ? 'button' : 'submit';
-    dom.sendButton.ariaLabel = busy ? '停止响应' : '发送消息';
-    dom.sendButton.title = busy ? '停止响应' : '发送消息';
+    dom.sendButton.ariaLabel = busy ? 'Stop response' : 'Send message';
+    dom.sendButton.title = busy ? 'Stop response' : 'Send message';
   }
   if (dom.sendButtonIcon) {
     dom.sendButtonIcon.src = busy ? '/static/lite/icons/stop.png' : '/static/lite/icons/send.png';
@@ -189,10 +191,46 @@ const formatFileSize = (size) => {
   return `${value.toFixed(digits)} ${units[unitIndex]}`;
 };
 
+const getAttachmentTooLargeMessage = () => 'Upload file too large (> 20 MB).';
+
 const getAttachmentStatusLabel = (item) => {
-  if (item.status === 'uploading') return '上传中';
-  if (item.status === 'error') return item.error || '上传失败';
+  if (item.status === 'uploading') return 'Uploading';
+  if (item.status === 'error') return item.error || 'Upload failed';
   return formatFileSize(item.size);
+};
+
+const createPastedFileName = (file) => {
+  const mime = file?.type || '';
+  const extension = mime.includes('/') ? mime.split('/')[1].replace('jpeg', 'jpg') : 'bin';
+  const timestamp = new Date()
+    .toISOString()
+    .replace(/[-:]/g, '')
+    .replace('T', '_')
+    .slice(0, 15);
+  return `pasted_${timestamp}.${extension || 'bin'}`;
+};
+
+const normalizeClipboardFiles = (clipboardData) => {
+  if (!clipboardData?.items?.length) return [];
+
+  const files = [];
+  for (const item of clipboardData.items) {
+    if (item.kind !== 'file') continue;
+
+    const file = item.getAsFile();
+    if (!file) continue;
+
+    const normalized = file.name
+      ? file
+      : new File([file], createPastedFileName(file), {
+          type: file.type || 'application/octet-stream',
+          lastModified: Date.now(),
+        });
+
+    files.push(normalized);
+  }
+
+  return files;
 };
 
 const getAttachmentLocalPath = (item) => item?.localPath || item?.file?.path || '';
@@ -240,7 +278,7 @@ const renderAttachments = () => {
 
     const name = document.createElement('div');
     name.className = 'attachment-chip-name';
-    name.textContent = item.name || '未命名文件';
+    name.textContent = item.name || 'Untitled file';
 
     const meta = document.createElement('div');
     meta.className = 'attachment-chip-meta';
@@ -252,8 +290,8 @@ const renderAttachments = () => {
     removeButton.type = 'button';
     removeButton.className = 'attachment-chip-remove';
     removeButton.textContent = '×';
-    removeButton.ariaLabel = `移除附件 ${item.name || ''}`.trim();
-    removeButton.title = '移除附件';
+    removeButton.ariaLabel = `Remove attachment ${item.name || ''}`.trim();
+    removeButton.title = 'Remove attachment';
     removeButton.disabled = state.isSending;
     removeButton.addEventListener('click', () => {
       state.pendingAttachments = state.pendingAttachments.filter((entry) => entry.itemId !== item.itemId);
@@ -276,7 +314,7 @@ const uploadAttachment = async (file) => {
 
   const uploadedFile = await uploadResponse.json();
   if (!uploadedFile?.id) {
-    throw new Error('文件上传失败');
+    throw new Error('File upload failed');
   }
 
   const fileDetailsResponse = await api(`/api/v1/files/${uploadedFile.id}`, { method: 'GET' });
@@ -288,7 +326,7 @@ const uploadAttachment = async (file) => {
   const localPath = localInfo?.path || '';
 
   if (!localPath) {
-    throw new Error('文件已上传，但无法获取本地路径');
+    throw new Error('File uploaded, but the local path is unavailable');
   }
 
   return {
@@ -311,7 +349,12 @@ const handleSelectedFiles = async (files) => {
 
   for (const file of incoming) {
     if (!file || !file.size) {
-      showError(dom.chatError, '不能上传空文件。');
+      showChatError('Cannot upload an empty file.');
+      continue;
+    }
+
+    if (file.size > MAX_ATTACHMENT_SIZE_BYTES) {
+      showChatError(getAttachmentTooLargeMessage(file));
       continue;
     }
 
@@ -330,11 +373,11 @@ const handleSelectedFiles = async (files) => {
           ? {
               ...item,
               status: 'error',
-              error: String(error.message || '上传失败'),
+              error: String(error.message || 'Upload failed'),
             }
           : item
       );
-      showError(dom.chatError, String(error.message || '上传失败'));
+      showChatError(String(error.message || 'Upload failed'));
     }
 
     renderAttachments();
@@ -391,11 +434,29 @@ const showError = (element, message) => {
   element.textContent = message;
 };
 
+const showChatError = (message) => {
+  if (state.chatErrorTimer) {
+    window.clearTimeout(state.chatErrorTimer);
+    state.chatErrorTimer = null;
+  }
+
+  showError(dom.chatError, message);
+
+  if (!message) return;
+
+  state.chatErrorTimer = window.setTimeout(() => {
+    if (dom.chatError?.textContent === message) {
+      showError(dom.chatError, '');
+    }
+    state.chatErrorTimer = null;
+  }, 10000);
+};
+
 const setLoginPending = (pending) => {
   loginInFlight = pending;
   const submitButton = dom.loginForm.querySelector('button[type="submit"]');
   submitButton.disabled = pending;
-  submitButton.textContent = pending ? '登录中...' : '登录';
+  submitButton.textContent = pending ? 'Signing in...' : 'Sign in';
 };
 
 const escapeHtml = (text) =>
@@ -635,7 +696,7 @@ const renderMessageMetaSections = (container, message) => {
 
   if (typeof message?.reasoningContent === 'string' && message.reasoningContent.trim()) {
     container.append(
-      createMetaSection('推理过程', renderMarkdown(message.reasoningContent), 'message-meta-reasoning')
+      createMetaSection('Reasoning', renderMarkdown(message.reasoningContent), 'message-meta-reasoning')
     );
   }
 
@@ -648,20 +709,20 @@ const renderMessageMetaSections = (container, message) => {
       })
       .join('');
 
-    container.append(createMetaSection('工具调用', items, 'message-meta-tools'));
+    container.append(createMetaSection('Tool Calls', items, 'message-meta-tools'));
   }
 
   if (Array.isArray(message?.progressLines) && message.progressLines.length > 0) {
     const lines = message.progressLines
       .map((line) => `<div class="progress-line">${escapeHtml(line)}</div>`)
       .join('');
-    container.append(createMetaSection('执行进度', lines, 'message-meta-progress'));
+    container.append(createMetaSection('Execution Progress', lines, 'message-meta-progress'));
   }
 };
 
 const getAttachmentKindLabel = (file) => {
-  if ((file?.content_type || '').startsWith('image/')) return '图片';
-  return '附件';
+  if ((file?.content_type || '').startsWith('image/')) return 'Image';
+  return 'Attachment';
 };
 
 const renderMessageFiles = (container, message) => {
@@ -688,7 +749,7 @@ const renderMessageFiles = (container, message) => {
 
     const name = document.createElement('div');
     name.className = 'message-file-name';
-    name.textContent = file?.name || file?.file?.filename || file?.id || '附件';
+    name.textContent = file?.name || file?.file?.filename || file?.id || 'Attachment';
 
     const meta = document.createElement('div');
     meta.className = 'message-file-meta';
@@ -733,7 +794,7 @@ const getMessageChain = (chat) => {
   return chain.reverse();
 };
 
-const createEmptyChatPayload = (title = '新聊天') => ({
+const createEmptyChatPayload = (title = 'New chat') => ({
   title,
   models: state.selectedModel ? [state.selectedModel.id] : [],
   messages: [],
@@ -747,11 +808,11 @@ const createEmptyChatPayload = (title = '新聊天') => ({
 
 const deriveTitleFromMessages = (chat) => {
   const firstUserMessage = getMessageChain(chat).find((message) => message.role === 'user');
-  if (!firstUserMessage?.content) return '新聊天';
-  return String(firstUserMessage.content).trim().slice(0, 32) || '新聊天';
+  if (!firstUserMessage?.content) return 'New chat';
+  return String(firstUserMessage.content).trim().slice(0, 32) || 'New chat';
 };
 
-const getChatDisplayTitle = (chat) => chat?.chat?.title || chat?.title || '新聊天';
+const getChatDisplayTitle = (chat) => chat?.chat?.title || chat?.title || 'New chat';
 
 const upsertMessage = (chatPayload, message) => {
   if (!Array.isArray(chatPayload.messages)) {
@@ -790,7 +851,7 @@ const renderMessages = () => {
   if (chain.length === 0) {
     const empty = document.createElement('div');
     empty.className = 'empty-state';
-    empty.textContent = '开始新的对话。';
+    empty.textContent = 'Start a new conversation.';
     dom.messages.append(empty);
     return;
   }
@@ -808,7 +869,7 @@ const renderMessages = () => {
     const rawContent = getRawMessageText(message);
     const isStreaming = message.role === 'assistant' && state.streamingMessageIds.has(message.id);
     article.classList.add(message.role === 'user' ? 'user' : 'assistant');
-    role.textContent = message.role === 'user' ? '你' : 'Hermes';
+    role.textContent = message.role === 'user' ? 'You' : 'Hermes';
     renderMessageMetaSections(metaSections, message);
     renderMessageFiles(fileSection, message);
     content.classList.remove('streaming-placeholder');
@@ -846,7 +907,7 @@ const renderMessages = () => {
         await copyTextToClipboard(rawContent);
         copyIcon.src = '/static/lite/icons/copied.png';
       } catch (error) {
-        showError(dom.chatError, '复制失败，请重试。');
+        showChatError('Copy failed. Please try again.');
       } finally {
         window.setTimeout(() => {
           copyIcon.src = '/static/lite/icons/copy_button.png';
@@ -865,7 +926,7 @@ const renderChatList = () => {
   if (state.chats.length === 0) {
     const empty = document.createElement('div');
     empty.className = 'empty-state';
-    empty.textContent = '还没有聊天记录。';
+    empty.textContent = 'No chats yet.';
     dom.chatList.append(empty);
     return;
   }
@@ -886,7 +947,7 @@ const renderChatList = () => {
     button.addEventListener('click', () => openChat(chat.id));
     deleteButton.addEventListener('click', async (event) => {
       event.stopPropagation();
-      const confirmed = window.confirm(`确定删除聊天“${getChatDisplayTitle(chat)}”吗？`);
+      const confirmed = window.confirm(`Delete chat "${getChatDisplayTitle(chat)}"?`);
       if (!confirmed) return;
       await deleteChat(chat.id);
     });
@@ -920,7 +981,7 @@ const deleteChat = async (chatId) => {
 const renderWorkspaceHeader = () => {
   dom.userEmail.textContent = state.user?.email || '';
   dom.chatTitle.textContent = getChatDisplayTitle(state.activeChat);
-  dom.modelName.textContent = state.selectedModel ? `模型：${state.selectedModel.name || state.selectedModel.id}` : '未选择模型';
+  dom.modelName.textContent = state.selectedModel ? `Model: ${state.selectedModel.name || state.selectedModel.id}` : 'No model selected';
 };
 
 const renderWorkspace = () => {
@@ -1023,7 +1084,7 @@ const renderTreeNode = async (path, depth = 0) => {
         return;
       }
 
-      downloadFile(nodePath).catch((error) => showError(dom.chatError, error.message));
+      downloadFile(nodePath).catch((error) => showChatError(error.message));
     });
 
     row.append(toggleOrSpacer, label);
@@ -1033,9 +1094,9 @@ const renderTreeNode = async (path, depth = 0) => {
       download.type = 'button';
       download.className = 'tree-download';
       download.textContent = '↓';
-      download.title = '下载';
+      download.title = 'Download';
       download.addEventListener('click', () => {
-        downloadFile(nodePath).catch((error) => showError(dom.chatError, error.message));
+        downloadFile(nodePath).catch((error) => showChatError(error.message));
       });
       row.append(download);
     }
@@ -1055,7 +1116,7 @@ const renderTreeNode = async (path, depth = 0) => {
 const renderFileTree = async () => {
   dom.fileTree.innerHTML = '';
   if (!state.currentPath) {
-    dom.fileTree.innerHTML = '<div class="empty-state">当前用户没有可用的工作目录。</div>';
+    dom.fileTree.innerHTML = '<div class="empty-state">No workspace directory is available for this user.</div>';
     dom.cwdLabel.textContent = '';
     return;
   }
@@ -1065,7 +1126,7 @@ const renderFileTree = async () => {
   try {
     const tree = await renderTreeNode(root);
     if (!tree.children.length) {
-      dom.fileTree.innerHTML = '<div class="empty-state">当前目录为空。</div>';
+      dom.fileTree.innerHTML = '<div class="empty-state">This directory is empty.</div>';
       return;
     }
     dom.fileTree.append(tree);
@@ -1255,18 +1316,23 @@ const submitPrompt = async (prompt) => {
   const uploadedAttachments = state.pendingAttachments.filter((item) => item.status === 'uploaded' && item.id);
   const hasFailedUploads = state.pendingAttachments.some((item) => item.status === 'error');
   const hasUploadingFiles = state.pendingAttachments.some((item) => item.status === 'uploading');
+  const oversizedAttachment = state.pendingAttachments.find((item) => Number(item?.size || 0) > MAX_ATTACHMENT_SIZE_BYTES);
 
   if (!trimmedPrompt && uploadedAttachments.length === 0) return;
   if (!state.selectedModel) {
-    showError(dom.chatError, '当前没有可用模型。');
+    showChatError('No model is currently available.');
     return;
   }
   if (hasUploadingFiles) {
-    showError(dom.chatError, '文件仍在上传处理中，请稍后发送。');
+    showChatError('Files are still uploading. Please wait before sending.');
     return;
   }
   if (hasFailedUploads) {
-    showError(dom.chatError, '存在上传失败的文件，请移除后重试。');
+    showChatError('Some attachments failed to upload. Remove them and try again.');
+    return;
+  }
+  if (oversizedAttachment) {
+    showChatError(getAttachmentTooLargeMessage(oversizedAttachment));
     return;
   }
 
@@ -1274,7 +1340,7 @@ const submitPrompt = async (prompt) => {
     await createChat();
   }
 
-  showError(dom.chatError, '');
+  showChatError('');
   const abortController = new AbortController();
   state.currentAbortController = abortController;
   setComposerBusyState(true);
@@ -1313,7 +1379,9 @@ const submitPrompt = async (prompt) => {
   state.streamingMessageIds.add(assistantMessage.id);
   appendChildLink(chatPayload, userMessage.id, assistantMessage.id);
   upsertMessage(chatPayload, assistantMessage);
+  state.pendingAttachments = [];
   renderMessages();
+  renderAttachments();
 
   const chain = getMessageChain(state.activeChat)
     .filter((message) => message.id !== assistantMessage.id)
@@ -1339,9 +1407,7 @@ const submitPrompt = async (prompt) => {
     state.streamingMessageIds.delete(assistantMessage.id);
     assistantMessage.timestamp = nowSeconds();
     upsertMessage(chatPayload, assistantMessage);
-    state.pendingAttachments = [];
     renderMessages();
-    renderAttachments();
     await persistActiveChat();
   } catch (error) {
     if (error.name === 'AbortError') {
@@ -1350,7 +1416,7 @@ const submitPrompt = async (prompt) => {
       assistantMessage.timestamp = nowSeconds();
 
       if (!assistantMessage.content.trim()) {
-        assistantMessage.content = '[已停止响应]';
+        assistantMessage.content = '[Response stopped]';
       }
 
       upsertMessage(chatPayload, assistantMessage);
@@ -1362,7 +1428,7 @@ const submitPrompt = async (prompt) => {
       state.streamingMessageIds.delete(assistantMessage.id);
       upsertMessage(chatPayload, assistantMessage);
       renderMessages();
-      showError(dom.chatError, error.message);
+      showChatError(error.message);
     }
   } finally {
     state.currentAbortController = null;
@@ -1406,7 +1472,7 @@ const initializeWorkspaceData = async () => {
   }
 
   if (firstError) {
-    showError(dom.chatError, firstError.message || '工作台初始化失败');
+    showChatError(firstError.message || 'Workspace initialization failed');
   }
 };
 
@@ -1476,10 +1542,10 @@ dom.loginForm.addEventListener('submit', async (event) => {
     renderWorkspace();
     await initializeWorkspaceData();
   } catch (error) {
-    const message = String(error.message || '登录失败');
+    const message = String(error.message || 'Sign-in failed');
     showError(
       dom.loginError,
-      message.includes('429') ? '登录请求过于频繁，请等待几秒后重试。' : message
+      message.includes('429') ? 'Too many sign-in attempts. Please wait a few seconds and try again.' : message
     );
   } finally {
     setLoginPending(false);
@@ -1490,6 +1556,11 @@ dom.logoutButton.addEventListener('click', () => {
   state.token = '';
   state.user = null;
   state.pendingAttachments = [];
+  if (state.chatErrorTimer) {
+    window.clearTimeout(state.chatErrorTimer);
+    state.chatErrorTimer = null;
+  }
+  showChatError('');
   localStorage.removeItem('lite_token');
   showLogin();
 });
@@ -1497,7 +1568,7 @@ dom.logoutButton.addEventListener('click', () => {
 dom.newChatButton.addEventListener('click', () => {
   state.pendingAttachments = [];
   renderAttachments();
-  createChat().catch((error) => showError(dom.chatError, error.message));
+  createChat().catch((error) => showChatError(error.message));
 });
 
 dom.composerForm.addEventListener('submit', async (event) => {
@@ -1531,6 +1602,16 @@ dom.promptInput.addEventListener('input', () => {
   autoResizePromptInput();
 });
 
+dom.promptInput.addEventListener('paste', async (event) => {
+  if (state.isSending) return;
+
+  const files = normalizeClipboardFiles(event.clipboardData);
+  if (!files.length) return;
+
+  event.preventDefault();
+  await handleSelectedFiles(files);
+});
+
 dom.sendButton.addEventListener('click', async (event) => {
   if (!state.isSending) return;
   event.preventDefault();
@@ -1540,7 +1621,7 @@ dom.sendButton.addEventListener('click', async (event) => {
 
 dom.refreshFilesButton.addEventListener('click', async () => {
   state.treeCache.clear();
-  await fetchWorkspaceFiles().catch((error) => showError(dom.chatError, error.message));
+  await fetchWorkspaceFiles().catch((error) => showChatError(error.message));
 });
 
 initResizablePanels();

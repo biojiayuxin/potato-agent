@@ -29,6 +29,7 @@ It syncs:
   - static/lite/index.html
   - static/lite/styles.css
   - static/lite/app.js
+  - static/lite/icons/attachment.png
 EOF
 }
 
@@ -83,14 +84,17 @@ require_path "$WORKSPACE_BACKEND/main.py" "Workspace main.py"
 require_path "$WORKSPACE_BACKEND/static/lite/index.html" "Lite index.html"
 require_path "$WORKSPACE_BACKEND/static/lite/styles.css" "Lite styles.css"
 require_path "$WORKSPACE_BACKEND/static/lite/app.js" "Lite app.js"
+require_path "$WORKSPACE_BACKEND/static/lite/icons/attachment.png" "Lite attachment icon"
 require_path "$DEST_PACKAGE" "Installed open_webui package directory"
 
 mkdir -p "$DEST_PACKAGE/static/lite"
+mkdir -p "$DEST_PACKAGE/static/lite/icons"
 
 cp "$WORKSPACE_BACKEND/main.py" "$DEST_PACKAGE/main.py"
 cp "$WORKSPACE_BACKEND/static/lite/index.html" "$DEST_PACKAGE/static/lite/index.html"
 cp "$WORKSPACE_BACKEND/static/lite/styles.css" "$DEST_PACKAGE/static/lite/styles.css"
 cp "$WORKSPACE_BACKEND/static/lite/app.js" "$DEST_PACKAGE/static/lite/app.js"
+cp "$WORKSPACE_BACKEND/static/lite/icons/attachment.png" "$DEST_PACKAGE/static/lite/icons/attachment.png"
 
 printf 'Lite frontend files deployed to %s\n' "$DEST_PACKAGE"
 

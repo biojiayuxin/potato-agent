@@ -378,6 +378,19 @@ button.stretch {
   line-height: 1.5;
 }
 
+.chat-error {
+  width: 100%;
+  padding: 10px 12px;
+  border: 1px solid rgba(255, 107, 129, 0.24);
+  border-radius: 12px;
+  background: rgba(255, 107, 129, 0.08);
+}
+
+:root[data-theme='light'] .chat-error {
+  border-color: rgba(214, 69, 93, 0.18);
+  background: rgba(214, 69, 93, 0.08);
+}
+
 .workspace-view {
   height: 100vh;
   display: grid;
@@ -1193,10 +1206,9 @@ button.stretch {
   align-self: stretch;
 }
 
-.composer-plus {
-  font-size: 22px;
-  line-height: 1;
-  font-weight: 500;
+.composer-attachment-icon {
+  width: 20px;
+  height: 20px;
 }
 
 .composer-icon-button:hover {
