@@ -4,3 +4,4 @@ __pycache__/
 hermes-agent/.mailmap
 hermes-agent/.gitattributes
 hermes-agent/.github/
+interface/data/interface.db

@@ -678,7 +678,7 @@ const deriveTitleFromMessages = (messages) => {
 };
 
 const getActiveChatTitle = () => {
-  if (state.activeSession?.title) {
+  if (state.activeSession?.title && state.activeSession.title !== 'New chat') {
     return state.activeSession.title;
   }
   return deriveTitleFromMessages(state.messages);
@@ -1363,6 +1363,7 @@ const syncActiveSessionFromSessions = (sessionId) => {
     state.draftSession = null;
     state.activeSession = matchedSession;
     state.activeSessionId = matchedSession.id;
+    renderWorkspaceHeader();
     return;
   }
 
@@ -1375,6 +1376,7 @@ const syncActiveSessionFromSessions = (sessionId) => {
       isDraft: false,
     };
     state.activeSessionId = sessionId;
+    renderWorkspaceHeader();
   }
 };
 
@@ -1421,19 +1423,6 @@ const startNewChat = () => {
   state.messages = [];
   renderWorkspace();
   dom.promptInput?.focus();
-};
-
-const ensureSessionTitle = async (sessionId) => {
-  const title = deriveTitleFromMessages(state.messages);
-  if (!sessionId || !title || title === 'New chat') return;
-  try {
-    await api(`/api/sessions/${encodeURIComponent(sessionId)}`, {
-      method: 'PATCH',
-      body: JSON.stringify({ title }),
-    });
-  } catch {
-    // Keep the chat flow resilient; a title patch failure shouldn't block chat.
-  }
 };
 
 const streamChatCompletion = async (payload, assistantMessage, abortController, streamState) => {
@@ -1618,7 +1607,6 @@ const submitPrompt = async (prompt) => {
     state.streamingMessageIds.delete(assistantMessage.id);
     renderMessages();
 
-    await ensureSessionTitle(streamState.sessionId);
     await refreshSessions();
     syncActiveSessionFromSessions(streamState.sessionId);
     renderWorkspace();

@@ -38,8 +38,10 @@ from interface.auth_db import (
 from interface.display_store import (
     delete_display_messages,
     ensure_display_store,
+    get_display_session_meta,
     get_display_messages,
     save_display_messages,
+    set_display_draft_title,
 )
 from interface.mapping import DEFAULT_MAPPING_PATH, HermesTarget, MappingStore
 
@@ -242,6 +244,32 @@ def _normalize_session_row(session: dict[str, Any]) -> dict[str, Any]:
         "message_count": int(session.get("message_count") or 0),
         "tool_call_count": int(session.get("tool_call_count") or 0),
     }
+
+
+def _derive_draft_title_from_user_message(message: dict[str, Any]) -> str:
+    text = str(message.get("content") or "").strip()
+    if text:
+        return text[:10] or "New chat"
+
+    files = message.get("files") if isinstance(message.get("files"), list) else []
+    first_file = files[0] if files else None
+    if isinstance(first_file, dict) and first_file.get("name"):
+        return str(first_file.get("name"))[:10]
+
+    return "New chat"
+
+
+def _apply_session_title_fallback(
+    session: dict[str, Any], display_meta: dict[str, Any] | None
+) -> dict[str, Any]:
+    normalized = _normalize_session_row(session)
+    hermes_title = str(session.get("title") or "").strip()
+    draft_title = str((display_meta or {}).get("draft_title") or "").strip()
+    if hermes_title:
+        normalized["title"] = hermes_title
+    elif draft_title:
+        normalized["title"] = draft_title
+    return normalized
 
 
 def _normalize_message_row(message: dict[str, Any]) -> dict[str, Any]:
@@ -758,6 +786,8 @@ async def update_session_title(
         session = db.get_session(resolved)
         if not session:
             raise HTTPException(status_code=404, detail="Session not found")
+    if title:
+        set_display_draft_title(user.id, resolved, "")
     return {"session": _normalize_session_row(session)}
 
 
@@ -883,6 +913,7 @@ async def chat_completions(
 
     user_display_message = _build_user_display_message(body)
     assistant_display_message = _build_assistant_display_message()
+    draft_title = _derive_draft_title_from_user_message(user_display_message)
 
     session_id = str(body.pop("session_id", "") or "").strip()
     upstream_headers = {
@@ -939,7 +970,9 @@ async def chat_completions(
         if not resolved_session_id:
             return
         payload = [*display_transcript, assistant_display_message]
-        save_display_messages(user.id, resolved_session_id, payload)
+        save_display_messages(
+            user.id, resolved_session_id, payload, draft_title=draft_title
+        )
 
     if body.get("stream") is False:
         payload = await upstream.aread()
@@ -960,6 +993,7 @@ async def chat_completions(
                 assistant_content = str(message.get("content") or "")
 
         if resolved_session_id:
+            set_display_draft_title(user.id, resolved_session_id, draft_title)
             display_transcript = _get_or_create_display_transcript(
                 user.id, resolved_session_id, user_message=user_display_message
             )
@@ -987,6 +1021,9 @@ async def chat_completions(
                         ).strip()
                         if header_session_id:
                             resolved_session_id = header_session_id
+                            set_display_draft_title(
+                                user.id, resolved_session_id, draft_title
+                            )
                             display_transcript = _get_or_create_display_transcript(
                                 user.id,
                                 resolved_session_id,
