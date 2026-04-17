@@ -48,6 +48,8 @@ users:
   systemd_service: hermes-user-test.service
   openwebui_tags:
   - user_test
+  email: user_test@example.com
+  display_name: user_test
 - username: user1
   linux_user: hmx_user1
   home_dir: /home/hmx_user1
@@ -149,4 +151,26 @@ users:
   webui_user: biojiayuxin@163.com
   webui_display_name: jiayuxin
   openwebui_user_id: ce9052db-99f1-4266-9fa7-1044da7c11f0
+  api_key: ${POTATO_AGENT_SHARED_API_KEY}
+- username: iface_test
+  email: iface_test@example.com
+  display_name: iface_test
+  linux_user: hmx_iface_test
+  home_dir: /home/hmx_iface_test
+  hermes_home: /home/hmx_iface_test/.hermes
+  workdir: /home/hmx_iface_test/work
+  api_port: 8661
+  api_server_model_name: Hermes
+  systemd_service: hermes-iface-test.service
+  api_key: ${POTATO_AGENT_SHARED_API_KEY}
+- username: iface_test2
+  email: iface_test2@example.com
+  display_name: iface_test2
+  linux_user: hmx_iface_test2
+  home_dir: /home/hmx_iface_test2
+  hermes_home: /home/hmx_iface_test2/.hermes
+  workdir: /home/hmx_iface_test2/work
+  api_port: 8662
+  api_server_model_name: Hermes
+  systemd_service: hermes-iface-test2.service
   api_key: ${POTATO_AGENT_SHARED_API_KEY}

@@ -407,3 +407,42 @@ sudo ./deploy_lite_to_installed_openwebui.sh
 - 聊天区错误提示会在 `10s` 后自动消失
 - 上传附件按钮已从文本 `+` 改为 PNG 图标
 - `deploy_lite_to_installed_openwebui.sh` 已补充同步 `static/lite/icons/attachment.png`，后续重部署会自动带上该资源
+
+### 7. `interface/` 独立后端已落地，已与 Open WebUI 鉴权脱离
+
+- 新目录：`./interface`
+- 新独立 Python 环境：`/opt/interface-env`
+- 新后端入口：`interface/app.py`
+- 新用户库：`interface/data/interface.db`
+- 新前端目录：`interface/static/lite/`
+
+- 当前 `interface` 已不再依赖：
+
+- Open WebUI `webui.db`
+- Open WebUI 聊天接口
+- Open WebUI 用户体系运行时
+
+- 当前 `interface` 运行链路改为：
+
+- 自有用户库负责登录鉴权
+- `users_mapping.yaml` 负责用户到 Linux/Hermes 实例映射
+- Hermes `/v1/models` 提供模型列表
+- Hermes `/v1/chat/completions` 提供聊天
+- Hermes `state.db` 提供会话列表、消息历史、删除和标题修改所需数据
+
+- 当前已新增独立用户管理脚本：
+
+- `./provision_interface_user.py`
+- `./deprovision_interface_user.py`
+
+- 已做真实验证：
+
+- `iface_test2` 已成功创建到 `interface/data/interface.db`
+- `/opt/interface-env` 已创建并完成 `interface/requirements.txt` 安装
+- 已成功创建 Linux 用户 `hmx_iface_test2`
+- 已成功安装并启动 `hermes-iface-test2.service`
+- 新用户 Hermes 端口 `8662` 的 `/v1/models` 验证通过
+- `interface` 新登录接口验证通过
+- 使用 `/opt/interface-env/bin/python -m uvicorn interface.app:app --host 127.0.0.1 --port 3903` 启动验证通过
+- 使用新用户直接经 `interface` 调用 Hermes 聊天成功返回 `detached-ok`
+- 使用 `/opt/interface-env` 启动的服务再次验证登录和聊天成功返回 `env-ok`
