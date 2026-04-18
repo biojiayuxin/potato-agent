@@ -31,6 +31,24 @@ CREATE TABLE IF NOT EXISTS users (
 
 CREATE INDEX IF NOT EXISTS idx_interface_users_mapping_username
 ON users(mapping_username);
+
+CREATE TABLE IF NOT EXISTS signup_jobs (
+    job_id TEXT PRIMARY KEY,
+    username TEXT NOT NULL,
+    email TEXT NOT NULL,
+    password_hash TEXT NOT NULL,
+    display_name TEXT NOT NULL,
+    status TEXT NOT NULL,
+    error_message TEXT NOT NULL DEFAULT '',
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_signup_jobs_username
+ON signup_jobs(username);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_signup_jobs_email
+ON signup_jobs(email);
 """
 
 
@@ -76,6 +94,34 @@ def connect_auth_db(db_path: Path = DEFAULT_AUTH_DB_PATH) -> sqlite3.Connection:
     conn = sqlite3.connect(str(db_path))
     conn.row_factory = sqlite3.Row
     return conn
+
+
+def username_exists(username: str, db_path: Path = DEFAULT_AUTH_DB_PATH) -> bool:
+    normalized_username = username.strip()
+    with connect_auth_db(db_path) as conn:
+        row = conn.execute(
+            "select 1 from users where username = ? limit 1",
+            (normalized_username,),
+        ).fetchone()
+        pending = conn.execute(
+            "select 1 from signup_jobs where username = ? and status in ('pending','provisioning') limit 1",
+            (normalized_username,),
+        ).fetchone()
+    return row is not None or pending is not None
+
+
+def email_exists(email: str, db_path: Path = DEFAULT_AUTH_DB_PATH) -> bool:
+    normalized_email = email.strip().lower()
+    with connect_auth_db(db_path) as conn:
+        row = conn.execute(
+            "select 1 from users where lower(email) = lower(?) limit 1",
+            (normalized_email,),
+        ).fetchone()
+        pending = conn.execute(
+            "select 1 from signup_jobs where lower(email) = lower(?) and status in ('pending','provisioning') limit 1",
+            (normalized_email,),
+        ).fetchone()
+    return row is not None or pending is not None
 
 
 def hash_password(password: str) -> str:
@@ -200,6 +246,108 @@ def upsert_user(
     user = get_user_by_id(user_id, db_path)
     if user is None:
         raise RuntimeError("Failed to load interface user after upsert")
+    return user
+
+
+def create_signup_job(
+    *,
+    username: str,
+    email: str,
+    password: str,
+    display_name: str,
+    db_path: Path = DEFAULT_AUTH_DB_PATH,
+) -> str:
+    normalized_username = username.strip()
+    normalized_email = email.strip().lower()
+    now = int(time.time())
+    job_id = str(uuid.uuid4())
+    password_hash = hash_password(password)
+
+    with connect_auth_db(db_path) as conn:
+        conn.execute(
+            "insert into signup_jobs (job_id, username, email, password_hash, display_name, status, error_message, created_at, updated_at) values (?, ?, ?, ?, ?, 'pending', '', ?, ?)",
+            (
+                job_id,
+                normalized_username,
+                normalized_email,
+                password_hash,
+                display_name.strip() or normalized_username,
+                now,
+                now,
+            ),
+        )
+        conn.commit()
+    return job_id
+
+
+def get_signup_job(job_id: str, db_path: Path = DEFAULT_AUTH_DB_PATH) -> dict | None:
+    with connect_auth_db(db_path) as conn:
+        row = conn.execute(
+            "select job_id, username, email, display_name, status, error_message, created_at, updated_at from signup_jobs where job_id = ? limit 1",
+            (job_id,),
+        ).fetchone()
+    return dict(row) if row is not None else None
+
+
+def get_next_pending_signup_job(db_path: Path = DEFAULT_AUTH_DB_PATH) -> dict | None:
+    with connect_auth_db(db_path) as conn:
+        row = conn.execute(
+            "select job_id, username, email, password_hash, display_name, status, error_message, created_at, updated_at from signup_jobs where status = 'pending' order by created_at asc limit 1"
+        ).fetchone()
+    return dict(row) if row is not None else None
+
+
+def set_signup_job_status(
+    job_id: str,
+    *,
+    status: str,
+    error_message: str = "",
+    db_path: Path = DEFAULT_AUTH_DB_PATH,
+) -> None:
+    now = int(time.time())
+    with connect_auth_db(db_path) as conn:
+        conn.execute(
+            "update signup_jobs set status = ?, error_message = ?, updated_at = ? where job_id = ?",
+            (status, error_message[:2000], now, job_id),
+        )
+        conn.commit()
+
+
+def activate_signup_user(
+    job_id: str,
+    *,
+    mapping_username: str,
+    db_path: Path = DEFAULT_AUTH_DB_PATH,
+) -> InterfaceUser:
+    with connect_auth_db(db_path) as conn:
+        row = conn.execute(
+            "select username, email, password_hash, display_name from signup_jobs where job_id = ? limit 1",
+            (job_id,),
+        ).fetchone()
+        if row is None:
+            raise RuntimeError("Signup job not found")
+
+    now = int(time.time())
+    user_id = str(uuid.uuid4())
+    with connect_auth_db(db_path) as conn:
+        conn.execute(
+            "insert into users (id, username, email, password_hash, name, role, mapping_username, active, created_at, updated_at) values (?, ?, ?, ?, ?, 'user', ?, 1, ?, ?)",
+            (
+                user_id,
+                str(row["username"]),
+                str(row["email"]),
+                str(row["password_hash"]),
+                str(row["display_name"]),
+                mapping_username,
+                now,
+                now,
+            ),
+        )
+        conn.commit()
+
+    user = get_user_by_id(user_id, db_path)
+    if user is None:
+        raise RuntimeError("Failed to create signup user")
     return user
 
 

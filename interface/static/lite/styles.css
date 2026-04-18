@@ -44,6 +44,10 @@
   box-sizing: border-box;
 }
 
+[hidden] {
+  display: none !important;
+}
+
 html,
 body {
   margin: 0;
@@ -75,7 +79,8 @@ button {
   place-items: center;
   padding: 32px;
   position: relative;
-  overflow: hidden;
+  overflow-x: hidden;
+  overflow-y: auto;
 }
 
 .login-view::before,
@@ -230,18 +235,81 @@ button {
   display: flex;
   align-items: center;
   justify-content: center;
+  min-height: 0;
 }
 
 .login-card {
   width: min(100%, 440px);
   border-radius: 28px;
   padding: 30px;
+  max-height: calc(100vh - 64px);
+  overflow-y: auto;
 }
 
 .login-card-form {
   display: flex;
   flex-direction: column;
   gap: 20px;
+}
+
+.login-secondary-actions {
+  display: flex;
+  gap: 10px;
+}
+
+.login-secondary-button {
+  width: 100%;
+}
+
+.signup-wait-view {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  padding: 6px 0 2px;
+}
+
+.signup-wait-kicker {
+  font-size: 11px;
+  line-height: 1.3;
+  text-transform: uppercase;
+  letter-spacing: 0.12em;
+  color: var(--primary);
+}
+
+.signup-wait-view h3 {
+  margin: 0;
+  font-size: 22px;
+  line-height: 1.2;
+}
+
+.signup-wait-view p {
+  margin: 0;
+  line-height: 1.6;
+}
+
+.signup-wait-steps {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.signup-step {
+  border: 1px solid var(--border);
+  background: var(--surface-subtle);
+  border-radius: 14px;
+  padding: 12px 14px;
+  color: var(--muted);
+}
+
+.signup-step.active {
+  border-color: rgba(91, 140, 255, 0.35);
+  background: rgba(91, 140, 255, 0.12);
+  color: var(--text);
+}
+
+.signup-step.completed {
+  border-color: rgba(91, 140, 255, 0.22);
+  color: var(--text);
 }
 
 .login-card-header {

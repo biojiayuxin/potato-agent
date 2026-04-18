@@ -32,9 +32,16 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from interface.auth_db import (
+    activate_signup_user,
+    create_signup_job,
     ensure_auth_db,
+    email_exists,
+    get_next_pending_signup_job,
+    get_signup_job,
     get_user_by_id,
     get_user_with_password_by_login,
+    set_signup_job_status,
+    username_exists,
     verify_password,
 )
 from interface.archive_store import (
@@ -54,6 +61,18 @@ from interface.display_store import (
     set_display_draft_title,
 )
 from interface.mapping import DEFAULT_MAPPING_PATH, HermesTarget, MappingStore
+from interface.hermes_service import (
+    install_user_files,
+    remove_linux_user,
+    stop_and_remove_service,
+    wait_for_hermes_models,
+)
+from interface.mapping import (
+    load_mapping,
+    upsert_user_mapping_entry,
+    write_mapping,
+    remove_user_mapping_entry,
+)
 
 
 ROOT_DIR = Path(__file__).resolve().parent
@@ -101,8 +120,94 @@ class UpdateSessionTitleRequest(BaseModel):
     title: str = ""
 
 
+class SignupRequest(BaseModel):
+    username: str
+    email: str
+    password: str
+    display_name: str = ""
+
+
 def _now_seconds() -> int:
     return int(datetime.now(UTC).timestamp())
+
+
+def _validate_signup_payload(payload: SignupRequest) -> tuple[str, str, str, str]:
+    username = payload.username.strip()
+    email = payload.email.strip().lower()
+    password = payload.password
+    display_name = payload.display_name.strip() or username
+
+    if not re.fullmatch(r"[A-Za-z0-9_]{3,32}", username):
+        raise HTTPException(
+            status_code=400,
+            detail="Username must be 3-32 characters and contain only letters, numbers, or underscores.",
+        )
+    if "@" not in email or len(email) > 254:
+        raise HTTPException(status_code=400, detail="Invalid email address.")
+    if len(password) < 8:
+        raise HTTPException(
+            status_code=400, detail="Password must be at least 8 characters."
+        )
+    if username_exists(username):
+        raise HTTPException(status_code=409, detail="Username is already in use.")
+    if email_exists(email):
+        raise HTTPException(status_code=409, detail="Email is already in use.")
+    return username, email, password, display_name
+
+
+async def _signup_worker_loop() -> None:
+    while True:
+        job = get_next_pending_signup_job()
+        if job is None:
+            await asyncio.sleep(2)
+            continue
+
+        job_id = str(job["job_id"])
+        username = str(job["username"])
+        email = str(job["email"])
+        display_name = str(job["display_name"])
+        set_signup_job_status(job_id, status="provisioning")
+
+        target = None
+        try:
+            config = load_mapping(DEFAULT_MAPPING_PATH, resolve_env=False)
+            upsert_user_mapping_entry(
+                config,
+                username=username,
+                email=email,
+                display_name=display_name,
+            )
+            write_mapping(DEFAULT_MAPPING_PATH, config)
+            resolved_config = load_mapping(DEFAULT_MAPPING_PATH, resolve_env=True)
+            mapping_store._mtime_ns = None
+            mapping_store._targets = []
+            target = mapping_store.get_target_by_username(username)
+            if target is None:
+                raise RuntimeError("Failed to resolve newly created mapping target.")
+
+            install_user_files(resolved_config, target)
+            wait_for_hermes_models(
+                target.api_key, target.api_server_host, target.api_port
+            )
+            activate_signup_user(job_id, mapping_username=username)
+            set_signup_job_status(job_id, status="completed")
+        except Exception as exc:
+            try:
+                config = load_mapping(DEFAULT_MAPPING_PATH, resolve_env=False)
+                remove_user_mapping_entry(config, username)
+                write_mapping(DEFAULT_MAPPING_PATH, config)
+                mapping_store._mtime_ns = None
+                mapping_store._targets = []
+            except Exception:
+                pass
+
+            if target is not None:
+                with contextlib.suppress(Exception):
+                    stop_and_remove_service(target.systemd_service)
+                with contextlib.suppress(Exception):
+                    remove_linux_user(target.linux_user, delete_home=True)
+
+            set_signup_job_status(job_id, status="failed", error_message=str(exc))
 
 
 def _create_session_token(user_id: str) -> str:
@@ -687,6 +792,7 @@ async def on_startup() -> None:
     ensure_archive_db()
     app.state.http = httpx.AsyncClient(timeout=httpx.Timeout(60.0, read=None))
     app.state.archive_scheduler_task = asyncio.create_task(_archive_scheduler_loop())
+    app.state.signup_worker_task = asyncio.create_task(_signup_worker_loop())
 
 
 @app.on_event("shutdown")
@@ -694,6 +800,9 @@ async def on_shutdown() -> None:
     archive_scheduler_task = getattr(app.state, "archive_scheduler_task", None)
     if archive_scheduler_task is not None:
         archive_scheduler_task.cancel()
+    signup_worker_task = getattr(app.state, "signup_worker_task", None)
+    if signup_worker_task is not None:
+        signup_worker_task.cancel()
     client: httpx.AsyncClient | None = getattr(app.state, "http", None)
     if client is not None:
         await client.aclose()
@@ -815,6 +924,32 @@ async def signin(payload: SigninRequest, response: Response) -> dict[str, Any]:
     )
     _set_session_cookie(response, _create_session_token(user.id))
     return _serialize_user(user)
+
+
+@app.post("/api/auth/signup")
+async def signup(payload: SignupRequest) -> dict[str, Any]:
+    username, email, password, display_name = _validate_signup_payload(payload)
+    try:
+        job_id = create_signup_job(
+            username=username,
+            email=email,
+            password=password,
+            display_name=display_name,
+        )
+    except Exception as exc:
+        raise HTTPException(
+            status_code=500, detail=f"Failed to create signup job: {exc}"
+        ) from exc
+
+    return {"ok": True, "job_id": job_id, "status": "pending"}
+
+
+@app.get("/api/auth/signup/{job_id}")
+async def signup_status(job_id: str) -> dict[str, Any]:
+    job = get_signup_job(job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="Signup job not found")
+    return {"ok": True, "job": job}
 
 
 @app.get("/api/auth/me")

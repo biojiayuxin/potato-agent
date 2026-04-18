@@ -34,11 +34,11 @@
           </div>
 
           <div class="login-card-shell">
-            <div class="login-card login-card-form">
+            <div id="auth-card" class="login-card login-card-form">
               <div class="login-card-header">
-                <div class="login-card-label">Sign in</div>
-                <h2>Enter Potato Agent</h2>
-                <p class="muted">Use the account already mapped to your Hermes runtime.</p>
+                <div id="auth-card-label" class="login-card-label">Sign in</div>
+                <h2 id="auth-card-title">Enter Potato Agent</h2>
+                <p id="auth-card-copy" class="muted">Use the account already mapped to your Hermes runtime.</p>
               </div>
 
               <form id="login-form" class="stack gap-12">
@@ -54,8 +54,59 @@
                 <div id="login-error" class="error" hidden></div>
               </form>
 
+              <div class="login-secondary-actions">
+                <button id="show-register-button" type="button" class="ghost login-secondary-button">Register</button>
+              </div>
+
               <div class="login-card-footer muted tiny">
                 After sign-in, requests are routed to the Hermes instance bound to your account.
+              </div>
+
+              <form id="register-form" class="stack gap-12" hidden>
+                <label class="stack gap-6">
+                  <span>Username</span>
+                  <input id="register-username" name="register-username" type="text" autocomplete="username" />
+                </label>
+                <label class="stack gap-6">
+                  <span>Display name</span>
+                  <input id="register-display-name" name="register-display-name" type="text" autocomplete="name" />
+                </label>
+                <label class="stack gap-6">
+                  <span>Email</span>
+                  <input id="register-email" name="register-email" type="email" autocomplete="email" />
+                </label>
+                <label class="stack gap-6">
+                  <span>Password</span>
+                  <input id="register-password" name="register-password" type="password" autocomplete="new-password" />
+                </label>
+                <label class="stack gap-6">
+                  <span>Confirm password</span>
+                  <input id="register-password-confirm" name="register-password-confirm" type="password" autocomplete="new-password" />
+                </label>
+                <button type="submit" class="primary login-submit">Create account</button>
+                <div id="register-error" class="error" hidden></div>
+              </form>
+
+              <div class="login-secondary-actions" id="register-nav-actions" hidden>
+                <button id="show-login-button" type="button" class="ghost login-secondary-button">Back to sign in</button>
+              </div>
+
+              <div id="signup-wait-view" class="signup-wait-view" hidden>
+                <div class="signup-wait-kicker">Workspace provisioning</div>
+                <h3 id="signup-wait-title">Creating your workspace</h3>
+                <p id="signup-wait-copy" class="muted">
+                  We are creating a dedicated Linux user and Hermes runtime for your account.
+                </p>
+                <div id="signup-wait-steps" class="signup-wait-steps">
+                  <div class="signup-step" data-step="pending">Request queued</div>
+                  <div class="signup-step" data-step="provisioning">Provisioning runtime</div>
+                  <div class="signup-step" data-step="completed">Workspace ready</div>
+                </div>
+                <div id="signup-wait-error" class="error" hidden></div>
+                <div class="login-secondary-actions">
+                  <button id="signup-go-login-button" type="button" class="primary login-secondary-button" hidden>Go to sign in</button>
+                  <button id="signup-back-button" type="button" class="ghost login-secondary-button" hidden>Back to register</button>
+                </div>
               </div>
             </div>
           </div>

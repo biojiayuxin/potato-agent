@@ -16,6 +16,8 @@ const state = {
   isSending: false,
   currentAbortController: null,
   chatErrorTimer: null,
+  signupJobId: null,
+  signupPollTimer: null,
 };
 
 const dom = {
@@ -23,6 +25,22 @@ const dom = {
   workspaceView: document.getElementById('workspace-view'),
   loginForm: document.getElementById('login-form'),
   loginError: document.getElementById('login-error'),
+  authCard: document.getElementById('auth-card'),
+  authCardLabel: document.getElementById('auth-card-label'),
+  authCardTitle: document.getElementById('auth-card-title'),
+  authCardCopy: document.getElementById('auth-card-copy'),
+  registerForm: document.getElementById('register-form'),
+  registerError: document.getElementById('register-error'),
+  showRegisterButton: document.getElementById('show-register-button'),
+  showLoginButton: document.getElementById('show-login-button'),
+  registerNavActions: document.getElementById('register-nav-actions'),
+  signupWaitView: document.getElementById('signup-wait-view'),
+  signupWaitTitle: document.getElementById('signup-wait-title'),
+  signupWaitCopy: document.getElementById('signup-wait-copy'),
+  signupWaitError: document.getElementById('signup-wait-error'),
+  signupWaitSteps: document.getElementById('signup-wait-steps'),
+  signupGoLoginButton: document.getElementById('signup-go-login-button'),
+  signupBackButton: document.getElementById('signup-back-button'),
   chatError: document.getElementById('chat-error'),
   chatList: document.getElementById('chat-list'),
   messages: document.getElementById('messages'),
@@ -49,6 +67,7 @@ const dom = {
 
 let loginInFlight = false;
 let bootstrapInFlight = false;
+let signupInFlight = false;
 
 const SIDEBAR_WIDTH_KEY = 'lite_sidebar_width';
 const FILES_WIDTH_KEY = 'lite_files_width';
@@ -240,6 +259,113 @@ const setLoginPending = (pending) => {
   const submitButton = dom.loginForm.querySelector('button[type="submit"]');
   submitButton.disabled = pending;
   submitButton.textContent = pending ? 'Signing in...' : 'Sign in';
+};
+
+const setSignupPending = (pending) => {
+  signupInFlight = pending;
+  const submitButton = dom.registerForm.querySelector('button[type="submit"]');
+  submitButton.disabled = pending;
+  submitButton.textContent = pending ? 'Creating account...' : 'Create account';
+};
+
+const stopSignupPolling = () => {
+  if (state.signupPollTimer) {
+    window.clearTimeout(state.signupPollTimer);
+    state.signupPollTimer = null;
+  }
+};
+
+const setAuthViewMode = (mode) => {
+  const showSignin = mode === 'signin';
+  const showRegister = mode === 'register';
+  const showWait = mode === 'signup-wait';
+
+  if (showSignin) {
+    dom.authCardLabel.textContent = 'Sign in';
+    dom.authCardTitle.textContent = 'Enter Potato Agent';
+    dom.authCardCopy.textContent = 'Use the account already mapped to your Hermes runtime.';
+  }
+
+  if (showRegister) {
+    dom.authCardLabel.textContent = 'Register';
+    dom.authCardTitle.textContent = 'Create your workspace';
+    dom.authCardCopy.textContent = 'A dedicated Linux user and Hermes runtime will be provisioned for your account.';
+  }
+
+  if (showWait) {
+    dom.authCardLabel.textContent = 'Provisioning';
+    dom.authCardTitle.textContent = 'Creating your workspace';
+    dom.authCardCopy.textContent = 'Please wait while your dedicated runtime is being provisioned.';
+  }
+
+  dom.loginForm.hidden = !showSignin;
+  dom.showRegisterButton.hidden = !showSignin;
+  dom.registerForm.hidden = !showRegister;
+  dom.registerNavActions.hidden = !showRegister;
+  dom.signupWaitView.hidden = !showWait;
+  if (showSignin) {
+    showError(dom.loginError, '');
+  }
+  if (showRegister) {
+    showError(dom.registerError, '');
+  }
+};
+
+const applySignupJobState = (job) => {
+  const status = job?.status || 'pending';
+  const titleMap = {
+    pending: 'Request queued',
+    provisioning: 'Creating your workspace',
+    completed: 'Workspace ready',
+    failed: 'Setup failed',
+  };
+  const copyMap = {
+    pending: 'Your request has been accepted and is waiting to start.',
+    provisioning: 'We are creating a dedicated Linux user and Hermes runtime for your account.',
+    completed: 'Your workspace is ready. Return to the sign-in page and use the account you just created.',
+    failed: 'The workspace could not be created. You can go back and try again.',
+  };
+  dom.signupWaitTitle.textContent = titleMap[status] || 'Creating your workspace';
+  dom.signupWaitCopy.textContent = copyMap[status] || copyMap.pending;
+  showError(dom.signupWaitError, status === 'failed' ? (job?.error_message || 'Setup failed') : '');
+  dom.signupGoLoginButton.hidden = status !== 'completed';
+  dom.signupBackButton.hidden = status !== 'failed';
+
+  for (const step of dom.signupWaitSteps.querySelectorAll('.signup-step')) {
+    const stepName = step.dataset.step;
+    step.classList.remove('active', 'completed');
+    if (status === 'pending' && stepName === 'pending') step.classList.add('active');
+    if (status === 'provisioning') {
+      if (stepName === 'pending') step.classList.add('completed');
+      if (stepName === 'provisioning') step.classList.add('active');
+    }
+    if (status === 'completed') {
+      if (stepName === 'pending' || stepName === 'provisioning') step.classList.add('completed');
+      if (stepName === 'completed') step.classList.add('active');
+    }
+    if (status === 'failed') {
+      if (stepName === 'pending') step.classList.add('completed');
+      if (stepName === 'provisioning') step.classList.add('active');
+    }
+  }
+};
+
+const pollSignupJob = async () => {
+  if (!state.signupJobId) return;
+  try {
+    const response = await api(`/api/auth/signup/${encodeURIComponent(state.signupJobId)}`, { method: 'GET' });
+    const json = await response.json();
+    const job = json?.job || null;
+    applySignupJobState(job);
+    const status = job?.status || 'pending';
+    if (status === 'completed' || status === 'failed') {
+      stopSignupPolling();
+      return;
+    }
+  } catch (error) {
+    showError(dom.signupWaitError, String(error.message || 'Failed to check provisioning status'));
+  }
+  state.signupPollTimer = window.setTimeout(pollSignupJob, 2000);
 };
 
 const api = async (path, options = {}) => {
@@ -1648,6 +1774,7 @@ const showLogin = () => {
   dom.workspaceView.style.display = 'none';
   dom.loginView.hidden = false;
   dom.loginView.style.display = 'grid';
+  setAuthViewMode('signin');
 };
 
 const initializeWorkspaceData = async () => {
@@ -1762,6 +1889,66 @@ dom.loginForm.addEventListener('submit', async (event) => {
   } finally {
     setLoginPending(false);
   }
+});
+
+dom.registerForm.addEventListener('submit', async (event) => {
+  event.preventDefault();
+  if (signupInFlight) return;
+  showError(dom.registerError, '');
+
+  const username = document.getElementById('register-username').value.trim();
+  const displayName = document.getElementById('register-display-name').value.trim();
+  const email = document.getElementById('register-email').value.trim();
+  const password = document.getElementById('register-password').value;
+  const passwordConfirm = document.getElementById('register-password-confirm').value;
+
+  if (password !== passwordConfirm) {
+    showError(dom.registerError, 'Passwords do not match.');
+    return;
+  }
+
+  try {
+    setSignupPending(true);
+    const response = await api('/api/auth/signup', {
+      method: 'POST',
+      body: JSON.stringify({
+        username,
+        display_name: displayName,
+        email,
+        password,
+      }),
+    });
+    const json = await response.json();
+    state.signupJobId = json?.job_id || null;
+    setAuthViewMode('signup-wait');
+    applySignupJobState({ status: json?.status || 'pending' });
+    stopSignupPolling();
+    pollSignupJob();
+  } catch (error) {
+    showError(dom.registerError, String(error.message || 'Registration failed'));
+  } finally {
+    setSignupPending(false);
+  }
+});
+
+dom.showRegisterButton.addEventListener('click', () => {
+  setAuthViewMode('register');
+});
+
+dom.showLoginButton.addEventListener('click', () => {
+  setAuthViewMode('signin');
+});
+
+dom.signupGoLoginButton.addEventListener('click', () => {
+  state.signupJobId = null;
+  stopSignupPolling();
+  setAuthViewMode('signin');
+});
+
+dom.signupBackButton.addEventListener('click', () => {
+  state.signupJobId = null;
+  stopSignupPolling();
+  setAuthViewMode('register');
 });
 
 dom.logoutButton.addEventListener('click', async () => {

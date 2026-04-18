@@ -50,3 +50,25 @@ users:
   - user_test
   email: user_test@example.com
   display_name: user_test
+- username: signupdemo
+  email: signupdemo@example.com
+  display_name: Signup Demo
+  linux_user: hmx_signupdemo
+  home_dir: /home/hmx_signupdemo
+  hermes_home: /home/hmx_signupdemo/.hermes
+  workdir: /home/hmx_signupdemo/work
+  api_port: 8644
+  api_server_model_name: Hermes
+  systemd_service: hermes-signupdemo.service
+  api_key: ${POTATO_AGENT_SHARED_API_KEY}
+- username: test123
+  email: test123@example.com
+  display_name: test123
+  linux_user: hmx_test123
+  home_dir: /home/hmx_test123
+  hermes_home: /home/hmx_test123/.hermes
+  workdir: /home/hmx_test123/work
+  api_port: 8645
+  api_server_model_name: Hermes
+  systemd_service: hermes-test123.service
+  api_key: ${POTATO_AGENT_SHARED_API_KEY}
