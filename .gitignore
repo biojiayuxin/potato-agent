@@ -5,3 +5,4 @@ hermes-agent/.mailmap
 hermes-agent/.gitattributes
 hermes-agent/.github/
 interface/data/interface.db
+interface/data/archive.db

@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import contextlib
+import asyncio
 import json
 import os
 import pwd
 import re
 import secrets
 import sys
+import time
 import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -35,6 +37,14 @@ from interface.auth_db import (
     get_user_with_password_by_login,
     verify_password,
 )
+from interface.archive_store import (
+    archive_session_record,
+    count_archived_sessions,
+    ensure_archive_db,
+    finish_archive_run,
+    list_archive_runs,
+    start_archive_run,
+)
 from interface.display_store import (
     delete_display_messages,
     ensure_display_store,
@@ -60,6 +70,8 @@ MAX_UPLOAD_SIZE_BYTES = int(
     os.getenv("INTERFACE_MAX_UPLOAD_BYTES", str(20 * 1024 * 1024))
 )
 UPLOAD_DIR_NAME = os.getenv("INTERFACE_UPLOAD_DIR_NAME", ".potato-interface-uploads")
+ARCHIVE_RETENTION_DAYS = int(os.getenv("INTERFACE_ARCHIVE_RETENTION_DAYS", "7"))
+ARCHIVE_SCHEDULE_HOUR = int(os.getenv("INTERFACE_ARCHIVE_SCHEDULE_HOUR", "3"))
 FILENAME_SANITIZE_RE = re.compile(r"[^A-Za-z0-9._-]+")
 
 HERMES_SRC = REPO_ROOT / "hermes-agent"
@@ -554,6 +566,88 @@ def _build_fallback_display_messages(
     return normalized
 
 
+async def _archive_expired_sessions_once() -> None:
+    from interface.auth_db import list_users
+
+    run_id = start_archive_run()
+    archived_count = 0
+    try:
+        cutoff = time.time() - (ARCHIVE_RETENTION_DAYS * 86400)
+        auth_users = {user.mapping_username: user for user in list_users()}
+
+        for target in mapping_store.load_targets():
+            auth_user = auth_users.get(target.username)
+            with _open_session_db(target) as db:
+                sessions = db.list_sessions_rich(
+                    source="api_server", limit=100000, offset=0
+                )
+                for session in sessions:
+                    session_id = str(session.get("id") or "")
+                    last_active = float(
+                        session.get("last_active") or session.get("started_at") or 0
+                    )
+                    if not session_id or last_active >= cutoff:
+                        continue
+
+                    raw_messages = db.get_messages(session_id)
+                    display_meta = (
+                        get_display_session_meta(auth_user.id, session_id)
+                        if auth_user is not None
+                        else None
+                    )
+                    display_messages = (
+                        display_meta.get("messages")
+                        if display_meta
+                        and isinstance(display_meta.get("messages"), list)
+                        else _build_fallback_display_messages(raw_messages)
+                    )
+                    draft_title = (
+                        str(display_meta.get("draft_title") or "")
+                        if display_meta
+                        else ""
+                    )
+
+                    archived = archive_session_record(
+                        mapping_username=target.username,
+                        email_snapshot=target.email,
+                        session=session,
+                        messages=raw_messages,
+                        display_messages=display_messages,
+                        draft_title=draft_title,
+                    )
+                    if not archived:
+                        continue
+
+                    db.delete_session(session_id)
+                    if auth_user is not None:
+                        delete_display_messages(auth_user.id, session_id)
+                    archived_count += 1
+
+        finish_archive_run(run_id, status="success", archived_count=archived_count)
+    except Exception as exc:
+        finish_archive_run(
+            run_id,
+            status="error",
+            archived_count=archived_count,
+            error_message=str(exc),
+        )
+
+
+async def _archive_scheduler_loop() -> None:
+    while True:
+        now = datetime.now()
+        scheduled_for = now.replace(
+            hour=ARCHIVE_SCHEDULE_HOUR, minute=0, second=0, microsecond=0
+        )
+        if scheduled_for <= now:
+            scheduled_for = scheduled_for + timedelta(days=1)
+        await asyncio.sleep(max((scheduled_for - now).total_seconds(), 60.0))
+        try:
+            await _archive_expired_sessions_once()
+        except Exception:
+            pass
+
+
 def _sanitize_filename(filename: str) -> str:
     base = Path(filename or "upload.bin").name
     cleaned = FILENAME_SANITIZE_RE.sub("_", base).strip("._")
@@ -590,11 +684,16 @@ app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 async def on_startup() -> None:
     ensure_auth_db()
     ensure_display_store()
+    ensure_archive_db()
     app.state.http = httpx.AsyncClient(timeout=httpx.Timeout(60.0, read=None))
+    app.state.archive_scheduler_task = asyncio.create_task(_archive_scheduler_loop())
 
 
 @app.on_event("shutdown")
 async def on_shutdown() -> None:
+    archive_scheduler_task = getattr(app.state, "archive_scheduler_task", None)
+    if archive_scheduler_task is not None:
+        archive_scheduler_task.cancel()
     client: httpx.AsyncClient | None = getattr(app.state, "http", None)
     if client is not None:
         await client.aclose()
@@ -655,6 +754,20 @@ async def api_status(user: CurrentUser = Depends(get_current_user)) -> dict[str,
         "mapping_path": str(DEFAULT_MAPPING_PATH),
         "hermes_api_base": user.target.api_base_url,
         "state_db_path": str(user.target.state_db_path),
+        "archived_session_count": count_archived_sessions(),
+    }
+
+
+@app.get("/api/archive/status")
+async def archive_status(
+    user: CurrentUser = Depends(get_current_user),
+) -> dict[str, Any]:
+    return {
+        "status": True,
+        "retention_days": ARCHIVE_RETENTION_DAYS,
+        "schedule_hour": ARCHIVE_SCHEDULE_HOUR,
+        "archived_session_count": count_archived_sessions(),
+        "runs": list_archive_runs(limit=10),
     }
 
 
