@@ -1,6 +1,6 @@
 # Interface
 
-`interface/` 是新的轻后端 + Lite 前端目录，目标是直接贴 Hermes 能力，不再复用 Open WebUI 的聊天模型，也不再依赖 Open WebUI 的用户库。
+`interface/` 是新的轻后端 + Lite 前端目录，目标是直接贴 Hermes 能力。
 
 当前实现：
 
@@ -37,13 +37,13 @@
 新增用户：
 
 ```bash
-python3 ./provision_interface_user.py <username> <email> <password>
+/opt/interface-env/bin/python ./provision_interface_user.py <username> <email> <password>
 ```
 
 删除用户：
 
 ```bash
-python3 ./deprovision_interface_user.py <username>
+/opt/interface-env/bin/python ./deprovision_interface_user.py <username>
 ```
 
 这两个脚本会直接维护：
@@ -52,6 +52,46 @@ python3 ./deprovision_interface_user.py <username>
 - `interface/data/interface.db`
 - per-user Linux 用户
 - per-user Hermes 配置和 systemd 服务
+
+绑定服务器上已存在的 Linux 用户：
+
+```bash
+/opt/interface-env/bin/python ./bind_existing_linux_user.py \
+  alice \
+  alice@example.com \
+  webpass123 \
+  --linux-user alice
+```
+
+这个脚本会：
+
+- 创建 interface 网页登录账号
+- 在 `users_mapping.yaml` 中增加映射
+- 直接复用现有 Linux 用户的 home 目录
+- 默认目录沿用当前规则：
+  - `~/.hermes`
+  - `~/work`
+- 为这个已有 Linux 用户安装并启动 Hermes service
+
+安全解绑已绑定的现有 Linux 用户：
+
+```bash
+/opt/interface-env/bin/python ./unbind_existing_linux_user.py alice
+```
+
+这个脚本会：
+
+- 删除 interface 网页账号
+- 删除 interface 展示态聊天记录
+- 删除 `users_mapping.yaml` 中的映射
+- 停止并移除对应 Hermes service
+
+但不会删除：
+
+- Linux 用户本身
+- home 目录
+- `.hermes`
+- `work` 目录
 
 ## 启动
 

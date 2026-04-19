@@ -54,6 +54,22 @@ def ensure_linux_user(username: str) -> None:
     _run_command(["useradd", "-m", "-s", "/bin/bash", username])
 
 
+def get_linux_user_info(username: str) -> dict[str, Any]:
+    import pwd
+
+    try:
+        pw = pwd.getpwnam(username)
+    except KeyError as exc:
+        raise RuntimeError(f"Linux user {username!r} does not exist.") from exc
+    return {
+        "username": pw.pw_name,
+        "uid": pw.pw_uid,
+        "gid": pw.pw_gid,
+        "home_dir": Path(pw.pw_dir).resolve(),
+        "shell": pw.pw_shell,
+    }
+
+
 def _set_owner_and_mode(path: Path, uid: int, gid: int, mode: int) -> None:
     os.chown(path, uid, gid)
     os.chmod(path, mode)
@@ -153,12 +169,11 @@ def build_systemd_unit(config: dict[str, Any], user: HermesTarget) -> str:
 
 
 def install_user_files(config: dict[str, Any], user: HermesTarget) -> None:
-    import grp
     import pwd
 
     ensure_linux_user(user.linux_user)
     pw = pwd.getpwnam(user.linux_user)
-    gid = grp.getgrnam(user.linux_user).gr_gid
+    gid = pw.pw_gid
 
     for directory in [
         user.home_dir,

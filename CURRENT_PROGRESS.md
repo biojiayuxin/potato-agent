@@ -213,6 +213,46 @@ Lite 文件树当前默认从 `/home/<linux_user>` 开始，而不是只从 `/ho
 
 - 升级过程：先备份，再同步工作区与部署源码，最后刷新 `/opt/hermes-agent-venv` 并重启 per-user Hermes 服务
 
+### 13. 已支持绑定和安全解绑服务器上已有的 Linux 用户
+
+- 已新增脚本：
+
+- `./bind_existing_linux_user.py`
+- `./unbind_existing_linux_user.py`
+
+- `bind_existing_linux_user.py` 用于把服务器上已存在的 Linux 用户直接接入网页端：
+
+- 创建 interface 网页登录账号
+- 在 `users_mapping.yaml` 中追加该用户映射
+- 直接使用该 Linux 用户自己的 home 目录
+- 默认目录沿用当前网页端部署规则：
+  - `~/.hermes`
+  - `~/work`
+- 安装并启动该用户自己的 Hermes systemd 服务
+
+- `unbind_existing_linux_user.py` 用于安全解绑已有 Linux 用户：
+
+- 删除 interface 网页账号
+- 删除 interface 展示态聊天记录
+- 从 `users_mapping.yaml` 中移除映射
+- 停止并移除对应 Hermes service
+
+- 但不会删除：
+
+- Linux 用户本身
+- home 目录
+- `.hermes`
+- `work` 目录
+
+- 这两个脚本统一默认使用项目目录内路径：
+
+- `./users_mapping.yaml`
+- `./interface/data/interface.db`
+
+- 执行时应使用：
+
+- `/opt/interface-env/bin/python`
+
 ## 当前已验证状态
 
 ### 1. Hermes 运行时可用
