@@ -1,9 +1,0 @@
-model:
-  default: gpt-5.4
-  provider: custom
-  base_url: https://your-upstream-model-gateway.example/v1
-  api_key: YOUR_UPSTREAM_MODEL_KEY
-terminal:
-  backend: local
-  timeout: 180
-  cwd: /home/hmx_alice/work
