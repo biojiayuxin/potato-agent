@@ -205,6 +205,10 @@ def install_user_files(config: dict[str, Any], user: HermesTarget) -> None:
     _run_command(["systemctl", "enable", "--now", user.systemd_service])
 
 
+def restart_service(service_name: str) -> None:
+    _run_command(["systemctl", "restart", service_name])
+
+
 def stop_and_remove_service(service_name: str) -> None:
     subprocess.run(
         ["systemctl", "disable", "--now", service_name], capture_output=True, text=True

@@ -58,11 +58,7 @@
 - root 权限
 - Python 3
 
-推荐准备共享上游模型密钥：
-
-```bash
-export POTATO_AGENT_SHARED_API_KEY='sk-...'
-```
+当前仓库已经提供了一个模型配置脚本，可以在部署时创建或更新 `users_mapping.yaml` 里的上游模型配置，不需要手动编辑 YAML。
 
 ### 2. 部署 Hermes 运行时
 
@@ -101,6 +97,8 @@ Hermes 能正常运行，至少需要这些模型相关配置：
 
 当前项目默认从 `users_mapping.yaml` 的 `hermes.model` 段读取这些配置。
 
+推荐直接使用仓库根目录的：`configure_hermes_model.py`
+
 最关键的配置示例：
 
 ```yaml
@@ -112,9 +110,9 @@ hermes:
     default: gpt-5.4
     provider: custom
     base_url: https://your-upstream-model-gateway.example/v1
-    api_key: ${POTATO_AGENT_SHARED_API_KEY}
+    api_key: sk-...
   extra_env:
-    OPENAI_API_KEY: ${POTATO_AGENT_SHARED_API_KEY}
+    OPENAI_API_KEY: sk-...
 ```
 
 其中：
@@ -126,7 +124,9 @@ hermes:
 - `base_url`
   上游 OpenAI-compatible 模型网关地址
 - `api_key`
-  上游模型访问密钥；当前项目通常通过环境变量 `POTATO_AGENT_SHARED_API_KEY` 注入
+  上游模型访问密钥；当前部署流程可以直接写进 `users_mapping.yaml`
+
+如果你不想把密钥直接写入文件，也仍然可以手动改成 `${ENV_NAME}` 形式；运行时依然支持环境变量占位符解析。
 
 如果没有正确设置 `base_url`、`provider`、`default`，即使系统服务能启动，Hermes 也无法正常完成聊天请求。
 
@@ -139,11 +139,56 @@ python3 -m venv /opt/interface-env
 
 ### 5. 准备映射文件
 
-首次部署建议先从模板复制：
+首次部署或后续更换上游模型时，推荐直接用模型配置脚本维护 `users_mapping.yaml`：
 
 ```bash
-cp ./users_mapping.example.yaml ./users_mapping.yaml
+/opt/interface-env/bin/python ./configure_hermes_model.py
 ```
+
+脚本行为：
+
+- 如果当前还没有 `users_mapping.yaml`，会创建一个空的 `users: []` 文件
+- 如果当前已经有 `users_mapping.yaml`，会读取现有文件，只更新模型配置，不改动 `users:` 里的用户信息
+
+脚本会交互式提示你输入：
+
+- 上游模型 `base_url`
+- 默认模型名称
+- 上游 `API_KEY`
+
+执行后会：
+
+- 自动写入基础 Hermes 配置
+- 同步更新 `hermes.model.*`
+- 同步更新 `hermes.extra_env.OPENAI_API_KEY`
+- 将文件权限收紧为 `600`
+
+如果你想在自动化部署里直接传参：
+
+```bash
+/opt/interface-env/bin/python ./configure_hermes_model.py \
+  --base-url https://your-upstream-model-gateway.example/v1 \
+  --model gpt-5.4 \
+  --api-key 'sk-...'
+```
+
+如果你已经有存量用户，并且希望把新模型配置立即下发到这些用户当前的 Hermes 实例：
+
+```bash
+/opt/interface-env/bin/python ./configure_hermes_model.py \
+  --base-url https://your-upstream-model-gateway.example/v1 \
+  --model gpt-5.4 \
+  --api-key 'sk-...' \
+  --apply-to-users
+```
+
+这个参数会在写完 `users_mapping.yaml` 后：
+
+- 遍历当前 `users_mapping.yaml` 中已记录的用户
+- 重写每个用户的 `~/.hermes/config.yaml` 和 `~/.hermes/.env`
+- 重启对应 Hermes systemd 服务
+
+执行前脚本会明确列出受影响用户，并要求你手动输入 `APPLY` 做二次确认。
 
 至少确认这些基础配置合理：
 
@@ -152,17 +197,53 @@ cp ./users_mapping.example.yaml ./users_mapping.yaml
 - `hermes.model.base_url`
 - `hermes.model.api_key`
 
-### 6. 启动网页服务
+后续新增网页用户时，`provision_interface_user.py` 或 `bind_existing_linux_user.py` 会自动向 `users:` 段追加用户映射；初始化阶段不需要预填任何用户信息。
+
+### 6. 创建首个可登录用户
+
+首次部署完成 `users_mapping.yaml` 初始化后，建议先创建至少一个可登录用户，再启动网页服务。
+
+如果服务器上还没有对应 Linux 用户：
+
+```bash
+/opt/interface-env/bin/python ./provision_interface_user.py <username> <email> <password>
+```
+
+如果服务器上已经有要复用的 Linux 用户：
+
+```bash
+/opt/interface-env/bin/python ./bind_existing_linux_user.py \
+  <username> \
+  <email> \
+  <password> \
+  --linux-user <existing-linux-user>
+```
+
+这一步会直接完成：
+
+- 更新 `users_mapping.yaml`
+- 创建或绑定 Linux 用户
+- 安装并启动对应 Hermes service
+- 创建网页登录账号
+
+### 7. 启动网页服务
 
 ```bash
 /opt/interface-env/bin/python -m uvicorn interface.app:app --host 0.0.0.0 --port 3000
 ```
+
+当前架构下，`interface` 进程建议由 root 的 systemd 服务启动，而不是普通用户进程。原因是：
+
+- 需要读取各用户 `700` 权限的 home、`work` 和 `.hermes/state.db`
+- 注册或自动开通用户时，需要创建 Linux 用户并管理 systemd 服务
 
 启动后访问：
 
 ```text
 http://<host>:3000/lite
 ```
+
+此时就可以使用上一步创建的账号登录。
 
 ## 手动管理用户
 

@@ -175,12 +175,8 @@ def _build_target(config: dict[str, Any], raw_user: dict[str, Any]) -> HermesTar
         str(raw_user.get("hermes_home") or (home_dir / ".hermes"))
     ).resolve()
     workdir = Path(str(raw_user.get("workdir") or (home_dir / "work"))).resolve()
-    email = (
-        str(raw_user.get("email") or raw_user.get("webui_user") or "").strip().lower()
-    )
-    display_name = str(
-        raw_user.get("display_name") or raw_user.get("webui_display_name") or username
-    ).strip()
+    email = str(raw_user.get("email") or "").strip().lower()
+    display_name = str(raw_user.get("display_name") or username).strip()
     api_server_host = str(
         raw_user.get("api_server_host")
         or hermes_cfg.get("api_server_host")
@@ -315,15 +311,6 @@ def upsert_user_mapping_entry(
 
     entry["email"] = email
     entry["display_name"] = display_name
-    # Keep legacy keys in sync when present so old docs/scripts can still inspect the file.
-    if (
-        "webui_user" in entry
-        or "openwebui_user_id" in entry
-        or "webui_display_name" in entry
-    ):
-        entry["webui_user"] = email
-        entry["webui_display_name"] = display_name
-
     entry.setdefault("linux_user", f"hmx_{username}")
     entry.setdefault("home_dir", f"/home/{entry['linux_user']}")
     entry.setdefault("hermes_home", f"{entry['home_dir']}/.hermes")

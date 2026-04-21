@@ -23,6 +23,18 @@
 - `interface/data/interface.db`
 - 每用户 `~/.hermes/state.db`
 
+首次部署前，推荐先在仓库根目录运行：
+
+```bash
+/opt/interface-env/bin/python ./configure_hermes_model.py
+```
+
+这个脚本会创建或更新 `users_mapping.yaml` 里的模型配置，并交互式写入上游模型 `base_url`、默认模型名和 `API_KEY`。如果文件不存在，会自动创建空的 `users: []`；如果文件已存在，只会更新模型配置，不会改动用户信息。
+
+如果附加 `--apply-to-users`，脚本会在二次确认后把新配置下发到当前已映射用户，重写各自 `~/.hermes/config.yaml` / `.env`，并重启对应 Hermes service。
+
+首次部署完成 mapping 初始化后，建议先用下面的用户管理脚本创建首个可登录用户，再启动 `interface` 服务。
+
 ## 关键环境变量
 
 - `POTATO_AGENT_MAPPING_PATH`
@@ -105,13 +117,15 @@ python3 -m venv /opt/interface-env
 ```
 
 ```bash
-/opt/interface-env/bin/python -m uvicorn interface.app:app --host 0.0.0.0 --port 3001
+/opt/interface-env/bin/python -m uvicorn interface.app:app --host 0.0.0.0 --port 3000
 ```
+
+当前架构下，`interface` 进程建议由 root 的 systemd 服务启动。原因是它需要读取各用户 `700` 权限的 home、`work`、`.hermes/state.db`，并在注册或开通用户时管理 Linux 用户和 systemd 服务。
 
 启动后访问：
 
 ```text
-http://<host>:3001/lite
+http://<host>:3000/lite
 ```
 
 ## 当前边界

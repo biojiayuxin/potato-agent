@@ -1,9 +1,13 @@
 opencode.jsonc
 __pycache__/
 **/__pycache__/
+
+# Local deployment/runtime state
 hermes-agent/.mailmap
 hermes-agent/.gitattributes
 hermes-agent/.github/
+
+# Sensitive or machine-local deployment files
 interface/data/interface.db
 interface/data/archive.db
 users_mapping.yaml
