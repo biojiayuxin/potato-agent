@@ -1,39 +1,44 @@
 # Interface
 
-`interface/` 是新的轻后端 + Lite 前端目录，目标是直接贴 Hermes 能力。
+`interface/` 是这个仓库里的轻量后端 + Lite 前端目录，负责把多用户 Hermes 运行时包装成统一的网页入口。
 
-当前实现：
+## 当前职责
 
 - 认证：使用 `interface` 自己的 SQLite 用户库
+- 注册：创建 signup job，由后台 worker 执行用户开通流程
 - 会话列表/消息：直接读取每个用户自己的 Hermes `state.db`
-- 聊天：直接代理对应用户 Hermes 的 `/v1/chat/completions`
-- 模型：直接代理对应用户 Hermes 的 `/v1/models`
+- 聊天：代理对应用户 Hermes 的 `/v1/chat/completions`
+- 模型：代理对应用户 Hermes 的 `/v1/models`
 - 文件树/下载/上传：由 `interface` 自己提供
-- 前端：迁移后的 Lite 页面位于 `interface/static/lite/`
+- 展示态消息：把页面展示用 transcript 持久化到 `interface.db`
+- 会话归档：后台定时把旧会话归档到 `archive.db`
+- 前端：Lite 页面位于 `interface/static/lite/`
 
 ## 目录
 
-- `app.py`：FastAPI 入口
-- `requirements.txt`：最小依赖
-- `static/lite/`：前端页面、样式、脚本、图标
+- `app.py`
+  FastAPI 入口；同时包含 signup worker 和归档调度逻辑
+- `auth_db.py`
+  网页用户、密码、signup jobs
+- `display_store.py`
+  页面展示态 transcript 持久化
+- `archive_store.py`
+  归档会话和归档运行记录
+- `mapping.py`
+  加载 `users_mapping.yaml` 并解析每用户 Hermes 目标
+- `hermes_service.py`
+  写入每用户 `~/.hermes/config.yaml`、`.env` 和 systemd service
+- `requirements.txt`
+  最小运行依赖
+- `static/lite/`
+  Lite 前端页面、样式、脚本、图标
 
 ## 依赖的数据源
 
 - `users_mapping.yaml`
 - `interface/data/interface.db`
+- `interface/data/archive.db`
 - 每用户 `~/.hermes/state.db`
-
-首次部署前，推荐先在仓库根目录运行：
-
-```bash
-/opt/interface-env/bin/python ./configure_hermes_model.py
-```
-
-这个脚本会创建或更新 `users_mapping.yaml` 里的模型配置，并交互式写入上游模型 `base_url`、默认模型名和 `API_KEY`。如果文件不存在，会自动创建空的 `users: []`；如果文件已存在，只会更新模型配置，不会改动用户信息。
-
-如果附加 `--apply-to-users`，脚本会在二次确认后把新配置下发到当前已映射用户，重写各自 `~/.hermes/config.yaml` / `.env`，并重启对应 Hermes service。
-
-首次部署完成 mapping 初始化后，建议先用下面的用户管理脚本创建首个可登录用户，再启动 `interface` 服务。
 
 ## 关键环境变量
 
@@ -43,93 +48,19 @@
 - `INTERFACE_SESSION_TTL_SECONDS`
 - `INTERFACE_MAX_UPLOAD_BYTES`
 - `INTERFACE_UPLOAD_DIR_NAME`
+- `INTERFACE_ARCHIVE_RETENTION_DAYS`
+- `INTERFACE_ARCHIVE_SCHEDULE_HOUR`
 
-## 用户管理
+说明：
 
-新增用户：
-
-```bash
-/opt/interface-env/bin/python ./provision_interface_user.py <username> <email> <password>
-```
-
-删除用户：
-
-```bash
-/opt/interface-env/bin/python ./deprovision_interface_user.py <username>
-```
-
-这两个脚本会直接维护：
-
-- `users_mapping.yaml`
-- `interface/data/interface.db`
-- per-user Linux 用户
-- per-user Hermes 配置和 systemd 服务
-
-绑定服务器上已存在的 Linux 用户：
-
-```bash
-/opt/interface-env/bin/python ./bind_existing_linux_user.py \
-  alice \
-  alice@example.com \
-  webpass123 \
-  --linux-user alice
-```
-
-这个脚本会：
-
-- 创建 interface 网页登录账号
-- 在 `users_mapping.yaml` 中增加映射
-- 直接复用现有 Linux 用户的 home 目录
-- 默认目录沿用当前规则：
-  - `~/.hermes`
-  - `~/work`
-- 为这个已有 Linux 用户安装并启动 Hermes service
-
-安全解绑已绑定的现有 Linux 用户：
-
-```bash
-/opt/interface-env/bin/python ./unbind_existing_linux_user.py alice
-```
-
-这个脚本会：
-
-- 删除 interface 网页账号
-- 删除 interface 展示态聊天记录
-- 删除 `users_mapping.yaml` 中的映射
-- 停止并移除对应 Hermes service
-
-但不会删除：
-
-- Linux 用户本身
-- home 目录
-- `.hermes`
-- `work` 目录
-
-## 启动
-
-使用仓库外的独立虚拟环境 `/opt/interface-env` 来启动 `interface`，避免把部署依赖混在开发目录里。
-
-首次创建环境：
-
-```bash
-python3 -m venv /opt/interface-env
-/opt/interface-env/bin/pip install -r ./interface/requirements.txt
-```
-
-```bash
-/opt/interface-env/bin/python -m uvicorn interface.app:app --host 0.0.0.0 --port 3000
-```
-
-当前架构下，`interface` 进程建议由 root 的 systemd 服务启动。原因是它需要读取各用户 `700` 权限的 home、`work`、`.hermes/state.db`，并在注册或开通用户时管理 Linux 用户和 systemd 服务。
-
-启动后访问：
-
-```text
-http://<host>:3000/lite
-```
+- 如果不设置 `INTERFACE_SESSION_SECRET`，进程启动时会临时生成一个随机值；生产环境通常应该固定它
+- 上传文件会保存到每用户工作区下的 `.<INTERFACE_UPLOAD_DIR_NAME>` 目录，默认是 `.potato-interface-uploads/`
 
 ## 当前边界
 
 - Hermes 当前在线只开了 API server，没开 `web_server`，所以会话列表不是走 Hermes HTTP，而是直接读 `state.db`
-- 附件上传保存到每用户 `workdir` 下的 `.potato-interface-uploads/`
+- `interface` 当前默认假设自己能够读取各用户的 home、`work` 和 `.hermes/state.db`
+- signup worker 会调用系统级用户开通逻辑；如果进程权限不足，注册任务会失败
 - `users_mapping.yaml` 里仍保留一些历史 `openwebui_*` 字段；`interface` 运行时不会使用它们
+
+部署方式、systemd 启动、模型配置和根目录用户管理脚本的具体用法，请看仓库根目录 `README.md`。
