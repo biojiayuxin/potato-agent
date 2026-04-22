@@ -13,7 +13,6 @@ from interface.hermes_service import (
     install_user_files,
     require_binary,
     require_root,
-    wait_for_hermes_models,
 )
 from interface.mapping import (
     DEFAULT_MODEL_NAME,
@@ -120,8 +119,6 @@ def main() -> int:
         db_path=auth_db_path,
     )
 
-    models = wait_for_hermes_models(target.api_key, target.api_server_host, target.api_port)
-
     print(f"Bound existing Linux user: {linux_user}")
     print(f"Interface user: {username}")
     print(f"Email: {email}")
@@ -131,7 +128,7 @@ def main() -> int:
     print(f"Hermes home: {target.hermes_home}")
     print(f"Hermes service: {target.systemd_service}")
     print(f"Hermes endpoint: {target.connection_url}")
-    print(f"Hermes models: {models}")
+    print("Hermes runtime start: deferred until the user enters the workspace")
     return 0
 
 

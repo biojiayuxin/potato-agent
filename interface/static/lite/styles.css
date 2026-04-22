@@ -268,6 +268,58 @@ button {
   padding: 6px 0 2px;
 }
 
+.runtime-start-view {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 14px;
+  padding: 6px 0 2px;
+}
+
+.runtime-start-spinner {
+  width: 54px;
+  height: 54px;
+  border-radius: 18px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  background: rgba(91, 140, 255, 0.1);
+  border: 1px solid rgba(91, 140, 255, 0.18);
+}
+
+.runtime-start-spinner span {
+  width: 7px;
+  height: 7px;
+  border-radius: 999px;
+  background: var(--primary);
+  opacity: 0.28;
+  animation: liteEllipsisPulse 1.1s infinite ease-in-out;
+}
+
+.runtime-start-spinner span:nth-child(2) {
+  animation-delay: 0.14s;
+}
+
+.runtime-start-spinner span:nth-child(3) {
+  animation-delay: 0.28s;
+}
+
+.runtime-start-view h3 {
+  margin: 0;
+  font-size: 22px;
+  line-height: 1.2;
+}
+
+.runtime-start-view p {
+  margin: 0;
+  line-height: 1.6;
+}
+
+.runtime-start-actions {
+  width: 100%;
+}
+
 .signup-wait-kicker {
   font-size: 11px;
   line-height: 1.3;
@@ -444,6 +496,7 @@ button.stretch {
   color: var(--danger);
   font-size: 13px;
   line-height: 1.5;
+  white-space: pre-wrap;
 }
 
 .chat-error {

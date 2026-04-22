@@ -1,5 +1,6 @@
 const state = {
   user: null,
+  pendingWorkspaceUser: null,
   models: [],
   selectedModel: null,
   sessions: [],
@@ -41,6 +42,12 @@ const dom = {
   signupWaitSteps: document.getElementById('signup-wait-steps'),
   signupGoLoginButton: document.getElementById('signup-go-login-button'),
   signupBackButton: document.getElementById('signup-back-button'),
+  runtimeStartView: document.getElementById('runtime-start-view'),
+  runtimeStartTitle: document.getElementById('runtime-start-title'),
+  runtimeStartCopy: document.getElementById('runtime-start-copy'),
+  runtimeStartError: document.getElementById('runtime-start-error'),
+  runtimeStartRetryButton: document.getElementById('runtime-start-retry-button'),
+  runtimeStartBackButton: document.getElementById('runtime-start-back-button'),
   chatError: document.getElementById('chat-error'),
   chatList: document.getElementById('chat-list'),
   messages: document.getElementById('messages'),
@@ -279,6 +286,7 @@ const setAuthViewMode = (mode) => {
   const showSignin = mode === 'signin';
   const showRegister = mode === 'register';
   const showWait = mode === 'signup-wait';
+  const showRuntimeStart = mode === 'runtime-start';
 
   if (showSignin) {
     dom.authCardLabel.textContent = 'Sign in';
@@ -298,16 +306,90 @@ const setAuthViewMode = (mode) => {
     dom.authCardCopy.textContent = 'Please wait while your dedicated runtime is being provisioned.';
   }
 
+  if (showRuntimeStart) {
+    dom.authCardLabel.textContent = 'Starting runtime';
+    dom.authCardTitle.textContent = 'Waking your workspace';
+    dom.authCardCopy.textContent = 'We are starting the Hermes service bound to your account before entering the workspace.';
+  }
+
   dom.loginForm.hidden = !showSignin;
   dom.showRegisterButton.hidden = !showSignin;
   dom.registerForm.hidden = !showRegister;
   dom.registerNavActions.hidden = !showRegister;
   dom.signupWaitView.hidden = !showWait;
+  dom.runtimeStartView.hidden = !showRuntimeStart;
   if (showSignin) {
     showError(dom.loginError, '');
   }
   if (showRegister) {
     showError(dom.registerError, '');
+  }
+};
+
+const resetWorkspaceState = () => {
+  state.sessions = [];
+  state.activeSession = null;
+  state.activeSessionId = null;
+  state.draftSession = null;
+  state.messages = [];
+  state.models = [];
+  state.selectedModel = null;
+  state.rootPath = '';
+  state.currentPath = '';
+  state.expandedPaths = new Set();
+  state.treeCache.clear();
+  state.streamingMessageIds.clear();
+  state.pendingAttachments = [];
+  state.currentAbortController = null;
+  state.isSending = false;
+};
+
+const setRuntimeStartState = ({ title, copy, error, canRetry, canBack }) => {
+  if (title) dom.runtimeStartTitle.textContent = title;
+  if (copy) dom.runtimeStartCopy.textContent = copy;
+  showError(dom.runtimeStartError, error || '');
+  dom.runtimeStartRetryButton.hidden = !canRetry;
+  dom.runtimeStartBackButton.hidden = !canBack;
+};
+
+const showRuntimeStartView = ({ title, copy, error = '', canRetry = false, canBack = false }) => {
+  showLogin();
+  setAuthViewMode('runtime-start');
+  setRuntimeStartState({ title, copy, error, canRetry, canBack });
+};
+
+const startWorkspaceRuntime = async (user, { allowRetry = true, source = 'signin' } = {}) => {
+  state.pendingWorkspaceUser = user || null;
+  showRuntimeStartView({
+    title: 'Starting your Hermes runtime',
+    copy: 'We are waking the dedicated Hermes service bound to your account. This usually takes a few seconds.',
+    error: '',
+    canRetry: false,
+    canBack: false,
+  });
+
+  try {
+    const response = await api('/api/runtime/start', { method: 'POST' });
+    const json = await response.json();
+    state.user = json?.user || user;
+    state.pendingWorkspaceUser = null;
+    resetWorkspaceState();
+    showWorkspace();
+    renderWorkspace();
+    await initializeWorkspaceData();
+  } catch (error) {
+    state.user = null;
+    resetWorkspaceState();
+    const message = String(error.message || 'Failed to start Hermes runtime');
+    showRuntimeStartView({
+      title: 'Failed to start your Hermes runtime',
+      copy: source === 'restore'
+        ? 'The previous session is valid, but the Hermes runtime could not be started. Review the error below before retrying.'
+        : 'Sign-in succeeded, but the Hermes runtime could not be started. Review the error below before retrying.',
+      error: message,
+      canRetry: allowRetry,
+      canBack: true,
+    });
   }
 };
 
@@ -1840,17 +1922,14 @@ const bootstrapSession = async () => {
     if (!json?.authenticated || !json?.user) {
       throw new Error('Not authenticated');
     }
-    state.user = json.user;
-    showWorkspace();
-    renderWorkspace();
-    await initializeWorkspaceData();
+    await startWorkspaceRuntime(json.user, { allowRetry: true, source: 'restore' });
+    if (state.user) {
+      return;
+    }
   } catch {
     state.user = null;
-    state.sessions = [];
-    state.activeSession = null;
-    state.activeSessionId = null;
-    state.draftSession = null;
-    state.messages = [];
+    state.pendingWorkspaceUser = null;
+    resetWorkspaceState();
     showLogin();
   } finally {
     bootstrapInFlight = false;
@@ -1870,16 +1949,8 @@ dom.loginForm.addEventListener('submit', async (event) => {
       method: 'POST',
       body: JSON.stringify({ email, password }),
     });
-    state.user = await response.json();
-    state.sessions = [];
-    state.activeSession = null;
-    state.activeSessionId = null;
-    state.draftSession = null;
-    state.messages = [];
-    state.pendingAttachments = [];
-    showWorkspace();
-    renderWorkspace();
-    await initializeWorkspaceData();
+    const user = await response.json();
+    await startWorkspaceRuntime(user, { allowRetry: true, source: 'signin' });
   } catch (error) {
     const message = String(error.message || 'Sign-in failed');
     showError(
@@ -1964,11 +2035,38 @@ dom.logoutButton.addEventListener('click', async () => {
     // Ignore logout transport failures and still clear the UI state.
   }
   state.user = null;
-  state.sessions = [];
-  state.activeSession = null;
-  state.activeSessionId = null;
-  state.draftSession = null;
-  state.messages = [];
+  state.pendingWorkspaceUser = null;
+  resetWorkspaceState();
+  showLogin();
+});
+
+dom.runtimeStartRetryButton.addEventListener('click', async () => {
+  if (loginInFlight || bootstrapInFlight) return;
+  const pendingUser = state.pendingWorkspaceUser;
+  if (!pendingUser) {
+    showLogin();
+    return;
+  }
+
+  try {
+    setLoginPending(true);
+    await startWorkspaceRuntime(pendingUser, { allowRetry: true, source: 'retry' });
+  } catch {
+    // Error already rendered inside startWorkspaceRuntime.
+  } finally {
+    setLoginPending(false);
+  }
+});
+
+dom.runtimeStartBackButton.addEventListener('click', async () => {
+  try {
+    await api('/api/auth/signout', { method: 'POST' });
+  } catch {
+    // Ignore logout transport failures and still clear UI state.
+  }
+  state.user = null;
+  state.pendingWorkspaceUser = null;
+  resetWorkspaceState();
   showLogin();
 });
 

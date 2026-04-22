@@ -10,6 +10,7 @@ from urllib.parse import urlparse
 
 from interface.hermes_service import DEFAULT_HERMES_BIN, DEFAULT_TERMINAL_TIMEOUT
 from interface.hermes_service import (
+    is_service_active,
     install_user_files,
     require_binary,
     require_root,
@@ -337,9 +338,15 @@ def apply_model_config_to_users(
     for target in targets:
         print(f"Applying config for user: {target.username}")
         install_user_files(resolved_config, target)
-        restart_service(target.systemd_service)
-        wait_for_hermes_models(target.api_key, target.api_server_host, target.api_port)
-        print(f"Restarted Hermes service: {target.systemd_service}")
+        if is_service_active(target.systemd_service):
+            restart_service(target.systemd_service)
+            wait_for_hermes_models(target.api_key, target.api_server_host, target.api_port)
+            print(f"Restarted Hermes service: {target.systemd_service}")
+        else:
+            print(
+                f"Updated config for stopped runtime: {target.systemd_service} "
+                "(will apply on next workspace login)"
+            )
 
 
 def extract_current_values(config: dict) -> tuple[str | None, str | None, str | None]:

@@ -99,6 +99,27 @@
   - 安全解绑一个已绑定的现有 Linux 用户
   - 不删除 Linux 用户本身，不删除 home 目录
 
+### 8. Hermes 运行时已改为登录按需启动
+
+- 注册或绑定用户时：
+  - 只创建网页账号、Linux 用户映射、`~/.hermes` 配置和 systemd unit
+  - 不再立即拉起该用户的 Hermes service
+- 用户登录网页工作台时：
+  - `interface` 会显式启动对应用户的 Hermes service
+  - 等待 `/v1/models` 就绪后才进入聊天页面
+- Lite 登录页已新增运行时启动过渡态：
+  - 显示 `Starting your Hermes runtime`
+  - 启动成功后再进入 workspace
+- 如果 Hermes service 启动失败：
+  - 前端会直接展示后端返回的调试错误
+  - 错误中包含 `systemctl status` / `journalctl` 片段，便于排障
+- 为后续空闲休眠机制做了结构预留：
+  - `interface` 侧已新增显式运行时启动入口
+  - 后续可以在此基础上实现“30 分钟无用户消息则停止服务并回到登录页”
+- 模型配置批量下发时：
+  - 只重启当前正在运行的 Hermes service
+  - 已停止的用户实例会在下次登录工作台时自动应用新配置
+
 ## 当前运行约定
 
 - Hermes 命令入口：`/usr/local/bin/hermes`

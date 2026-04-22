@@ -62,10 +62,10 @@ from interface.display_store import (
 )
 from interface.mapping import DEFAULT_MAPPING_PATH, HermesTarget, MappingStore
 from interface.hermes_service import (
+    ensure_service_ready,
     install_user_files,
     remove_linux_user,
     stop_and_remove_service,
-    wait_for_hermes_models,
 )
 from interface.mapping import (
     load_mapping,
@@ -186,9 +186,6 @@ async def _signup_worker_loop() -> None:
                 raise RuntimeError("Failed to resolve newly created mapping target.")
 
             install_user_files(resolved_config, target)
-            wait_for_hermes_models(
-                target.api_key, target.api_server_host, target.api_port
-            )
             activate_signup_user(job_id, mapping_username=username)
             set_signup_job_status(job_id, status="completed")
         except Exception as exc:
@@ -853,6 +850,19 @@ async def auth_session(request: Request) -> dict[str, Any]:
         target=target,
     )
     return {"authenticated": True, "user": _serialize_user(user)}
+
+
+@app.post("/api/runtime/start")
+async def start_runtime(user: CurrentUser = Depends(get_current_user)) -> dict[str, Any]:
+    try:
+        runtime = await asyncio.to_thread(ensure_service_ready, user.target)
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    return {
+        "ok": True,
+        "runtime": runtime,
+        "user": _serialize_user(user),
+    }
 
 
 @app.get("/api/status")

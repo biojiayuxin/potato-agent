@@ -108,6 +108,22 @@
                   <button id="signup-back-button" type="button" class="ghost login-secondary-button" hidden>Back to register</button>
                 </div>
               </div>
+
+              <div id="runtime-start-view" class="runtime-start-view" hidden>
+                <div class="signup-wait-kicker">Runtime startup</div>
+                <div class="runtime-start-spinner" aria-hidden="true">
+                  <span></span><span></span><span></span>
+                </div>
+                <h3 id="runtime-start-title">Starting your Hermes runtime</h3>
+                <p id="runtime-start-copy" class="muted">
+                  We are waking the dedicated Hermes service bound to your account. This usually takes a few seconds.
+                </p>
+                <div id="runtime-start-error" class="error" hidden></div>
+                <div class="login-secondary-actions runtime-start-actions">
+                  <button id="runtime-start-retry-button" type="button" class="primary login-secondary-button" hidden>Try again</button>
+                  <button id="runtime-start-back-button" type="button" class="ghost login-secondary-button" hidden>Back to sign in</button>
+                </div>
+              </div>
             </div>
           </div>
         </div>

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import fcntl
 import json
 import os
 import shutil
@@ -19,6 +20,8 @@ DEFAULT_HERMES_BIN = "/usr/local/bin/hermes"
 DEFAULT_SERVICE_RESTART = "always"
 DEFAULT_SERVICE_RESTART_SEC = 3
 DEFAULT_TERMINAL_TIMEOUT = 180
+DEFAULT_RUNTIME_READY_TIMEOUT = 45
+DEFAULT_RUNTIME_LOCK_DIR = Path("/run/potato-agent/runtime-start")
 
 
 def _run_command(command: list[str]) -> str:
@@ -31,6 +34,10 @@ def _run_command(command: list[str]) -> str:
         )
         raise RuntimeError(f"Command failed ({' '.join(command)}): {detail}")
     return result.stdout
+
+
+def _run_command_result(command: list[str]) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(command, capture_output=True, text=True, check=False)
 
 
 def require_root() -> None:
@@ -202,11 +209,27 @@ def install_user_files(config: dict[str, Any], user: HermesTarget) -> None:
     os.chmod(service_path, 0o644)
 
     _run_command(["systemctl", "daemon-reload"])
-    _run_command(["systemctl", "enable", "--now", user.systemd_service])
+    # Keep per-user Hermes services disabled by default so the interface can
+    # wake them on demand when a user enters the workspace.
+    subprocess.run(
+        ["systemctl", "disable", user.systemd_service],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
 
 
 def restart_service(service_name: str) -> None:
     _run_command(["systemctl", "restart", service_name])
+
+
+def start_service(service_name: str) -> None:
+    _run_command(["systemctl", "start", service_name])
+
+
+def is_service_active(service_name: str) -> bool:
+    result = _run_command_result(["systemctl", "is-active", service_name])
+    return result.returncode == 0 and result.stdout.strip() == "active"
 
 
 def stop_and_remove_service(service_name: str) -> None:
@@ -244,7 +267,7 @@ def wait_for_hermes_models(
     host: str,
     port: int,
     *,
-    timeout_seconds: int = 45,
+    timeout_seconds: int = DEFAULT_RUNTIME_READY_TIMEOUT,
 ) -> dict[str, Any]:
     deadline = time.time() + timeout_seconds
     last_error = "unknown error"
@@ -260,3 +283,70 @@ def wait_for_hermes_models(
 def require_binary(name: str) -> None:
     if not shutil.which(name):
         raise RuntimeError(f"{name} is required.")
+
+
+def _collect_service_debug_info(service_name: str) -> str:
+    sections: list[str] = []
+    commands = [
+        (["systemctl", "is-active", service_name], "systemctl is-active"),
+        (
+            ["systemctl", "status", "--no-pager", "--full", service_name],
+            "systemctl status",
+        ),
+        (
+            ["journalctl", "-u", service_name, "-n", "60", "--no-pager"],
+            "journalctl -u",
+        ),
+    ]
+    for command, label in commands:
+        result = _run_command_result(command)
+        output = (result.stdout or "").strip()
+        stderr = (result.stderr or "").strip()
+        body = output or stderr or f"exit code {result.returncode}"
+        sections.append(f"[{label}]\n{body}")
+    return "\n\n".join(sections).strip()
+
+
+def ensure_service_ready(
+    user: HermesTarget,
+    *,
+    timeout_seconds: int = DEFAULT_RUNTIME_READY_TIMEOUT,
+) -> dict[str, Any]:
+    require_binary("systemctl")
+    DEFAULT_RUNTIME_LOCK_DIR.mkdir(parents=True, exist_ok=True)
+    os.chmod(DEFAULT_RUNTIME_LOCK_DIR, 0o700)
+    lock_path = DEFAULT_RUNTIME_LOCK_DIR / f"{user.systemd_service}.lock"
+
+    with lock_path.open("a+", encoding="utf-8") as handle:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+        was_active = is_service_active(user.systemd_service)
+        if not was_active:
+            start_service(user.systemd_service)
+        try:
+            wait_for_hermes_models(
+                user.api_key,
+                user.api_server_host,
+                user.api_port,
+                timeout_seconds=timeout_seconds,
+            )
+        except Exception as exc:
+            debug_info = _collect_service_debug_info(user.systemd_service)
+            detail = (
+                f"Failed to start Hermes runtime for {user.username}.\n"
+                f"Service: {user.systemd_service}\n"
+                f"Endpoint: {user.connection_url}\n"
+                f"Error: {exc}"
+            )
+            if debug_info:
+                detail = f"{detail}\n\n{debug_info}"
+            raise RuntimeError(detail) from exc
+        finally:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+
+    return {
+        "status": "ready",
+        "started": not was_active,
+        "service_name": user.systemd_service,
+        "api_base_url": user.api_base_url,
+        "connection_url": user.connection_url,
+    }
