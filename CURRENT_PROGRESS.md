@@ -120,6 +120,31 @@
   - 只重启当前正在运行的 Hermes service
   - 已停止的用户实例会在下次登录工作台时自动应用新配置
 
+### 9. 已接入运行时空闲休眠与任务保护
+
+- `interface` 已新增运行时状态存储：
+  - 记录 `runtime_started_at`
+  - 记录 `last_user_message_at`
+  - 记录后台任务活跃时间
+  - 记录登录态撤销时间
+- 当前空闲休眠策略：
+  - 默认 30 分钟未收到新的用户消息时，允许进入休眠判定
+  - 后台调度器按固定周期检查各用户运行时
+- 前台长任务保护：
+  - `POST /api/chat/completions` 会创建 `foreground_chat lease`
+  - 即使前台长时间没有新输出，只要该请求未结束，就不会触发休眠
+- 后台任务保护：
+  - `interface` 会旁路读取每个用户 `~/.hermes/processes.json`
+  - 只要 Hermes 仍登记有活跃后台进程，就不会停止该用户 Hermes service
+  - 后台任务运行期间会持续刷新后台活跃时间
+  - 后台任务结束后，会从最后一次后台活跃时间重新开始计算空闲超时，不会在任务刚结束时立刻踢下线
+- 安全策略：
+  - 如果 `processes.json` 读取或解析失败，采用 fail-open
+  - 即该轮跳过休眠，避免误杀长后台任务
+- 会话回收：
+  - 当运行时满足空闲休眠条件并被停止后，当前网页登录态会失效
+  - 前端会轮询 `/api/auth/session`，在 idle timeout 后自动回到登录页
+
 ## 当前运行约定
 
 - Hermes 命令入口：`/usr/local/bin/hermes`
