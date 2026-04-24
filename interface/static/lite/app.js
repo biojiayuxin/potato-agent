@@ -17,6 +17,7 @@ const state = {
   isSending: false,
   currentAbortController: null,
   chatErrorTimer: null,
+  authPollTimer: null,
   signupJobId: null,
   signupPollTimer: null,
 };
@@ -80,6 +81,7 @@ const SIDEBAR_WIDTH_KEY = 'lite_sidebar_width';
 const FILES_WIDTH_KEY = 'lite_files_width';
 const THEME_MODE_KEY = 'lite_theme_mode';
 const MAX_ATTACHMENT_SIZE_BYTES = 20 * 1024 * 1024;
+const AUTH_POLL_INTERVAL_MS = 60 * 1000;
 const ATTACHMENT_BLOCK_START = '<potato-files>';
 const ATTACHMENT_BLOCK_END = '</potato-files>';
 const ATTACHMENT_HINT_LINE = 'Use the attachment local paths above if you need to inspect the files.';
@@ -261,6 +263,22 @@ const showChatError = (message) => {
   }, 10000);
 };
 
+const stopAuthPolling = () => {
+  if (state.authPollTimer) {
+    window.clearTimeout(state.authPollTimer);
+    state.authPollTimer = null;
+  }
+};
+
+const handleSessionExpired = (message) => {
+  stopAuthPolling();
+  state.user = null;
+  state.pendingWorkspaceUser = null;
+  resetWorkspaceState();
+  showLogin();
+  showError(dom.loginError, message || 'Workspace slept after 30 minutes of inactivity. Please sign in again.');
+};
+
 const setLoginPending = (pending) => {
   loginInFlight = pending;
   const submitButton = dom.loginForm.querySelector('button[type="submit"]');
@@ -377,6 +395,7 @@ const startWorkspaceRuntime = async (user, { allowRetry = true, source = 'signin
     showWorkspace();
     renderWorkspace();
     await initializeWorkspaceData();
+    startAuthPolling();
   } catch (error) {
     state.user = null;
     resetWorkspaceState();
@@ -391,6 +410,35 @@ const startWorkspaceRuntime = async (user, { allowRetry = true, source = 'signin
       canBack: true,
     });
   }
+};
+
+const pollAuthSession = async () => {
+  stopAuthPolling();
+  if (!state.user) return;
+
+  try {
+    const response = await fetch('/api/auth/session', {
+      method: 'GET',
+      credentials: 'include',
+    });
+    const json = await response.json();
+    if (!json?.authenticated) {
+      handleSessionExpired(
+        json?.message || 'Workspace slept after 30 minutes of inactivity. Please sign in again.'
+      );
+      return;
+    }
+  } catch {
+    // Ignore transient polling failures and try again later.
+  }
+
+  state.authPollTimer = window.setTimeout(pollAuthSession, AUTH_POLL_INTERVAL_MS);
+};
+
+const startAuthPolling = () => {
+  stopAuthPolling();
+  if (!state.user) return;
+  state.authPollTimer = window.setTimeout(pollAuthSession, AUTH_POLL_INTERVAL_MS);
 };
 
 const applySignupJobState = (job) => {
@@ -464,12 +512,16 @@ const api = async (path, options = {}) => {
 
   if (!response.ok) {
     let detail = `Request failed: ${response.status}`;
+    let payload = null;
     try {
-      const json = await response.json();
-      detail = json?.detail || json?.error?.message || json?.error || detail;
+      payload = await response.json();
+      detail = payload?.detail || payload?.message || payload?.error?.message || payload?.error || detail;
     } catch {
       const text = await response.text().catch(() => '');
       if (text) detail = text;
+    }
+    if ((response.status === 401 || response.status === 403) && (payload?.reason === 'idle_timeout' || /Workspace slept/i.test(detail) || /Please sign in again/i.test(detail))) {
+      handleSessionExpired(payload?.message || detail);
     }
     throw new Error(detail);
   }
@@ -1927,6 +1979,7 @@ const bootstrapSession = async () => {
       return;
     }
   } catch {
+    stopAuthPolling();
     state.user = null;
     state.pendingWorkspaceUser = null;
     resetWorkspaceState();
@@ -2024,6 +2077,7 @@ dom.signupBackButton.addEventListener('click', () => {
 
 dom.logoutButton.addEventListener('click', async () => {
   state.pendingAttachments = [];
+  stopAuthPolling();
   if (state.chatErrorTimer) {
     window.clearTimeout(state.chatErrorTimer);
     state.chatErrorTimer = null;
@@ -2059,6 +2113,7 @@ dom.runtimeStartRetryButton.addEventListener('click', async () => {
 });
 
 dom.runtimeStartBackButton.addEventListener('click', async () => {
+  stopAuthPolling();
   try {
     await api('/api/auth/signout', { method: 'POST' });
   } catch {

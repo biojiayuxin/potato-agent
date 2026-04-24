@@ -40,6 +40,7 @@ from interface.auth_db import (
     get_signup_job,
     get_user_by_id,
     get_user_with_password_by_login,
+    list_users,
     set_signup_job_status,
     username_exists,
     verify_password,
@@ -52,6 +53,7 @@ from interface.archive_store import (
     list_archive_runs,
     start_archive_run,
 )
+from interface.background_jobs import has_active_background_processes
 from interface.display_store import (
     delete_display_messages,
     ensure_display_store,
@@ -64,8 +66,27 @@ from interface.mapping import DEFAULT_MAPPING_PATH, HermesTarget, MappingStore
 from interface.hermes_service import (
     ensure_service_ready,
     install_user_files,
+    is_service_active,
     remove_linux_user,
+    service_operation_lock,
+    stop_service,
     stop_and_remove_service,
+)
+from interface.runtime_state import (
+    FOREGROUND_CHAT_LEASE,
+    cleanup_expired_runtime_leases,
+    clear_session_revocation,
+    create_runtime_lease,
+    ensure_runtime_state_store,
+    get_runtime_state,
+    has_active_runtime_leases,
+    heartbeat_runtime_lease,
+    list_idle_runtime_candidates,
+    mark_background_activity,
+    mark_runtime_started,
+    mark_user_message_activity,
+    release_runtime_lease,
+    revoke_runtime_session,
 )
 from interface.mapping import (
     load_mapping,
@@ -79,7 +100,7 @@ ROOT_DIR = Path(__file__).resolve().parent
 REPO_ROOT = ROOT_DIR.parent
 STATIC_DIR = ROOT_DIR / "static"
 LITE_DIR = STATIC_DIR / "lite"
-FAVICON_PATH = STATIC_DIR / "favicon.ico"
+FAVICON_PATH = STATIC_DIR / "favicon.png"
 SESSION_COOKIE_NAME = "potato_interface_token"
 SESSION_SECRET = os.getenv("INTERFACE_SESSION_SECRET") or secrets.token_urlsafe(32)
 SESSION_TTL_SECONDS = int(
@@ -91,6 +112,18 @@ MAX_UPLOAD_SIZE_BYTES = int(
 UPLOAD_DIR_NAME = os.getenv("INTERFACE_UPLOAD_DIR_NAME", ".potato-interface-uploads")
 ARCHIVE_RETENTION_DAYS = int(os.getenv("INTERFACE_ARCHIVE_RETENTION_DAYS", "7"))
 ARCHIVE_SCHEDULE_HOUR = int(os.getenv("INTERFACE_ARCHIVE_SCHEDULE_HOUR", "3"))
+RUNTIME_IDLE_TIMEOUT_SECONDS = int(
+    os.getenv("INTERFACE_RUNTIME_IDLE_TIMEOUT_SECONDS", str(30 * 60))
+)
+RUNTIME_IDLE_CHECK_INTERVAL_SECONDS = int(
+    os.getenv("INTERFACE_RUNTIME_IDLE_CHECK_INTERVAL_SECONDS", "60")
+)
+FOREGROUND_CHAT_LEASE_TTL_SECONDS = int(
+    os.getenv("INTERFACE_FOREGROUND_CHAT_LEASE_TTL_SECONDS", "90")
+)
+FOREGROUND_CHAT_HEARTBEAT_INTERVAL_SECONDS = int(
+    os.getenv("INTERFACE_FOREGROUND_CHAT_HEARTBEAT_INTERVAL_SECONDS", "15")
+)
 FILENAME_SANITIZE_RE = re.compile(r"[^A-Za-z0-9._-]+")
 
 HERMES_SRC = REPO_ROOT / "hermes-agent"
@@ -265,19 +298,43 @@ def _serialize_user(user: CurrentUser) -> dict[str, Any]:
     }
 
 
-async def get_current_user(request: Request) -> CurrentUser:
+def _revocation_message(reason: str) -> str:
+    if reason == "idle_timeout":
+        return "Workspace slept after 30 minutes of inactivity. Please sign in again."
+    return "Session expired"
+
+
+def _session_revocation_payload(reason: str) -> dict[str, Any]:
+    return {
+        "authenticated": False,
+        "reason": reason,
+        "message": _revocation_message(reason),
+    }
+
+
+def _resolve_current_user(request: Request) -> tuple[CurrentUser | None, str | None]:
     token = _extract_request_token(request)
     if not token:
-        raise HTTPException(status_code=401, detail="Not authenticated")
+        return None, None
 
     decoded = _decode_session_token(token)
-    user_id = str((decoded or {}).get("sub") or "").strip()
-    if not user_id:
-        raise HTTPException(status_code=401, detail="Invalid session")
+    if not isinstance(decoded, dict):
+        return None, None
 
+    user_id = str(decoded.get("sub") or "").strip()
+    if not user_id:
+        return None, None
+
+    issued_at = int(decoded.get("iat") or 0)
     record = get_user_by_id(user_id)
     if record is None or not record.active:
-        raise HTTPException(status_code=401, detail="Session expired")
+        return None, None
+
+    runtime_state = get_runtime_state(record.id)
+    revoked_after = int((runtime_state or {}).get("session_revoked_after") or 0)
+    revoked_reason = str((runtime_state or {}).get("last_sleep_reason") or "").strip()
+    if revoked_after and issued_at <= revoked_after:
+        return None, revoked_reason or "idle_timeout"
 
     target = mapping_store.resolve_target(
         mapping_username=record.mapping_username,
@@ -285,19 +342,29 @@ async def get_current_user(request: Request) -> CurrentUser:
         username=record.username,
     )
     if target is None:
-        raise HTTPException(
-            status_code=403, detail="No Hermes runtime is mapped to this user"
-        )
+        return None, None
 
-    return CurrentUser(
-        id=record.id,
-        email=record.email,
-        username=record.username,
-        name=record.name,
-        role=record.role,
-        mapping_username=record.mapping_username,
-        target=target,
+    return (
+        CurrentUser(
+            id=record.id,
+            email=record.email,
+            username=record.username,
+            name=record.name,
+            role=record.role,
+            mapping_username=record.mapping_username,
+            target=target,
+        ),
+        None,
     )
+
+
+async def get_current_user(request: Request) -> CurrentUser:
+    user, revoked_reason = _resolve_current_user(request)
+    if user is None and revoked_reason:
+        raise HTTPException(status_code=401, detail=_revocation_message(revoked_reason))
+    if user is None:
+        raise HTTPException(status_code=401, detail="Not authenticated")
+    return user
 
 
 def _ensure_resolved_within_root(root: Path, path: str | None) -> Path:
@@ -669,8 +736,6 @@ def _build_fallback_display_messages(
 
 
 async def _archive_expired_sessions_once() -> None:
-    from interface.auth_db import list_users
-
     run_id = start_archive_run()
     archived_count = 0
     try:
@@ -750,6 +815,79 @@ async def _archive_scheduler_loop() -> None:
             pass
 
 
+async def _foreground_chat_lease_heartbeat(lease_id: str) -> None:
+    try:
+        while True:
+            await asyncio.sleep(max(FOREGROUND_CHAT_HEARTBEAT_INTERVAL_SECONDS, 1))
+            renewed = await asyncio.to_thread(
+                heartbeat_runtime_lease,
+                lease_id,
+                ttl_seconds=FOREGROUND_CHAT_LEASE_TTL_SECONDS,
+            )
+            if not renewed:
+                return
+    except asyncio.CancelledError:
+        raise
+
+
+async def _runtime_idle_scheduler_loop() -> None:
+    while True:
+        await asyncio.sleep(max(RUNTIME_IDLE_CHECK_INTERVAL_SECONDS, 5))
+        try:
+            await asyncio.to_thread(cleanup_expired_runtime_leases)
+            candidates = await asyncio.to_thread(
+                list_idle_runtime_candidates,
+                idle_timeout_seconds=RUNTIME_IDLE_TIMEOUT_SECONDS,
+            )
+            if not candidates:
+                continue
+
+            users_by_id = {user.id: user for user in list_users()}
+            for candidate in candidates:
+                auth_user = users_by_id.get(str(candidate.get("user_id") or ""))
+                if auth_user is None:
+                    continue
+                target = mapping_store.resolve_target(
+                    mapping_username=auth_user.mapping_username,
+                    email=auth_user.email,
+                    username=auth_user.username,
+                )
+                if target is None:
+                    continue
+
+                def _stop_if_idle() -> None:
+                    with service_operation_lock(target.systemd_service):
+                        cleanup_expired_runtime_leases()
+                        if has_active_runtime_leases(auth_user.id):
+                            return
+                        try:
+                            if has_active_background_processes(target):
+                                mark_background_activity(auth_user.id)
+                                return
+                        except Exception:
+                            # Fail open: if we cannot read or validate Hermes' process
+                            # registry, keep the runtime alive rather than risk killing
+                            # a long-running background task.
+                            return
+                        if not target.systemd_service or not os.path.exists(
+                            f"/etc/systemd/system/{target.systemd_service}"
+                        ):
+                            return
+                        if not target.systemd_service or not target.username:
+                            return
+                        if not is_service_active(target.systemd_service):
+                            return
+                        stop_service(target.systemd_service)
+                        revoke_runtime_session(
+                            auth_user.id,
+                            reason="idle_timeout",
+                        )
+
+                await asyncio.to_thread(_stop_if_idle)
+        except Exception:
+            pass
+
+
 def _sanitize_filename(filename: str) -> str:
     base = Path(filename or "upload.bin").name
     cleaned = FILENAME_SANITIZE_RE.sub("_", base).strip("._")
@@ -787,9 +925,13 @@ async def on_startup() -> None:
     ensure_auth_db()
     ensure_display_store()
     ensure_archive_db()
+    ensure_runtime_state_store()
     app.state.http = httpx.AsyncClient(timeout=httpx.Timeout(60.0, read=None))
     app.state.archive_scheduler_task = asyncio.create_task(_archive_scheduler_loop())
     app.state.signup_worker_task = asyncio.create_task(_signup_worker_loop())
+    app.state.runtime_idle_scheduler_task = asyncio.create_task(
+        _runtime_idle_scheduler_loop()
+    )
 
 
 @app.on_event("shutdown")
@@ -800,6 +942,11 @@ async def on_shutdown() -> None:
     signup_worker_task = getattr(app.state, "signup_worker_task", None)
     if signup_worker_task is not None:
         signup_worker_task.cancel()
+    runtime_idle_scheduler_task = getattr(
+        app.state, "runtime_idle_scheduler_task", None
+    )
+    if runtime_idle_scheduler_task is not None:
+        runtime_idle_scheduler_task.cancel()
     client: httpx.AsyncClient | None = getattr(app.state, "http", None)
     if client is not None:
         await client.aclose()
@@ -819,36 +966,11 @@ async def favicon() -> FileResponse:
 
 @app.get("/api/auth/session")
 async def auth_session(request: Request) -> dict[str, Any]:
-    token = _extract_request_token(request)
-    if not token:
+    user, revoked_reason = _resolve_current_user(request)
+    if user is None and revoked_reason:
+        return _session_revocation_payload(revoked_reason)
+    if user is None:
         return {"authenticated": False}
-
-    decoded = _decode_session_token(token)
-    user_id = str((decoded or {}).get("sub") or "").strip()
-    if not user_id:
-        return {"authenticated": False}
-
-    record = get_user_by_id(user_id)
-    if record is None or not record.active:
-        return {"authenticated": False}
-
-    target = mapping_store.resolve_target(
-        mapping_username=record.mapping_username,
-        email=record.email,
-        username=record.username,
-    )
-    if target is None:
-        return {"authenticated": False}
-
-    user = CurrentUser(
-        id=record.id,
-        email=record.email,
-        username=record.username,
-        name=record.name,
-        role=record.role,
-        mapping_username=record.mapping_username,
-        target=target,
-    )
     return {"authenticated": True, "user": _serialize_user(user)}
 
 
@@ -856,6 +978,8 @@ async def auth_session(request: Request) -> dict[str, Any]:
 async def start_runtime(user: CurrentUser = Depends(get_current_user)) -> dict[str, Any]:
     try:
         runtime = await asyncio.to_thread(ensure_service_ready, user.target)
+        await asyncio.to_thread(mark_runtime_started, user.id)
+        await asyncio.to_thread(clear_session_revocation, user.id)
     except Exception as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
     return {
@@ -1169,6 +1293,23 @@ async def chat_completions(
     if not isinstance(body, dict):
         raise HTTPException(status_code=400, detail="Invalid request body")
 
+    await asyncio.to_thread(mark_user_message_activity, user.id)
+    lease_id = await asyncio.to_thread(
+        create_runtime_lease,
+        user.id,
+        lease_type=FOREGROUND_CHAT_LEASE,
+        ttl_seconds=FOREGROUND_CHAT_LEASE_TTL_SECONDS,
+        resource_id=str(uuid.uuid4()),
+        meta={"username": user.username, "mapping_username": user.mapping_username},
+    )
+    lease_heartbeat_task = asyncio.create_task(_foreground_chat_lease_heartbeat(lease_id))
+
+    async def _release_chat_lease() -> None:
+        lease_heartbeat_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await lease_heartbeat_task
+        await asyncio.to_thread(release_runtime_lease, lease_id)
+
     user_display_message = _build_user_display_message(body)
     assistant_display_message = _build_assistant_display_message()
     draft_title = _derive_draft_title_from_user_message(user_display_message)
@@ -1195,6 +1336,7 @@ async def chat_completions(
     if upstream.status_code >= 400:
         payload = await upstream.aread()
         await upstream.aclose()
+        await _release_chat_lease()
         return Response(
             content=payload,
             status_code=upstream.status_code,
@@ -1261,6 +1403,7 @@ async def chat_completions(
             persist_transcript()
 
         await upstream.aclose()
+        await _release_chat_lease()
         return Response(
             content=payload,
             status_code=upstream.status_code,
@@ -1371,6 +1514,7 @@ async def chat_completions(
             assistant_display_message["timestamp"] = _now_seconds()
             persist_transcript()
             await upstream.aclose()
+            await _release_chat_lease()
 
     return StreamingResponse(
         stream_upstream(),

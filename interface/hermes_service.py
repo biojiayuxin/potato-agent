@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import contextlib
 import fcntl
 import json
 import os
@@ -227,6 +228,10 @@ def start_service(service_name: str) -> None:
     _run_command(["systemctl", "start", service_name])
 
 
+def stop_service(service_name: str) -> None:
+    _run_command(["systemctl", "stop", service_name])
+
+
 def is_service_active(service_name: str) -> bool:
     result = _run_command_result(["systemctl", "is-active", service_name])
     return result.returncode == 0 and result.stdout.strip() == "active"
@@ -307,18 +312,26 @@ def _collect_service_debug_info(service_name: str) -> str:
     return "\n\n".join(sections).strip()
 
 
+@contextlib.contextmanager
+def service_operation_lock(service_name: str):
+    DEFAULT_RUNTIME_LOCK_DIR.mkdir(parents=True, exist_ok=True)
+    os.chmod(DEFAULT_RUNTIME_LOCK_DIR, 0o700)
+    lock_path = DEFAULT_RUNTIME_LOCK_DIR / f"{service_name}.lock"
+    with lock_path.open("a+", encoding="utf-8") as handle:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+
+
 def ensure_service_ready(
     user: HermesTarget,
     *,
     timeout_seconds: int = DEFAULT_RUNTIME_READY_TIMEOUT,
 ) -> dict[str, Any]:
     require_binary("systemctl")
-    DEFAULT_RUNTIME_LOCK_DIR.mkdir(parents=True, exist_ok=True)
-    os.chmod(DEFAULT_RUNTIME_LOCK_DIR, 0o700)
-    lock_path = DEFAULT_RUNTIME_LOCK_DIR / f"{user.systemd_service}.lock"
-
-    with lock_path.open("a+", encoding="utf-8") as handle:
-        fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+    with service_operation_lock(user.systemd_service):
         was_active = is_service_active(user.systemd_service)
         if not was_active:
             start_service(user.systemd_service)
@@ -340,8 +353,6 @@ def ensure_service_ready(
             if debug_info:
                 detail = f"{detail}\n\n{debug_info}"
             raise RuntimeError(detail) from exc
-        finally:
-            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
 
     return {
         "status": "ready",
