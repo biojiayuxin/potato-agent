@@ -212,6 +212,26 @@
           </div>
         </main>
       </section>
+
+      <div id="approval-modal" class="approval-modal" hidden>
+        <div id="approval-backdrop" class="approval-backdrop"></div>
+        <section class="approval-dialog" role="dialog" aria-modal="true" aria-labelledby="approval-title">
+          <div class="approval-kicker">Permission required</div>
+          <h2 id="approval-title">Hermes needs approval to continue</h2>
+          <p id="approval-description" class="muted approval-description"></p>
+          <div class="approval-command-shell">
+            <div class="approval-command-label">Command</div>
+            <pre id="approval-command" class="approval-command"></pre>
+          </div>
+          <div id="approval-error" class="error" hidden></div>
+          <div class="approval-actions">
+            <button id="approval-allow-once" type="button" class="primary">Allow once</button>
+            <button id="approval-allow-session" type="button" class="ghost">Allow for session</button>
+            <button id="approval-allow-always" type="button" class="ghost">Always allow</button>
+            <button id="approval-deny" type="button" class="danger-button">Deny</button>
+          </div>
+        </section>
+      </div>
     </div>
 
     <template id="chat-item-template">

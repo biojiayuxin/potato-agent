@@ -4,6 +4,7 @@ import contextlib
 import fcntl
 import json
 import os
+import pwd
 import shutil
 import subprocess
 import urllib.request
@@ -17,12 +18,15 @@ import yaml
 from interface.mapping import HermesTarget, resolve_env_placeholders
 
 
+ROOT_DIR = Path(__file__).resolve().parent
+REPO_ROOT = ROOT_DIR.parent
 DEFAULT_HERMES_BIN = "/usr/local/bin/hermes"
 DEFAULT_SERVICE_RESTART = "always"
 DEFAULT_SERVICE_RESTART_SEC = 3
 DEFAULT_TERMINAL_TIMEOUT = 180
 DEFAULT_RUNTIME_READY_TIMEOUT = 45
 DEFAULT_RUNTIME_LOCK_DIR = Path("/run/potato-agent/runtime-start")
+PATCH_SITE_DIR_NAME = ".potato-interface-patch"
 
 
 def _run_command(command: list[str]) -> str:
@@ -151,6 +155,7 @@ def build_systemd_unit(config: dict[str, Any], user: HermesTarget) -> str:
         display_name=user.display_name,
         linux_user=user.linux_user,
     )
+    patch_site_dir = user.hermes_home / PATCH_SITE_DIR_NAME
 
     return "\n".join(
         [
@@ -165,6 +170,8 @@ def build_systemd_unit(config: dict[str, Any], user: HermesTarget) -> str:
             f"WorkingDirectory={user.home_dir}",
             f"Environment=HOME={user.home_dir}",
             f"Environment=HERMES_HOME={user.hermes_home}",
+            f"Environment=PYTHONPATH={patch_site_dir}",
+            "Environment=POTATO_AGENT_ENABLE_APPROVAL_PATCH=1",
             f"ExecStart={hermes_bin} gateway run --replace",
             f"Restart={restart}",
             f"RestartSec={restart_sec}",
@@ -177,8 +184,6 @@ def build_systemd_unit(config: dict[str, Any], user: HermesTarget) -> str:
 
 
 def install_user_files(config: dict[str, Any], user: HermesTarget) -> None:
-    import pwd
-
     ensure_linux_user(user.linux_user)
     pw = pwd.getpwnam(user.linux_user)
     gid = pw.pw_gid
@@ -204,6 +209,23 @@ def install_user_files(config: dict[str, Any], user: HermesTarget) -> None:
         encoding="utf-8",
     )
     _set_owner_and_mode(config_path, pw.pw_uid, gid, 0o600)
+
+    patch_site_dir = user.hermes_home / PATCH_SITE_DIR_NAME
+    patch_site_dir.mkdir(parents=True, exist_ok=True)
+    _set_owner_and_mode(patch_site_dir, pw.pw_uid, gid, 0o755)
+
+    patch_source = ROOT_DIR / "hermes_sitecustomize.py"
+    patch_target = patch_site_dir / "sitecustomize.py"
+    patch_target.write_text(patch_source.read_text(encoding="utf-8"), encoding="utf-8")
+    _set_owner_and_mode(patch_target, pw.pw_uid, gid, 0o644)
+
+    patch_module_source = ROOT_DIR / "hermes_api_approval_patch.py"
+    patch_module_target = patch_site_dir / "hermes_api_approval_patch.py"
+    patch_module_target.write_text(
+        patch_module_source.read_text(encoding="utf-8"),
+        encoding="utf-8",
+    )
+    _set_owner_and_mode(patch_module_target, pw.pw_uid, gid, 0o644)
 
     service_path = Path("/etc/systemd/system") / user.systemd_service
     service_path.write_text(build_systemd_unit(config, user), encoding="utf-8")

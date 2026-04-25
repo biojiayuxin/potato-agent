@@ -9,6 +9,7 @@ const state = {
   draftSession: null,
   messages: [],
   rootPath: '',
+  workspaceRoot: '',
   currentPath: '',
   expandedPaths: new Set(),
   treeCache: new Map(),
@@ -20,6 +21,8 @@ const state = {
   authPollTimer: null,
   signupJobId: null,
   signupPollTimer: null,
+  pendingApproval: null,
+  approvalSubmitting: false,
 };
 
 const dom = {
@@ -71,6 +74,14 @@ const dom = {
   filesResizer: document.getElementById('files-resizer'),
   chatItemTemplate: document.getElementById('chat-item-template'),
   messageTemplate: document.getElementById('message-template'),
+  approvalModal: document.getElementById('approval-modal'),
+  approvalDescription: document.getElementById('approval-description'),
+  approvalCommand: document.getElementById('approval-command'),
+  approvalError: document.getElementById('approval-error'),
+  approvalAllowOnce: document.getElementById('approval-allow-once'),
+  approvalAllowSession: document.getElementById('approval-allow-session'),
+  approvalAllowAlways: document.getElementById('approval-allow-always'),
+  approvalDeny: document.getElementById('approval-deny'),
 };
 
 let loginInFlight = false;
@@ -263,6 +274,64 @@ const showChatError = (message) => {
   }, 10000);
 };
 
+const setApprovalSubmitting = (submitting) => {
+  state.approvalSubmitting = submitting;
+  const buttons = [
+    dom.approvalAllowOnce,
+    dom.approvalAllowSession,
+    dom.approvalAllowAlways,
+    dom.approvalDeny,
+  ].filter(Boolean);
+  for (const button of buttons) {
+    button.disabled = submitting;
+  }
+};
+
+const renderApprovalModal = () => {
+  const approval = state.pendingApproval;
+  if (!approval) {
+    if (dom.approvalModal) {
+      dom.approvalModal.hidden = true;
+    }
+    showError(dom.approvalError, '');
+    setApprovalSubmitting(false);
+    return;
+  }
+
+  if (dom.approvalModal) {
+    dom.approvalModal.hidden = false;
+  }
+  if (dom.approvalDescription) {
+    dom.approvalDescription.textContent = approval.description || 'Hermes marked this command as dangerous and is waiting for your decision.';
+  }
+  if (dom.approvalCommand) {
+    dom.approvalCommand.textContent = approval.command || '';
+  }
+};
+
+const clearPendingApproval = () => {
+  state.pendingApproval = null;
+  showError(dom.approvalError, '');
+  renderApprovalModal();
+};
+
+const submitApprovalDecision = async (choice) => {
+  const approval = state.pendingApproval;
+  if (!approval?.approvalId || state.approvalSubmitting) return;
+  showError(dom.approvalError, '');
+  setApprovalSubmitting(true);
+  try {
+    await api(`/api/chat/approvals/${encodeURIComponent(approval.approvalId)}`, {
+      method: 'POST',
+      body: JSON.stringify({ choice }),
+    });
+    clearPendingApproval();
+  } catch (error) {
+    showError(dom.approvalError, String(error.message || 'Approval request failed'));
+    setApprovalSubmitting(false);
+  }
+};
+
 const stopAuthPolling = () => {
   if (state.authPollTimer) {
     window.clearTimeout(state.authPollTimer);
@@ -353,6 +422,7 @@ const resetWorkspaceState = () => {
   state.models = [];
   state.selectedModel = null;
   state.rootPath = '';
+  state.workspaceRoot = '';
   state.currentPath = '';
   state.expandedPaths = new Set();
   state.treeCache.clear();
@@ -360,6 +430,9 @@ const resetWorkspaceState = () => {
   state.pendingAttachments = [];
   state.currentAbortController = null;
   state.isSending = false;
+  state.pendingApproval = null;
+  state.approvalSubmitting = false;
+  renderApprovalModal();
 };
 
 const setRuntimeStartState = ({ title, copy, error, canRetry, canBack }) => {
@@ -1421,11 +1494,22 @@ const renderWorkspace = () => {
   renderWorkspaceHeader();
   renderMessages();
   renderAttachments();
+  renderApprovalModal();
 };
 
 const normalizeDirectory = (path) => {
   const normalized = String(path || '/').replace(/\\/g, '/');
   return normalized.endsWith('/') ? normalized : `${normalized}/`;
+};
+
+const getDisplayDirectoryPath = () => {
+  const workspaceRoot = String(state.workspaceRoot || state.user?.workspace_root || '').trim();
+  if (!workspaceRoot) {
+    return state.currentPath || state.rootPath || '/';
+  }
+
+  const relativePath = String(state.currentPath || '').replace(/^\/+|\/+$/g, '');
+  return relativePath ? `${workspaceRoot.replace(/\/+$/g, '')}/${relativePath}` : workspaceRoot;
 };
 
 const joinPath = (directory, name, type) => {
@@ -1509,7 +1593,6 @@ const renderTreeNode = async (path, depth = 0) => {
     label.addEventListener('click', async () => {
       if (entry.type === 'directory') {
         state.currentPath = normalizeDirectory(nodePath);
-        dom.cwdLabel.textContent = state.currentPath;
         state.expandedPaths.add(normalizeDirectory(nodePath));
         await listDirectory(nodePath);
         renderFileTree();
@@ -1552,7 +1635,7 @@ const renderFileTree = async () => {
     return;
   }
 
-  dom.cwdLabel.textContent = state.rootPath || state.currentPath;
+  dom.cwdLabel.textContent = getDisplayDirectoryPath();
   const root = normalizeDirectory(state.rootPath || state.currentPath);
   try {
     const tree = await renderTreeNode(root);
@@ -1568,12 +1651,12 @@ const renderFileTree = async () => {
 
 const fetchWorkspaceFiles = async () => {
   const json = await api('/api/files/tree', { method: 'GET' }).then((res) => res.json());
-  state.rootPath = '/';
-  state.currentPath = '/';
+  state.workspaceRoot = String(json?.root || state.user?.workspace_root || '').trim();
+  state.rootPath = normalizeDirectory(json?.path || '/');
+  state.currentPath = state.rootPath;
   state.expandedPaths = new Set([state.rootPath]);
   state.treeCache.clear();
   await listDirectory(state.rootPath, true);
-  dom.cwdLabel.textContent = json?.root || '/';
   await renderFileTree();
 };
 
@@ -1746,6 +1829,20 @@ const streamChatCompletion = async (payload, assistantMessage, abortController, 
         continue;
       }
 
+      if (eventName === 'hermes.approval.required') {
+        state.pendingApproval = {
+          approvalId: String(json?.approval_id || ''),
+          sessionId: String(json?.session_id || streamState.sessionId || ''),
+          command: String(json?.command || ''),
+          description: String(json?.description || 'Dangerous command requires approval.'),
+          patternKey: String(json?.pattern_key || ''),
+          patternKeys: Array.isArray(json?.pattern_keys) ? json.pattern_keys.map((item) => String(item)) : [],
+          options: Array.isArray(json?.options) ? json.options.map((item) => String(item)) : [],
+        };
+        renderApprovalModal();
+        continue;
+      }
+
       const delta = json?.choices?.[0]?.delta || {};
 
       if (typeof delta.reasoning_content === 'string' && delta.reasoning_content) {
@@ -1874,6 +1971,7 @@ const submitPrompt = async (prompt) => {
     state.streamingMessageIds.delete(assistantMessage.id);
     assistantMessage.done = true;
     assistantMessage.timestamp = nowSeconds();
+    clearPendingApproval();
 
     if (error.name === 'AbortError') {
       if (!assistantMessage.content.trim()) {
@@ -2092,6 +2190,22 @@ dom.logoutButton.addEventListener('click', async () => {
   state.pendingWorkspaceUser = null;
   resetWorkspaceState();
   showLogin();
+});
+
+dom.approvalAllowOnce?.addEventListener('click', () => {
+  submitApprovalDecision('once');
+});
+
+dom.approvalAllowSession?.addEventListener('click', () => {
+  submitApprovalDecision('session');
+});
+
+dom.approvalAllowAlways?.addEventListener('click', () => {
+  submitApprovalDecision('always');
+});
+
+dom.approvalDeny?.addEventListener('click', () => {
+  submitApprovalDecision('deny');
 });
 
 dom.runtimeStartRetryButton.addEventListener('click', async () => {

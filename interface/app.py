@@ -160,6 +160,10 @@ class SignupRequest(BaseModel):
     display_name: str = ""
 
 
+class ApprovalDecisionRequest(BaseModel):
+    choice: str
+
+
 def _now_seconds() -> int:
     return int(datetime.now(UTC).timestamp())
 
@@ -1279,6 +1283,37 @@ async def upload_file(
         "content_type": file.content_type or "application/octet-stream",
         "path": str(destination),
     }
+
+
+@app.post("/api/chat/approvals/{approval_id}")
+async def resolve_chat_approval(
+    approval_id: str,
+    payload: ApprovalDecisionRequest,
+    user: CurrentUser = Depends(get_current_user),
+) -> Response:
+    choice = str(payload.choice or "").strip().lower()
+    if choice not in {"once", "session", "always", "deny"}:
+        raise HTTPException(
+            status_code=400,
+            detail="choice must be one of once, session, always, deny",
+        )
+
+    client: httpx.AsyncClient = app.state.http
+    upstream = await client.post(
+        f"{user.target.api_base_url}/v1/approvals/{approval_id}",
+        headers={"Authorization": f"Bearer {user.target.api_key}"},
+        json={"choice": choice},
+    )
+
+    try:
+        content = upstream.json()
+        return JSONResponse(status_code=upstream.status_code, content=content)
+    except Exception:
+        return Response(
+            content=upstream.text,
+            status_code=upstream.status_code,
+            media_type=upstream.headers.get("content-type", "application/json"),
+        )
 
 
 @app.post("/api/chat/completions")

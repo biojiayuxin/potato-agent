@@ -174,7 +174,7 @@ def _build_target(config: dict[str, Any], raw_user: dict[str, Any]) -> HermesTar
     hermes_home = Path(
         str(raw_user.get("hermes_home") or (home_dir / ".hermes"))
     ).resolve()
-    workdir = Path(str(raw_user.get("workdir") or (home_dir / "work"))).resolve()
+    workdir = Path(str(raw_user.get("workdir") or home_dir)).resolve()
     email = str(raw_user.get("email") or "").strip().lower()
     display_name = str(raw_user.get("display_name") or username).strip()
     api_server_host = str(
@@ -302,7 +302,7 @@ def upsert_user_mapping_entry(
             "linux_user": f"hmx_{username}",
             "home_dir": f"/home/hmx_{username}",
             "hermes_home": f"/home/hmx_{username}/.hermes",
-            "workdir": f"/home/hmx_{username}/work",
+            "workdir": f"/home/hmx_{username}",
             "api_port": select_next_port(config),
             "api_server_model_name": DEFAULT_MODEL_NAME,
             "systemd_service": f"hermes-{slug}.service",
@@ -314,7 +314,7 @@ def upsert_user_mapping_entry(
     entry.setdefault("linux_user", f"hmx_{username}")
     entry.setdefault("home_dir", f"/home/{entry['linux_user']}")
     entry.setdefault("hermes_home", f"{entry['home_dir']}/.hermes")
-    entry.setdefault("workdir", f"{entry['home_dir']}/work")
+    entry.setdefault("workdir", f"{entry['home_dir']}")
     entry.setdefault("api_port", select_next_port(config))
     entry.setdefault("api_server_model_name", DEFAULT_MODEL_NAME)
     entry.setdefault("systemd_service", f"hermes-{slug}.service")

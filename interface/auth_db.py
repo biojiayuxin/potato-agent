@@ -351,6 +351,16 @@ def activate_signup_user(
     return user
 
 
+def delete_signup_job(job_id: str, db_path: Path = DEFAULT_AUTH_DB_PATH) -> bool:
+    with connect_auth_db(db_path) as conn:
+        cursor = conn.execute(
+            "delete from signup_jobs where job_id = ?",
+            (job_id,),
+        )
+        conn.commit()
+        return cursor.rowcount > 0
+
+
 def delete_user_by_mapping_username(
     mapping_username: str, db_path: Path = DEFAULT_AUTH_DB_PATH
 ) -> bool:

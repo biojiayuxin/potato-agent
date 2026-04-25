@@ -88,7 +88,7 @@ def main() -> int:
         "linux_user": linux_user,
         "home_dir": str(linux_info["home_dir"]),
         "hermes_home": str(linux_info["home_dir"] / ".hermes"),
-        "workdir": str(linux_info["home_dir"] / "work"),
+        "workdir": str(linux_info["home_dir"]),
         "api_port": None,
     }
 
