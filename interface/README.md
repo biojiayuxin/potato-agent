@@ -47,6 +47,7 @@
 - `INTERFACE_SESSION_SECRET`
 - `INTERFACE_SESSION_TTL_SECONDS`
 - `INTERFACE_MAX_UPLOAD_BYTES`
+- `INTERFACE_FILE_BROWSER_MODE`
 - `INTERFACE_UPLOAD_DIR_NAME`
 - `INTERFACE_ARCHIVE_RETENTION_DAYS`
 - `INTERFACE_ARCHIVE_SCHEDULE_HOUR`
@@ -54,6 +55,9 @@
 说明：
 
 - 如果不设置 `INTERFACE_SESSION_SECRET`，进程启动时会临时生成一个随机值；生产环境通常应该固定它
+- `INTERFACE_FILE_BROWSER_MODE` 默认为 `home_only`
+  - `home_only`：Files 面板只显示 `~/`，不显示目录输入框
+  - `user_readable`：显示目录输入框，允许打开任意当前 Linux 用户有权限读取的目录
 - 上传文件会保存到每用户工作区下的 `.<INTERFACE_UPLOAD_DIR_NAME>` 目录，默认是 `.potato-interface-uploads/`
 
 ## 当前边界

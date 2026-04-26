@@ -1367,13 +1367,21 @@ button.stretch {
   gap: 12px;
 }
 
+.files-header-main {
+  min-width: 0;
+  flex: 1 1 auto;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
 :root[data-theme='light'] .files-header {
   background: #f7faff;
 }
 
 .files-header-actions {
   display: flex;
-  align-items: center;
+  align-items: flex-start;
   justify-content: flex-end;
   gap: 10px;
   flex-wrap: wrap;
@@ -1381,14 +1389,28 @@ button.stretch {
 
 .file-open-controls {
   display: flex;
+  align-items: stretch;
+  width: 100%;
+  min-width: 0;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.file-open-buttons {
+  display: flex;
   align-items: center;
   gap: 8px;
   flex-wrap: wrap;
 }
 
 .file-path-input {
-  width: min(360px, 52vw);
-  min-width: 220px;
+  width: 100%;
+  max-width: 100%;
+  min-width: 0;
+}
+
+.file-open-buttons .ghost.small {
+  flex: 0 0 auto;
 }
 
 .file-tree {
@@ -1704,6 +1726,15 @@ button.stretch {
 
   .approval-actions {
     grid-template-columns: 1fr;
+  }
+
+  .files-header {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .files-header-actions {
+    justify-content: flex-start;
   }
 
   .workspace-view > .panel-resizer {

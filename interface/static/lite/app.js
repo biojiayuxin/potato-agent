@@ -1522,11 +1522,9 @@ const normalizeDirectory = (path) => {
 const getDisplayDirectoryPath = () => {
   const workspaceRoot = String(state.workspaceRoot || state.user?.workspace_root || '').trim();
   if (!workspaceRoot) {
-    return state.currentPath || state.rootPath || '/';
+    return state.rootPath || state.currentPath || '/';
   }
-
-  const relativePath = String(state.currentPath || '').replace(/^\/+|\/+$/g, '');
-  return relativePath ? `${workspaceRoot.replace(/\/+$/g, '')}/${relativePath}` : workspaceRoot;
+  return workspaceRoot;
 };
 
 const setFileTreeRoot = async ({ root, path = '', entries = null }) => {
@@ -1611,11 +1609,16 @@ const renderTreeNode = async (path, depth = 0) => {
       toggle.addEventListener('click', async () => {
         if (state.expandedPaths.has(nodePath)) {
           state.expandedPaths.delete(nodePath);
+          renderFileTree();
         } else {
-          state.expandedPaths.add(nodePath);
-          await listDirectory(nodePath);
+          try {
+            await listDirectory(nodePath);
+            state.expandedPaths.add(nodePath);
+            renderFileTree();
+          } catch (error) {
+            showChatError(error.message);
+          }
         }
-        renderFileTree();
       });
       toggleOrSpacer = toggle;
     } else {
@@ -1633,10 +1636,14 @@ const renderTreeNode = async (path, depth = 0) => {
     }
     label.addEventListener('click', async () => {
       if (entry.type === 'directory') {
-        state.currentPath = normalizeDirectory(nodePath);
-        state.expandedPaths.add(normalizeDirectory(nodePath));
-        await listDirectory(nodePath);
-        renderFileTree();
+        try {
+          await listDirectory(nodePath);
+          state.currentPath = normalizeDirectory(nodePath);
+          state.expandedPaths.add(normalizeDirectory(nodePath));
+          renderFileTree();
+        } catch (error) {
+          showChatError(error.message);
+        }
         return;
       }
       downloadFile(nodePath).catch((error) => showChatError(error.message));

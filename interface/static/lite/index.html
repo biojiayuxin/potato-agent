@@ -201,16 +201,18 @@
 
             <aside class="files-panel">
               <div class="files-header">
-                <div>
+                <div class="files-header-main">
                   <div class="sidebar-section-title no-margin">Files</div>
                   <div id="cwd-label" class="muted tiny"></div>
-                </div>
-                <div class="files-header-actions">
                   <div id="file-open-controls" class="file-open-controls" hidden>
                     <input id="file-path-input" type="text" class="file-path-input" placeholder="Open path (~/, /path, relative)" />
-                    <button id="file-open-button" class="ghost small" type="button">Open</button>
-                    <button id="file-home-button" class="ghost small" type="button">Home</button>
+                    <div class="file-open-buttons">
+                      <button id="file-open-button" class="ghost small" type="button">Open</button>
+                      <button id="file-home-button" class="ghost small" type="button">Home</button>
+                    </div>
                   </div>
+                </div>
+                <div class="files-header-actions">
                   <button id="refresh-files-button" class="ghost small">Refresh</button>
                 </div>
               </div>
