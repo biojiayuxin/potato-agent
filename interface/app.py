@@ -153,10 +153,6 @@ class SigninRequest(BaseModel):
     password: str
 
 
-class UpdateSessionTitleRequest(BaseModel):
-    title: str = ""
-
-
 class SignupRequest(BaseModel):
     username: str
     email: str
@@ -608,6 +604,23 @@ def _derive_draft_title_from_user_message(message: dict[str, Any]) -> str:
     return "New chat"
 
 
+def _should_set_initial_draft_title(
+    session: dict[str, Any] | None, display_meta: dict[str, Any] | None
+) -> bool:
+    if not isinstance(session, dict):
+        return False
+
+    if int(session.get("message_count") or 0) > 0:
+        return False
+
+    hermes_title = str(session.get("title") or "").strip()
+    if hermes_title and hermes_title != "New chat":
+        return False
+
+    existing_draft_title = str((display_meta or {}).get("draft_title") or "").strip()
+    return not existing_draft_title
+
+
 def _apply_session_title_fallback(
     session: dict[str, Any], display_meta: dict[str, Any] | None
 ) -> dict[str, Any]:
@@ -619,6 +632,12 @@ def _apply_session_title_fallback(
     elif draft_title:
         normalized["title"] = draft_title
     return normalized
+
+
+def _generate_interface_session_id() -> str:
+    timestamp_str = datetime.now(UTC).strftime("%Y%m%d_%H%M%S")
+    short_uuid = uuid.uuid4().hex[:6]
+    return f"{timestamp_str}_{short_uuid}"
 
 
 def _normalize_message_row(message: dict[str, Any]) -> dict[str, Any]:
@@ -1283,11 +1302,36 @@ async def get_sessions(
         sessions = db.list_sessions_rich(
             source="api_server", limit=limit, offset=offset
         )
-    normalized = [_normalize_session_row(item) for item in sessions]
+    normalized = [
+        _apply_session_title_fallback(item, get_display_session_meta(user.id, str(item.get("id") or "")))
+        for item in sessions
+    ]
     normalized.sort(
         key=lambda item: (item["last_active"], item["started_at"]), reverse=True
     )
     return {"sessions": normalized, "limit": limit, "offset": offset}
+
+
+@app.post("/api/sessions")
+async def create_session(
+    user: CurrentUser = Depends(get_current_user),
+) -> dict[str, Any]:
+    session_id = _generate_interface_session_id()
+    with _open_session_db(user.target) as db:
+        db.create_session(
+            session_id=session_id,
+            source="api_server",
+        )
+        session = db.get_session(session_id)
+        if not session:
+            raise HTTPException(status_code=500, detail="Failed to create session")
+
+    return {
+        "session": _apply_session_title_fallback(
+            session,
+            get_display_session_meta(user.id, session_id),
+        )
+    }
 
 
 @app.get("/api/sessions/{session_id}")
@@ -1308,37 +1352,12 @@ async def get_session_detail(
         display_messages = _build_fallback_display_messages(raw_messages)
 
     return {
-        "session": _normalize_session_row(session),
+        "session": _apply_session_title_fallback(
+            session,
+            get_display_session_meta(user.id, resolved),
+        ),
         "messages": [_normalize_display_message(item) for item in display_messages],
     }
-
-
-@app.patch("/api/sessions/{session_id}")
-async def update_session_title(
-    session_id: str,
-    payload: UpdateSessionTitleRequest,
-    user: CurrentUser = Depends(get_current_user),
-) -> dict[str, Any]:
-    with _open_session_db(user.target) as db:
-        resolved = db.resolve_session_id(session_id)
-        if not resolved:
-            raise HTTPException(status_code=404, detail="Session not found")
-
-        title = payload.title.strip()
-        if title:
-            try:
-                db.set_session_title(resolved, title)
-            except ValueError:
-                db.set_session_title(resolved, db.get_next_title_in_lineage(title))
-        else:
-            db.set_session_title(resolved, "")
-
-        session = db.get_session(resolved)
-        if not session:
-            raise HTTPException(status_code=404, detail="Session not found")
-    if title:
-        set_display_draft_title(user.id, resolved, "")
-    return {"session": _normalize_session_row(session)}
 
 
 @app.delete("/api/sessions/{session_id}")
@@ -1575,6 +1594,18 @@ async def chat_completions(
         or session_id
         or str(upstream.headers.get("x-hermes-session-id") or "")
     ).strip()
+    display_meta = None
+    should_set_initial_draft_title = False
+    if resolved_session_id:
+        with _open_session_db(user.target) as db:
+            resolved_session = db.get_session(resolved_session_id)
+        display_meta = get_display_session_meta(user.id, resolved_session_id)
+        should_set_initial_draft_title = _should_set_initial_draft_title(
+            resolved_session, display_meta
+        )
+        if should_set_initial_draft_title:
+            set_display_draft_title(user.id, resolved_session_id, draft_title)
+            display_meta = get_display_session_meta(user.id, resolved_session_id)
     display_transcript = (
         _get_or_create_display_transcript(
             user.id, resolved_session_id, user_message=user_display_message
@@ -1588,7 +1619,10 @@ async def chat_completions(
             return
         payload = [*display_transcript, assistant_display_message]
         save_display_messages(
-            user.id, resolved_session_id, payload, draft_title=draft_title
+            user.id,
+            resolved_session_id,
+            payload,
+            draft_title=draft_title if should_set_initial_draft_title else None,
         )
 
     if body.get("stream") is False:
@@ -1610,7 +1644,6 @@ async def chat_completions(
                 assistant_content = str(message.get("content") or "")
 
         if resolved_session_id:
-            set_display_draft_title(user.id, resolved_session_id, draft_title)
             display_transcript = _get_or_create_display_transcript(
                 user.id, resolved_session_id, user_message=user_display_message
             )
@@ -1639,9 +1672,6 @@ async def chat_completions(
                         ).strip()
                         if header_session_id:
                             resolved_session_id = header_session_id
-                            set_display_draft_title(
-                                user.id, resolved_session_id, draft_title
-                            )
                             display_transcript = _get_or_create_display_transcript(
                                 user.id,
                                 resolved_session_id,

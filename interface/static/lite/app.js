@@ -25,6 +25,9 @@ const state = {
   signupPollTimer: null,
   pendingApproval: null,
   approvalSubmitting: false,
+  pendingSessionPromise: null,
+  shouldAutoScrollMessages: true,
+  liveSessionMessages: new Map(),
 };
 
 const dom = {
@@ -113,6 +116,7 @@ const ICON_SEND_PATH = './static/lite/icons/send.png';
 const ICON_STOP_PATH = './static/lite/icons/stop.png';
 const ICON_COPY_PATH = './static/lite/icons/copy_button.png';
 const ICON_COPIED_PATH = './static/lite/icons/copied.png';
+const MESSAGE_AUTO_SCROLL_THRESHOLD_PX = 48;
 
 const getSystemTheme = () =>
   window.matchMedia?.('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
@@ -238,6 +242,65 @@ const createDraftSession = () => ({
   message_count: 0,
   isDraft: true,
 });
+
+const createSession = async () => {
+  const response = await api('/api/sessions', {
+    method: 'POST',
+  });
+  const json = await response.json();
+  return json?.session || null;
+};
+
+const activatePersistedSession = (session, { clearMessages = true } = {}) => {
+  if (!session?.id) {
+    throw new Error('Failed to activate session');
+  }
+
+  state.draftSession = null;
+  state.activeSession = session;
+  state.activeSessionId = session.id;
+  state.sessions = [session, ...state.sessions.filter((chat) => chat.id !== session.id)];
+  if (clearMessages) {
+    state.messages = [];
+  }
+};
+
+const showDraftChat = () => {
+  state.pendingAttachments = [];
+  renderAttachments();
+  state.draftSession = createDraftSession();
+  state.activeSession = state.draftSession;
+  state.activeSessionId = state.draftSession.id;
+  state.messages = [];
+  state.shouldAutoScrollMessages = true;
+  renderWorkspace();
+  dom.promptInput?.focus();
+};
+
+const setLiveSessionMessages = (sessionId, messages) => {
+  if (!sessionId || !Array.isArray(messages)) return;
+  state.liveSessionMessages.set(sessionId, messages);
+};
+
+const clearLiveSessionMessages = (sessionId) => {
+  if (!sessionId) return;
+  state.liveSessionMessages.delete(sessionId);
+};
+
+const getLiveSessionMessages = (sessionId) => {
+  if (!sessionId) return null;
+  return state.liveSessionMessages.get(sessionId) || null;
+};
+
+const sessionHasStreamingMessages = (sessionId) => Boolean(
+  getLiveSessionMessages(sessionId)?.some((message) => state.streamingMessageIds.has(message.id))
+);
+
+const isScrolledNearBottom = (element) => {
+  if (!element) return true;
+  const remaining = element.scrollHeight - element.clientHeight - element.scrollTop;
+  return remaining <= MESSAGE_AUTO_SCROLL_THRESHOLD_PX;
+};
 
 const formatFileSize = (size) => {
   const bytes = Number(size || 0);
@@ -448,6 +511,9 @@ const resetWorkspaceState = () => {
   state.activeSession = null;
   state.activeSessionId = null;
   state.draftSession = null;
+  state.pendingSessionPromise = null;
+  state.shouldAutoScrollMessages = true;
+  state.liveSessionMessages.clear();
   state.messages = [];
   state.models = [];
   state.selectedModel = null;
@@ -1025,28 +1091,8 @@ const getCurrentChatEntries = () => {
   return state.sessions;
 };
 
-const deriveTitleFromMessages = (messages) => {
-  const firstUserMessage = (messages || []).find((message) => message.role === 'user');
-  if (!firstUserMessage) return 'New chat';
-
-  const text = String(firstUserMessage.content || '').trim();
-  if (text) {
-    return text.slice(0, 32) || 'New chat';
-  }
-
-  const firstFile = Array.isArray(firstUserMessage.files) ? firstUserMessage.files[0] : null;
-  if (firstFile?.name) {
-    return String(firstFile.name).slice(0, 32);
-  }
-
-  return 'New chat';
-};
-
 const getActiveChatTitle = () => {
-  if (state.activeSession?.title && state.activeSession.title !== 'New chat') {
-    return state.activeSession.title;
-  }
-  return deriveTitleFromMessages(state.messages);
+  return state.activeSession?.title || 'New chat';
 };
 
 const getRawMessageText = (message) => {
@@ -1387,6 +1433,7 @@ const copyTextToClipboard = async (text) => {
 const getRenderableMessages = () => state.messages.filter((message) => message.role !== 'tool');
 
 const renderMessages = () => {
+  const shouldStickToBottom = state.shouldAutoScrollMessages || isScrolledNearBottom(dom.messages);
   dom.messages.innerHTML = '';
   const visibleMessages = getRenderableMessages();
 
@@ -1455,14 +1502,14 @@ const renderMessages = () => {
     dom.messages.append(fragment);
   }
 
-  dom.messages.scrollTop = dom.messages.scrollHeight;
+  state.shouldAutoScrollMessages = shouldStickToBottom;
+  if (shouldStickToBottom) {
+    dom.messages.scrollTop = dom.messages.scrollHeight;
+  }
 };
 
 const getChatDisplayTitle = (chat) => {
   if (!chat) return 'New chat';
-  if (chat.isDraft && state.messages.length > 0) {
-    return deriveTitleFromMessages(state.messages);
-  }
   return chat.title || chat.preview || 'New chat';
 };
 
@@ -1776,18 +1823,23 @@ const openSession = async (sessionId) => {
     state.activeSession = state.draftSession;
     state.activeSessionId = state.draftSession?.id || null;
     state.messages = [];
+    state.shouldAutoScrollMessages = true;
     renderWorkspace();
     return;
   }
 
   const response = await api(`/api/sessions/${encodeURIComponent(sessionId)}`, { method: 'GET' });
   const json = await response.json();
+  const liveMessages = getLiveSessionMessages(sessionId);
   state.draftSession = null;
   state.activeSession = json?.session || null;
   state.activeSessionId = state.activeSession?.id || null;
-  state.messages = Array.isArray(json?.messages)
-    ? json.messages.map(normalizeMessageForDisplay)
-    : [];
+  state.messages = sessionHasStreamingMessages(sessionId) && liveMessages
+    ? liveMessages
+    : Array.isArray(json?.messages)
+      ? json.messages.map(normalizeMessageForDisplay)
+      : [];
+  state.shouldAutoScrollMessages = true;
   renderWorkspace();
 };
 
@@ -1816,6 +1868,28 @@ const syncActiveSessionFromSessions = (sessionId) => {
   }
 };
 
+const updateSessionSnapshot = async (sessionId, { preserveLiveMessages = false } = {}) => {
+  if (!sessionId) return null;
+
+  const response = await api(`/api/sessions/${encodeURIComponent(sessionId)}`, { method: 'GET' });
+  const json = await response.json();
+  const session = json?.session || null;
+  if (!session?.id) {
+    return null;
+  }
+
+  state.sessions = [session, ...state.sessions.filter((chat) => chat.id !== session.id)];
+  if (state.activeSessionId === session.id) {
+    state.activeSession = session;
+  }
+  if (!preserveLiveMessages && !sessionHasStreamingMessages(sessionId)) {
+    clearLiveSessionMessages(sessionId);
+  }
+  return session;
+};
+
+const isViewingSession = (sessionId) => Boolean(sessionId) && state.activeSessionId === sessionId;
+
 const deleteChat = async (chatId, isDraft = false) => {
   if (isDraft) {
     state.draftSession = null;
@@ -1828,11 +1902,12 @@ const deleteChat = async (chatId, isDraft = false) => {
       return;
     }
 
-    startNewChat();
+    showDraftChat();
     return;
   }
 
   await api(`/api/sessions/${encodeURIComponent(chatId)}`, { method: 'DELETE' });
+  clearLiveSessionMessages(chatId);
   state.sessions = state.sessions.filter((chat) => chat.id !== chatId);
 
   if (chatId !== state.activeSessionId) {
@@ -1847,21 +1922,52 @@ const deleteChat = async (chatId, isDraft = false) => {
     await openSession(state.sessions[0].id);
     return;
   }
-  startNewChat();
+  showDraftChat();
 };
 
-const startNewChat = () => {
-  state.pendingAttachments = [];
-  renderAttachments();
-  state.draftSession = createDraftSession();
-  state.activeSession = state.draftSession;
-  state.activeSessionId = state.draftSession.id;
-  state.messages = [];
-  renderWorkspace();
-  dom.promptInput?.focus();
+const startNewChat = async () => {
+  if (state.pendingSessionPromise) {
+    return state.pendingSessionPromise;
+  }
+
+  const previousActiveSession = state.activeSession;
+  const previousActiveSessionId = state.activeSessionId;
+  const previousMessages = [...state.messages];
+  showDraftChat();
+  const draftSessionId = state.draftSession?.id;
+
+  state.pendingSessionPromise = (async () => {
+    try {
+      const session = await createSession();
+      if (state.activeSessionId === draftSessionId || state.draftSession?.id === draftSessionId) {
+        activatePersistedSession(session);
+      } else if (session?.id) {
+        state.sessions = [session, ...state.sessions.filter((chat) => chat.id !== session.id)];
+      }
+      renderWorkspace();
+      if (state.activeSessionId === session?.id) {
+        dom.promptInput?.focus();
+      }
+      return session;
+    } catch (error) {
+      if (state.activeSessionId === draftSessionId || state.draftSession?.id === draftSessionId) {
+        state.draftSession = null;
+        state.activeSession = previousActiveSession;
+        state.activeSessionId = previousActiveSessionId;
+        state.messages = previousMessages;
+      }
+      renderWorkspace();
+      showChatError(error.message || 'Failed to create chat');
+      throw error;
+    } finally {
+      state.pendingSessionPromise = null;
+    }
+  })();
+
+  return state.pendingSessionPromise;
 };
 
-const streamChatCompletion = async (payload, assistantMessage, abortController, streamState) => {
+const streamChatCompletion = async (payload, assistantMessage, abortController, streamState, streamMessages) => {
   const response = await fetch('/api/chat/completions', {
     method: 'POST',
     credentials: 'include',
@@ -1918,7 +2024,12 @@ const streamChatCompletion = async (payload, assistantMessage, abortController, 
         const emoji = json?.emoji || '🛠️';
         const label = json?.label || json?.tool || 'tool';
         appendProgressEntries(assistantMessage, [`${emoji} ${label}`]);
-        renderMessages();
+        if (streamState.sessionId) {
+          setLiveSessionMessages(streamState.sessionId, streamMessages);
+        }
+        if (isViewingSession(streamState.sessionId)) {
+          renderMessages();
+        }
         continue;
       }
 
@@ -1954,7 +2065,12 @@ const streamChatCompletion = async (payload, assistantMessage, abortController, 
         }
       }
 
-      renderMessages();
+      if (streamState.sessionId) {
+        setLiveSessionMessages(streamState.sessionId, streamMessages);
+      }
+      if (isViewingSession(streamState.sessionId)) {
+        renderMessages();
+      }
     }
   }
 };
@@ -1985,7 +2101,7 @@ const submitPrompt = async (prompt) => {
   }
 
   if (!state.activeSession) {
-    startNewChat();
+    showDraftChat();
   }
 
   showChatError('');
@@ -2027,16 +2143,40 @@ const submitPrompt = async (prompt) => {
     files: [],
   };
 
-  state.messages = [...state.messages, userMessage, assistantMessage];
-  state.streamingMessageIds.add(assistantMessage.id);
-  state.pendingAttachments = [];
+  const streamMessages = [...state.messages, userMessage, assistantMessage];
 
-  if (state.draftSession) {
-    state.draftSession.title = deriveTitleFromMessages(state.messages);
-    state.draftSession.last_active = nowSeconds();
-  }
+  state.messages = streamMessages;
+  state.streamingMessageIds.add(assistantMessage.id);
+    state.pendingAttachments = [];
+
+    if (state.draftSession) {
+      state.draftSession.last_active = nowSeconds();
+    }
 
   renderWorkspace();
+
+  if (!state.activeSession || state.activeSession.isDraft) {
+    try {
+      const session = state.pendingSessionPromise
+        ? await state.pendingSessionPromise
+        : await createSession();
+      activatePersistedSession(session, { clearMessages: false });
+    } catch (error) {
+      state.messages = state.messages.filter((message) => message.id !== userMessage.id && message.id !== assistantMessage.id);
+      state.streamingMessageIds.delete(assistantMessage.id);
+      if (streamState.sessionId) {
+        clearLiveSessionMessages(streamState.sessionId);
+      }
+      renderWorkspace();
+      showChatError(error.message || 'Failed to create chat');
+      return;
+    }
+  }
+
+  streamState.sessionId = state.activeSession?.id || streamState.sessionId;
+  if (streamState.sessionId) {
+    setLiveSessionMessages(streamState.sessionId, streamMessages);
+  }
 
   const payload = {
     stream: true,
@@ -2051,34 +2191,57 @@ const submitPrompt = async (prompt) => {
   };
 
   try {
-    await streamChatCompletion(payload, assistantMessage, abortController, streamState);
+    await streamChatCompletion(payload, assistantMessage, abortController, streamState, streamMessages);
     assistantMessage.done = true;
     assistantMessage.timestamp = nowSeconds();
     state.streamingMessageIds.delete(assistantMessage.id);
-    renderMessages();
+    if (streamState.sessionId) {
+      setLiveSessionMessages(streamState.sessionId, streamMessages);
+    }
+    if (isViewingSession(streamState.sessionId)) {
+      renderMessages();
+    }
 
     await refreshSessions();
-    syncActiveSessionFromSessions(streamState.sessionId);
+    if (streamState.sessionId) {
+      await updateSessionSnapshot(streamState.sessionId, { preserveLiveMessages: true }).catch(() => null);
+    }
+    if (isViewingSession(streamState.sessionId)) {
+      syncActiveSessionFromSessions(streamState.sessionId);
+    }
     renderWorkspace();
   } catch (error) {
     state.streamingMessageIds.delete(assistantMessage.id);
     assistantMessage.done = true;
     assistantMessage.timestamp = nowSeconds();
     clearPendingApproval();
+    if (streamState.sessionId) {
+      setLiveSessionMessages(streamState.sessionId, streamMessages);
+    }
 
     if (error.name === 'AbortError') {
       if (!assistantMessage.content.trim()) {
         assistantMessage.content = '[Response stopped]';
       }
-      renderMessages();
+      if (isViewingSession(streamState.sessionId)) {
+        renderMessages();
+      }
       if (streamState.sessionId) {
         await refreshSessions().catch(() => {});
-        syncActiveSessionFromSessions(streamState.sessionId);
+        await updateSessionSnapshot(streamState.sessionId, { preserveLiveMessages: true }).catch(() => null);
+        if (isViewingSession(streamState.sessionId)) {
+          syncActiveSessionFromSessions(streamState.sessionId);
+        }
         renderWorkspace();
       }
     } else {
       assistantMessage.content = `${assistantMessage.content}\n\n[Error] ${error.message}`.trim();
-      renderMessages();
+      if (streamState.sessionId) {
+        setLiveSessionMessages(streamState.sessionId, streamMessages);
+      }
+      if (isViewingSession(streamState.sessionId)) {
+        renderMessages();
+      }
       showChatError(error.message);
     }
   } finally {
@@ -2116,7 +2279,7 @@ const initializeWorkspaceData = async () => {
     if (state.sessions.length > 0) {
       await openSession(state.sessions[0].id);
     } else {
-      startNewChat();
+      showDraftChat();
     }
   } catch (error) {
     firstError = firstError || error;
@@ -2350,7 +2513,7 @@ dom.runtimeStartBackButton.addEventListener('click', async () => {
 });
 
 dom.newChatButton.addEventListener('click', () => {
-  startNewChat();
+  startNewChat().catch((error) => showChatError(error.message));
 });
 
 dom.composerForm.addEventListener('submit', async (event) => {
@@ -2392,6 +2555,10 @@ dom.promptInput.addEventListener('paste', async (event) => {
 
   event.preventDefault();
   await handleSelectedFiles(files);
+});
+
+dom.messages?.addEventListener('scroll', () => {
+  state.shouldAutoScrollMessages = isScrolledNearBottom(dom.messages);
 });
 
 dom.sendButton.addEventListener('click', async (event) => {
