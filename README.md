@@ -117,6 +117,8 @@ python3 -m venv /opt/interface-env
 
 ### 5. 先前台确认 interface 能正常启动
 
+这一段只建议用于一次性验收。正式部署时，推荐切到 systemd unit 方式启动 `interface`。
+
 ```bash
 /opt/interface-env/bin/python -m uvicorn interface.app:app --host 0.0.0.0 --port 3000
 ```
@@ -153,7 +155,7 @@ After=network.target
 Type=simple
 WorkingDirectory=/srv/potato_agent
 Environment=INTERFACE_SESSION_SECRET=replace-with-a-long-random-string
-Environment=INTERFACE_FILE_BROWSER_MODE=home_only
+Environment=INTERFACE_FILE_BROWSER_MODE=user_readable
 ExecStart=/opt/interface-env/bin/python -m uvicorn interface.app:app --host 0.0.0.0 --port 3000
 Restart=always
 RestartSec=3
@@ -166,6 +168,7 @@ WantedBy=multi-user.target
 
 - `WorkingDirectory` 必须改成你实际部署这个仓库的目录
 - `INTERFACE_SESSION_SECRET` 必须固定；如果不固定，`interface` 每次重启都会让现有登录态失效
+- 正式运行推荐使用 systemd unit；前台 `uvicorn` 更适合一次性验证和排障
 - `INTERFACE_FILE_BROWSER_MODE` 控制 Files 面板里是否允许用户输入目录并打开：
   - `home_only`：默认值。用户只能浏览 `~/`，不显示目录输入框。适合公有云/共享服务器。
   - `user_readable`：显示目录输入框，允许用户打开任意当前 Linux 用户有读取权限的目录。适合 HPC/内网机器。

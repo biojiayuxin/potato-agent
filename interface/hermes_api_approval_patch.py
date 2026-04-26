@@ -140,6 +140,8 @@ def apply_patch() -> None:
         session_id: str | None = None,
         stream_delta_callback=None,
         tool_progress_callback=None,
+        tool_start_callback=None,
+        tool_complete_callback=None,
         agent_ref: list[Any] | None = None,
     ) -> tuple[Any, Any]:
         loop = asyncio.get_event_loop()
@@ -158,6 +160,8 @@ def apply_patch() -> None:
                 session_id=session_id,
                 stream_delta_callback=stream_delta_callback,
                 tool_progress_callback=tool_progress_callback,
+                tool_start_callback=tool_start_callback,
+                tool_complete_callback=tool_complete_callback,
                 agent_ref=agent_ref,
             )
 
@@ -176,6 +180,8 @@ def apply_patch() -> None:
                 session_id=session_id,
                 stream_delta_callback=stream_delta_callback,
                 tool_progress_callback=tool_progress_callback,
+                tool_start_callback=tool_start_callback,
+                tool_complete_callback=tool_complete_callback,
             )
             if agent_ref is not None:
                 agent_ref[0] = agent
@@ -255,6 +261,10 @@ def apply_patch() -> None:
             self._app = web.Application(middlewares=mws)
             self._app["api_server_adapter"] = self
             self._app.router.add_get("/health", self._handle_health)
+            if hasattr(self, "_handle_health_detailed"):
+                self._app.router.add_get(
+                    "/health/detailed", self._handle_health_detailed
+                )
             self._app.router.add_get("/v1/health", self._handle_health)
             self._app.router.add_get("/v1/models", self._handle_models)
             self._app.router.add_post("/v1/chat/completions", self._handle_chat_completions)
