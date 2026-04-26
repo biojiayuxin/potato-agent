@@ -30,6 +30,8 @@ const state = {
 const dom = {
   loginView: document.getElementById('login-view'),
   workspaceView: document.getElementById('workspace-view'),
+  authHomeView: document.getElementById('auth-home-view'),
+  authPanelHeader: document.getElementById('auth-panel-header'),
   loginForm: document.getElementById('login-form'),
   loginError: document.getElementById('login-error'),
   authCard: document.getElementById('auth-card'),
@@ -40,6 +42,11 @@ const dom = {
   registerError: document.getElementById('register-error'),
   showRegisterButton: document.getElementById('show-register-button'),
   showLoginButton: document.getElementById('show-login-button'),
+  authBackButton: document.getElementById('auth-back-button'),
+  switchRegisterButton: document.getElementById('switch-register-button'),
+  registerBackButton: document.getElementById('register-back-button'),
+  switchLoginButton: document.getElementById('switch-login-button'),
+  signinNavActions: document.getElementById('signin-nav-actions'),
   registerNavActions: document.getElementById('register-nav-actions'),
   signupWaitView: document.getElementById('signup-wait-view'),
   signupWaitTitle: document.getElementById('signup-wait-title'),
@@ -102,6 +109,10 @@ const AUTH_POLL_INTERVAL_MS = 60 * 1000;
 const ATTACHMENT_BLOCK_START = '<potato-files>';
 const ATTACHMENT_BLOCK_END = '</potato-files>';
 const ATTACHMENT_HINT_LINE = 'Use the attachment local paths above if you need to inspect the files.';
+const ICON_SEND_PATH = './static/lite/icons/send.png';
+const ICON_STOP_PATH = './static/lite/icons/stop.png';
+const ICON_COPY_PATH = './static/lite/icons/copy_button.png';
+const ICON_COPIED_PATH = './static/lite/icons/copied.png';
 
 const getSystemTheme = () =>
   window.matchMedia?.('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
@@ -190,7 +201,7 @@ const setComposerBusyState = (busy) => {
     dom.sendButton.title = busy ? 'Stop response' : 'Send message';
   }
   if (dom.sendButtonIcon) {
-    dom.sendButtonIcon.src = busy ? '/static/lite/icons/stop.png' : '/static/lite/icons/send.png';
+    dom.sendButtonIcon.src = busy ? ICON_STOP_PATH : ICON_SEND_PATH;
   }
 };
 
@@ -351,6 +362,7 @@ const handleSessionExpired = (message) => {
   state.pendingWorkspaceUser = null;
   resetWorkspaceState();
   showLogin();
+  setAuthViewMode('signin');
   showError(dom.loginError, message || 'Workspace slept after 30 minutes of inactivity. Please sign in again.');
 };
 
@@ -376,37 +388,49 @@ const stopSignupPolling = () => {
 };
 
 const setAuthViewMode = (mode) => {
+  const showHome = mode === 'home';
   const showSignin = mode === 'signin';
   const showRegister = mode === 'register';
   const showWait = mode === 'signup-wait';
   const showRuntimeStart = mode === 'runtime-start';
 
+  if (dom.authCard) {
+    dom.authCard.dataset.authMode = mode;
+  }
+
+  if (showHome) {
+    showError(dom.loginError, '');
+    showError(dom.registerError, '');
+  }
+
   if (showSignin) {
     dom.authCardLabel.textContent = 'Sign in';
     dom.authCardTitle.textContent = 'Enter Potato Agent';
-    dom.authCardCopy.textContent = 'Use the account already mapped to your Hermes runtime.';
+    dom.authCardCopy.textContent = 'Use your account to open the isolated Potato Agent workspace assigned to you.';
   }
 
   if (showRegister) {
     dom.authCardLabel.textContent = 'Register';
     dom.authCardTitle.textContent = 'Create your workspace';
-    dom.authCardCopy.textContent = 'A dedicated Linux user and Hermes runtime will be provisioned for your account.';
+    dom.authCardCopy.textContent = 'A dedicated Linux user and Potato Agent runtime will be provisioned for your account.';
   }
 
   if (showWait) {
     dom.authCardLabel.textContent = 'Provisioning';
     dom.authCardTitle.textContent = 'Creating your workspace';
-    dom.authCardCopy.textContent = 'Please wait while your dedicated runtime is being provisioned.';
+    dom.authCardCopy.textContent = 'Please wait while your dedicated Potato Agent workspace is being provisioned.';
   }
 
   if (showRuntimeStart) {
     dom.authCardLabel.textContent = 'Starting runtime';
     dom.authCardTitle.textContent = 'Waking your workspace';
-    dom.authCardCopy.textContent = 'We are starting the Hermes service bound to your account before entering the workspace.';
+    dom.authCardCopy.textContent = 'We are starting the Potato Agent service bound to your account before entering the workspace.';
   }
 
+  dom.authHomeView.hidden = !showHome;
+  dom.authPanelHeader.hidden = showHome;
   dom.loginForm.hidden = !showSignin;
-  dom.showRegisterButton.hidden = !showSignin;
+  dom.signinNavActions.hidden = !showSignin;
   dom.registerForm.hidden = !showRegister;
   dom.registerNavActions.hidden = !showRegister;
   dom.signupWaitView.hidden = !showWait;
@@ -460,8 +484,8 @@ const showRuntimeStartView = ({ title, copy, error = '', canRetry = false, canBa
 const startWorkspaceRuntime = async (user, { allowRetry = true, source = 'signin' } = {}) => {
   state.pendingWorkspaceUser = user || null;
   showRuntimeStartView({
-    title: 'Starting your Hermes runtime',
-    copy: 'We are waking the dedicated Hermes service bound to your account. This usually takes a few seconds.',
+    title: 'Starting your Potato Agent runtime',
+    copy: 'We are waking the dedicated Potato Agent service bound to your account. This usually takes a few seconds.',
     error: '',
     canRetry: false,
     canBack: false,
@@ -480,12 +504,12 @@ const startWorkspaceRuntime = async (user, { allowRetry = true, source = 'signin
   } catch (error) {
     state.user = null;
     resetWorkspaceState();
-    const message = String(error.message || 'Failed to start Hermes runtime');
+    const message = String(error.message || 'Failed to start Potato Agent runtime');
     showRuntimeStartView({
-      title: 'Failed to start your Hermes runtime',
+      title: 'Failed to start your Potato Agent runtime',
       copy: source === 'restore'
-        ? 'The previous session is valid, but the Hermes runtime could not be started. Review the error below before retrying.'
-        : 'Sign-in succeeded, but the Hermes runtime could not be started. Review the error below before retrying.',
+        ? 'The previous session is valid, but the Potato Agent runtime could not be started. Review the error below before retrying.'
+        : 'Sign-in succeeded, but the Potato Agent runtime could not be started. Review the error below before retrying.',
       error: message,
       canRetry: allowRetry,
       canBack: true,
@@ -532,7 +556,7 @@ const applySignupJobState = (job) => {
   };
   const copyMap = {
     pending: 'Your request has been accepted and is waiting to start.',
-    provisioning: 'We are creating a dedicated Linux user and Hermes runtime for your account.',
+    provisioning: 'We are creating a dedicated Linux user and Potato Agent runtime for your account.',
     completed: 'Your workspace is ready. Return to the sign-in page and use the account you just created.',
     failed: 'The workspace could not be created. You can go back and try again.',
   };
@@ -1418,12 +1442,12 @@ const renderMessages = () => {
 
       try {
         await copyTextToClipboard(rawContent);
-        copyIcon.src = '/static/lite/icons/copied.png';
+        copyIcon.src = ICON_COPIED_PATH;
       } catch {
         showChatError('Copy failed. Please try again.');
       } finally {
         window.setTimeout(() => {
-          copyIcon.src = '/static/lite/icons/copy_button.png';
+          copyIcon.src = ICON_COPY_PATH;
         }, 3000);
       }
     });
@@ -2075,7 +2099,7 @@ const showLogin = () => {
   dom.workspaceView.style.display = 'none';
   dom.loginView.hidden = false;
   dom.loginView.style.display = 'grid';
-  setAuthViewMode('signin');
+  setAuthViewMode('home');
 };
 
 const initializeWorkspaceData = async () => {
@@ -2230,6 +2254,22 @@ dom.showLoginButton.addEventListener('click', () => {
   setAuthViewMode('signin');
 });
 
+dom.authBackButton?.addEventListener('click', () => {
+  setAuthViewMode('home');
+});
+
+dom.switchRegisterButton?.addEventListener('click', () => {
+  setAuthViewMode('register');
+});
+
+dom.registerBackButton?.addEventListener('click', () => {
+  setAuthViewMode('home');
+});
+
+dom.switchLoginButton?.addEventListener('click', () => {
+  setAuthViewMode('signin');
+});
+
 dom.signupGoLoginButton.addEventListener('click', () => {
   state.signupJobId = null;
   stopSignupPolling();
@@ -2306,6 +2346,7 @@ dom.runtimeStartBackButton.addEventListener('click', async () => {
   state.pendingWorkspaceUser = null;
   resetWorkspaceState();
   showLogin();
+  setAuthViewMode('signin');
 });
 
 dom.newChatButton.addEventListener('click', () => {

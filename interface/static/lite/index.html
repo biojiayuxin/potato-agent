@@ -4,45 +4,35 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Potato Agent</title>
-    <link rel="icon" type="image/png" href="/static/favicon.png" />
-    <link rel="stylesheet" href="/static/lite/styles.css" />
+    <link rel="icon" type="image/png" href="./static/favicon.png" />
+    <link rel="stylesheet" href="./static/lite/styles.css" />
   </head>
   <body>
     <div id="app" class="app-shell">
       <section id="login-view" class="login-view">
         <div class="login-stage">
-          <div class="login-hero">
-            <div class="login-hero-mark">PA</div>
-            <div class="brand">Potato Agent</div>
-            <h1>A unified AI workspace for isolated multi-user execution</h1>
-            <p class="muted login-hero-copy">
-              Sign in once to access your dedicated Hermes runtime and work with chat, tools, and files in a single interface.
-            </p>
-            <div class="login-hero-points">
-              <div class="login-point">
-                <span class="login-point-kicker">Isolated runtime</span>
-                <strong>Each user maps to an independent Linux user and Hermes service.</strong>
-              </div>
-              <div class="login-point">
-                <span class="login-point-kicker">Single entry</span>
-                <strong>The frontend presents one consistent model name: `Hermes`.</strong>
-              </div>
-              <div class="login-point">
-                <span class="login-point-kicker">Workspace UX</span>
-                <strong>Built for chat, streaming tool progress, file access, and future extensions.</strong>
-              </div>
-            </div>
-          </div>
-
           <div class="login-card-shell">
-            <div id="auth-card" class="login-card login-card-form">
-              <div class="login-card-header">
+            <div id="auth-card" class="login-card login-card-form" data-auth-mode="home">
+              <div class="login-card-brand">
+                <div class="login-logo-frame">
+                  <img src="./static/LOGO.png" alt="Potato Agent logo" />
+                </div>
+                <div class="login-brand-wordmark">Potato Agent</div>
+                <p class="login-brand-subtitle">—— AI for Potato Research ——</p>
+              </div>
+
+              <div id="auth-home-view" class="auth-home-view">
+                <button id="show-login-button" type="button" class="primary login-home-button">Sign in</button>
+                <button id="show-register-button" type="button" class="ghost login-home-button">Register</button>
+              </div>
+
+              <div id="auth-panel-header" class="login-card-header" hidden>
                 <div id="auth-card-label" class="login-card-label">Sign in</div>
                 <h2 id="auth-card-title">Enter Potato Agent</h2>
-                <p id="auth-card-copy" class="muted">Use your username or email to access the Hermes runtime bound to your account.</p>
+                <p id="auth-card-copy" class="muted">Use your account to open the isolated Potato Agent workspace assigned to you.</p>
               </div>
 
-              <form id="login-form" class="stack gap-12">
+              <form id="login-form" class="stack gap-12" hidden>
                 <label class="stack gap-6">
                   <span>Username or email</span>
                   <input id="email" name="email" type="text" autocomplete="username" required />
@@ -55,12 +45,9 @@
                 <div id="login-error" class="error" hidden></div>
               </form>
 
-              <div class="login-secondary-actions">
-                <button id="show-register-button" type="button" class="ghost login-secondary-button">Register</button>
-              </div>
-
-              <div class="login-card-footer muted tiny">
-                After sign-in, requests are routed to the Hermes instance bound to your account.
+              <div id="signin-nav-actions" class="login-secondary-actions" hidden>
+                <button id="auth-back-button" type="button" class="ghost login-secondary-button">Back</button>
+                <button id="switch-register-button" type="button" class="ghost login-secondary-button">Register instead</button>
               </div>
 
               <form id="register-form" class="stack gap-12" hidden>
@@ -89,14 +76,15 @@
               </form>
 
               <div class="login-secondary-actions" id="register-nav-actions" hidden>
-                <button id="show-login-button" type="button" class="ghost login-secondary-button">Back to sign in</button>
+                <button id="register-back-button" type="button" class="ghost login-secondary-button">Back</button>
+                <button id="switch-login-button" type="button" class="ghost login-secondary-button">Sign in instead</button>
               </div>
 
               <div id="signup-wait-view" class="signup-wait-view" hidden>
                 <div class="signup-wait-kicker">Workspace provisioning</div>
                 <h3 id="signup-wait-title">Creating your workspace</h3>
                 <p id="signup-wait-copy" class="muted">
-                  We are creating a dedicated Linux user and Hermes runtime for your account.
+                  We are creating a dedicated Linux user and Potato Agent runtime for your account.
                 </p>
                 <div id="signup-wait-steps" class="signup-wait-steps">
                   <div class="signup-step" data-step="pending">Request queued</div>
@@ -115,9 +103,9 @@
                 <div class="runtime-start-spinner" aria-hidden="true">
                   <span></span><span></span><span></span>
                 </div>
-                <h3 id="runtime-start-title">Starting your Hermes runtime</h3>
+                <h3 id="runtime-start-title">Starting your Potato Agent runtime</h3>
                 <p id="runtime-start-copy" class="muted">
-                  We are waking the dedicated Hermes service bound to your account. This usually takes a few seconds.
+                  We are waking the dedicated Potato Agent service bound to your account. This usually takes a few seconds.
                 </p>
                 <div id="runtime-start-error" class="error" hidden></div>
                 <div class="login-secondary-actions runtime-start-actions">
@@ -180,7 +168,7 @@
                       <div class="composer-input-row">
                         <input id="file-input" type="file" class="file-input" multiple hidden />
                         <button id="attach-button" type="button" class="composer-icon-button attach-button" aria-label="Upload file" title="Upload file">
-                          <img src="/static/lite/icons/attachment.png" alt="" class="composer-icon composer-attachment-icon" />
+                          <img src="./static/lite/icons/attachment.png" alt="" class="composer-icon composer-attachment-icon" />
                         </button>
                         <textarea
                           id="prompt-input"
@@ -190,7 +178,7 @@
                       </div>
                     </div>
                     <button id="send-button" type="submit" class="composer-icon-button" aria-label="Send message" title="Send message">
-                      <img id="send-button-icon" src="/static/lite/icons/send.png" alt="" class="composer-icon" />
+                      <img id="send-button-icon" src="./static/lite/icons/send.png" alt="" class="composer-icon" />
                     </button>
                   </div>
                 </div>
@@ -251,7 +239,7 @@
         </button>
         <div class="chat-item-actions">
           <button type="button" class="chat-delete-button" aria-label="Delete chat" title="Delete chat">
-            <img src="/static/lite/icons/delete.png" alt="" class="chat-delete-icon" />
+            <img src="./static/lite/icons/delete.png" alt="" class="chat-delete-icon" />
           </button>
         </div>
       </div>
@@ -268,13 +256,13 @@
         </div>
         <div class="message-actions">
           <button type="button" class="message-copy-button" aria-label="Copy message" title="Copy message">
-            <img src="/static/lite/icons/copy_button.png" alt="" class="message-copy-icon" />
+            <img src="./static/lite/icons/copy_button.png" alt="" class="message-copy-icon" />
           </button>
         </div>
       </article>
     </template>
 
-    <script src="/static/lite/vendor/marked.umd.js"></script>
-    <script type="module" src="/static/lite/app.js"></script>
+    <script src="./static/lite/vendor/marked.umd.js"></script>
+    <script type="module" src="./static/lite/app.js"></script>
   </body>
 </html>
