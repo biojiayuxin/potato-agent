@@ -1361,10 +1361,34 @@ button.stretch {
 .files-header {
   padding: 18px 18px 12px;
   border-bottom: 1px solid var(--border);
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
 }
 
 :root[data-theme='light'] .files-header {
   background: #f7faff;
+}
+
+.files-header-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.file-open-controls {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.file-path-input {
+  width: min(360px, 52vw);
+  min-width: 220px;
 }
 
 .file-tree {

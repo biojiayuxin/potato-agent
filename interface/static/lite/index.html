@@ -205,7 +205,14 @@
                   <div class="sidebar-section-title no-margin">Files</div>
                   <div id="cwd-label" class="muted tiny"></div>
                 </div>
-                <button id="refresh-files-button" class="ghost small">Refresh</button>
+                <div class="files-header-actions">
+                  <div id="file-open-controls" class="file-open-controls" hidden>
+                    <input id="file-path-input" type="text" class="file-path-input" placeholder="Open path (~/, /path, relative)" />
+                    <button id="file-open-button" class="ghost small" type="button">Open</button>
+                    <button id="file-home-button" class="ghost small" type="button">Home</button>
+                  </div>
+                  <button id="refresh-files-button" class="ghost small">Refresh</button>
+                </div>
               </div>
               <div id="file-tree" class="file-tree"></div>
             </aside>

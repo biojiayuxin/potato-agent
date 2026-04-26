@@ -11,6 +11,8 @@ const state = {
   rootPath: '',
   workspaceRoot: '',
   currentPath: '',
+  fileBrowserMode: 'home_only',
+  homePath: '',
   expandedPaths: new Set(),
   treeCache: new Map(),
   streamingMessageIds: new Set(),
@@ -70,6 +72,10 @@ const dom = {
   fileTree: document.getElementById('file-tree'),
   cwdLabel: document.getElementById('cwd-label'),
   refreshFilesButton: document.getElementById('refresh-files-button'),
+  fileOpenControls: document.getElementById('file-open-controls'),
+  filePathInput: document.getElementById('file-path-input'),
+  fileOpenButton: document.getElementById('file-open-button'),
+  fileHomeButton: document.getElementById('file-home-button'),
   sidebarResizer: document.getElementById('sidebar-resizer'),
   filesResizer: document.getElementById('files-resizer'),
   chatItemTemplate: document.getElementById('chat-item-template'),
@@ -424,6 +430,8 @@ const resetWorkspaceState = () => {
   state.rootPath = '';
   state.workspaceRoot = '';
   state.currentPath = '';
+  state.fileBrowserMode = 'home_only';
+  state.homePath = '';
   state.expandedPaths = new Set();
   state.treeCache.clear();
   state.streamingMessageIds.clear();
@@ -1489,12 +1497,21 @@ const renderWorkspaceHeader = () => {
     : 'No model selected';
 };
 
+const renderFileBrowserControls = () => {
+  if (!dom.fileOpenControls) return;
+  dom.fileOpenControls.hidden = state.fileBrowserMode !== 'user_readable';
+  if (state.fileBrowserMode === 'user_readable' && dom.filePathInput && !dom.filePathInput.value.trim()) {
+    dom.filePathInput.value = state.homePath || state.workspaceRoot || state.user?.workspace_root || '~';
+  }
+};
+
 const renderWorkspace = () => {
   renderChatList();
   renderWorkspaceHeader();
   renderMessages();
   renderAttachments();
   renderApprovalModal();
+  renderFileBrowserControls();
 };
 
 const normalizeDirectory = (path) => {
@@ -1512,6 +1529,20 @@ const getDisplayDirectoryPath = () => {
   return relativePath ? `${workspaceRoot.replace(/\/+$/g, '')}/${relativePath}` : workspaceRoot;
 };
 
+const setFileTreeRoot = async ({ root, path = '', entries = null }) => {
+  state.workspaceRoot = String(root || state.workspaceRoot || state.user?.workspace_root || '').trim();
+  state.rootPath = normalizeDirectory(path || '/');
+  state.currentPath = state.rootPath;
+  state.expandedPaths = new Set([state.rootPath]);
+  state.treeCache.clear();
+  if (Array.isArray(entries)) {
+    state.treeCache.set(state.rootPath, entries);
+  } else {
+    await listDirectory(state.rootPath, true);
+  }
+  await renderFileTree();
+};
+
 const joinPath = (directory, name, type) => {
   const base = normalizeDirectory(directory);
   return type === 'directory' ? `${base}${name}/` : `${base}${name}`;
@@ -1524,7 +1555,12 @@ const listDirectory = async (path, force = false) => {
   }
 
   const relativePath = directory === '/' ? '' : directory.replace(/^\/+|\/+$/g, '');
-  const json = await api(`/api/files/tree?path=${encodeURIComponent(relativePath)}`, { method: 'GET' }).then((res) => res.json());
+  const query = new URLSearchParams();
+  query.set('path', relativePath);
+  if (state.workspaceRoot) {
+    query.set('root', state.workspaceRoot);
+  }
+  const json = await api(`/api/files/tree?${query.toString()}`, { method: 'GET' }).then((res) => res.json());
   const entries = Array.isArray(json?.entries) ? json.entries : [];
   entries.sort((left, right) => {
     if (left.type !== right.type) return left.type === 'directory' ? -1 : 1;
@@ -1536,7 +1572,12 @@ const listDirectory = async (path, force = false) => {
 
 const downloadFile = async (path) => {
   const relativePath = String(path || '').replace(/^\/+/, '');
-  const response = await api(`/api/files/download?path=${encodeURIComponent(relativePath)}`, { method: 'GET' });
+  const query = new URLSearchParams();
+  query.set('path', relativePath);
+  if (state.workspaceRoot) {
+    query.set('root', state.workspaceRoot);
+  }
+  const response = await api(`/api/files/download?${query.toString()}`, { method: 'GET' });
   const blob = await response.blob();
   const url = URL.createObjectURL(blob);
   const link = document.createElement('a');
@@ -1650,14 +1691,35 @@ const renderFileTree = async () => {
 };
 
 const fetchWorkspaceFiles = async () => {
-  const json = await api('/api/files/tree', { method: 'GET' }).then((res) => res.json());
-  state.workspaceRoot = String(json?.root || state.user?.workspace_root || '').trim();
-  state.rootPath = normalizeDirectory(json?.path || '/');
-  state.currentPath = state.rootPath;
-  state.expandedPaths = new Set([state.rootPath]);
-  state.treeCache.clear();
-  await listDirectory(state.rootPath, true);
-  await renderFileTree();
+  const [configJson, treeJson] = await Promise.all([
+    api('/api/files/config', { method: 'GET' }).then((res) => res.json()),
+    api('/api/files/tree', { method: 'GET' }).then((res) => res.json()),
+  ]);
+  state.fileBrowserMode = String(configJson?.mode || 'home_only');
+  state.homePath = String(configJson?.home || treeJson?.root || state.user?.workspace_root || '').trim();
+  renderFileBrowserControls();
+  await setFileTreeRoot({
+    root: treeJson?.root || state.user?.workspace_root || '/',
+    path: treeJson?.path || '/',
+    entries: Array.isArray(treeJson?.entries) ? treeJson.entries : [],
+  });
+};
+
+const openDirectory = async (rawPath) => {
+  const requestedPath = String(rawPath || '').trim();
+  if (!requestedPath) {
+    showChatError('Enter a directory path to open.');
+    return;
+  }
+  const json = await api(`/api/files/open?path=${encodeURIComponent(requestedPath)}`, { method: 'GET' }).then((res) => res.json());
+  await setFileTreeRoot({
+    root: json?.root || requestedPath,
+    path: json?.path || '/',
+    entries: Array.isArray(json?.entries) ? json.entries : [],
+  });
+  if (dom.filePathInput) {
+    dom.filePathInput.value = String(json?.opened_path || requestedPath);
+  }
 };
 
 const fetchModels = async () => {
@@ -2294,6 +2356,21 @@ dom.sendButton.addEventListener('click', async (event) => {
 dom.refreshFilesButton.addEventListener('click', async () => {
   state.treeCache.clear();
   await fetchWorkspaceFiles().catch((error) => showChatError(error.message));
+});
+
+dom.fileOpenButton?.addEventListener('click', async () => {
+  await openDirectory(dom.filePathInput?.value || '').catch((error) => showChatError(error.message));
+});
+
+dom.fileHomeButton?.addEventListener('click', async () => {
+  const homePath = state.homePath || state.user?.workspace_root || '~';
+  await openDirectory(homePath).catch((error) => showChatError(error.message));
+});
+
+dom.filePathInput?.addEventListener('keydown', async (event) => {
+  if (event.key !== 'Enter' || event.isComposing) return;
+  event.preventDefault();
+  await openDirectory(dom.filePathInput?.value || '').catch((error) => showChatError(error.message));
 });
 
 initResizablePanels();

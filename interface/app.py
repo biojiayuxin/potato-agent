@@ -7,6 +7,7 @@ import os
 import pwd
 import re
 import secrets
+import subprocess
 import sys
 import time
 import uuid
@@ -109,6 +110,9 @@ SESSION_TTL_SECONDS = int(
 MAX_UPLOAD_SIZE_BYTES = int(
     os.getenv("INTERFACE_MAX_UPLOAD_BYTES", str(20 * 1024 * 1024))
 )
+FILE_BROWSER_MODE = (
+    os.getenv("INTERFACE_FILE_BROWSER_MODE", "home_only").strip().lower()
+)
 UPLOAD_DIR_NAME = os.getenv("INTERFACE_UPLOAD_DIR_NAME", ".potato-interface-uploads")
 ARCHIVE_RETENTION_DAYS = int(os.getenv("INTERFACE_ARCHIVE_RETENTION_DAYS", "7"))
 ARCHIVE_SCHEDULE_HOUR = int(os.getenv("INTERFACE_ARCHIVE_SCHEDULE_HOUR", "3"))
@@ -162,6 +166,12 @@ class SignupRequest(BaseModel):
 
 class ApprovalDecisionRequest(BaseModel):
     choice: str
+
+
+def _normalized_file_browser_mode() -> str:
+    if FILE_BROWSER_MODE in {"home_only", "user_readable"}:
+        return FILE_BROWSER_MODE
+    return "home_only"
 
 
 def _now_seconds() -> int:
@@ -380,6 +390,160 @@ def _ensure_resolved_within_root(root: Path, path: str | None) -> Path:
     except ValueError as exc:
         raise HTTPException(status_code=400, detail="Invalid path") from exc
     return target
+
+
+def _expand_user_directory_input(user: CurrentUser, path: str | None) -> Path:
+    home = user.target.home_dir.resolve()
+    raw = str(path or "").strip()
+    if not raw or raw == "~":
+        return home
+    if raw.startswith("~/"):
+        return (home / raw[2:]).resolve()
+    if raw.startswith("/"):
+        return Path(raw).resolve()
+    return (home / raw).resolve()
+
+
+def _resolve_file_browser_root(user: CurrentUser, requested_root: str | None) -> Path:
+    home = user.target.home_dir.resolve()
+    if not requested_root:
+        return home
+
+    root = _expand_user_directory_input(user, requested_root)
+    if _normalized_file_browser_mode() == "home_only":
+        try:
+            root.relative_to(home)
+        except ValueError as exc:
+            raise HTTPException(
+                status_code=403,
+                detail="Opening directories outside ~/ is disabled on this deployment",
+            ) from exc
+    return root
+
+
+def _probe_path_as_user(path: Path, *, linux_user: str) -> dict[str, Any]:
+    script = (
+        "import json, os, pathlib, sys\n"
+        "target = pathlib.Path(sys.argv[1]).resolve()\n"
+        "payload = {'exists': target.exists()}\n"
+        "if payload['exists']:\n"
+        "    payload['is_dir'] = target.is_dir()\n"
+        "    payload['is_file'] = target.is_file()\n"
+        "    payload['readable'] = os.access(target, os.R_OK)\n"
+        "    payload['enterable'] = os.access(target, os.X_OK)\n"
+        "else:\n"
+        "    payload['is_dir'] = False\n"
+        "    payload['is_file'] = False\n"
+        "    payload['readable'] = False\n"
+        "    payload['enterable'] = False\n"
+        "print(json.dumps(payload))\n"
+    )
+    result = subprocess.run(
+        ["runuser", "-u", linux_user, "--", "python3", "-c", script, str(path)],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if result.returncode != 0:
+        detail = result.stderr.strip() or result.stdout.strip() or "path probe failed"
+        raise HTTPException(status_code=500, detail=detail)
+    try:
+        payload = json.loads(result.stdout.strip() or "{}")
+    except json.JSONDecodeError as exc:
+        raise HTTPException(status_code=500, detail="Invalid path probe response") from exc
+    return payload if isinstance(payload, dict) else {}
+
+
+def _assert_user_can_open_directory(path: Path, *, linux_user: str) -> None:
+    payload = _probe_path_as_user(path, linux_user=linux_user)
+    if not payload.get("exists"):
+        raise HTTPException(status_code=404, detail="Requested path does not exist")
+    if not payload.get("is_dir"):
+        raise HTTPException(status_code=400, detail="Requested path is not a directory")
+    if not (payload.get("readable") and payload.get("enterable")):
+        raise HTTPException(status_code=403, detail="Permission denied for this directory")
+
+
+def _assert_user_can_read_file(path: Path, *, linux_user: str) -> None:
+    payload = _probe_path_as_user(path, linux_user=linux_user)
+    if not payload.get("exists"):
+        raise HTTPException(status_code=404, detail="Requested file does not exist")
+    if not payload.get("is_file"):
+        raise HTTPException(status_code=400, detail="Requested path is not a file")
+    if not payload.get("readable"):
+        raise HTTPException(status_code=403, detail="Permission denied for this file")
+
+
+def _list_directory_as_user(
+    root: Path,
+    path: Path,
+    *,
+    linux_user: str,
+) -> list[dict[str, Any]]:
+    script = (
+        "import json, os, pathlib, sys\n"
+        "root = pathlib.Path(sys.argv[1]).resolve()\n"
+        "target = pathlib.Path(sys.argv[2]).resolve()\n"
+        "if not target.exists():\n"
+        "    print(json.dumps({'error': 'not_found'}))\n"
+        "    raise SystemExit(0)\n"
+        "if not target.is_dir():\n"
+        "    print(json.dumps({'error': 'not_directory'}))\n"
+        "    raise SystemExit(0)\n"
+        "if not os.access(target, os.R_OK | os.X_OK):\n"
+        "    print(json.dumps({'error': 'permission_denied'}))\n"
+        "    raise SystemExit(0)\n"
+        "entries = []\n"
+        "for child in sorted(target.iterdir(), key=lambda item: (not item.is_dir(), item.name.lower())):\n"
+        "    if child.name.startswith('.'):\n"
+        "        continue\n"
+        "    try:\n"
+        "        child_stat = child.stat()\n"
+        "    except PermissionError:\n"
+        "        continue\n"
+        "    entries.append({\n"
+        "        'name': child.name,\n"
+        "        'path': child.resolve().relative_to(root).as_posix(),\n"
+        "        'type': 'directory' if child.is_dir() else 'file',\n"
+        "        'size': int(child_stat.st_size),\n"
+        "        'modified': int(child_stat.st_mtime),\n"
+        "    })\n"
+        "print(json.dumps({'entries': entries}))\n"
+    )
+    result = subprocess.run(
+        [
+            "runuser",
+            "-u",
+            linux_user,
+            "--",
+            "python3",
+            "-c",
+            script,
+            str(root),
+            str(path),
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if result.returncode != 0:
+        detail = result.stderr.strip() or result.stdout.strip() or "directory access failed"
+        raise HTTPException(status_code=500, detail=detail)
+
+    try:
+        payload = json.loads(result.stdout.strip() or "{}")
+    except json.JSONDecodeError as exc:
+        raise HTTPException(status_code=500, detail="Invalid directory access response") from exc
+
+    error = str(payload.get("error") or "").strip()
+    if error == "not_found":
+        raise HTTPException(status_code=404, detail="Requested path does not exist")
+    if error == "not_directory":
+        raise HTTPException(status_code=400, detail="Requested path is not a directory")
+    if error == "permission_denied":
+        raise HTTPException(status_code=403, detail="Permission denied for this directory")
+    entries = payload.get("entries") if isinstance(payload.get("entries"), list) else []
+    return [item for item in entries if isinstance(item, dict)]
 
 
 def _get_user_workspace_root(user: CurrentUser) -> Path:
@@ -914,7 +1078,7 @@ def _ensure_upload_root(user: CurrentUser) -> Path:
     if upload_dir_name.is_absolute():
         upload_root = (upload_dir_name / user.target.username).resolve()
     else:
-        upload_root = (user.target.workdir / upload_dir_name).resolve()
+        upload_root = (_get_user_workspace_root(user) / upload_dir_name).resolve()
     upload_root.mkdir(parents=True, exist_ok=True)
     _apply_file_permissions(upload_root, linux_user=user.target.linux_user, is_dir=True)
     return upload_root
@@ -1195,47 +1359,65 @@ async def delete_session(
 
 @app.get("/api/files/tree")
 async def files_tree(
-    path: str | None = None, user: CurrentUser = Depends(get_current_user)
+    path: str | None = None,
+    root: str | None = None,
+    user: CurrentUser = Depends(get_current_user),
 ) -> dict[str, Any]:
-    root = _get_user_workspace_root(user)
-    target = _ensure_resolved_within_root(root, path)
-    if not root.exists():
+    browser_root = _resolve_file_browser_root(user, root)
+    target = _ensure_resolved_within_root(browser_root, path)
+    if not browser_root.exists():
         raise HTTPException(status_code=404, detail="Workspace root does not exist")
-    if not target.exists():
-        raise HTTPException(status_code=404, detail="Requested path does not exist")
-    if not target.is_dir():
-        raise HTTPException(status_code=400, detail="Requested path is not a directory")
+    _assert_user_can_open_directory(target, linux_user=user.target.linux_user)
+    entries = _list_directory_as_user(
+        browser_root,
+        target,
+        linux_user=user.target.linux_user,
+    )
 
-    entries: list[dict[str, Any]] = []
-    for child in sorted(
-        target.iterdir(), key=lambda item: (not item.is_dir(), item.name.lower())
-    ):
-        if child.name.startswith("."):
-            continue
-        stat = child.stat()
-        entries.append(
-            {
-                "name": child.name,
-                "path": _relative_path(root, child),
-                "type": "directory" if child.is_dir() else "file",
-                "size": stat.st_size,
-                "modified": int(stat.st_mtime),
-            }
-        )
+    return {
+        "root": str(browser_root),
+        "path": _relative_path(browser_root, target),
+        "entries": entries,
+    }
 
-    return {"root": str(root), "path": _relative_path(root, target), "entries": entries}
+
+@app.get("/api/files/config")
+async def files_config(user: CurrentUser = Depends(get_current_user)) -> dict[str, Any]:
+    root = _get_user_workspace_root(user)
+    return {
+        "mode": _normalized_file_browser_mode(),
+        "home": str(user.target.home_dir),
+        "root": str(root),
+    }
+
+
+@app.get("/api/files/open")
+async def open_directory(
+    path: str,
+    user: CurrentUser = Depends(get_current_user),
+) -> dict[str, Any]:
+    mode = _normalized_file_browser_mode()
+    target = _resolve_file_browser_root(user, path)
+    _assert_user_can_open_directory(target, linux_user=user.target.linux_user)
+    entries = _list_directory_as_user(target, target, linux_user=user.target.linux_user)
+    return {
+        "mode": mode,
+        "root": str(target),
+        "path": "",
+        "opened_path": str(target),
+        "entries": entries,
+    }
 
 
 @app.get("/api/files/download")
 async def files_download(
-    path: str, user: CurrentUser = Depends(get_current_user)
+    path: str,
+    root: str | None = None,
+    user: CurrentUser = Depends(get_current_user),
 ) -> FileResponse:
-    root = _get_user_workspace_root(user)
-    target = _ensure_resolved_within_root(root, path)
-    if not target.exists():
-        raise HTTPException(status_code=404, detail="Requested file does not exist")
-    if not target.is_file():
-        raise HTTPException(status_code=400, detail="Requested path is not a file")
+    browser_root = _resolve_file_browser_root(user, root)
+    target = _ensure_resolved_within_root(browser_root, path)
+    _assert_user_can_read_file(target, linux_user=user.target.linux_user)
     return FileResponse(target, filename=target.name)
 
 

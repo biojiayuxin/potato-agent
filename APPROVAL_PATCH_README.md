@@ -227,6 +227,28 @@ If you do not want to change model settings, you can still use the same helper
 logic from a maintenance script — the key point is that existing users need a
 refresh pass after patch code changes.
 
+### Hermes upgrade compatibility model
+
+Updating `hermes-agent/` source alone should not require changing the deployment
+shape of this approval feature. The deployment contract is:
+
+1. `interface` owns patch generation and user-file installation.
+2. Each user's `HERMES_HOME` stores a copied bootstrap + patch module.
+3. Hermes continues to start normally with:
+   `hermes gateway run --replace`
+4. The patch is applied at Python startup through the per-user
+   `sitecustomize.py` bootstrap.
+
+So after pulling a newer Hermes version, the operational steps are:
+
+1. update this repository and the deployed Hermes code
+2. restart `interface`
+3. refresh existing users so their copied patch files are rewritten
+4. restart the affected Hermes services
+
+As long as the Hermes internals listed in the "Maintenance notes" section have
+not changed incompatibly, this remains enough to re-deploy approval support.
+
 ### Why new users automatically get approval support
 
 All supported user-creation paths converge on the same provisioning helper:
