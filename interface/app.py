@@ -13,7 +13,7 @@ import time
 import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any, Iterator
 
 import httpx
@@ -377,31 +377,57 @@ async def get_current_user(request: Request) -> CurrentUser:
     return user
 
 
-def _ensure_resolved_within_root(root: Path, path: str | None) -> Path:
-    root_resolved = root.resolve()
-    relative = str(path or "").strip().lstrip("/")
-    target = (root_resolved / relative).resolve()
-    try:
-        target.relative_to(root_resolved)
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail="Invalid path") from exc
-    return target
+def _normalize_relative_browser_path(path: str | None) -> str:
+    raw = str(path or "").strip().replace("\\", "/")
+    if not raw or raw == "/":
+        return ""
+
+    parts: list[str] = []
+    for part in PurePosixPath(raw.lstrip("/")).parts:
+        if part in {"", "."}:
+            continue
+        if part == "..":
+            if not parts:
+                raise HTTPException(status_code=400, detail="Invalid path")
+            parts.pop()
+            continue
+        parts.append(part)
+    return "/".join(parts)
+
+
+def _normalize_logical_absolute_path(path: Path) -> Path:
+    parts: list[str] = []
+    for part in PurePosixPath(path.as_posix()).parts:
+        if part in {"", "/", "."}:
+            continue
+        if part == "..":
+            if parts:
+                parts.pop()
+            continue
+        parts.append(part)
+    return Path("/").joinpath(*parts) if parts else Path("/")
+
+
+def _resolve_file_browser_target(root: Path, path: str | None) -> tuple[str, Path]:
+    relative = _normalize_relative_browser_path(path)
+    target = (root / relative).resolve()
+    return relative, target
 
 
 def _expand_user_directory_input(user: CurrentUser, path: str | None) -> Path:
-    home = user.target.home_dir.resolve()
+    home = _normalize_logical_absolute_path(user.target.home_dir.resolve())
     raw = str(path or "").strip()
     if not raw or raw == "~":
         return home
     if raw.startswith("~/"):
-        return (home / raw[2:]).resolve()
+        return _normalize_logical_absolute_path(home / raw[2:])
     if raw.startswith("/"):
-        return Path(raw).resolve()
-    return (home / raw).resolve()
+        return _normalize_logical_absolute_path(Path(raw))
+    return _normalize_logical_absolute_path(home / raw)
 
 
 def _resolve_file_browser_root(user: CurrentUser, requested_root: str | None) -> Path:
-    home = user.target.home_dir.resolve()
+    home = _normalize_logical_absolute_path(user.target.home_dir.resolve())
     if not requested_root:
         return home
 
@@ -471,15 +497,15 @@ def _assert_user_can_read_file(path: Path, *, linux_user: str) -> None:
 
 
 def _list_directory_as_user(
-    root: Path,
     path: Path,
     *,
+    relative_path: str,
     linux_user: str,
 ) -> list[dict[str, Any]]:
     script = (
         "import json, os, pathlib, sys\n"
-        "root = pathlib.Path(sys.argv[1]).resolve()\n"
-        "target = pathlib.Path(sys.argv[2]).resolve()\n"
+        "target = pathlib.Path(sys.argv[1]).resolve()\n"
+        "logical_base = pathlib.PurePosixPath(sys.argv[2]) if len(sys.argv) > 2 and sys.argv[2] else pathlib.PurePosixPath()\n"
         "if not target.exists():\n"
         "    print(json.dumps({'error': 'not_found'}))\n"
         "    raise SystemExit(0)\n"
@@ -499,7 +525,7 @@ def _list_directory_as_user(
         "        continue\n"
         "    entries.append({\n"
         "        'name': child.name,\n"
-        "        'path': child.resolve().relative_to(root).as_posix(),\n"
+        "        'path': (logical_base / child.name).as_posix(),\n"
         "        'type': 'directory' if child.is_dir() else 'file',\n"
         "        'size': int(child_stat.st_size),\n"
         "        'modified': int(child_stat.st_mtime),\n"
@@ -515,8 +541,8 @@ def _list_directory_as_user(
             "python3",
             "-c",
             script,
-            str(root),
             str(path),
+            relative_path,
         ],
         capture_output=True,
         text=True,
@@ -546,12 +572,6 @@ def _get_user_workspace_root(user: CurrentUser) -> Path:
     if user.target.home_dir:
         return user.target.home_dir
     return user.target.workdir
-
-
-def _relative_path(root: Path, target: Path) -> str:
-    rel = target.resolve().relative_to(root.resolve())
-    text = rel.as_posix()
-    return "" if text == "." else text
 
 
 def _load_session_db(spec: HermesTarget):
@@ -1383,19 +1403,19 @@ async def files_tree(
     user: CurrentUser = Depends(get_current_user),
 ) -> dict[str, Any]:
     browser_root = _resolve_file_browser_root(user, root)
-    target = _ensure_resolved_within_root(browser_root, path)
+    relative_path, target = _resolve_file_browser_target(browser_root, path)
     if not browser_root.exists():
         raise HTTPException(status_code=404, detail="Workspace root does not exist")
     _assert_user_can_open_directory(target, linux_user=user.target.linux_user)
     entries = _list_directory_as_user(
-        browser_root,
         target,
+        relative_path=relative_path,
         linux_user=user.target.linux_user,
     )
 
     return {
         "root": str(browser_root),
-        "path": _relative_path(browser_root, target),
+        "path": relative_path,
         "entries": entries,
     }
 
@@ -1418,7 +1438,11 @@ async def open_directory(
     mode = _normalized_file_browser_mode()
     target = _resolve_file_browser_root(user, path)
     _assert_user_can_open_directory(target, linux_user=user.target.linux_user)
-    entries = _list_directory_as_user(target, target, linux_user=user.target.linux_user)
+    entries = _list_directory_as_user(
+        target,
+        relative_path="",
+        linux_user=user.target.linux_user,
+    )
     return {
         "mode": mode,
         "root": str(target),
@@ -1435,7 +1459,7 @@ async def files_download(
     user: CurrentUser = Depends(get_current_user),
 ) -> FileResponse:
     browser_root = _resolve_file_browser_root(user, root)
-    target = _ensure_resolved_within_root(browser_root, path)
+    _, target = _resolve_file_browser_target(browser_root, path)
     _assert_user_can_read_file(target, linux_user=user.target.linux_user)
     return FileResponse(target, filename=target.name)
 
