@@ -129,6 +129,14 @@ FOREGROUND_CHAT_HEARTBEAT_INTERVAL_SECONDS = int(
     os.getenv("INTERFACE_FOREGROUND_CHAT_HEARTBEAT_INTERVAL_SECONDS", "15")
 )
 FILENAME_SANITIZE_RE = re.compile(r"[^A-Za-z0-9._-]+")
+CONTEXT_COMPACTION_PREFIXES = (
+    "[CONTEXT COMPACTION",
+    "[CONTEXT SUMMARY]:",
+)
+CONTEXT_COMPACTION_NOTICE = (
+    "Context was compressed in the background because the conversation got too long. "
+    "I'll continue from the compacted context."
+)
 
 HERMES_SRC = REPO_ROOT / "hermes-agent"
 if str(HERMES_SRC) not in sys.path:
@@ -654,6 +662,103 @@ def _apply_session_title_fallback(
     return normalized
 
 
+def _logical_session_id_from_row(session: dict[str, Any] | None) -> str:
+    if not isinstance(session, dict):
+        return ""
+    return str(session.get("_lineage_root_id") or session.get("id") or "").strip()
+
+
+def _is_context_compaction_message(message: dict[str, Any]) -> bool:
+    content = str(message.get("content") or "").strip()
+    return bool(content) and content.startswith(CONTEXT_COMPACTION_PREFIXES)
+
+
+def _is_compression_continuation(
+    parent_session: dict[str, Any] | None,
+    child_session: dict[str, Any] | None,
+) -> bool:
+    if not isinstance(parent_session, dict) or not isinstance(child_session, dict):
+        return False
+
+    parent_id = str(parent_session.get("id") or "").strip()
+    if not parent_id:
+        return False
+
+    if str(child_session.get("parent_session_id") or "").strip() != parent_id:
+        return False
+
+    if str(parent_session.get("end_reason") or "").strip() != "compression":
+        return False
+
+    ended_at = float(parent_session.get("ended_at") or 0)
+    started_at = float(child_session.get("started_at") or 0)
+    return ended_at > 0 and started_at >= ended_at
+
+
+def _find_logical_session_root_id(db: Any, session_id: str) -> str:
+    current_id = str(session_id or "").strip()
+    if not current_id:
+        return ""
+
+    current_session = db.get_session(current_id)
+    if not current_session:
+        return current_id
+
+    for _ in range(100):
+        parent_id = str(current_session.get("parent_session_id") or "").strip()
+        if not parent_id:
+            return current_id
+
+        parent_session = db.get_session(parent_id)
+        if not _is_compression_continuation(parent_session, current_session):
+            return current_id
+
+        current_id = parent_id
+        current_session = parent_session
+
+    return current_id
+
+
+def _get_logical_session_tip_id(db: Any, logical_session_id: str) -> str:
+    logical_id = str(logical_session_id or "").strip()
+    if not logical_id:
+        return ""
+    return str(db.get_compression_tip(logical_id) or logical_id).strip()
+
+
+def _get_projected_logical_session_row(
+    db: Any, logical_session_id: str
+) -> dict[str, Any] | None:
+    for session in db.list_sessions_rich(
+        source="api_server",
+        limit=100000,
+        offset=0,
+    ):
+        if _logical_session_id_from_row(session) == logical_session_id:
+            return session
+    return None
+
+
+def _normalize_logical_session_row(
+    session: dict[str, Any],
+    *,
+    logical_session_id: str,
+    logical_session: dict[str, Any] | None,
+    display_meta: dict[str, Any] | None,
+) -> dict[str, Any]:
+    normalized = _normalize_session_row(session)
+    normalized["id"] = logical_session_id
+
+    root_title = str((logical_session or {}).get("title") or "").strip()
+    draft_title = str((display_meta or {}).get("draft_title") or "").strip()
+    if root_title:
+        normalized["title"] = root_title
+    elif draft_title:
+        normalized["title"] = draft_title
+
+    return normalized
+
+
 def _generate_interface_session_id() -> str:
     timestamp_str = datetime.now(UTC).strftime("%Y%m%d_%H%M%S")
     short_uuid = uuid.uuid4().hex[:6]
@@ -855,7 +960,13 @@ def _build_fallback_display_messages(
             normalized.append(pending_assistant)
         pending_assistant = None
 
-    for raw_message in messages:
+    filtered_messages = [
+        raw_message
+        for raw_message in messages
+        if not _is_context_compaction_message(raw_message)
+    ]
+
+    for raw_message in filtered_messages:
         role = str(raw_message.get("role") or "")
         if role == "tool":
             continue
@@ -942,6 +1053,84 @@ def _build_fallback_display_messages(
     return normalized
 
 
+def _build_context_compaction_notice_message(
+    *,
+    timestamp: int | None = None,
+) -> dict[str, Any]:
+    return _normalize_display_message(
+        {
+            "id": f"context-compaction-{uuid.uuid4().hex}",
+            "role": "assistant",
+            "content": CONTEXT_COMPACTION_NOTICE,
+            "reasoningContent": "",
+            "toolCalls": [],
+            "progressLines": [],
+            "files": [],
+            "timestamp": int(timestamp or _now_seconds()),
+            "done": True,
+            "source": "context_compaction_notice",
+        }
+    )
+
+
+def _collect_compression_lineage_session_ids(db: Any, logical_session_id: str) -> list[str]:
+    logical_id = str(logical_session_id or "").strip()
+    if not logical_id:
+        return []
+
+    all_sessions = db.list_sessions_rich(
+        source="api_server",
+        include_children=True,
+        project_compression_tips=False,
+        limit=100000,
+        offset=0,
+    )
+    children_by_parent: dict[str, list[dict[str, Any]]] = {}
+    for session in all_sessions:
+        parent_id = str(session.get("parent_session_id") or "").strip()
+        if not parent_id:
+            continue
+        children_by_parent.setdefault(parent_id, []).append(session)
+
+    session_ids: list[str] = []
+    current_session = db.get_session(logical_id)
+    while isinstance(current_session, dict):
+        current_id = str(current_session.get("id") or "").strip()
+        if not current_id or current_id in session_ids:
+            break
+        session_ids.append(current_id)
+
+        children = sorted(
+            children_by_parent.get(current_id, []),
+            key=lambda item: float(item.get("started_at") or 0),
+        )
+        next_session = None
+        for child in children:
+            if _is_compression_continuation(current_session, child):
+                next_session = child
+                break
+        current_session = next_session
+
+    return session_ids
+
+
+def _resolve_logical_session_context(
+    db: Any, session_id: str
+) -> tuple[str, dict[str, Any] | None, str, dict[str, Any] | None]:
+    resolved = db.resolve_session_id(session_id)
+    if not resolved:
+        return "", None, "", None
+
+    logical_session_id = _find_logical_session_root_id(db, resolved)
+    logical_session = db.get_session(logical_session_id)
+    tip_session_id = _get_logical_session_tip_id(db, logical_session_id)
+    projected_session = (
+        _get_projected_logical_session_row(db, logical_session_id)
+        or logical_session
+    )
+    return logical_session_id, logical_session, tip_session_id, projected_session
+
+
 async def _archive_expired_sessions_once() -> None:
     run_id = start_archive_run()
     archived_count = 0
@@ -956,14 +1145,15 @@ async def _archive_expired_sessions_once() -> None:
                     source="api_server", limit=100000, offset=0
                 )
                 for session in sessions:
-                    session_id = str(session.get("id") or "")
+                    session_id = _logical_session_id_from_row(session)
                     last_active = float(
                         session.get("last_active") or session.get("started_at") or 0
                     )
                     if not session_id or last_active >= cutoff:
                         continue
 
-                    raw_messages = db.get_messages(session_id)
+                    tip_session_id = _get_logical_session_tip_id(db, session_id)
+                    raw_messages = db.get_messages(tip_session_id)
                     display_meta = (
                         get_display_session_meta(auth_user.id, session_id)
                         if auth_user is not None
@@ -992,7 +1182,10 @@ async def _archive_expired_sessions_once() -> None:
                     if not archived:
                         continue
 
-                    db.delete_session(session_id)
+                    for lineage_session_id in reversed(
+                        _collect_compression_lineage_session_ids(db, session_id)
+                    ):
+                        db.delete_session(lineage_session_id)
                     if auth_user is not None:
                         delete_display_messages(auth_user.id, session_id)
                     archived_count += 1
@@ -1322,10 +1515,18 @@ async def get_sessions(
         sessions = db.list_sessions_rich(
             source="api_server", limit=limit, offset=offset
         )
-    normalized = [
-        _apply_session_title_fallback(item, get_display_session_meta(user.id, str(item.get("id") or "")))
-        for item in sessions
-    ]
+        normalized = []
+        for item in sessions:
+            logical_session_id = _logical_session_id_from_row(item)
+            logical_session = db.get_session(logical_session_id)
+            normalized.append(
+                _normalize_logical_session_row(
+                    item,
+                    logical_session_id=logical_session_id,
+                    logical_session=logical_session,
+                    display_meta=get_display_session_meta(user.id, logical_session_id),
+                )
+            )
     normalized.sort(
         key=lambda item: (item["last_active"], item["started_at"]), reverse=True
     )
@@ -1347,9 +1548,11 @@ async def create_session(
             raise HTTPException(status_code=500, detail="Failed to create session")
 
     return {
-        "session": _apply_session_title_fallback(
+        "session": _normalize_logical_session_row(
             session,
-            get_display_session_meta(user.id, session_id),
+            logical_session_id=session_id,
+            logical_session=session,
+            display_meta=get_display_session_meta(user.id, session_id),
         )
     }
 
@@ -1359,22 +1562,23 @@ async def get_session_detail(
     session_id: str, user: CurrentUser = Depends(get_current_user)
 ) -> dict[str, Any]:
     with _open_session_db(user.target) as db:
-        resolved = db.resolve_session_id(session_id)
-        if not resolved:
+        logical_session_id, logical_session, tip_session_id, projected_session = (
+            _resolve_logical_session_context(db, session_id)
+        )
+        if not logical_session or logical_session.get("source") != "api_server":
             raise HTTPException(status_code=404, detail="Session not found")
-        session = db.get_session(resolved)
-        if not session or session.get("source") != "api_server":
-            raise HTTPException(status_code=404, detail="Session not found")
-        raw_messages = db.get_messages(resolved)
+        raw_messages = db.get_messages(tip_session_id)
 
-    display_messages = get_display_messages(user.id, resolved)
+    display_messages = get_display_messages(user.id, logical_session_id)
     if display_messages is None:
         display_messages = _build_fallback_display_messages(raw_messages)
 
     return {
-        "session": _apply_session_title_fallback(
-            session,
-            get_display_session_meta(user.id, resolved),
+        "session": _normalize_logical_session_row(
+            projected_session,
+            logical_session_id=logical_session_id,
+            logical_session=logical_session,
+            display_meta=get_display_session_meta(user.id, logical_session_id),
         ),
         "messages": [_normalize_display_message(item) for item in display_messages],
     }
@@ -1385,14 +1589,16 @@ async def delete_session(
     session_id: str, user: CurrentUser = Depends(get_current_user)
 ) -> dict[str, Any]:
     with _open_session_db(user.target) as db:
-        resolved = db.resolve_session_id(session_id)
-        if not resolved:
+        logical_session_id, logical_session, _, _ = _resolve_logical_session_context(
+            db, session_id
+        )
+        if not logical_session or logical_session.get("source") != "api_server":
             raise HTTPException(status_code=404, detail="Session not found")
-        session = db.get_session(resolved)
-        if not session or session.get("source") != "api_server":
-            raise HTTPException(status_code=404, detail="Session not found")
-        db.delete_session(resolved)
-    delete_display_messages(user.id, resolved)
+        for lineage_session_id in reversed(
+            _collect_compression_lineage_session_ids(db, logical_session_id)
+        ):
+            db.delete_session(lineage_session_id)
+    delete_display_messages(user.id, logical_session_id)
     return {"ok": True}
 
 
@@ -1575,12 +1781,46 @@ async def chat_completions(
     draft_title = _derive_draft_title_from_user_message(user_display_message)
 
     session_id = str(body.pop("session_id", "") or "").strip()
+    logical_session_id = session_id
+    runtime_session_id = session_id
+    start_tip_session_id = ""
+    context_compaction_notice_message: dict[str, Any] | None = None
+    display_meta = None
+    should_set_initial_draft_title = False
+    display_transcript: list[dict[str, Any]] = []
+
+    if session_id:
+        with _open_session_db(user.target) as db:
+            (
+                resolved_logical_session_id,
+                logical_session,
+                tip_session_id,
+                _,
+            ) = _resolve_logical_session_context(db, session_id)
+        if not logical_session or logical_session.get("source") != "api_server":
+            raise HTTPException(status_code=404, detail="Session not found")
+        logical_session_id = resolved_logical_session_id
+        runtime_session_id = tip_session_id or logical_session_id
+        start_tip_session_id = runtime_session_id
+        display_meta = get_display_session_meta(user.id, logical_session_id)
+        should_set_initial_draft_title = _should_set_initial_draft_title(
+            logical_session, display_meta
+        )
+        if should_set_initial_draft_title:
+            set_display_draft_title(user.id, logical_session_id, draft_title)
+            display_meta = get_display_session_meta(user.id, logical_session_id)
+        display_transcript = _get_or_create_display_transcript(
+            user.id,
+            logical_session_id,
+            user_message=user_display_message,
+        )
+
     upstream_headers = {
         "Authorization": f"Bearer {user.target.api_key}",
         "Content-Type": "application/json",
     }
-    if session_id:
-        upstream_headers["X-Hermes-Session-Id"] = session_id
+    if runtime_session_id:
+        upstream_headers["X-Hermes-Session-Id"] = runtime_session_id
 
     client: httpx.AsyncClient = app.state.http
     upstream = await client.send(
@@ -1604,50 +1844,48 @@ async def chat_completions(
         )
 
     response_headers: dict[str, str] = {}
-    if upstream.headers.get("x-hermes-session-id"):
-        response_headers["X-Hermes-Session-Id"] = upstream.headers[
-            "x-hermes-session-id"
-        ]
     if upstream.headers.get("cache-control"):
         response_headers["Cache-Control"] = upstream.headers["cache-control"]
     if upstream.headers.get("x-accel-buffering"):
         response_headers["X-Accel-Buffering"] = upstream.headers["x-accel-buffering"]
 
-    resolved_session_id = (
-        response_headers.get("X-Hermes-Session-Id")
-        or session_id
-        or str(upstream.headers.get("x-hermes-session-id") or "")
+    resolved_runtime_session_id = (
+        runtime_session_id or str(upstream.headers.get("x-hermes-session-id") or "")
     ).strip()
-    display_meta = None
-    should_set_initial_draft_title = False
-    if resolved_session_id:
-        with _open_session_db(user.target) as db:
-            resolved_session = db.get_session(resolved_session_id)
-        display_meta = get_display_session_meta(user.id, resolved_session_id)
-        should_set_initial_draft_title = _should_set_initial_draft_title(
-            resolved_session, display_meta
-        )
-        if should_set_initial_draft_title:
-            set_display_draft_title(user.id, resolved_session_id, draft_title)
-            display_meta = get_display_session_meta(user.id, resolved_session_id)
-    display_transcript = (
-        _get_or_create_display_transcript(
-            user.id, resolved_session_id, user_message=user_display_message
-        )
-        if resolved_session_id
-        else []
-    )
+    if logical_session_id:
+        response_headers["X-Hermes-Session-Id"] = logical_session_id
 
     def persist_transcript() -> None:
-        if not resolved_session_id:
+        if not logical_session_id:
             return
         payload = [*display_transcript, assistant_display_message]
+        if context_compaction_notice_message is not None:
+            payload.append(context_compaction_notice_message)
         save_display_messages(
             user.id,
-            resolved_session_id,
+            logical_session_id,
             payload,
             draft_title=draft_title if should_set_initial_draft_title else None,
         )
+
+    def finalize_logical_session_context() -> dict[str, Any] | None:
+        nonlocal resolved_runtime_session_id, context_compaction_notice_message
+        if not logical_session_id:
+            return None
+        with _open_session_db(user.target) as db:
+            end_tip_session_id = _get_logical_session_tip_id(db, logical_session_id)
+        if end_tip_session_id:
+            resolved_runtime_session_id = end_tip_session_id
+        if (
+            logical_session_id
+            and start_tip_session_id
+            and end_tip_session_id
+            and end_tip_session_id != start_tip_session_id
+        ):
+            context_compaction_notice_message = _build_context_compaction_notice_message(
+                timestamp=assistant_display_message.get("timestamp")
+            )
+        return context_compaction_notice_message
 
     if body.get("stream") is False:
         payload = await upstream.aread()
@@ -1667,14 +1905,29 @@ async def chat_completions(
                 )
                 assistant_content = str(message.get("content") or "")
 
-        if resolved_session_id:
-            display_transcript = _get_or_create_display_transcript(
-                user.id, resolved_session_id, user_message=user_display_message
-            )
+        if logical_session_id:
+            if not display_transcript:
+                display_transcript = _get_or_create_display_transcript(
+                    user.id, logical_session_id, user_message=user_display_message
+                )
             assistant_display_message["content"] = assistant_content
             assistant_display_message["done"] = True
             assistant_display_message["timestamp"] = _now_seconds()
+            notice_message = finalize_logical_session_context()
             persist_transcript()
+            if notice_message is not None:
+                response_json.setdefault("choices", [{}])
+                first_choice = response_json["choices"][0]
+                if isinstance(first_choice, dict):
+                    message = first_choice.get("message")
+                    if isinstance(message, dict):
+                        existing_content = str(message.get("content") or "").strip()
+                        message["content"] = (
+                            f"{existing_content}\n\n{notice_message['content']}"
+                            if existing_content
+                            else notice_message["content"]
+                        )
+                        payload = json.dumps(response_json).encode("utf-8")
 
         await upstream.aclose()
         await _release_chat_lease()
@@ -1686,21 +1939,16 @@ async def chat_completions(
         )
 
     async def stream_upstream() -> Iterator[bytes]:
-        nonlocal resolved_session_id, display_transcript
+        nonlocal display_transcript
         try:
             async for chunk in upstream.aiter_bytes():
                 if chunk:
-                    if not resolved_session_id:
-                        header_session_id = str(
-                            upstream.headers.get("x-hermes-session-id") or ""
-                        ).strip()
-                        if header_session_id:
-                            resolved_session_id = header_session_id
-                            display_transcript = _get_or_create_display_transcript(
-                                user.id,
-                                resolved_session_id,
-                                user_message=user_display_message,
-                            )
+                    if logical_session_id and not display_transcript:
+                        display_transcript = _get_or_create_display_transcript(
+                            user.id,
+                            logical_session_id,
+                            user_message=user_display_message,
+                        )
 
                     text = chunk.decode("utf-8", errors="ignore")
                     for block in text.split("\n\n"):
@@ -1783,7 +2031,17 @@ async def chat_completions(
         finally:
             assistant_display_message["done"] = True
             assistant_display_message["timestamp"] = _now_seconds()
+            notice_message = finalize_logical_session_context()
             persist_transcript()
+            if notice_message is not None:
+                notice_event = {
+                    "content": str(notice_message.get("content") or ""),
+                    "timestamp": int(notice_message.get("timestamp") or _now_seconds()),
+                }
+                yield (
+                    f"event: hermes.context.compaction\n"
+                    f"data: {json.dumps(notice_event)}\n\n"
+                ).encode("utf-8")
             await upstream.aclose()
             await _release_chat_lease()
 

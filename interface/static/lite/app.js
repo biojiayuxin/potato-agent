@@ -287,6 +287,37 @@ const clearLiveSessionMessages = (sessionId) => {
   state.liveSessionMessages.delete(sessionId);
 };
 
+const appendContextCompactionNotice = (sessionId, content, timestamp = nowSeconds()) => {
+  if (!sessionId || !content) return;
+
+  const targetMessages = getLiveSessionMessages(sessionId) || state.messages;
+  if (!Array.isArray(targetMessages)) return;
+  if (targetMessages.some((message) => message.source === 'context_compaction_notice')) {
+    return;
+  }
+
+  targetMessages.push(normalizeMessageForDisplay({
+    id: uuid(),
+    role: 'assistant',
+    content,
+    reasoningContent: '',
+    toolCalls: [],
+    progressLines: [],
+    timestamp,
+    done: true,
+    files: [],
+    source: 'context_compaction_notice',
+  }));
+
+  if (getLiveSessionMessages(sessionId)) {
+    setLiveSessionMessages(sessionId, targetMessages);
+  }
+  if (isViewingSession(sessionId)) {
+    state.messages = targetMessages;
+    renderMessages();
+  }
+};
+
 const getLiveSessionMessages = (sessionId) => {
   if (!sessionId) return null;
   return state.liveSessionMessages.get(sessionId) || null;
@@ -2044,6 +2075,15 @@ const streamChatCompletion = async (payload, assistantMessage, abortController, 
           options: Array.isArray(json?.options) ? json.options.map((item) => String(item)) : [],
         };
         renderApprovalModal();
+        continue;
+      }
+
+      if (eventName === 'hermes.context.compaction') {
+        appendContextCompactionNotice(
+          streamState.sessionId,
+          String(json?.content || ''),
+          Number(json?.timestamp || nowSeconds()),
+        );
         continue;
       }
 
