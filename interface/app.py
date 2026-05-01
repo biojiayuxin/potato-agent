@@ -5,6 +5,7 @@ import asyncio
 import json
 import os
 import pwd
+import sqlite3
 import re
 import secrets
 import subprocess
@@ -16,7 +17,6 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path, PurePosixPath
 from typing import Any, Iterator
 
-import httpx
 import jwt
 from fastapi import (
     Depends,
@@ -30,12 +30,13 @@ from fastapi import (
     WebSocketDisconnect,
     status,
 )
-from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
+from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from interface.auth_db import (
     activate_signup_user,
+    cleanup_terminal_signup_jobs,
     create_signup_job,
     ensure_auth_db,
     email_exists,
@@ -63,7 +64,6 @@ from interface.display_store import (
     get_display_session_meta,
     get_display_messages,
     save_display_messages,
-    set_display_draft_title,
 )
 from interface.mapping import DEFAULT_MAPPING_PATH, HermesTarget, MappingStore
 from interface.hermes_service import (
@@ -76,19 +76,14 @@ from interface.hermes_service import (
     stop_and_remove_service,
 )
 from interface.runtime_state import (
-    FOREGROUND_CHAT_LEASE,
     cleanup_expired_runtime_leases,
     clear_session_revocation,
-    create_runtime_lease,
     ensure_runtime_state_store,
     get_runtime_state,
     has_active_runtime_leases,
-    heartbeat_runtime_lease,
     list_idle_runtime_candidates,
     mark_background_activity,
     mark_runtime_started,
-    mark_user_message_activity,
-    release_runtime_lease,
     revoke_runtime_session,
 )
 from interface.mapping import (
@@ -129,14 +124,8 @@ RUNTIME_IDLE_TIMEOUT_SECONDS = int(
 RUNTIME_IDLE_CHECK_INTERVAL_SECONDS = int(
     os.getenv("INTERFACE_RUNTIME_IDLE_CHECK_INTERVAL_SECONDS", "60")
 )
-FOREGROUND_CHAT_LEASE_TTL_SECONDS = int(
-    os.getenv("INTERFACE_FOREGROUND_CHAT_LEASE_TTL_SECONDS", "90")
-)
-FOREGROUND_CHAT_HEARTBEAT_INTERVAL_SECONDS = int(
-    os.getenv("INTERFACE_FOREGROUND_CHAT_HEARTBEAT_INTERVAL_SECONDS", "15")
-)
 FILENAME_SANITIZE_RE = re.compile(r"[^A-Za-z0-9._-]+")
-INTERFACE_SESSION_SOURCES = ("api_server", "tui")
+INTERFACE_SESSION_SOURCES = ("tui",)
 
 HERMES_SRC = REPO_ROOT / "hermes-agent"
 if str(HERMES_SRC) not in sys.path:
@@ -166,10 +155,6 @@ class SignupRequest(BaseModel):
     email: str
     password: str
     display_name: str = ""
-
-
-class ApprovalDecisionRequest(BaseModel):
-    choice: str
 
 
 class SessionDisplaySyncRequest(BaseModel):
@@ -205,14 +190,15 @@ def _validate_signup_payload(payload: SignupRequest) -> tuple[str, str, str, str
             status_code=400, detail="Password must be at least 8 characters."
         )
     if username_exists(username):
-        raise HTTPException(status_code=409, detail="Username is already in use.")
+        raise HTTPException(status_code=409, detail="Username is already taken.")
     if email_exists(email):
-        raise HTTPException(status_code=409, detail="Email is already in use.")
+        raise HTTPException(status_code=409, detail="Email is already taken.")
     return username, email, password, display_name
 
 
 async def _signup_worker_loop() -> None:
     while True:
+        cleanup_terminal_signup_jobs()
         job = get_next_pending_signup_job()
         if job is None:
             await asyncio.sleep(2)
@@ -635,36 +621,6 @@ def _normalize_session_row(session: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def _derive_draft_title_from_user_message(message: dict[str, Any]) -> str:
-    text = str(message.get("content") or "").strip()
-    if text:
-        return text[:10] or "New chat"
-
-    files = message.get("files") if isinstance(message.get("files"), list) else []
-    first_file = files[0] if files else None
-    if isinstance(first_file, dict) and first_file.get("name"):
-        return str(first_file.get("name"))[:10]
-
-    return "New chat"
-
-
-def _should_set_initial_draft_title(
-    session: dict[str, Any] | None, display_meta: dict[str, Any] | None
-) -> bool:
-    if not isinstance(session, dict):
-        return False
-
-    if int(session.get("message_count") or 0) > 0:
-        return False
-
-    hermes_title = str(session.get("title") or "").strip()
-    if hermes_title and hermes_title != "New chat":
-        return False
-
-    existing_draft_title = str((display_meta or {}).get("draft_title") or "").strip()
-    return not existing_draft_title
-
-
 def _apply_session_title_fallback(
     session: dict[str, Any], display_meta: dict[str, Any] | None
 ) -> dict[str, Any]:
@@ -780,12 +736,6 @@ def _normalize_logical_session_row(
     return normalized
 
 
-def _generate_interface_session_id() -> str:
-    timestamp_str = datetime.now(UTC).strftime("%Y%m%d_%H%M%S")
-    short_uuid = uuid.uuid4().hex[:6]
-    return f"{timestamp_str}_{short_uuid}"
-
-
 def _normalize_message_row(message: dict[str, Any]) -> dict[str, Any]:
     tool_calls = message.get("tool_calls")
     if not isinstance(tool_calls, list):
@@ -839,35 +789,6 @@ def _normalize_tool_call(tool_call: dict[str, Any]) -> dict[str, Any]:
     return normalized
 
 
-def _merge_tool_call_deltas(
-    existing_tool_calls: list[dict[str, Any]], delta_tool_calls: list[dict[str, Any]]
-) -> list[dict[str, Any]]:
-    merged = [_normalize_tool_call(item) for item in existing_tool_calls]
-
-    for delta_tool_call in delta_tool_calls:
-        index = int(delta_tool_call.get("index") or len(merged))
-        while len(merged) <= index:
-            merged.append(_normalize_tool_call({"index": len(merged)}))
-
-        current = merged[index]
-        if delta_tool_call.get("id"):
-            current["id"] = str(delta_tool_call["id"])
-        if delta_tool_call.get("type"):
-            current["type"] = str(delta_tool_call["type"])
-
-        function_delta = (
-            delta_tool_call.get("function")
-            if isinstance(delta_tool_call.get("function"), dict)
-            else {}
-        )
-        if function_delta.get("name"):
-            current["function"]["name"] = str(function_delta["name"])
-        if function_delta.get("arguments"):
-            current["function"]["arguments"] += str(function_delta["arguments"])
-
-    return merged
-
-
 def _append_progress_entries(message: dict[str, Any], entries: list[str]) -> None:
     progress_lines = message.setdefault("progressLines", [])
     if not isinstance(progress_lines, list):
@@ -879,81 +800,6 @@ def _append_progress_entries(message: dict[str, Any], entries: list[str]) -> Non
         if progress_lines and progress_lines[-1] == entry:
             continue
         progress_lines.append(entry)
-
-
-def _build_user_display_message(body: dict[str, Any]) -> dict[str, Any]:
-    messages = body.get("messages") if isinstance(body.get("messages"), list) else []
-    user_payload = messages[-1] if messages and isinstance(messages[-1], dict) else {}
-    raw_content = str(user_payload.get("content") or "")
-    visible_content = raw_content
-    files: list[dict[str, Any]] = []
-
-    attachment_start = raw_content.find("<potato-files>")
-    attachment_end = raw_content.find("</potato-files>")
-    if attachment_start == 0 and attachment_end != -1:
-        json_text = raw_content[len("<potato-files>") : attachment_end].strip()
-        remainder = raw_content[attachment_end + len("</potato-files>") :].lstrip()
-        hint_line = (
-            "Use the attachment local paths above if you need to inspect the files."
-        )
-        if remainder.startswith(hint_line):
-            remainder = remainder[len(hint_line) :].lstrip()
-        visible_content = remainder
-        try:
-            parsed_files = json.loads(json_text)
-        except json.JSONDecodeError:
-            parsed_files = []
-        if isinstance(parsed_files, list):
-            files = parsed_files
-
-    return _normalize_display_message(
-        {
-            "id": f"user-{uuid.uuid4().hex}",
-            "role": "user",
-            "content": visible_content,
-            "reasoningContent": "",
-            "toolCalls": [],
-            "progressLines": [],
-            "files": files,
-            "timestamp": _now_seconds(),
-            "done": True,
-            "source": "display_store",
-        }
-    )
-
-
-def _build_assistant_display_message() -> dict[str, Any]:
-    return _normalize_display_message(
-        {
-            "id": f"assistant-{uuid.uuid4().hex}",
-            "role": "assistant",
-            "content": "",
-            "reasoningContent": "",
-            "toolCalls": [],
-            "progressLines": [],
-            "files": [],
-            "timestamp": _now_seconds(),
-            "done": False,
-            "source": "display_store",
-        }
-    )
-
-
-def _get_or_create_display_transcript(
-    user_id: str,
-    session_id: str,
-    *,
-    user_message: dict[str, Any] | None = None,
-) -> list[dict[str, Any]]:
-    existing = get_display_messages(user_id, session_id)
-    transcript = (
-        [_normalize_display_message(item) for item in existing]
-        if isinstance(existing, list)
-        else []
-    )
-    if user_message is not None:
-        transcript.append(_normalize_display_message(user_message))
-    return transcript
 
 
 def _extract_progress_lines(text: str) -> list[str]:
@@ -1359,21 +1205,6 @@ async def _archive_scheduler_loop() -> None:
             pass
 
 
-async def _foreground_chat_lease_heartbeat(lease_id: str) -> None:
-    try:
-        while True:
-            await asyncio.sleep(max(FOREGROUND_CHAT_HEARTBEAT_INTERVAL_SECONDS, 1))
-            renewed = await asyncio.to_thread(
-                heartbeat_runtime_lease,
-                lease_id,
-                ttl_seconds=FOREGROUND_CHAT_LEASE_TTL_SECONDS,
-            )
-            if not renewed:
-                return
-    except asyncio.CancelledError:
-        raise
-
-
 async def _runtime_idle_scheduler_loop() -> None:
     while True:
         await asyncio.sleep(max(RUNTIME_IDLE_CHECK_INTERVAL_SECONDS, 5))
@@ -1472,10 +1303,10 @@ app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 @app.on_event("startup")
 async def on_startup() -> None:
     ensure_auth_db()
+    cleanup_terminal_signup_jobs()
     ensure_display_store()
     ensure_archive_db()
     ensure_runtime_state_store()
-    app.state.http = httpx.AsyncClient(timeout=httpx.Timeout(60.0, read=None))
     app.state.tui_gateway_bridges = TuiGatewayBridgeRegistry()
     app.state.archive_scheduler_task = asyncio.create_task(_archive_scheduler_loop())
     app.state.signup_worker_task = asyncio.create_task(_signup_worker_loop())
@@ -1497,9 +1328,6 @@ async def on_shutdown() -> None:
     )
     if runtime_idle_scheduler_task is not None:
         runtime_idle_scheduler_task.cancel()
-    client: httpx.AsyncClient | None = getattr(app.state, "http", None)
-    if client is not None:
-        await client.aclose()
     bridge_registry: TuiGatewayBridgeRegistry | None = getattr(
         app.state, "tui_gateway_bridges", None
     )
@@ -1636,7 +1464,7 @@ async def api_status(user: CurrentUser = Depends(get_current_user)) -> dict[str,
         "status": True,
         "user": _serialize_user(user),
         "mapping_path": str(DEFAULT_MAPPING_PATH),
-        "hermes_api_base": user.target.api_base_url,
+        "workspace_service": user.target.systemd_service,
         "state_db_path": str(user.target.state_db_path),
         "archived_session_count": count_archived_sessions(),
     }
@@ -1711,6 +1539,13 @@ async def signup(payload: SignupRequest) -> dict[str, Any]:
             password=password,
             display_name=display_name,
         )
+    except sqlite3.IntegrityError as exc:
+        detail = str(exc).lower()
+        if "signup_jobs.email" in detail or "users.email" in detail or "email" in detail:
+            raise HTTPException(status_code=409, detail="Email is already taken.") from exc
+        if "signup_jobs.username" in detail or "users.username" in detail or "username" in detail:
+            raise HTTPException(status_code=409, detail="Username is already taken.") from exc
+        raise HTTPException(status_code=409, detail="Username or email is already taken.") from exc
     except Exception as exc:
         raise HTTPException(
             status_code=500, detail=f"Failed to create signup job: {exc}"
@@ -1739,13 +1574,44 @@ async def signout(response: Response) -> dict[str, Any]:
 
 
 @app.get("/api/models")
-async def get_models(user: CurrentUser = Depends(get_current_user)) -> Response:
-    client: httpx.AsyncClient = app.state.http
-    upstream = await client.get(
-        f"{user.target.api_base_url}/v1/models",
-        headers={"Authorization": f"Bearer {user.target.api_key}"},
-    )
-    return JSONResponse(status_code=upstream.status_code, content=upstream.json())
+async def get_models(user: CurrentUser = Depends(get_current_user)) -> dict[str, Any]:
+    bridge: TuiGatewayBridge | None = None
+    try:
+        bridge = await _get_tui_bridge_for_user(user)
+        model_options = await bridge.rpc("model.options", {})
+    except Exception as exc:
+        raise HTTPException(
+            status_code=503,
+            detail=f"Failed to load available models: {exc}",
+        ) from exc
+    finally:
+        if bridge is not None:
+            registry: TuiGatewayBridgeRegistry = app.state.tui_gateway_bridges
+            await registry.maybe_close_if_unused(user.id)
+
+    models: list[dict[str, str]] = []
+    seen_model_ids: set[str] = set()
+
+    def add_model(model_id: Any) -> None:
+        normalized_model_id = str(model_id or "").strip()
+        if not normalized_model_id or normalized_model_id in seen_model_ids:
+            return
+        seen_model_ids.add(normalized_model_id)
+        models.append({"id": normalized_model_id, "name": normalized_model_id})
+
+    add_model(model_options.get("model"))
+    providers = model_options.get("providers")
+    if isinstance(providers, list):
+        for provider in providers:
+            if not isinstance(provider, dict):
+                continue
+            provider_models = provider.get("models")
+            if not isinstance(provider_models, list):
+                continue
+            for model_id in provider_models:
+                add_model(model_id)
+
+    return {"data": models}
 
 
 @app.get("/api/sessions")
@@ -1779,31 +1645,6 @@ async def get_sessions(
         key=lambda item: (item["last_active"], item["started_at"]), reverse=True
     )
     return {"sessions": normalized, "limit": limit, "offset": offset}
-
-
-@app.post("/api/sessions")
-async def create_session(
-    user: CurrentUser = Depends(get_current_user),
-) -> dict[str, Any]:
-    session_id = _generate_interface_session_id()
-    with _open_session_db(user.target) as db:
-        db.create_session(
-            session_id=session_id,
-            source="api_server",
-        )
-        session = db.get_session(session_id)
-        if not session:
-            raise HTTPException(status_code=500, detail="Failed to create session")
-
-    return {
-        "session": _normalize_logical_session_row(
-            session,
-            logical_session_id=session_id,
-            logical_session=session,
-            display_meta=get_display_session_meta(user.id, session_id),
-            resume_session_id=session_id,
-        )
-    }
 
 
 @app.get("/api/sessions/{session_id}")
@@ -2001,305 +1842,3 @@ async def upload_file(
         "content_type": file.content_type or "application/octet-stream",
         "path": str(destination),
     }
-
-
-@app.post("/api/chat/approvals/{approval_id}")
-async def resolve_chat_approval(
-    approval_id: str,
-    payload: ApprovalDecisionRequest,
-    user: CurrentUser = Depends(get_current_user),
-) -> Response:
-    choice = str(payload.choice or "").strip().lower()
-    if choice not in {"once", "session", "always", "deny"}:
-        raise HTTPException(
-            status_code=400,
-            detail="choice must be one of once, session, always, deny",
-        )
-
-    client: httpx.AsyncClient = app.state.http
-    upstream = await client.post(
-        f"{user.target.api_base_url}/v1/approvals/{approval_id}",
-        headers={"Authorization": f"Bearer {user.target.api_key}"},
-        json={"choice": choice},
-    )
-
-    try:
-        content = upstream.json()
-        return JSONResponse(status_code=upstream.status_code, content=content)
-    except Exception:
-        return Response(
-            content=upstream.text,
-            status_code=upstream.status_code,
-            media_type=upstream.headers.get("content-type", "application/json"),
-        )
-
-
-@app.post("/api/chat/completions")
-async def chat_completions(
-    request: Request, user: CurrentUser = Depends(get_current_user)
-) -> Response:
-    try:
-        body = await request.json()
-    except json.JSONDecodeError as exc:
-        raise HTTPException(status_code=400, detail="Invalid JSON body") from exc
-
-    if not isinstance(body, dict):
-        raise HTTPException(status_code=400, detail="Invalid request body")
-
-    await asyncio.to_thread(mark_user_message_activity, user.id)
-    lease_id = await asyncio.to_thread(
-        create_runtime_lease,
-        user.id,
-        lease_type=FOREGROUND_CHAT_LEASE,
-        ttl_seconds=FOREGROUND_CHAT_LEASE_TTL_SECONDS,
-        resource_id=str(uuid.uuid4()),
-        meta={"username": user.username, "mapping_username": user.mapping_username},
-    )
-    lease_heartbeat_task = asyncio.create_task(_foreground_chat_lease_heartbeat(lease_id))
-
-    async def _release_chat_lease() -> None:
-        lease_heartbeat_task.cancel()
-        with contextlib.suppress(asyncio.CancelledError):
-            await lease_heartbeat_task
-        await asyncio.to_thread(release_runtime_lease, lease_id)
-
-    user_display_message = _build_user_display_message(body)
-    assistant_display_message = _build_assistant_display_message()
-    draft_title = _derive_draft_title_from_user_message(user_display_message)
-
-    session_id = str(body.pop("session_id", "") or "").strip()
-    logical_session_id = session_id
-    runtime_session_id = session_id
-    start_tip_session_id = ""
-    display_meta = None
-    should_set_initial_draft_title = False
-    display_transcript: list[dict[str, Any]] = []
-
-    if session_id:
-        with _open_session_db(user.target) as db:
-            (
-                resolved_logical_session_id,
-                logical_session,
-                tip_session_id,
-                _,
-            ) = _resolve_logical_session_context(db, session_id)
-        if not logical_session or logical_session.get("source") != "api_server":
-            raise HTTPException(status_code=404, detail="Session not found")
-        logical_session_id = resolved_logical_session_id
-        runtime_session_id = tip_session_id or logical_session_id
-        start_tip_session_id = runtime_session_id
-        display_meta = get_display_session_meta(user.id, logical_session_id)
-        should_set_initial_draft_title = _should_set_initial_draft_title(
-            logical_session, display_meta
-        )
-        if should_set_initial_draft_title:
-            set_display_draft_title(user.id, logical_session_id, draft_title)
-            display_meta = get_display_session_meta(user.id, logical_session_id)
-        display_transcript = _get_or_create_display_transcript(
-            user.id,
-            logical_session_id,
-            user_message=user_display_message,
-        )
-
-    upstream_headers = {
-        "Authorization": f"Bearer {user.target.api_key}",
-        "Content-Type": "application/json",
-    }
-    if runtime_session_id:
-        upstream_headers["X-Hermes-Session-Id"] = runtime_session_id
-
-    client: httpx.AsyncClient = app.state.http
-    upstream = await client.send(
-        client.build_request(
-            "POST",
-            f"{user.target.api_base_url}/v1/chat/completions",
-            headers=upstream_headers,
-            content=json.dumps(body).encode("utf-8"),
-        ),
-        stream=True,
-    )
-
-    if upstream.status_code >= 400:
-        payload = await upstream.aread()
-        await upstream.aclose()
-        await _release_chat_lease()
-        return Response(
-            content=payload,
-            status_code=upstream.status_code,
-            media_type=upstream.headers.get("content-type", "application/json"),
-        )
-
-    response_headers: dict[str, str] = {}
-    if upstream.headers.get("cache-control"):
-        response_headers["Cache-Control"] = upstream.headers["cache-control"]
-    if upstream.headers.get("x-accel-buffering"):
-        response_headers["X-Accel-Buffering"] = upstream.headers["x-accel-buffering"]
-
-    resolved_runtime_session_id = (
-        runtime_session_id or str(upstream.headers.get("x-hermes-session-id") or "")
-    ).strip()
-    if logical_session_id:
-        response_headers["X-Hermes-Session-Id"] = logical_session_id
-
-    def persist_transcript() -> None:
-        if not logical_session_id:
-            return
-        payload = [*display_transcript, assistant_display_message]
-        save_display_messages(
-            user.id,
-            logical_session_id,
-            payload,
-            draft_title=draft_title if should_set_initial_draft_title else None,
-        )
-
-    def finalize_logical_session_context() -> None:
-        nonlocal resolved_runtime_session_id
-        if not logical_session_id:
-            return
-        with _open_session_db(user.target) as db:
-            end_tip_session_id = _get_logical_session_tip_id(db, logical_session_id)
-        if end_tip_session_id:
-            resolved_runtime_session_id = end_tip_session_id
-
-    if body.get("stream") is False:
-        payload = await upstream.aread()
-        try:
-            response_json = json.loads(payload.decode("utf-8"))
-        except (UnicodeDecodeError, json.JSONDecodeError):
-            response_json = {}
-
-        assistant_content = ""
-        if isinstance(response_json.get("choices"), list) and response_json["choices"]:
-            first_choice = response_json["choices"][0]
-            if isinstance(first_choice, dict):
-                message = (
-                    first_choice.get("message")
-                    if isinstance(first_choice.get("message"), dict)
-                    else {}
-                )
-                assistant_content = str(message.get("content") or "")
-
-        if logical_session_id:
-            if not display_transcript:
-                display_transcript = _get_or_create_display_transcript(
-                    user.id, logical_session_id, user_message=user_display_message
-                )
-            assistant_display_message["content"] = assistant_content
-            assistant_display_message["done"] = True
-            assistant_display_message["timestamp"] = _now_seconds()
-            finalize_logical_session_context()
-            persist_transcript()
-
-        await upstream.aclose()
-        await _release_chat_lease()
-        return Response(
-            content=payload,
-            status_code=upstream.status_code,
-            media_type=upstream.headers.get("content-type", "application/json"),
-            headers=response_headers,
-        )
-
-    async def stream_upstream() -> Iterator[bytes]:
-        nonlocal display_transcript
-        try:
-            async for chunk in upstream.aiter_bytes():
-                if chunk:
-                    if logical_session_id and not display_transcript:
-                        display_transcript = _get_or_create_display_transcript(
-                            user.id,
-                            logical_session_id,
-                            user_message=user_display_message,
-                        )
-
-                    text = chunk.decode("utf-8", errors="ignore")
-                    for block in text.split("\n\n"):
-                        if not block.strip():
-                            continue
-
-                        lines = block.split("\n")
-                        event_name = ""
-                        data_lines: list[str] = []
-                        for line in lines:
-                            if line.startswith("event: "):
-                                event_name = line[7:].strip()
-                            elif line.startswith("data: "):
-                                data_lines.append(line[6:])
-
-                        data = "\n".join(data_lines).strip()
-                        if not data or data == "[DONE]":
-                            continue
-
-                        try:
-                            event_payload = json.loads(data)
-                        except json.JSONDecodeError:
-                            continue
-
-                        if event_name == "hermes.tool.progress":
-                            emoji = str(event_payload.get("emoji") or "🛠️")
-                            label = str(
-                                event_payload.get("label")
-                                or event_payload.get("tool")
-                                or "tool"
-                            )
-                            _append_progress_entries(
-                                assistant_display_message, [f"{emoji} {label}"]
-                            )
-                            assistant_display_message["timestamp"] = _now_seconds()
-                            persist_transcript()
-                            continue
-
-                        delta = {}
-                        if (
-                            isinstance(event_payload.get("choices"), list)
-                            and event_payload["choices"]
-                        ):
-                            first_choice = event_payload["choices"][0]
-                            if isinstance(first_choice, dict):
-                                delta = (
-                                    first_choice.get("delta")
-                                    if isinstance(first_choice.get("delta"), dict)
-                                    else {}
-                                )
-
-                        if delta.get("reasoning_content"):
-                            assistant_display_message["reasoningContent"] += str(
-                                delta["reasoning_content"]
-                            )
-                        if (
-                            isinstance(delta.get("tool_calls"), list)
-                            and delta["tool_calls"]
-                        ):
-                            assistant_display_message["toolCalls"] = (
-                                _merge_tool_call_deltas(
-                                    assistant_display_message.get("toolCalls", []),
-                                    delta["tool_calls"],
-                                )
-                            )
-                        if delta.get("content"):
-                            content_delta = str(delta["content"])
-                            assistant_display_message["content"] += content_delta
-                            progress_lines = _extract_progress_lines(content_delta)
-                            if progress_lines:
-                                _append_progress_entries(
-                                    assistant_display_message, progress_lines
-                                )
-
-                        if delta:
-                            assistant_display_message["timestamp"] = _now_seconds()
-                            persist_transcript()
-
-                    yield chunk
-        finally:
-            assistant_display_message["done"] = True
-            assistant_display_message["timestamp"] = _now_seconds()
-            finalize_logical_session_context()
-            persist_transcript()
-            await upstream.aclose()
-            await _release_chat_lease()
-
-    return StreamingResponse(
-        stream_upstream(),
-        status_code=upstream.status_code,
-        media_type=upstream.headers.get("content-type", "text/event-stream"),
-        headers=response_headers,
-    )

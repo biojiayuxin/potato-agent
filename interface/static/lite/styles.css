@@ -534,7 +534,8 @@ button.stretch {
 
 .error {
   color: #b42348;
-  font-size: 13px;
+  font-size: 15px;
+  font-weight: 700;
   line-height: 1.5;
   white-space: pre-wrap;
 }

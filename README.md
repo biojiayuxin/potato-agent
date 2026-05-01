@@ -10,7 +10,7 @@
 
 - 仓库部署在 `/srv/potato_agent`
 - 下面所有命令都在仓库根目录执行
-- 默认以 `root` 身份执行
+- 默认以 `root` 身份执行，便于创建 Linux 用户、写入 `/etc/systemd/system`，并调用 `systemctl`
 - 目标机器已经具备：Linux、systemd、Python 3、Python `venv` 模块、`rsync`
 - 上游模型网关是 OpenAI-compatible 接口
 
@@ -112,7 +112,7 @@ python3 -m venv /opt/interface-env
 
 - 更新 `users_mapping.yaml`
 - 创建或绑定 Linux 用户
-- 安装并启动该用户自己的 Hermes service
+- 安装该用户自己的 Hermes service（默认保持 disabled，用户首次登录工作台时再自动启动）
 - 创建网页登录账号
 
 ### 5. 先前台确认 interface 能正常启动
@@ -168,6 +168,9 @@ WantedBy=multi-user.target
 
 - `WorkingDirectory` 必须改成你实际部署这个仓库的目录
 - `INTERFACE_SESSION_SECRET` 必须固定；如果不固定，`interface` 每次重启都会让现有登录态失效
+- `INTERFACE_TUI_GATEWAY_PYTHON` 默认是 `/opt/hermes-agent-venv/bin/python3`；如果你的 Hermes 虚拟环境装在别处，需要把这个环境变量改成对应的 Python 路径
+- `INTERFACE_RUNTIME_IDLE_TIMEOUT_SECONDS` 默认是 1800；测试时可以临时调小，例如 300 表示 5 分钟
+- 聊天主链路通过 `tui_gateway`，不再依赖浏览器侧 `api_server` 回退
 - 正式运行推荐使用 systemd unit；前台 `uvicorn` 更适合一次性验证和排障
 - `INTERFACE_FILE_BROWSER_MODE` 控制 Files 面板里是否允许用户输入目录并打开：
   - `home_only`：默认值。用户只能浏览 `~/`，不显示目录输入框。适合公有云/共享服务器。

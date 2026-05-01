@@ -27,6 +27,7 @@ const state = {
   pendingSessionPromise: null,
   shouldAutoScrollMessages: true,
   liveSessionMessages: new Map(),
+  sessionHistoryLoading: false,
 };
 
 const dom = {
@@ -926,6 +927,7 @@ const activatePersistedSession = (session, { clearMessages = true } = {}) => {
 const showDraftChat = () => {
   activeTuiSessionId = '';
   activePersistentSessionId = '';
+  state.sessionHistoryLoading = false;
   state.pendingAttachments = [];
   renderAttachments();
   state.draftSession = createDraftSession();
@@ -2096,6 +2098,14 @@ const renderMessages = () => {
   dom.messages.innerHTML = '';
   const visibleMessages = getRenderableMessages();
 
+  if (state.sessionHistoryLoading) {
+    const empty = document.createElement('div');
+    empty.className = 'empty-state loading-history';
+    empty.textContent = 'Loading chat history...';
+    dom.messages.append(empty);
+    return;
+  }
+
   if (visibleMessages.length === 0) {
     const empty = document.createElement('div');
     empty.className = 'empty-state';
@@ -2511,30 +2521,42 @@ const openSession = async (sessionId) => {
   state.activeSessionId = sessionId;
   activePersistentSessionId = String(sessionId || '');
   activeTuiSessionId = liveTuiSessionsByPersistentId.get(activePersistentSessionId) || '';
+  state.sessionHistoryLoading = true;
+  state.messages = [];
+  state.shouldAutoScrollMessages = true;
+  renderWorkspace();
 
   const cachedMessages = getCachedSessionMessages(sessionId);
   if (cachedMessages) {
+    state.sessionHistoryLoading = false;
     state.messages = cachedMessages;
     state.shouldAutoScrollMessages = true;
     renderWorkspace();
     return;
   }
 
-  const response = await api(`/api/sessions/${encodeURIComponent(sessionId)}`, { method: 'GET' });
-  const json = await response.json();
-  const normalizedMessages = Array.isArray(json?.messages)
-    ? json.messages.map(normalizeMessageForDisplay)
-    : [];
-  setLiveSessionMessages(sessionId, normalizedMessages);
-  state.activeSession = normalizeSessionSnapshot(
-    json?.session
-      ? { ...json.session, persistentSessionId: json.session.id }
-      : null
-  );
-  state.activeSessionId = state.activeSession?.id || null;
-  state.messages = normalizedMessages;
-  state.shouldAutoScrollMessages = true;
-  renderWorkspace();
+  try {
+    const response = await api(`/api/sessions/${encodeURIComponent(sessionId)}`, { method: 'GET' });
+    const json = await response.json();
+    const normalizedMessages = Array.isArray(json?.messages)
+      ? json.messages.map(normalizeMessageForDisplay)
+      : [];
+    setLiveSessionMessages(sessionId, normalizedMessages);
+    state.activeSession = normalizeSessionSnapshot(
+      json?.session
+        ? { ...json.session, persistentSessionId: json.session.id }
+        : null
+    );
+    state.activeSessionId = state.activeSession?.id || null;
+    state.sessionHistoryLoading = false;
+    state.messages = normalizedMessages;
+    state.shouldAutoScrollMessages = true;
+    renderWorkspace();
+  } catch (error) {
+    state.sessionHistoryLoading = false;
+    renderWorkspace();
+    throw error;
+  }
 };
 
 const syncActiveSessionFromSessions = (sessionId) => {
@@ -2804,28 +2826,30 @@ const showLogin = () => {
 const initializeWorkspaceData = async () => {
   let firstError = null;
 
-  try {
-    await fetchModels();
-  } catch (error) {
+  const modelsPromise = fetchModels().catch((error) => {
     firstError = firstError || error;
-  }
+  });
 
-  try {
-    await refreshSessions();
-    if (state.sessions.length > 0) {
-      await openSession(state.sessions[0].id);
-    } else {
-      showDraftChat();
+  const sessionsPromise = (async () => {
+    try {
+      await refreshSessions();
+      if (state.sessions.length > 0) {
+        await openSession(state.sessions[0].id);
+      } else {
+        state.sessionHistoryLoading = false;
+        showDraftChat();
+      }
+    } catch (error) {
+      state.sessionHistoryLoading = false;
+      firstError = firstError || error;
     }
-  } catch (error) {
-    firstError = firstError || error;
-  }
+  })();
 
-  try {
-    await fetchWorkspaceFiles();
-  } catch (error) {
+  const filesPromise = fetchWorkspaceFiles().catch((error) => {
     firstError = firstError || error;
-  }
+  });
+
+  await Promise.all([modelsPromise, sessionsPromise, filesPromise]);
 
   if (firstError) {
     showChatError(firstError.message || 'Workspace initialization failed');

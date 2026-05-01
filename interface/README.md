@@ -7,9 +7,8 @@
 - 认证：使用 `interface` 自己的 SQLite 用户库
 - 注册：创建 signup job，由后台 worker 执行用户开通流程
 - 会话列表/消息：直接读取每个用户自己的 Hermes `state.db`
-- 聊天：代理对应用户 Hermes 的 `/v1/chat/completions`
-- 聊天重构方向：通过受认证的 `tui_gateway` bridge 接入每用户会话化交互后端
-- 模型：代理对应用户 Hermes 的 `/v1/models`
+- 聊天：通过受认证的 `tui_gateway` bridge 接入每用户会话化交互后端
+- 模型：通过 `tui_gateway` 读取当前模型/模型列表
 - 文件树/下载/上传：由 `interface` 自己提供
 - 展示态消息：把页面展示用 transcript 持久化到 `interface.db`
 - 会话归档：后台定时把旧会话归档到 `archive.db`
@@ -65,7 +64,7 @@
 
 ## 当前边界
 
-- Hermes 当前在线只开了 API server，没开 `web_server`，所以会话列表不是走 Hermes HTTP，而是直接读 `state.db`
+- Hermes 每用户运行时由 systemd 管理；会话列表不是走 Hermes HTTP，而是直接读 `state.db`
 - `interface` 当前默认假设自己能够读取各用户的 home、`work` 和 `.hermes/state.db`
 - signup worker 会调用系统级用户开通逻辑；如果进程权限不足，注册任务会失败
 - `users_mapping.yaml` 里仍保留一些历史 `openwebui_*` 字段；`interface` 运行时不会使用它们
@@ -76,7 +75,7 @@
   - 受登录态保护的 WebSocket
   - 每个登录用户首次连接时，`interface` 会以该用户自己的 Linux 身份拉起一个 `python -m tui_gateway.entry` 子进程
   - 浏览器通过 WebSocket 发送 `{id, method, params}`，`interface` 负责转成 `tui_gateway` JSON-RPC，并把事件流转回浏览器
-- 这一层当前只提供后端 bridge 骨架，还没有替换 Lite 前端的主聊天链路
+- 这一层就是 Lite 前端当前的主聊天链路
 
 ### Lite 前端当前状态
 

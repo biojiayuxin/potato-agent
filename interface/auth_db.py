@@ -45,11 +45,17 @@ CREATE TABLE IF NOT EXISTS signup_jobs (
 );
 
 CREATE UNIQUE INDEX IF NOT EXISTS idx_signup_jobs_username
-ON signup_jobs(username);
+ON signup_jobs(username)
+WHERE status IN ('pending', 'provisioning');
 
 CREATE UNIQUE INDEX IF NOT EXISTS idx_signup_jobs_email
-ON signup_jobs(email);
+ON signup_jobs(email)
+WHERE status IN ('pending', 'provisioning');
 """
+
+ACTIVE_SIGNUP_JOB_STATUSES = ("pending", "provisioning")
+TERMINAL_SIGNUP_JOB_STATUSES = ("completed", "failed")
+DEFAULT_SIGNUP_JOB_RETENTION_SECONDS = 3600
 
 
 @dataclass(frozen=True)
@@ -85,6 +91,22 @@ def ensure_auth_db(db_path: Path = DEFAULT_AUTH_DB_PATH) -> Path:
     db_path.parent.mkdir(parents=True, exist_ok=True)
     with sqlite3.connect(str(db_path)) as conn:
         conn.executescript(SCHEMA_SQL)
+        for index_name, column_name in (
+            ("idx_signup_jobs_username", "username"),
+            ("idx_signup_jobs_email", "email"),
+        ):
+            row = conn.execute(
+                "select sql from sqlite_master where type = 'index' and name = ? limit 1",
+                (index_name,),
+            ).fetchone()
+            existing_sql = str(row[0] or "") if row is not None else ""
+            desired_marker = "where status in ('pending', 'provisioning')"
+            if desired_marker not in existing_sql.lower():
+                conn.execute(f"drop index if exists {index_name}")
+                conn.execute(
+                    f"create unique index if not exists {index_name} on signup_jobs({column_name}) "
+                    "where status in ('pending', 'provisioning')"
+                )
         conn.commit()
     return db_path
 
@@ -122,6 +144,21 @@ def email_exists(email: str, db_path: Path = DEFAULT_AUTH_DB_PATH) -> bool:
             (normalized_email,),
         ).fetchone()
     return row is not None or pending is not None
+
+
+def cleanup_terminal_signup_jobs(
+    *,
+    retention_seconds: int = DEFAULT_SIGNUP_JOB_RETENTION_SECONDS,
+    db_path: Path = DEFAULT_AUTH_DB_PATH,
+) -> int:
+    cutoff = int(time.time()) - max(int(retention_seconds), 0)
+    with connect_auth_db(db_path) as conn:
+        cursor = conn.execute(
+            "delete from signup_jobs where status in (?, ?) and updated_at <= ?",
+            (*TERMINAL_SIGNUP_JOB_STATUSES, cutoff),
+        )
+        conn.commit()
+        return cursor.rowcount
 
 
 def hash_password(password: str) -> str:

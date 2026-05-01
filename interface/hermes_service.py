@@ -2,12 +2,10 @@ from __future__ import annotations
 
 import contextlib
 import fcntl
-import json
 import os
 import pwd
 import shutil
 import subprocess
-import urllib.request
 import time
 from copy import deepcopy
 from pathlib import Path
@@ -26,9 +24,6 @@ DEFAULT_SERVICE_RESTART_SEC = 3
 DEFAULT_TERMINAL_TIMEOUT = 180
 DEFAULT_RUNTIME_READY_TIMEOUT = 45
 DEFAULT_RUNTIME_LOCK_DIR = Path("/run/potato-agent/runtime-start")
-PATCH_SITE_DIR_NAME = ".potato-interface-patch"
-
-
 def _run_command(command: list[str]) -> str:
     result = subprocess.run(command, capture_output=True, text=True, check=False)
     if result.returncode != 0:
@@ -90,15 +85,10 @@ def _set_owner_and_mode(path: Path, uid: int, gid: int, mode: int) -> None:
 def build_env_content(user: HermesTarget) -> str:
     lines = [
         f"# Interface user: {user.email or user.display_name or user.username}",
-        "API_SERVER_ENABLED=true",
-        f"API_SERVER_HOST={user.api_server_host}",
-        f"API_SERVER_PORT={user.api_port}",
-        f"API_SERVER_KEY={json.dumps(user.api_key) if ' ' in user.api_key else user.api_key}",
-        f"API_SERVER_MODEL_NAME={user.api_server_model_name}",
     ]
     for key, value in user.extra_env.items():
         rendered = (
-            json.dumps(value)
+            repr(value)
             if not str(value)
             .replace("_", "")
             .replace("/", "")
@@ -155,8 +145,6 @@ def build_systemd_unit(config: dict[str, Any], user: HermesTarget) -> str:
         display_name=user.display_name,
         linux_user=user.linux_user,
     )
-    patch_site_dir = user.hermes_home / PATCH_SITE_DIR_NAME
-
     return "\n".join(
         [
             "[Unit]",
@@ -170,8 +158,6 @@ def build_systemd_unit(config: dict[str, Any], user: HermesTarget) -> str:
             f"WorkingDirectory={user.home_dir}",
             f"Environment=HOME={user.home_dir}",
             f"Environment=HERMES_HOME={user.hermes_home}",
-            f"Environment=PYTHONPATH={patch_site_dir}",
-            "Environment=POTATO_AGENT_ENABLE_APPROVAL_PATCH=1",
             f"ExecStart={hermes_bin} gateway run --replace",
             f"Restart={restart}",
             f"RestartSec={restart_sec}",
@@ -209,23 +195,6 @@ def install_user_files(config: dict[str, Any], user: HermesTarget) -> None:
         encoding="utf-8",
     )
     _set_owner_and_mode(config_path, pw.pw_uid, gid, 0o600)
-
-    patch_site_dir = user.hermes_home / PATCH_SITE_DIR_NAME
-    patch_site_dir.mkdir(parents=True, exist_ok=True)
-    _set_owner_and_mode(patch_site_dir, pw.pw_uid, gid, 0o755)
-
-    patch_source = ROOT_DIR / "hermes_sitecustomize.py"
-    patch_target = patch_site_dir / "sitecustomize.py"
-    patch_target.write_text(patch_source.read_text(encoding="utf-8"), encoding="utf-8")
-    _set_owner_and_mode(patch_target, pw.pw_uid, gid, 0o644)
-
-    patch_module_source = ROOT_DIR / "hermes_api_approval_patch.py"
-    patch_module_target = patch_site_dir / "hermes_api_approval_patch.py"
-    patch_module_target.write_text(
-        patch_module_source.read_text(encoding="utf-8"),
-        encoding="utf-8",
-    )
-    _set_owner_and_mode(patch_module_target, pw.pw_uid, gid, 0o644)
 
     service_path = Path("/etc/systemd/system") / user.systemd_service
     service_path.write_text(build_systemd_unit(config, user), encoding="utf-8")
@@ -280,31 +249,24 @@ def remove_linux_user(linux_user: str, *, delete_home: bool) -> None:
     _run_command(command)
 
 
-def verify_hermes_models(api_key: str, host: str, port: int) -> dict[str, Any]:
-    request = urllib.request.Request(
-        f"http://{host}:{port}/v1/models",
-        headers={"Authorization": f"Bearer {api_key}"},
-    )
-    with urllib.request.urlopen(request, timeout=30) as response:
-        return json.loads(response.read().decode("utf-8"))
-
-
-def wait_for_hermes_models(
-    api_key: str,
-    host: str,
-    port: int,
+def wait_for_service_active(
+    service_name: str,
     *,
     timeout_seconds: int = DEFAULT_RUNTIME_READY_TIMEOUT,
-) -> dict[str, Any]:
+) -> None:
     deadline = time.time() + timeout_seconds
     last_error = "unknown error"
     while time.time() < deadline:
         try:
-            return verify_hermes_models(api_key, host, port)
+            if is_service_active(service_name):
+                return
+            last_error = f"service {service_name} is not active"
         except Exception as exc:
             last_error = str(exc)
             time.sleep(2)
-    raise RuntimeError(f"Hermes API did not become ready in time: {last_error}")
+            continue
+        time.sleep(1)
+    raise RuntimeError(f"Hermes runtime did not become ready in time: {last_error}")
 
 
 def require_binary(name: str) -> None:
@@ -358,18 +320,12 @@ def ensure_service_ready(
         if not was_active:
             start_service(user.systemd_service)
         try:
-            wait_for_hermes_models(
-                user.api_key,
-                user.api_server_host,
-                user.api_port,
-                timeout_seconds=timeout_seconds,
-            )
+            wait_for_service_active(user.systemd_service, timeout_seconds=timeout_seconds)
         except Exception as exc:
             debug_info = _collect_service_debug_info(user.systemd_service)
             detail = (
                 f"Failed to start Hermes runtime for {user.username}.\n"
                 f"Service: {user.systemd_service}\n"
-                f"Endpoint: {user.connection_url}\n"
                 f"Error: {exc}"
             )
             if debug_info:
@@ -380,6 +336,4 @@ def ensure_service_ready(
         "status": "ready",
         "started": not was_active,
         "service_name": user.systemd_service,
-        "api_base_url": user.api_base_url,
-        "connection_url": user.connection_url,
     }

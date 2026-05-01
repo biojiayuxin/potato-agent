@@ -16,6 +16,13 @@ from typing import Any
 from fastapi import WebSocket
 
 from interface.mapping import HermesTarget
+from interface.runtime_state import (
+    FOREGROUND_CHAT_LEASE,
+    create_runtime_lease,
+    heartbeat_runtime_lease,
+    mark_user_message_activity,
+    release_runtime_lease,
+)
 
 
 class TuiGatewayBridgeError(RuntimeError):
@@ -48,6 +55,8 @@ class TuiGatewayBridge:
         self._closed = False
         self._started_at = 0.0
         self._last_event_at = 0.0
+        self._foreground_leases_lock = threading.Lock()
+        self._foreground_leases: dict[str, tuple[str, asyncio.Task[None]]] = {}
 
     @property
     def started_at(self) -> float:
@@ -150,6 +159,11 @@ class TuiGatewayBridge:
         if self._proc is None or self._proc.stdin is None:
             raise TuiGatewayBridgeError("tui_gateway process is not available")
 
+        rpc_params = params or {}
+        live_session_id = str(rpc_params.get("session_id") or "").strip()
+        if method == "prompt.submit" and live_session_id:
+            await self._start_foreground_lease(live_session_id)
+
         request_id = uuid.uuid4().hex
         loop = asyncio.get_running_loop()
         future: asyncio.Future[dict[str, Any]] = loop.create_future()
@@ -179,10 +193,13 @@ class TuiGatewayBridge:
         except Exception:
             with self._pending_lock:
                 self._pending.pop(request_id, None)
+            if method == "prompt.submit" and live_session_id:
+                await self._release_foreground_lease(live_session_id)
             raise
 
     async def close(self) -> None:
         self._closed = True
+        await self._release_all_foreground_leases()
         proc = self._proc
         self._proc = None
 
@@ -244,11 +261,16 @@ class TuiGatewayBridge:
         if payload.get("method") == "event":
             params = payload.get("params") if isinstance(payload.get("params"), dict) else {}
             event_type = str(params.get("type") or "")
+            event_session_id = str(params.get("session_id") or "").strip()
             event_payload = params.get("payload") if isinstance(params.get("payload"), dict) else {}
             if event_type == "gateway.ready":
                 self._last_ready_payload = event_payload
                 if self._ready_event is not None and self._loop is not None:
                     self._loop.call_soon_threadsafe(self._ready_event.set)
+            if event_type == "message.complete" and event_session_id:
+                self._schedule_foreground_lease_release(event_session_id)
+            elif event_type == "gateway.exit":
+                self._schedule_release_all_foreground_leases()
             self._dispatch_event(
                 {
                     "type": event_type,
@@ -275,6 +297,87 @@ class TuiGatewayBridge:
 
         result = payload.get("result") if isinstance(payload.get("result"), dict) else {}
         self._loop.call_soon_threadsafe(entry.future.set_result, result)
+
+    async def _start_foreground_lease(self, live_session_id: str) -> None:
+        normalized_session_id = str(live_session_id or "").strip()
+        if not normalized_session_id:
+            return
+        with self._foreground_leases_lock:
+            if normalized_session_id in self._foreground_leases:
+                return
+        await asyncio.to_thread(mark_user_message_activity, self.user_id)
+        lease_id = await asyncio.to_thread(
+            create_runtime_lease,
+            self.user_id,
+            lease_type=FOREGROUND_CHAT_LEASE,
+            ttl_seconds=90,
+            resource_id=normalized_session_id,
+            meta={
+                "mapping_username": self.target.username,
+                "transport": "tui_gateway",
+            },
+        )
+        heartbeat_task = asyncio.create_task(
+            self._foreground_chat_lease_heartbeat(lease_id, ttl_seconds=90, interval_seconds=15)
+        )
+        with self._foreground_leases_lock:
+            self._foreground_leases[normalized_session_id] = (lease_id, heartbeat_task)
+
+    async def _release_foreground_lease(self, live_session_id: str) -> None:
+        normalized_session_id = str(live_session_id or "").strip()
+        if not normalized_session_id:
+            return
+        with self._foreground_leases_lock:
+            lease = self._foreground_leases.pop(normalized_session_id, None)
+        if lease is None:
+            return
+        lease_id, heartbeat_task = lease
+        heartbeat_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await heartbeat_task
+        await asyncio.to_thread(release_runtime_lease, lease_id)
+
+    async def _release_all_foreground_leases(self) -> None:
+        with self._foreground_leases_lock:
+            live_session_ids = list(self._foreground_leases.keys())
+        for live_session_id in live_session_ids:
+            await self._release_foreground_lease(live_session_id)
+
+    async def _foreground_chat_lease_heartbeat(
+        self,
+        lease_id: str,
+        *,
+        ttl_seconds: int,
+        interval_seconds: int,
+    ) -> None:
+        try:
+            while True:
+                await asyncio.sleep(max(interval_seconds, 1))
+                renewed = await asyncio.to_thread(
+                    heartbeat_runtime_lease,
+                    lease_id,
+                    ttl_seconds=ttl_seconds,
+                )
+                if not renewed:
+                    return
+        except asyncio.CancelledError:
+            raise
+
+    def _schedule_foreground_lease_release(self, live_session_id: str) -> None:
+        if self._loop is None:
+            return
+        self._loop.call_soon_threadsafe(
+            asyncio.create_task,
+            self._release_foreground_lease(live_session_id),
+        )
+
+    def _schedule_release_all_foreground_leases(self) -> None:
+        if self._loop is None:
+            return
+        self._loop.call_soon_threadsafe(
+            asyncio.create_task,
+            self._release_all_foreground_leases(),
+        )
 
     def _dispatch_event(self, event: dict[str, Any]) -> None:
         if self._loop is None:
