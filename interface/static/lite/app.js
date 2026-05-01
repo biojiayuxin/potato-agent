@@ -18,7 +18,6 @@ const state = {
   streamingMessageIds: new Set(),
   pendingAttachments: [],
   isSending: false,
-  currentAbortController: null,
   chatErrorTimer: null,
   authPollTimer: null,
   signupJobId: null,
@@ -28,7 +27,6 @@ const state = {
   pendingSessionPromise: null,
   shouldAutoScrollMessages: true,
   liveSessionMessages: new Map(),
-  useTuiGateway: false,
 };
 
 const dom = {
@@ -131,7 +129,6 @@ const ICON_STOP_PATH = './static/lite/icons/stop.png';
 const ICON_COPY_PATH = './static/lite/icons/copy_button.png';
 const ICON_COPIED_PATH = './static/lite/icons/copied.png';
 const MESSAGE_AUTO_SCROLL_THRESHOLD_PX = 48;
-const TUI_EXPERIMENT_STORAGE_KEY = 'lite_tui_bridge_experiment';
 const TUI_DEBUG_STATUS_STORAGE_KEY = 'lite_tui_bridge_debug';
 
 const getSystemTheme = () =>
@@ -176,7 +173,6 @@ const setCssSize = (name, value) => {
   document.documentElement.style.setProperty(name, `${Math.round(value)}px`);
 };
 
-const isTuiBridgeExperimentEnabled = () => localStorage.getItem(TUI_EXPERIMENT_STORAGE_KEY) !== '0';
 const isTuiBridgeDebugStatusEnabled = () => localStorage.getItem(TUI_DEBUG_STATUS_STORAGE_KEY) === '1';
 
 const setTuiBridgeStatus = (message = '', { hidden = false } = {}) => {
@@ -222,6 +218,11 @@ const getPersistentSessionIdForChat = (chat) => {
   return String(chat.persistentSessionId || chat.id || '').trim();
 };
 
+const getResumeSessionIdForChat = (chat) => {
+  if (!chat || chat.isDraft) return '';
+  return String(chat.resume_session_id || chat.resumeSessionId || chat.id || '').trim();
+};
+
 const getActivePersistentSessionId = () => {
   return String(getPersistentSessionIdForChat(state.activeSession) || state.activeSessionId || '').trim();
 };
@@ -239,6 +240,11 @@ const getSessionTitleById = (sessionId) => {
 const isSessionBusy = (sessionId) => {
   const normalizedSessionId = String(sessionId || '').trim();
   return Boolean(normalizedSessionId) && busySessionIds.has(normalizedSessionId);
+};
+
+const sessionNeedsApproval = (sessionId) => {
+  const normalizedSessionId = String(sessionId || '').trim();
+  return Boolean(normalizedSessionId) && pendingApprovalsBySessionId.has(normalizedSessionId);
 };
 
 const getActiveSessionPendingApproval = () => {
@@ -266,6 +272,13 @@ const normalizeSessionSnapshot = (session) => {
     ...session,
     id: sessionId,
     persistentSessionId: String(session.persistentSessionId || existingSession?.persistentSessionId || sessionId),
+    resume_session_id: String(
+      session.resume_session_id
+      || session.resumeSessionId
+      || existingSession?.resume_session_id
+      || existingSession?.resumeSessionId
+      || sessionId
+    ).trim(),
   };
 
   if (isDefaultChatTitle(normalized.title)) {
@@ -622,9 +635,6 @@ const handleTuiBridgeMessage = (event) => {
 };
 
 const ensureTuiBridge = async () => {
-  if (!isTuiBridgeExperimentEnabled()) {
-    throw new Error('TUI bridge experiment is disabled. Enable it via localStorage key lite_tui_bridge_experiment=1');
-  }
   if (tuiBridge && tuiBridge.readyState === WebSocket.OPEN) {
     return tuiBridge;
   }
@@ -692,11 +702,8 @@ const tuiBridgeRpc = async (method, params = {}) => {
 };
 
 const ensureTuiChatSession = async () => {
-  if (!state.useTuiGateway) {
-    return null;
-  }
-
   const activePersistentId = getPersistentSessionIdForChat(state.activeSession);
+  const activeResumeId = getResumeSessionIdForChat(state.activeSession) || activePersistentId;
   const rememberedLiveId = liveTuiSessionsByPersistentId.get(activePersistentId) || '';
   if (rememberedLiveId && activePersistentId) {
     updateActiveTuiSessionMapping({
@@ -740,19 +747,27 @@ const ensureTuiChatSession = async () => {
 
   const resumed = await tuiBridgeRpc('session.resume', {
     cols: 100,
-    session_id: activePersistentId,
+    session_id: activeResumeId,
   });
   const liveSessionId = String(resumed?.session_id || '');
   if (!liveSessionId) {
     throw new Error('TUI gateway did not return a live session id on resume');
   }
+  const resumedPersistentId = String(activePersistentId || '').trim();
+  const resumedSessionKey = String(resumed?.resumed || activeResumeId || resumedPersistentId).trim();
+  if (!resumedPersistentId) {
+    throw new Error('TUI gateway resume lost the logical session id');
+  }
+  if (resumedSessionKey) {
+    rememberLiveTuiSession(resumedSessionKey, liveSessionId);
+  }
   updateActiveTuiSessionMapping({
     liveSessionId,
-    persistentSessionId: String(resumed?.resumed || activePersistentId),
+    persistentSessionId: resumedPersistentId,
   });
   return {
     liveSessionId,
-    persistentSessionId: activePersistentSessionId,
+    persistentSessionId: resumedPersistentId,
     resumed: true,
   };
 };
@@ -890,14 +905,6 @@ const createDraftSession = () => ({
   isDraft: true,
 });
 
-const createSession = async () => {
-  const response = await api('/api/sessions', {
-    method: 'POST',
-  });
-  const json = await response.json();
-  return json?.session || null;
-};
-
 const activatePersistedSession = (session, { clearMessages = true } = {}) => {
   const normalizedSession = normalizeSessionSnapshot(session);
   if (!normalizedSession?.id) {
@@ -938,37 +945,6 @@ const setLiveSessionMessages = (sessionId, messages) => {
 const clearLiveSessionMessages = (sessionId) => {
   if (!sessionId) return;
   state.liveSessionMessages.delete(sessionId);
-};
-
-const appendContextCompactionNotice = (sessionId, content, timestamp = nowSeconds()) => {
-  if (!sessionId || !content) return;
-
-  const targetMessages = getLiveSessionMessages(sessionId) || state.messages;
-  if (!Array.isArray(targetMessages)) return;
-  if (targetMessages.some((message) => message.source === 'context_compaction_notice')) {
-    return;
-  }
-
-  targetMessages.push(normalizeMessageForDisplay({
-    id: uuid(),
-    role: 'assistant',
-    content,
-    reasoningContent: '',
-    toolCalls: [],
-    progressLines: [],
-    timestamp,
-    done: true,
-    files: [],
-    source: 'context_compaction_notice',
-  }));
-
-  if (getLiveSessionMessages(sessionId)) {
-    setLiveSessionMessages(sessionId, targetMessages);
-  }
-  if (isViewingSession(sessionId)) {
-    state.messages = targetMessages;
-    renderMessages();
-  }
 };
 
 const getLiveSessionMessages = (sessionId) => {
@@ -1087,25 +1063,16 @@ const submitApprovalDecision = async (choice) => {
   const liveSessionId = liveTuiSessionsByPersistentId.get(approvalSessionId) || '';
 
   try {
-    if (state.useTuiGateway && liveSessionId) {
-      await tuiBridgeRpc('approval.respond', {
-        session_id: liveSessionId,
-        choice,
-      });
-      clearSessionPendingApproval(approvalSessionId);
-      setApprovalSubmitting(false);
-      return;
+    if (!liveSessionId) {
+      throw new Error('Approval request is no longer attached to a live session.');
     }
 
-    if (!approval.approvalId) {
-      throw new Error('Approval request is no longer available.');
-    }
-
-    await api(`/api/chat/approvals/${encodeURIComponent(approval.approvalId)}`, {
-      method: 'POST',
-      body: JSON.stringify({ choice }),
+    await tuiBridgeRpc('approval.respond', {
+      session_id: liveSessionId,
+      choice,
     });
     clearSessionPendingApproval(approvalSessionId);
+    setApprovalSubmitting(false);
   } catch (error) {
     showError(dom.approvalError, String(error.message || 'Approval request failed'));
     setApprovalSubmitting(false);
@@ -1230,7 +1197,6 @@ const resetWorkspaceState = () => {
   sessionAbortControllersById.clear();
   pendingApprovalsBySessionId.clear();
   state.pendingAttachments = [];
-  state.currentAbortController = null;
   state.isSending = false;
   state.pendingApproval = null;
   state.approvalSubmitting = false;
@@ -2226,9 +2192,10 @@ const renderChatList = () => {
     const deleteButton = fragment.querySelector('.chat-delete-button');
     const chatSessionId = getPersistentSessionIdForChat(chat) || chat.id;
     const busyLabel = isSessionBusy(chatSessionId) ? 'Responding…' : '';
+    const approvalLabel = sessionNeedsApproval(chatSessionId) ? 'Needs approval' : '';
 
     title.textContent = getChatDisplayTitle(chat);
-    meta.textContent = [formatTimestamp(chat.last_active || chat.started_at), busyLabel]
+    meta.textContent = [formatTimestamp(chat.last_active || chat.started_at), busyLabel, approvalLabel]
       .filter(Boolean)
       .join(' · ');
 
@@ -2596,10 +2563,6 @@ const syncActiveSessionFromSessions = (sessionId) => {
 };
 
 const createSessionForCurrentMode = async () => {
-  if (!state.useTuiGateway) {
-    return createSession();
-  }
-
   const session = await tuiBridgeRpc('session.create', { cols: 100 });
   const liveSessionId = String(session?.session_id || '');
   if (!liveSessionId) {
@@ -2671,9 +2634,7 @@ const deleteChat = async (chatId, isDraft = false) => {
     return;
   }
 
-  if (state.useTuiGateway) {
-    forgetLiveTuiSession(chatId);
-  }
+  forgetLiveTuiSession(chatId);
 
   await api(`/api/sessions/${encodeURIComponent(chatId)}`, { method: 'DELETE' });
   clearLiveSessionMessages(chatId);
@@ -2695,353 +2656,9 @@ const deleteChat = async (chatId, isDraft = false) => {
 };
 
 const startNewChat = async () => {
-  if (state.useTuiGateway) {
-    showDraftChat();
-    dom.promptInput?.focus();
-    return state.draftSession;
-  }
-
-  if (state.pendingSessionPromise) {
-    return state.pendingSessionPromise;
-  }
-
-  const previousActiveSession = state.activeSession;
-  const previousActiveSessionId = state.activeSessionId;
-  const previousMessages = [...state.messages];
   showDraftChat();
-  const draftSessionId = state.draftSession?.id;
-
-  state.pendingSessionPromise = (async () => {
-    try {
-      const session = await createSessionForCurrentMode();
-      if (state.activeSessionId === draftSessionId || state.draftSession?.id === draftSessionId) {
-        activatePersistedSession(session);
-      } else if (session?.id) {
-        state.sessions = [session, ...state.sessions.filter((chat) => chat.id !== session.id)];
-      }
-      renderWorkspace();
-      if (state.activeSessionId === session?.id) {
-        dom.promptInput?.focus();
-      }
-      return session;
-    } catch (error) {
-      if (state.activeSessionId === draftSessionId || state.draftSession?.id === draftSessionId) {
-        state.draftSession = null;
-        state.activeSession = previousActiveSession;
-        state.activeSessionId = previousActiveSessionId;
-        state.messages = previousMessages;
-      }
-      renderWorkspace();
-      showChatError(error.message || 'Failed to create chat');
-      throw error;
-    } finally {
-      state.pendingSessionPromise = null;
-    }
-  })();
-
-  return state.pendingSessionPromise;
-};
-
-const streamChatCompletion = async (payload, assistantMessage, abortController, streamState, streamMessages) => {
-  const response = await fetch('/api/chat/completions', {
-    method: 'POST',
-    credentials: 'include',
-    signal: abortController.signal,
-    headers: {
-      'Content-Type': 'application/json',
-    },
-    body: JSON.stringify(payload),
-  });
-
-  if (!response.ok) {
-    let detail = `Chat failed: ${response.status}`;
-    try {
-      const json = await response.json();
-      detail = json?.detail || json?.error?.message || detail;
-    } catch {}
-    throw new Error(detail);
-  }
-
-  streamState.sessionId = response.headers.get('X-Hermes-Session-Id') || streamState.sessionId || payload.session_id || '';
-
-  const reader = response.body.getReader();
-  const decoder = new TextDecoder();
-  let buffer = '';
-
-  while (true) {
-    const { value, done } = await reader.read();
-    if (done) break;
-
-    buffer += decoder.decode(value, { stream: true });
-    const chunks = buffer.split('\n\n');
-    buffer = chunks.pop() || '';
-
-    for (const chunk of chunks) {
-      const lines = chunk.split('\n');
-      const eventLine = lines.find((part) => part.startsWith('event: '));
-      const eventName = eventLine ? eventLine.slice(7).trim() : '';
-      const data = lines
-        .filter((part) => part.startsWith('data: '))
-        .map((part) => part.slice(6))
-        .join('\n')
-        .trim();
-
-      if (!data || data === '[DONE]') continue;
-
-      let json;
-      try {
-        json = JSON.parse(data);
-      } catch {
-        continue;
-      }
-
-      if (eventName === 'hermes.tool.progress') {
-        const emoji = json?.emoji || '🛠️';
-        const label = json?.label || json?.tool || 'tool';
-        appendProgressEntries(assistantMessage, [`${emoji} ${label}`]);
-        if (streamState.sessionId) {
-          setLiveSessionMessages(streamState.sessionId, streamMessages);
-        }
-        if (isViewingSession(streamState.sessionId)) {
-          renderMessages();
-        }
-        continue;
-      }
-
-      if (eventName === 'hermes.approval.required') {
-        setSessionPendingApproval(String(json?.session_id || streamState.sessionId || ''), {
-          approvalId: String(json?.approval_id || ''),
-          command: String(json?.command || ''),
-          description: String(json?.description || 'Dangerous command requires approval.'),
-          patternKey: String(json?.pattern_key || ''),
-          patternKeys: Array.isArray(json?.pattern_keys) ? json.pattern_keys.map((item) => String(item)) : [],
-          options: Array.isArray(json?.options) ? json.options.map((item) => String(item)) : [],
-        });
-        continue;
-      }
-
-      if (eventName === 'hermes.context.compaction') {
-        appendContextCompactionNotice(
-          streamState.sessionId,
-          String(json?.content || ''),
-          Number(json?.timestamp || nowSeconds()),
-        );
-        continue;
-      }
-
-      const delta = json?.choices?.[0]?.delta || {};
-
-      if (typeof delta.reasoning_content === 'string' && delta.reasoning_content) {
-        assistantMessage.reasoningContent = `${assistantMessage.reasoningContent || ''}${delta.reasoning_content}`;
-      }
-
-      if (Array.isArray(delta.tool_calls) && delta.tool_calls.length > 0) {
-        assistantMessage.toolCalls = mergeToolCallDelta(assistantMessage.toolCalls, delta.tool_calls);
-      }
-
-      if (typeof delta.content === 'string' && delta.content) {
-        assistantMessage.content += delta.content;
-        const progressLines = extractDisplayProgressLines(delta.content);
-        if (progressLines.length > 0) {
-          appendProgressEntries(assistantMessage, progressLines);
-        }
-      }
-
-      if (streamState.sessionId) {
-        setLiveSessionMessages(streamState.sessionId, streamMessages);
-      }
-      if (isViewingSession(streamState.sessionId)) {
-        renderMessages();
-      }
-    }
-  }
-};
-
-const submitPrompt = async (prompt) => {
-  if (state.useTuiGateway) {
-    return submitPromptViaTuiBridge(prompt);
-  }
-
-  const trimmedPrompt = prompt.trim();
-  const uploadedAttachments = state.pendingAttachments.filter((item) => item.status === 'uploaded' && item.id);
-  const hasFailedUploads = state.pendingAttachments.some((item) => item.status === 'error');
-  const hasUploadingFiles = state.pendingAttachments.some((item) => item.status === 'uploading');
-  const oversizedAttachment = state.pendingAttachments.find((item) => Number(item?.size || 0) > MAX_ATTACHMENT_SIZE_BYTES);
-
-  if (!trimmedPrompt && uploadedAttachments.length === 0) return;
-  if (!state.selectedModel) {
-    showChatError('No model is currently available.');
-    return;
-  }
-  if (hasUploadingFiles) {
-    showChatError('Files are still uploading. Please wait before sending.');
-    return;
-  }
-  if (hasFailedUploads) {
-    showChatError('Some attachments failed to upload. Remove them and try again.');
-    return;
-  }
-  if (oversizedAttachment) {
-    showChatError(getAttachmentTooLargeMessage(oversizedAttachment));
-    return;
-  }
-
-  if (!state.activeSession) {
-    showDraftChat();
-  }
-
-  const currentSessionId = getActivePersistentSessionId();
-  if (currentSessionId && isSessionBusy(currentSessionId)) {
-    showChatError('This conversation is already responding.');
-    return;
-  }
-
-  showChatError('');
-  const abortController = new AbortController();
-  const streamState = {
-    sessionId: state.activeSession?.isDraft ? '' : (state.activeSession?.id || ''),
-  };
-
-  const userMessage = {
-    id: uuid(),
-    role: 'user',
-    content: trimmedPrompt,
-    files: uploadedAttachments.map((item) => ({
-      type: item.type,
-      id: item.id,
-      name: item.name,
-      size: item.size,
-      content_type: item.content_type,
-      localPath: item.localPath,
-    })),
-    timestamp: nowSeconds(),
-    done: true,
-    reasoningContent: '',
-    toolCalls: [],
-    progressLines: [],
-  };
-
-  const assistantMessage = {
-    id: uuid(),
-    role: 'assistant',
-    content: '',
-    reasoningContent: '',
-    toolCalls: [],
-    progressLines: [],
-    timestamp: nowSeconds(),
-    done: false,
-    files: [],
-  };
-
-  const streamMessages = [...state.messages, userMessage, assistantMessage];
-
-  state.messages = streamMessages;
-  state.streamingMessageIds.add(assistantMessage.id);
-    state.pendingAttachments = [];
-
-    if (state.draftSession) {
-      state.draftSession.last_active = nowSeconds();
-    }
-
-  renderWorkspace();
-
-  if (!state.activeSession || state.activeSession.isDraft) {
-    try {
-      const session = state.pendingSessionPromise
-        ? await state.pendingSessionPromise
-        : await createSession();
-      activatePersistedSession(session, { clearMessages: false });
-    } catch (error) {
-      state.messages = state.messages.filter((message) => message.id !== userMessage.id && message.id !== assistantMessage.id);
-      state.streamingMessageIds.delete(assistantMessage.id);
-      if (streamState.sessionId) {
-        clearLiveSessionMessages(streamState.sessionId);
-      }
-      renderWorkspace();
-      showChatError(error.message || 'Failed to create chat');
-      return;
-    }
-  }
-
-  streamState.sessionId = state.activeSession?.id || streamState.sessionId;
-  if (streamState.sessionId) {
-    setLiveSessionMessages(streamState.sessionId, streamMessages);
-    setSessionBusy(streamState.sessionId, true, { transport: 'api', abortController });
-  }
-  state.currentAbortController = abortController;
-
-  const payload = {
-    stream: true,
-    model: state.selectedModel.id,
-    session_id: streamState.sessionId,
-    messages: [
-      {
-        role: 'user',
-        content: buildHermesUserContent(trimmedPrompt, uploadedAttachments),
-      },
-    ],
-  };
-
-  try {
-    await streamChatCompletion(payload, assistantMessage, abortController, streamState, streamMessages);
-    assistantMessage.done = true;
-    assistantMessage.timestamp = nowSeconds();
-    state.streamingMessageIds.delete(assistantMessage.id);
-    if (streamState.sessionId) {
-      setLiveSessionMessages(streamState.sessionId, streamMessages);
-    }
-    if (isViewingSession(streamState.sessionId)) {
-      renderMessages();
-    }
-
-    await refreshSessions();
-    if (streamState.sessionId) {
-      await updateSessionSnapshot(streamState.sessionId, { preserveLiveMessages: true }).catch(() => null);
-    }
-    if (isViewingSession(streamState.sessionId)) {
-      syncActiveSessionFromSessions(streamState.sessionId);
-    }
-    renderWorkspace();
-  } catch (error) {
-    state.streamingMessageIds.delete(assistantMessage.id);
-    assistantMessage.done = true;
-    assistantMessage.timestamp = nowSeconds();
-    clearSessionPendingApproval(streamState.sessionId);
-    if (streamState.sessionId) {
-      setLiveSessionMessages(streamState.sessionId, streamMessages);
-    }
-
-    if (error.name === 'AbortError') {
-      if (!assistantMessage.content.trim()) {
-        assistantMessage.content = '[Response stopped]';
-      }
-      if (isViewingSession(streamState.sessionId)) {
-        renderMessages();
-      }
-      if (streamState.sessionId) {
-        await refreshSessions().catch(() => {});
-        await updateSessionSnapshot(streamState.sessionId, { preserveLiveMessages: true }).catch(() => null);
-        if (isViewingSession(streamState.sessionId)) {
-          syncActiveSessionFromSessions(streamState.sessionId);
-        }
-        renderWorkspace();
-      }
-    } else {
-      assistantMessage.content = `${assistantMessage.content}\n\n[Error] ${error.message}`.trim();
-      if (streamState.sessionId) {
-        setLiveSessionMessages(streamState.sessionId, streamMessages);
-      }
-      if (isViewingSession(streamState.sessionId)) {
-        renderMessages();
-      }
-      showChatError(error.message);
-    }
-  } finally {
-    if (streamState.sessionId) {
-      setSessionBusy(streamState.sessionId, false);
-    }
-    state.currentAbortController = null;
-  }
+  dom.promptInput?.focus();
+  return state.draftSession;
 };
 
 const submitPromptViaTuiBridge = async (prompt) => {
@@ -3185,7 +2802,6 @@ const showLogin = () => {
 };
 
 const initializeWorkspaceData = async () => {
-  state.useTuiGateway = isTuiBridgeExperimentEnabled();
   let firstError = null;
 
   try {
@@ -3213,10 +2829,6 @@ const initializeWorkspaceData = async () => {
 
   if (firstError) {
     showChatError(firstError.message || 'Workspace initialization failed');
-  }
-
-  if (!isTuiBridgeExperimentEnabled()) {
-    setTuiBridgeStatus('', { hidden: true });
   }
 };
 
@@ -3451,7 +3063,7 @@ dom.composerForm.addEventListener('submit', async (event) => {
   const prompt = dom.promptInput.value;
   dom.promptInput.value = '';
   autoResizePromptInput();
-  await submitPrompt(prompt);
+  await submitPromptViaTuiBridge(prompt);
 });
 
 dom.attachButton.addEventListener('click', () => {
@@ -3496,14 +3108,13 @@ dom.sendButton.addEventListener('click', async (event) => {
   event.stopPropagation();
   const activeSessionId = getActivePersistentSessionId();
   const activeLiveSessionId = liveTuiSessionsByPersistentId.get(activeSessionId) || activeTuiSessionId;
-  if (state.useTuiGateway && activeLiveSessionId) {
-    tuiBridgeRpc('session.interrupt', { session_id: activeLiveSessionId }).catch((error) => {
-      showChatError(String(error.message || 'Failed to interrupt TUI session'));
-    });
+  if (!activeLiveSessionId) {
+    showChatError('No live TUI session is attached to this conversation.');
     return;
   }
-  sessionAbortControllersById.get(activeSessionId)?.abort();
-  state.currentAbortController?.abort();
+  tuiBridgeRpc('session.interrupt', { session_id: activeLiveSessionId }).catch((error) => {
+    showChatError(String(error.message || 'Failed to interrupt TUI session'));
+  });
 });
 
 dom.refreshFilesButton.addEventListener('click', async () => {

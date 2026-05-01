@@ -81,8 +81,7 @@
 ### Lite 前端当前状态
 
 - Lite 前端默认已切换到 `tui_gateway` 聊天主链路
-- 旧 `/api/chat/completions` 路径保留在代码中，仅作为回退实现
-- 浏览器里设置 `localStorage.setItem('lite_tui_bridge_experiment', '0')` 后刷新，可临时退回旧链路
+- Lite 前端不再保留浏览器侧 `api_server` 回退开关，聊天固定走 `tui_gateway`
 
 ### 已验证的最小 bridge 探针
 

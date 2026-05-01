@@ -316,10 +316,14 @@ class TuiGatewayBridge:
 class TuiGatewayBridgeRegistry:
     def __init__(self) -> None:
         self._bridges: dict[str, TuiGatewayBridge] = {}
+        self._close_tasks: dict[str, asyncio.Task[None]] = {}
         self._lock = asyncio.Lock()
 
     async def get_or_create(self, user_id: str, target: HermesTarget) -> TuiGatewayBridge:
         async with self._lock:
+            close_task = self._close_tasks.pop(user_id, None)
+            if close_task is not None:
+                close_task.cancel()
             bridge = self._bridges.get(user_id)
             if bridge is None or bridge._closed:
                 bridge = TuiGatewayBridge(user_id=user_id, target=target)
@@ -334,12 +338,42 @@ class TuiGatewayBridgeRegistry:
                 return
             if bridge.subscriber_count() > 0:
                 return
-            self._bridges.pop(user_id, None)
-        await bridge.close()
+            existing_task = self._close_tasks.get(user_id)
+            if existing_task is not None and not existing_task.done():
+                return
+            self._close_tasks[user_id] = asyncio.create_task(
+                self._close_if_still_unused_after_delay(user_id, bridge)
+            )
+
+    async def _close_if_still_unused_after_delay(
+        self, user_id: str, bridge: TuiGatewayBridge
+    ) -> None:
+        try:
+            await asyncio.sleep(15)
+            async with self._lock:
+                current = self._bridges.get(user_id)
+                if current is not bridge:
+                    return
+                if bridge.subscriber_count() > 0:
+                    return
+                self._bridges.pop(user_id, None)
+                self._close_tasks.pop(user_id, None)
+            await bridge.close()
+        except asyncio.CancelledError:
+            raise
+        finally:
+            async with self._lock:
+                existing = self._close_tasks.get(user_id)
+                if existing is not None and existing.done():
+                    self._close_tasks.pop(user_id, None)
 
     async def close_all(self) -> None:
         async with self._lock:
             bridges = list(self._bridges.values())
             self._bridges.clear()
+            close_tasks = list(self._close_tasks.values())
+            self._close_tasks.clear()
+        for task in close_tasks:
+            task.cancel()
         for bridge in bridges:
             await bridge.close()
