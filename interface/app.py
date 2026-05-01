@@ -26,6 +26,8 @@ from fastapi import (
     Request,
     Response,
     UploadFile,
+    WebSocket,
+    WebSocketDisconnect,
     status,
 )
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
@@ -95,6 +97,11 @@ from interface.mapping import (
     write_mapping,
     remove_user_mapping_entry,
 )
+from interface.tui_gateway_bridge import (
+    TuiGatewayBridge,
+    TuiGatewayBridgeError,
+    TuiGatewayBridgeRegistry,
+)
 
 
 ROOT_DIR = Path(__file__).resolve().parent
@@ -137,6 +144,7 @@ CONTEXT_COMPACTION_NOTICE = (
     "Context was compressed in the background because the conversation got too long. "
     "I'll continue from the compacted context."
 )
+INTERFACE_SESSION_SOURCES = ("api_server", "tui")
 
 HERMES_SRC = REPO_ROOT / "hermes-agent"
 if str(HERMES_SRC) not in sys.path:
@@ -170,6 +178,11 @@ class SignupRequest(BaseModel):
 
 class ApprovalDecisionRequest(BaseModel):
     choice: str
+
+
+class SessionDisplaySyncRequest(BaseModel):
+    messages: list[dict[str, Any]]
+    draft_title: str = ""
 
 
 def _normalized_file_browser_mode() -> str:
@@ -374,6 +387,17 @@ def _resolve_current_user(request: Request) -> tuple[CurrentUser | None, str | N
         ),
         None,
     )
+
+
+async def get_current_user_ws(websocket: WebSocket) -> CurrentUser:
+    user, revoked_reason = _resolve_current_user(websocket)
+    if user is None and revoked_reason:
+        await websocket.close(code=4401, reason=_revocation_message(revoked_reason))
+        raise RuntimeError("websocket session revoked")
+    if user is None:
+        await websocket.close(code=4401, reason="Not authenticated")
+        raise RuntimeError("websocket unauthenticated")
+    return user
 
 
 async def get_current_user(request: Request) -> CurrentUser:
@@ -666,6 +690,10 @@ def _logical_session_id_from_row(session: dict[str, Any] | None) -> str:
     if not isinstance(session, dict):
         return ""
     return str(session.get("_lineage_root_id") or session.get("id") or "").strip()
+
+
+def _is_interface_managed_source(source: str | None) -> bool:
+    return str(source or "").strip().lower() in INTERFACE_SESSION_SOURCES
 
 
 def _is_context_compaction_message(message: dict[str, Any]) -> bool:
@@ -1053,6 +1081,156 @@ def _build_fallback_display_messages(
     return normalized
 
 
+def _display_message_bucket_key(message: dict[str, Any]) -> str:
+    source = str(message.get("source") or "").strip()
+    if source == "context_compaction_notice":
+        return source
+    return str(message.get("role") or "").strip()
+
+
+def _tool_call_merge_key(tool_call: dict[str, Any], index: int) -> str:
+    normalized = _normalize_tool_call(tool_call)
+    tool_id = str(normalized.get("id") or "").strip()
+    if tool_id:
+        return f"id:{tool_id}"
+
+    function = (
+        normalized.get("function") if isinstance(normalized.get("function"), dict) else {}
+    )
+    name = str(function.get("name") or "").strip()
+    arguments = str(function.get("arguments") or "")
+    return f"fallback:{index}:{name}:{arguments}"
+
+
+def _merge_display_tool_calls(
+    preferred_tool_calls: list[dict[str, Any]],
+    fallback_tool_calls: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    merged = [_normalize_tool_call(item) for item in preferred_tool_calls or []]
+    positions = {
+        _tool_call_merge_key(item, index): index for index, item in enumerate(merged)
+    }
+
+    for fallback_index, fallback_item in enumerate(fallback_tool_calls or []):
+        normalized_fallback = _normalize_tool_call(fallback_item)
+        key = _tool_call_merge_key(normalized_fallback, fallback_index)
+        existing_index = positions.get(key)
+
+        if existing_index is None:
+            positions[key] = len(merged)
+            merged.append(normalized_fallback)
+            continue
+
+        existing = merged[existing_index]
+        existing_function = (
+            existing.get("function") if isinstance(existing.get("function"), dict) else {}
+        )
+        fallback_function = (
+            normalized_fallback.get("function")
+            if isinstance(normalized_fallback.get("function"), dict)
+            else {}
+        )
+
+        if fallback_function.get("name"):
+            existing_function["name"] = str(fallback_function["name"])
+
+        fallback_arguments = str(fallback_function.get("arguments") or "")
+        existing_arguments = str(existing_function.get("arguments") or "")
+        if fallback_arguments and len(fallback_arguments) >= len(existing_arguments):
+            existing_function["arguments"] = fallback_arguments
+
+        if normalized_fallback.get("type"):
+            existing["type"] = str(normalized_fallback["type"])
+
+        existing["function"] = existing_function
+
+    return merged
+
+
+def _merge_display_message_with_fallback(
+    preferred_message: dict[str, Any],
+    fallback_message: dict[str, Any] | None,
+) -> dict[str, Any]:
+    merged = _normalize_display_message(preferred_message)
+    if not isinstance(fallback_message, dict):
+        return merged
+
+    fallback = _normalize_display_message(fallback_message)
+    if str(merged.get("role") or "") != str(fallback.get("role") or ""):
+        return merged
+
+    if not str(merged.get("content") or "").strip() and str(
+        fallback.get("content") or ""
+    ).strip():
+        merged["content"] = str(fallback.get("content") or "")
+
+    if not str(merged.get("reasoningContent") or "").strip() and str(
+        fallback.get("reasoningContent") or ""
+    ).strip():
+        merged["reasoningContent"] = str(fallback.get("reasoningContent") or "")
+
+    merged["toolCalls"] = _merge_display_tool_calls(
+        merged.get("toolCalls") if isinstance(merged.get("toolCalls"), list) else [],
+        fallback.get("toolCalls") if isinstance(fallback.get("toolCalls"), list) else [],
+    )
+
+    _append_progress_entries(
+        merged,
+        fallback.get("progressLines") if isinstance(fallback.get("progressLines"), list) else [],
+    )
+
+    merged_files = merged.get("files") if isinstance(merged.get("files"), list) else []
+    fallback_files = fallback.get("files") if isinstance(fallback.get("files"), list) else []
+    if not merged_files and fallback_files:
+        merged["files"] = fallback_files
+
+    merged["timestamp"] = max(
+        int(merged.get("timestamp") or 0),
+        int(fallback.get("timestamp") or 0),
+    )
+    merged["done"] = bool(merged.get("done", True) and fallback.get("done", True))
+    return merged
+
+
+def _merge_display_transcripts(
+    preferred_messages: list[dict[str, Any]],
+    fallback_messages: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    preferred = [
+        _normalize_display_message(item)
+        for item in preferred_messages or []
+        if isinstance(item, dict)
+    ]
+    fallback = [
+        _normalize_display_message(item)
+        for item in fallback_messages or []
+        if isinstance(item, dict)
+    ]
+
+    if not preferred:
+        return fallback
+    if not fallback:
+        return preferred
+
+    fallback_buckets: dict[str, list[dict[str, Any]]] = {}
+    for message in fallback:
+        fallback_buckets.setdefault(_display_message_bucket_key(message), []).append(message)
+
+    bucket_offsets: dict[str, int] = {}
+    merged: list[dict[str, Any]] = []
+    for message in preferred:
+        bucket_key = _display_message_bucket_key(message)
+        bucket_index = bucket_offsets.get(bucket_key, 0)
+        bucket_offsets[bucket_key] = bucket_index + 1
+        fallback_bucket = fallback_buckets.get(bucket_key, [])
+        fallback_message = (
+            fallback_bucket[bucket_index] if bucket_index < len(fallback_bucket) else None
+        )
+        merged.append(_merge_display_message_with_fallback(message, fallback_message))
+
+    return merged
+
+
 def _build_context_compaction_notice_message(
     *,
     timestamp: int | None = None,
@@ -1079,7 +1257,7 @@ def _collect_compression_lineage_session_ids(db: Any, logical_session_id: str) -
         return []
 
     all_sessions = db.list_sessions_rich(
-        source="api_server",
+        source=None,
         include_children=True,
         project_compression_tips=False,
         limit=100000,
@@ -1087,6 +1265,8 @@ def _collect_compression_lineage_session_ids(db: Any, logical_session_id: str) -
     )
     children_by_parent: dict[str, list[dict[str, Any]]] = {}
     for session in all_sessions:
+        if not _is_interface_managed_source(session.get("source")):
+            continue
         parent_id = str(session.get("parent_session_id") or "").strip()
         if not parent_id:
             continue
@@ -1141,10 +1321,10 @@ async def _archive_expired_sessions_once() -> None:
         for target in mapping_store.load_targets():
             auth_user = auth_users.get(target.username)
             with _open_session_db(target) as db:
-                sessions = db.list_sessions_rich(
-                    source="api_server", limit=100000, offset=0
-                )
+                sessions = db.list_sessions_rich(source=None, limit=100000, offset=0)
                 for session in sessions:
+                    if not _is_interface_managed_source(session.get("source")):
+                        continue
                     session_id = _logical_session_id_from_row(session)
                     last_active = float(
                         session.get("last_active") or session.get("started_at") or 0
@@ -1305,6 +1485,11 @@ def _apply_file_permissions(path: Path, *, linux_user: str, is_dir: bool) -> Non
         os.chmod(path, 0o755 if is_dir else 0o644)
 
 
+async def _get_tui_bridge_for_user(user: CurrentUser) -> TuiGatewayBridge:
+    registry: TuiGatewayBridgeRegistry = app.state.tui_gateway_bridges
+    return await registry.get_or_create(user.id, user.target)
+
+
 def _ensure_upload_root(user: CurrentUser) -> Path:
     upload_dir_name = Path(UPLOAD_DIR_NAME)
     if upload_dir_name.is_absolute():
@@ -1327,6 +1512,7 @@ async def on_startup() -> None:
     ensure_archive_db()
     ensure_runtime_state_store()
     app.state.http = httpx.AsyncClient(timeout=httpx.Timeout(60.0, read=None))
+    app.state.tui_gateway_bridges = TuiGatewayBridgeRegistry()
     app.state.archive_scheduler_task = asyncio.create_task(_archive_scheduler_loop())
     app.state.signup_worker_task = asyncio.create_task(_signup_worker_loop())
     app.state.runtime_idle_scheduler_task = asyncio.create_task(
@@ -1350,6 +1536,11 @@ async def on_shutdown() -> None:
     client: httpx.AsyncClient | None = getattr(app.state, "http", None)
     if client is not None:
         await client.aclose()
+    bridge_registry: TuiGatewayBridgeRegistry | None = getattr(
+        app.state, "tui_gateway_bridges", None
+    )
+    if bridge_registry is not None:
+        await bridge_registry.close_all()
 
 
 @app.get("/health")
@@ -1387,6 +1578,92 @@ async def start_runtime(user: CurrentUser = Depends(get_current_user)) -> dict[s
         "runtime": runtime,
         "user": _serialize_user(user),
     }
+
+
+@app.websocket("/api/tui/ws")
+async def tui_gateway_websocket(websocket: WebSocket) -> None:
+    user = await get_current_user_ws(websocket)
+    await websocket.accept()
+
+    bridge = await _get_tui_bridge_for_user(user)
+    await bridge.add_subscriber(websocket)
+
+    try:
+        while True:
+            raw = await websocket.receive_text()
+            try:
+                payload = json.loads(raw)
+            except json.JSONDecodeError:
+                await websocket.send_text(
+                    json.dumps(
+                        {
+                            "type": "rpc.error",
+                            "payload": {"message": "Invalid JSON"},
+                        },
+                        ensure_ascii=False,
+                    )
+                )
+                continue
+
+            request_id = str(payload.get("id") or "")
+            method = str(payload.get("method") or "").strip()
+            params = payload.get("params") if isinstance(payload.get("params"), dict) else {}
+            if not method:
+                await websocket.send_text(
+                    json.dumps(
+                        {
+                            "type": "rpc.error",
+                            "id": request_id,
+                            "payload": {"message": "method is required"},
+                        },
+                        ensure_ascii=False,
+                    )
+                )
+                continue
+
+            try:
+                result = await bridge.rpc(method, params)
+            except TuiGatewayBridgeError as exc:
+                await websocket.send_text(
+                    json.dumps(
+                        {
+                            "type": "rpc.error",
+                            "id": request_id,
+                            "payload": {"message": str(exc)},
+                        },
+                        ensure_ascii=False,
+                    )
+                )
+                continue
+            except Exception as exc:
+                await websocket.send_text(
+                    json.dumps(
+                        {
+                            "type": "rpc.error",
+                            "id": request_id,
+                            "payload": {"message": f"Bridge failure: {exc}"},
+                        },
+                        ensure_ascii=False,
+                    )
+                )
+                continue
+
+            await websocket.send_text(
+                json.dumps(
+                    {
+                        "type": "rpc.result",
+                        "id": request_id,
+                        "payload": result,
+                    },
+                    ensure_ascii=False,
+                )
+            )
+    except WebSocketDisconnect:
+        pass
+    finally:
+        bridge.remove_subscriber(websocket)
+        registry: TuiGatewayBridgeRegistry = app.state.tui_gateway_bridges
+        await registry.maybe_close_if_unused(user.id)
 
 
 @app.get("/api/status")
@@ -1512,13 +1789,17 @@ async def get_sessions(
     limit: int = 50, offset: int = 0, user: CurrentUser = Depends(get_current_user)
 ) -> dict[str, Any]:
     with _open_session_db(user.target) as db:
-        sessions = db.list_sessions_rich(
-            source="api_server", limit=limit, offset=offset
-        )
+        sessions = db.list_sessions_rich(source=None, limit=limit * 5, offset=offset)
         normalized = []
         for item in sessions:
+            if not _is_interface_managed_source(item.get("source")):
+                continue
             logical_session_id = _logical_session_id_from_row(item)
             logical_session = db.get_session(logical_session_id)
+            if not logical_session or not _is_interface_managed_source(
+                logical_session.get("source")
+            ):
+                continue
             normalized.append(
                 _normalize_logical_session_row(
                     item,
@@ -1527,6 +1808,8 @@ async def get_sessions(
                     display_meta=get_display_session_meta(user.id, logical_session_id),
                 )
             )
+            if len(normalized) >= limit:
+                break
     normalized.sort(
         key=lambda item: (item["last_active"], item["started_at"]), reverse=True
     )
@@ -1565,7 +1848,9 @@ async def get_session_detail(
         logical_session_id, logical_session, tip_session_id, projected_session = (
             _resolve_logical_session_context(db, session_id)
         )
-        if not logical_session or logical_session.get("source") != "api_server":
+        if not logical_session or not _is_interface_managed_source(
+            logical_session.get("source")
+        ):
             raise HTTPException(status_code=404, detail="Session not found")
         raw_messages = db.get_messages(tip_session_id)
 
@@ -1584,6 +1869,39 @@ async def get_session_detail(
     }
 
 
+@app.put("/api/sessions/{session_id}/display")
+async def sync_session_display(
+    session_id: str,
+    payload: SessionDisplaySyncRequest,
+    user: CurrentUser = Depends(get_current_user),
+) -> dict[str, Any]:
+    with _open_session_db(user.target) as db:
+        logical_session_id, logical_session, tip_session_id, _ = _resolve_logical_session_context(
+            db, session_id
+        )
+        if not logical_session or not _is_interface_managed_source(
+            logical_session.get("source")
+        ):
+            raise HTTPException(status_code=404, detail="Session not found")
+        raw_messages = db.get_messages(tip_session_id)
+
+    merged_messages = _merge_display_transcripts(
+        payload.messages,
+        _build_fallback_display_messages(raw_messages),
+    )
+    draft_title = str(payload.draft_title or "").strip() or None
+    save_display_messages(
+        user.id,
+        logical_session_id,
+        merged_messages,
+        draft_title=draft_title,
+    )
+    return {
+        "ok": True,
+        "messages": [_normalize_display_message(item) for item in merged_messages],
+    }
+
+
 @app.delete("/api/sessions/{session_id}")
 async def delete_session(
     session_id: str, user: CurrentUser = Depends(get_current_user)
@@ -1592,7 +1910,9 @@ async def delete_session(
         logical_session_id, logical_session, _, _ = _resolve_logical_session_context(
             db, session_id
         )
-        if not logical_session or logical_session.get("source") != "api_server":
+        if not logical_session or not _is_interface_managed_source(
+            logical_session.get("source")
+        ):
             raise HTTPException(status_code=404, detail="Session not found")
         for lineage_session_id in reversed(
             _collect_compression_lineage_session_ids(db, logical_session_id)

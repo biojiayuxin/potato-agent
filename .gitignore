@@ -11,3 +11,4 @@ hermes-agent/.github/
 interface/data/interface.db
 interface/data/archive.db
 users_mapping.yaml
+interface/auth.db
