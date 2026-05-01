@@ -2692,8 +2692,16 @@ const submitPromptViaTuiBridge = async (prompt) => {
 
   if (!trimmedPrompt && uploadedAttachments.length === 0) return;
   if (!state.selectedModel) {
-    showChatError('No model is currently available.');
-    return;
+    try {
+      await fetchModels();
+    } catch (error) {
+      showChatError(String(error.message || 'No model is currently available.'));
+      return;
+    }
+    if (!state.selectedModel) {
+      showChatError('No model is currently available.');
+      return;
+    }
   }
   if (hasUploadingFiles) {
     showChatError('Files are still uploading. Please wait before sending.');

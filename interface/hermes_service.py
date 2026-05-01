@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import contextlib
 import fcntl
+import json
 import os
 import pwd
 import shutil
@@ -10,6 +11,8 @@ import time
 from copy import deepcopy
 from pathlib import Path
 from typing import Any
+from urllib import error as urllib_error
+from urllib import request as urllib_request
 
 import yaml
 
@@ -274,6 +277,64 @@ def require_binary(name: str) -> None:
         raise RuntimeError(f"{name} is required.")
 
 
+def repair_session_db_permissions(user: HermesTarget) -> None:
+    try:
+        pw = pwd.getpwnam(user.linux_user)
+    except KeyError as exc:
+        raise RuntimeError(f"Linux user {user.linux_user!r} does not exist.") from exc
+
+    # Ensure the SQLite files, if already created by root-side readers, are
+    # returned to the target Linux user before Hermes tries to write again.
+    for candidate in (
+        user.state_db_path,
+        user.state_db_path.with_name(f"{user.state_db_path.name}-wal"),
+        user.state_db_path.with_name(f"{user.state_db_path.name}-shm"),
+    ):
+        if not candidate.exists():
+            continue
+        os.chown(candidate, pw.pw_uid, pw.pw_gid)
+        os.chmod(candidate, 0o600)
+
+
+def wait_for_hermes_models(
+    api_key: str,
+    host: str,
+    port: int,
+    *,
+    timeout_seconds: int = DEFAULT_RUNTIME_READY_TIMEOUT,
+) -> dict[str, Any]:
+    url = f"http://{host}:{int(port)}/v1/models"
+    deadline = time.time() + timeout_seconds
+    last_error = "unknown error"
+
+    while time.time() < deadline:
+        headers: dict[str, str] = {}
+        if api_key:
+            headers["Authorization"] = f"Bearer {api_key}"
+        request = urllib_request.Request(url, headers=headers)
+        try:
+            with urllib_request.urlopen(request, timeout=5) as response:
+                body = response.read().decode("utf-8", errors="replace")
+                if response.status != 200:
+                    last_error = f"status {response.status}"
+                    time.sleep(1)
+                    continue
+                payload = json.loads(body or "{}")
+                if isinstance(payload.get("data"), list):
+                    return payload
+                last_error = "response missing models list"
+        except urllib_error.HTTPError as exc:
+            detail = exc.read().decode("utf-8", errors="replace").strip()
+            last_error = detail or f"HTTP {exc.code}"
+        except Exception as exc:
+            last_error = str(exc)
+        time.sleep(1)
+
+    raise RuntimeError(
+        f"Hermes models endpoint did not become ready in time for {url}: {last_error}"
+    )
+
+
 def _collect_service_debug_info(service_name: str) -> str:
     sections: list[str] = []
     commands = [
@@ -316,6 +377,7 @@ def ensure_service_ready(
 ) -> dict[str, Any]:
     require_binary("systemctl")
     with service_operation_lock(user.systemd_service):
+        repair_session_db_permissions(user)
         was_active = is_service_active(user.systemd_service)
         if not was_active:
             start_service(user.systemd_service)

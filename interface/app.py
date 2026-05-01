@@ -131,6 +131,42 @@ HERMES_SRC = REPO_ROOT / "hermes-agent"
 if str(HERMES_SRC) not in sys.path:
     sys.path.insert(0, str(HERMES_SRC))
 
+DEFAULT_SESSION_DB_PYTHON = (
+    os.getenv("INTERFACE_TUI_GATEWAY_PYTHON") or "/opt/hermes-agent-venv/bin/python3"
+)
+USER_SESSION_DB_RPC_SCRIPT = (
+    "import json, sys\n"
+    "from pathlib import Path\n"
+    "from hermes_state import SessionDB\n"
+    "db = None\n"
+    "db_path = Path(sys.argv[1])\n"
+    "method = sys.argv[2]\n"
+    "kwargs = json.loads(sys.argv[3]) if len(sys.argv) > 3 else {}\n"
+    "try:\n"
+    "    db = SessionDB(db_path=db_path)\n"
+    "    if method == 'list_sessions_rich':\n"
+    "        result = db.list_sessions_rich(**kwargs)\n"
+    "    elif method == 'get_session':\n"
+    "        result = db.get_session(str(kwargs.get('session_id') or '').strip())\n"
+    "    elif method == 'resolve_session_id':\n"
+    "        result = db.resolve_session_id(str(kwargs.get('session_id_or_prefix') or '').strip())\n"
+    "    elif method == 'get_compression_tip':\n"
+    "        result = db.get_compression_tip(str(kwargs.get('session_id') or '').strip())\n"
+    "    elif method == 'get_messages':\n"
+    "        result = db.get_messages(str(kwargs.get('session_id') or '').strip())\n"
+    "    elif method == 'delete_session':\n"
+    "        result = db.delete_session(str(kwargs.get('session_id') or '').strip())\n"
+    "    else:\n"
+    "        raise RuntimeError(f'Unsupported session DB method: {method}')\n"
+    "    print(json.dumps({'ok': True, 'result': result}, ensure_ascii=False))\n"
+    "except Exception as exc:\n"
+    "    print(json.dumps({'ok': False, 'error': str(exc), 'type': type(exc).__name__}, ensure_ascii=False))\n"
+    "    raise SystemExit(1)\n"
+    "finally:\n"
+    "    if db is not None:\n"
+    "        db.close()\n"
+)
+
 mapping_store = MappingStore(DEFAULT_MAPPING_PATH)
 
 
@@ -584,14 +620,139 @@ def _get_user_workspace_root(user: CurrentUser) -> Path:
     return user.target.workdir
 
 
-def _load_session_db(spec: HermesTarget):
+class _UserSessionDBProxy:
+    def __init__(self, spec: HermesTarget):
+        self.spec = spec
+
+    def _call(self, method: str, **kwargs: Any) -> Any:
+        result = subprocess.run(
+            [
+                "runuser",
+                "-u",
+                self.spec.linux_user,
+                "--",
+                "env",
+                f"HOME={self.spec.home_dir}",
+                f"HERMES_HOME={self.spec.hermes_home}",
+                f"TERMINAL_CWD={self.spec.workdir}",
+                f"PATH={os.environ.get('PATH', '')}",
+                "PYTHONUNBUFFERED=1",
+                DEFAULT_SESSION_DB_PYTHON,
+                "-c",
+                USER_SESSION_DB_RPC_SCRIPT,
+                str(self.spec.state_db_path),
+                method,
+                json.dumps(kwargs, ensure_ascii=False),
+            ],
+            capture_output=True,
+            text=True,
+            cwd=str(self.spec.workdir),
+            check=False,
+        )
+
+        stdout_lines = [line for line in result.stdout.splitlines() if line.strip()]
+        raw_payload = stdout_lines[-1] if stdout_lines else ""
+        if not raw_payload:
+            detail = (
+                result.stderr.strip()
+                or result.stdout.strip()
+                or f"session DB helper exited with code {result.returncode}"
+            )
+            raise HTTPException(
+                status_code=500,
+                detail=(
+                    f"Failed to access Hermes session DB as {self.spec.linux_user}: "
+                    f"{detail}"
+                ),
+            )
+
+        try:
+            payload = json.loads(raw_payload)
+        except json.JSONDecodeError as exc:
+            detail = result.stderr.strip() or raw_payload
+            raise HTTPException(
+                status_code=500,
+                detail=(
+                    f"Invalid Hermes session DB helper response for "
+                    f"{self.spec.linux_user}: {detail}"
+                ),
+            ) from exc
+
+        if not isinstance(payload, dict) or not payload.get("ok"):
+            detail = str(payload.get("error") or result.stderr.strip() or "unknown error")
+            raise HTTPException(
+                status_code=500,
+                detail=(
+                    f"Failed to access Hermes session DB as {self.spec.linux_user}: "
+                    f"{detail}"
+                ),
+            )
+
+        return payload.get("result")
+
+    def list_sessions_rich(
+        self,
+        source: str | None = None,
+        exclude_sources: list[str] | None = None,
+        limit: int = 20,
+        offset: int = 0,
+        include_children: bool = False,
+        project_compression_tips: bool = True,
+    ) -> list[dict[str, Any]]:
+        result = self._call(
+            "list_sessions_rich",
+            source=source,
+            exclude_sources=exclude_sources,
+            limit=limit,
+            offset=offset,
+            include_children=include_children,
+            project_compression_tips=project_compression_tips,
+        )
+        return result if isinstance(result, list) else []
+
+    def get_session(self, session_id: str) -> dict[str, Any] | None:
+        result = self._call("get_session", session_id=session_id)
+        return result if isinstance(result, dict) else None
+
+    def resolve_session_id(self, session_id_or_prefix: str) -> str | None:
+        result = self._call(
+            "resolve_session_id", session_id_or_prefix=session_id_or_prefix
+        )
+        normalized = str(result or "").strip()
+        return normalized or None
+
+    def get_compression_tip(self, session_id: str) -> str | None:
+        result = self._call("get_compression_tip", session_id=session_id)
+        normalized = str(result or "").strip()
+        return normalized or None
+
+    def get_messages(self, session_id: str) -> list[dict[str, Any]]:
+        result = self._call("get_messages", session_id=session_id)
+        return result if isinstance(result, list) else []
+
+    def delete_session(self, session_id: str) -> bool:
+        return bool(self._call("delete_session", session_id=session_id))
+
+    def close(self) -> None:
+        return None
+
+
+def _load_direct_session_db(db_path: Path):
     try:
         from hermes_state import SessionDB  # type: ignore
     except Exception as exc:
         raise HTTPException(
             status_code=500, detail=f"Failed to import Hermes session DB: {exc}"
         ) from exc
-    return SessionDB(db_path=spec.state_db_path)
+    return SessionDB(db_path=db_path)
+
+
+def _load_session_db(spec: HermesTarget):
+    try:
+        pwd.getpwnam(spec.linux_user)
+    except KeyError:
+        return _load_direct_session_db(spec.state_db_path)
+    return _UserSessionDBProxy(spec)
 
 
 @contextlib.contextmanager
