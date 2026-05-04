@@ -4,6 +4,7 @@ import os
 import sqlite3
 import sys
 import tempfile
+import importlib
 from pathlib import Path
 
 from fastapi.testclient import TestClient
@@ -215,12 +216,19 @@ def _build_client_and_user():
     os.environ["INTERFACE_SESSION_SECRET"] = "test-secret"
     _seed_state_db(state_db_path)
 
+    for module_name in list(sys.modules):
+        if module_name == "interface" or module_name.startswith("interface."):
+            sys.modules.pop(module_name, None)
+
+    import interface.auth_db as auth_db_mod
     from interface import app as interface_app_mod
-    from interface.auth_db import upsert_user
+
+    importlib.reload(auth_db_mod)
+    importlib.reload(interface_app_mod)
 
     interface_app_mod.ensure_auth_db()
     interface_app_mod.ensure_display_store()
-    user = upsert_user(
+    user = auth_db_mod.upsert_user(
         username="alice",
         email="alice@example.com",
         password="password123",

@@ -60,9 +60,14 @@ from interface.archive_store import (
 from interface.background_jobs import has_active_background_processes
 from interface.display_store import (
     delete_display_messages,
+    delete_live_session_state,
+    delete_session_events,
     ensure_display_store,
+    get_live_session_state,
+    list_live_session_states,
     get_display_session_meta,
     get_display_messages,
+    list_display_session_metas,
     save_display_messages,
 )
 from interface.mapping import DEFAULT_MAPPING_PATH, HermesTarget, MappingStore
@@ -97,6 +102,7 @@ from interface.tui_gateway_bridge import (
     TuiGatewayBridgeError,
     TuiGatewayBridgeRegistry,
 )
+from interface.session_run_manager import SessionRunManager
 
 
 ROOT_DIR = Path(__file__).resolve().parent
@@ -196,6 +202,16 @@ class SignupRequest(BaseModel):
 class SessionDisplaySyncRequest(BaseModel):
     messages: list[dict[str, Any]]
     draft_title: str = ""
+
+
+class SessionTurnSubmitRequest(BaseModel):
+    prompt: str = ""
+    attachments: list[dict[str, Any]] = []
+    draft_title: str = ""
+
+
+class SessionApprovalRequest(BaseModel):
+    choice: str
 
 
 def _normalized_file_browser_mode() -> str:
@@ -879,6 +895,7 @@ def _normalize_logical_session_row(
     logical_session_id: str,
     logical_session: dict[str, Any] | None,
     display_meta: dict[str, Any] | None,
+    live_state: dict[str, Any] | None = None,
     resume_session_id: str | None = None,
 ) -> dict[str, Any]:
     normalized = _normalize_session_row(session)
@@ -893,6 +910,16 @@ def _normalize_logical_session_row(
         normalized["title"] = root_title
     elif draft_title:
         normalized["title"] = draft_title
+
+    normalized["live"] = live_state
+    normalized["is_running"] = bool(
+        isinstance(live_state, dict)
+        and str(live_state.get("status") or "")
+        in {"queued", "starting", "running", "awaiting_approval"}
+    )
+    normalized["has_pending_approval"] = bool(
+        isinstance(live_state, dict) and isinstance(live_state.get("pending_approval"), dict)
+    )
 
     return normalized
 
@@ -967,6 +994,19 @@ def _extract_progress_lines(text: str) -> list[str]:
     return re.findall(r"`(?:💻|🔍|🧠|📁|🌐|📝|⚙️|🛠️)[^`]*`", text or "")
 
 
+def _content_contains_only_progress_lines(text: str, progress_lines: list[str]) -> bool:
+    normalized_text = str(text or "")
+    if not normalized_text.strip() or not progress_lines:
+        return False
+
+    remainder = normalized_text
+    for progress_line in progress_lines:
+        if not progress_line:
+            continue
+        remainder = remainder.replace(progress_line, "")
+    return not remainder.strip()
+
+
 def _build_fallback_display_messages(
     messages: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
@@ -1015,27 +1055,28 @@ def _build_fallback_display_messages(
         if role != "assistant":
             continue
 
+        raw_content = str(raw_message.get("content") or "")
+        progress_lines = _extract_progress_lines(raw_content)
         display_message = {
             "id": f"fallback-{raw_message.get('id') or uuid.uuid4().hex}",
             "role": "assistant",
-            "content": str(raw_message.get("content") or ""),
+            "content": (
+                ""
+                if _content_contains_only_progress_lines(raw_content, progress_lines)
+                else raw_content
+            ),
             "reasoningContent": str(raw_message.get("reasoning") or ""),
             "toolCalls": raw_message.get("tool_calls")
             if isinstance(raw_message.get("tool_calls"), list)
             else [],
-            "progressLines": _extract_progress_lines(
-                str(raw_message.get("content") or "")
-            ),
+            "progressLines": progress_lines,
             "files": [],
             "timestamp": int(raw_message.get("timestamp") or 0),
             "done": True,
             "source": "fallback",
         }
 
-        has_text = bool(
-            display_message["content"].strip()
-            or display_message["reasoningContent"].strip()
-        )
+        has_text = bool(display_message["content"].strip())
         has_tool_context = bool(
             display_message["toolCalls"] or display_message["progressLines"]
         )
@@ -1443,7 +1484,10 @@ def _apply_file_permissions(path: Path, *, linux_user: str, is_dir: bool) -> Non
 
 async def _get_tui_bridge_for_user(user: CurrentUser) -> TuiGatewayBridge:
     registry: TuiGatewayBridgeRegistry = app.state.tui_gateway_bridges
-    return await registry.get_or_create(user.id, user.target)
+    bridge = await registry.get_or_create(user.id, user.target)
+    session_run_manager: SessionRunManager = app.state.session_run_manager
+    await session_run_manager.attach_bridge(bridge)
+    return bridge
 
 
 def _ensure_upload_root(user: CurrentUser) -> Path:
@@ -1469,6 +1513,7 @@ async def on_startup() -> None:
     ensure_archive_db()
     ensure_runtime_state_store()
     app.state.tui_gateway_bridges = TuiGatewayBridgeRegistry()
+    app.state.session_run_manager = SessionRunManager()
     app.state.archive_scheduler_task = asyncio.create_task(_archive_scheduler_loop())
     app.state.signup_worker_task = asyncio.create_task(_signup_worker_loop())
     app.state.runtime_idle_scheduler_task = asyncio.create_task(
@@ -1489,6 +1534,11 @@ async def on_shutdown() -> None:
     )
     if runtime_idle_scheduler_task is not None:
         runtime_idle_scheduler_task.cancel()
+    session_run_manager: SessionRunManager | None = getattr(
+        app.state, "session_run_manager", None
+    )
+    if session_run_manager is not None:
+        await session_run_manager.shutdown()
     bridge_registry: TuiGatewayBridgeRegistry | None = getattr(
         app.state, "tui_gateway_bridges", None
     )
@@ -1779,9 +1829,12 @@ async def get_models(user: CurrentUser = Depends(get_current_user)) -> dict[str,
 async def get_sessions(
     limit: int = 50, offset: int = 0, user: CurrentUser = Depends(get_current_user)
 ) -> dict[str, Any]:
+    live_states = list_live_session_states(user.id)
+    display_metas = list_display_session_metas(user.id)
     with _open_session_db(user.target) as db:
         sessions = db.list_sessions_rich(source=None, limit=limit * 5, offset=offset)
         normalized = []
+        seen_session_ids: set[str] = set()
         for item in sessions:
             if not _is_interface_managed_source(item.get("source")):
                 continue
@@ -1796,12 +1849,50 @@ async def get_sessions(
                     item,
                     logical_session_id=logical_session_id,
                     logical_session=logical_session,
-                    display_meta=get_display_session_meta(user.id, logical_session_id),
+                    display_meta=display_metas.get(logical_session_id),
+                    live_state=live_states.get(logical_session_id),
                     resume_session_id=str(item.get("id") or logical_session_id),
                 )
             )
+            seen_session_ids.add(logical_session_id)
             if len(normalized) >= limit:
                 break
+
+        if len(normalized) < limit:
+            for logical_session_id, display_meta in display_metas.items():
+                if logical_session_id in seen_session_ids:
+                    continue
+                live_state = live_states.get(logical_session_id)
+                normalized.append(
+                    _normalize_logical_session_row(
+                        {
+                            "id": logical_session_id,
+                            "source": "tui",
+                            "model": "",
+                            "title": str(display_meta.get("draft_title") or "").strip(),
+                            "preview": "",
+                            "started_at": int(display_meta.get("created_at") or 0),
+                            "last_active": int(
+                                live_state.get("updated_at")
+                                if isinstance(live_state, dict)
+                                else display_meta.get("updated_at") or 0
+                            ),
+                            "message_count": len(
+                                display_meta.get("messages")
+                                if isinstance(display_meta.get("messages"), list)
+                                else []
+                            ),
+                            "tool_call_count": 0,
+                        },
+                        logical_session_id=logical_session_id,
+                        logical_session={"id": logical_session_id, "source": "tui", "title": ""},
+                        display_meta=display_meta,
+                        live_state=live_state,
+                        resume_session_id=logical_session_id,
+                    )
+                )
+                if len(normalized) >= limit:
+                    break
     normalized.sort(
         key=lambda item: (item["last_active"], item["started_at"]), reverse=True
     )
@@ -1812,6 +1903,7 @@ async def get_sessions(
 async def get_session_detail(
     session_id: str, user: CurrentUser = Depends(get_current_user)
 ) -> dict[str, Any]:
+    display_meta_fallback = get_display_session_meta(user.id, session_id)
     with _open_session_db(user.target) as db:
         logical_session_id, logical_session, tip_session_id, projected_session = (
             _resolve_logical_session_context(db, session_id)
@@ -1819,12 +1911,34 @@ async def get_session_detail(
         if not logical_session or not _is_interface_managed_source(
             logical_session.get("source")
         ):
-            raise HTTPException(status_code=404, detail="Session not found")
-        raw_messages = db.get_messages(tip_session_id)
+            if display_meta_fallback is None:
+                raise HTTPException(status_code=404, detail="Session not found")
+            logical_session_id = session_id
+            logical_session = {"id": session_id, "source": "tui", "title": ""}
+            tip_session_id = session_id
+            projected_session = {
+                "id": session_id,
+                "source": "tui",
+                "model": "",
+                "title": str(display_meta_fallback.get("draft_title") or "").strip(),
+                "preview": "",
+                "started_at": int(display_meta_fallback.get("created_at") or 0),
+                "last_active": int(display_meta_fallback.get("updated_at") or 0),
+                "message_count": len(
+                    display_meta_fallback.get("messages")
+                    if isinstance(display_meta_fallback.get("messages"), list)
+                    else []
+                ),
+                "tool_call_count": 0,
+            }
+            raw_messages = []
+        else:
+            raw_messages = db.get_messages(tip_session_id)
 
     display_messages = get_display_messages(user.id, logical_session_id)
     if display_messages is None:
         display_messages = _build_fallback_display_messages(raw_messages)
+    live_state = get_live_session_state(user.id, logical_session_id)
 
     return {
         "session": _normalize_logical_session_row(
@@ -1832,9 +1946,11 @@ async def get_session_detail(
             logical_session_id=logical_session_id,
             logical_session=logical_session,
             display_meta=get_display_session_meta(user.id, logical_session_id),
+            live_state=live_state,
             resume_session_id=tip_session_id or logical_session_id,
         ),
         "messages": [_normalize_display_message(item) for item in display_messages],
+        "live": live_state,
     }
 
 
@@ -1871,6 +1987,178 @@ async def sync_session_display(
     }
 
 
+@app.post("/api/sessions/{session_id}/turns")
+async def submit_session_turn(
+    session_id: str,
+    payload: SessionTurnSubmitRequest,
+    user: CurrentUser = Depends(get_current_user),
+) -> dict[str, Any]:
+    prompt = str(payload.prompt or "").strip()
+    attachments = (
+        [item for item in payload.attachments if isinstance(item, dict)]
+        if isinstance(payload.attachments, list)
+        else []
+    )
+    if not prompt and not attachments:
+        raise HTTPException(status_code=400, detail="Prompt or attachments are required")
+
+    bridge: TuiGatewayBridge | None = None
+    logical_session_id = ""
+    tip_session_id = ""
+    projected_session: dict[str, Any] | None = None
+    logical_session: dict[str, Any] | None = None
+    fallback_messages: list[dict[str, Any]] = []
+    display_messages: list[dict[str, Any]] | None = None
+    live_session_id = ""
+    created_new_session = False
+    session_run_manager: SessionRunManager = app.state.session_run_manager
+    draft_title = str(payload.draft_title or "").strip()
+
+    try:
+        bridge = await _get_tui_bridge_for_user(user)
+        with _open_session_db(user.target) as db:
+            if session_id == "draft":
+                created = await bridge.rpc("session.create", {"cols": 100})
+                live_session_id = str(created.get("session_id") or "").strip()
+                if not live_session_id:
+                    raise HTTPException(status_code=500, detail="Failed to create TUI gateway session")
+                title_info = await bridge.rpc("session.title", {"session_id": live_session_id})
+                logical_session_id = str(title_info.get("session_key") or live_session_id).strip()
+                tip_session_id = logical_session_id
+                logical_session = db.get_session(logical_session_id)
+                projected_session = logical_session
+                fallback_messages = []
+                created_new_session = True
+            else:
+                (
+                    logical_session_id,
+                    logical_session,
+                    tip_session_id,
+                    projected_session,
+                ) = _resolve_logical_session_context(db, session_id)
+                if not logical_session or not _is_interface_managed_source(
+                    logical_session.get("source")
+                ):
+                    raise HTTPException(status_code=404, detail="Session not found")
+                resumed = await bridge.rpc(
+                    "session.resume",
+                    {
+                        "cols": 100,
+                        "session_id": tip_session_id or logical_session_id,
+                    },
+                )
+                live_session_id = str(resumed.get("session_id") or "").strip()
+                if not live_session_id:
+                    raise HTTPException(status_code=500, detail="TUI gateway did not return a live session id on resume")
+                fallback_messages = _build_fallback_display_messages(db.get_messages(tip_session_id))
+
+        if not logical_session_id:
+            raise HTTPException(status_code=500, detail="Failed to resolve logical session id")
+
+        display_messages = get_display_messages(user.id, logical_session_id)
+        base_messages = (
+            display_messages
+            if display_messages is not None
+            else fallback_messages
+        )
+
+        await session_run_manager.ensure_session_bound(
+            bridge=bridge,
+            user_id=user.id,
+            session_id=logical_session_id,
+            live_session_id=live_session_id,
+        )
+        submit_result = await session_run_manager.submit_turn(
+            bridge=bridge,
+            user_id=user.id,
+            session_id=logical_session_id,
+            live_session_id=live_session_id,
+            prompt=prompt,
+            attachments=attachments,
+            existing_messages=base_messages,
+            draft_title=draft_title,
+        )
+
+        live_state = get_live_session_state(user.id, logical_session_id)
+        normalized_session = _normalize_logical_session_row(
+            projected_session or logical_session or {"id": logical_session_id, "source": "tui"},
+            logical_session_id=logical_session_id,
+            logical_session=logical_session or projected_session or {"id": logical_session_id, "source": "tui"},
+            display_meta=get_display_session_meta(user.id, logical_session_id),
+            live_state=live_state,
+            resume_session_id=tip_session_id or logical_session_id,
+        )
+        if created_new_session and not normalized_session.get("started_at"):
+            normalized_session["started_at"] = _now_seconds()
+            normalized_session["last_active"] = _now_seconds()
+        return {
+            "ok": True,
+            "created": created_new_session,
+            "session": normalized_session,
+            "messages": [_normalize_display_message(item) for item in submit_result.get("messages", [])],
+            "live": live_state,
+        }
+    except TuiGatewayBridgeError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    finally:
+        if bridge is not None:
+            registry: TuiGatewayBridgeRegistry = app.state.tui_gateway_bridges
+            await registry.maybe_close_if_unused(user.id)
+
+
+@app.post("/api/sessions/{session_id}/interrupt")
+async def interrupt_session_turn(
+    session_id: str,
+    user: CurrentUser = Depends(get_current_user),
+) -> dict[str, Any]:
+    bridge: TuiGatewayBridge | None = None
+    try:
+        bridge = await _get_tui_bridge_for_user(user)
+        session_run_manager: SessionRunManager = app.state.session_run_manager
+        result = await session_run_manager.interrupt_run(
+            bridge=bridge,
+            user_id=user.id,
+            session_id=session_id,
+        )
+        return {"ok": True, "result": result}
+    except TuiGatewayBridgeError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    finally:
+        if bridge is not None:
+            registry: TuiGatewayBridgeRegistry = app.state.tui_gateway_bridges
+            await registry.maybe_close_if_unused(user.id)
+
+
+@app.post("/api/sessions/{session_id}/approval")
+async def respond_session_approval(
+    session_id: str,
+    payload: SessionApprovalRequest,
+    user: CurrentUser = Depends(get_current_user),
+) -> dict[str, Any]:
+    choice = str(payload.choice or "").strip().lower()
+    if choice not in {"once", "session", "always", "deny"}:
+        raise HTTPException(status_code=400, detail="Invalid approval choice")
+
+    bridge: TuiGatewayBridge | None = None
+    try:
+        bridge = await _get_tui_bridge_for_user(user)
+        session_run_manager: SessionRunManager = app.state.session_run_manager
+        result = await session_run_manager.respond_to_approval(
+            bridge=bridge,
+            user_id=user.id,
+            session_id=session_id,
+            choice=choice,
+        )
+        live_state = get_live_session_state(user.id, session_id)
+        return {"ok": True, "result": result, "live": live_state}
+    except TuiGatewayBridgeError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    finally:
+        if bridge is not None:
+            registry: TuiGatewayBridgeRegistry = app.state.tui_gateway_bridges
+            await registry.maybe_close_if_unused(user.id)
+
+
 @app.delete("/api/sessions/{session_id}")
 async def delete_session(
     session_id: str, user: CurrentUser = Depends(get_current_user)
@@ -1888,6 +2176,8 @@ async def delete_session(
         ):
             db.delete_session(lineage_session_id)
     delete_display_messages(user.id, logical_session_id)
+    delete_live_session_state(user.id, logical_session_id)
+    delete_session_events(user.id, logical_session_id)
     return {"ok": True}
 
 

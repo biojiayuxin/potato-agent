@@ -350,6 +350,14 @@ const rememberLiveTuiSession = (persistentSessionId, liveSessionId) => {
   persistentIdsByLiveTuiSessionId.set(liveId, persistentId);
 };
 
+const ACTIVE_LIVE_SESSION_STATUSES = new Set(['queued', 'starting', 'running', 'awaiting_approval']);
+
+const normalizeDisplayMessageId = (messageId) => {
+  const normalized = String(messageId || '').trim();
+  if (!normalized) return '';
+  return normalized.startsWith('msg-') ? normalized : `msg-${normalized}`;
+};
+
 const forgetLiveTuiSession = (persistentSessionId) => {
   const persistentId = String(persistentSessionId || '').trim();
   if (!persistentId) return;
@@ -364,6 +372,83 @@ const getPersistentSessionIdForLiveTuiSession = (liveSessionId) => {
   const liveId = String(liveSessionId || '').trim();
   if (!liveId) return '';
   return String(persistentIdsByLiveTuiSessionId.get(liveId) || '');
+};
+
+const syncStreamingAssistantStateForSession = (
+  sessionId,
+  {
+    liveState = null,
+    nextMessages = [],
+    previousMessages = [],
+  } = {},
+) => {
+  const persistentSessionId = String(sessionId || '').trim();
+  if (!persistentSessionId) return;
+
+  const relatedMessages = [
+    ...(Array.isArray(previousMessages) ? previousMessages : []),
+    ...(Array.isArray(nextMessages) ? nextMessages : []),
+  ];
+  for (const message of relatedMessages) {
+    if (String(message?.role || '') !== 'assistant') continue;
+    const messageId = String(message?.id || '').trim();
+    if (!messageId) continue;
+    state.streamingMessageIds.delete(messageId);
+  }
+
+  const normalizedLiveState = liveState && typeof liveState === 'object' ? liveState : null;
+  const status = String(normalizedLiveState?.status || '').trim();
+  if (!ACTIVE_LIVE_SESSION_STATUSES.has(status)) {
+    return;
+  }
+
+  const assistantMessageId = normalizeDisplayMessageId(
+    normalizedLiveState?.assistant_message_id || normalizedLiveState?.assistantMessageId || ''
+  );
+  if (!assistantMessageId) return;
+
+  const targetMessages = Array.isArray(nextMessages) ? nextMessages : [];
+  const hasTargetAssistant = targetMessages.some((message) => (
+    String(message?.role || '') === 'assistant' && String(message?.id || '').trim() === assistantMessageId
+  ));
+  if (hasTargetAssistant) {
+    state.streamingMessageIds.add(assistantMessageId);
+  }
+};
+
+const applyLiveStateToSession = (sessionId, live) => {
+  const persistentSessionId = String(sessionId || '').trim();
+  if (!persistentSessionId) return;
+
+  const liveState = live && typeof live === 'object' ? live : null;
+  const liveSessionId = String(liveState?.live_session_id || liveState?.liveSessionId || '').trim();
+  const status = String(liveState?.status || '').trim();
+  const pendingApproval = liveState?.pending_approval || liveState?.pendingApproval || null;
+
+  if (liveSessionId) {
+    rememberLiveTuiSession(persistentSessionId, liveSessionId);
+  } else {
+    forgetLiveTuiSession(persistentSessionId);
+  }
+
+  if (ACTIVE_LIVE_SESSION_STATUSES.has(status)) {
+    setSessionBusy(persistentSessionId, true, { transport: 'tui' });
+  } else {
+    setSessionBusy(persistentSessionId, false);
+  }
+
+  if (pendingApproval && status === 'awaiting_approval') {
+    setSessionPendingApproval(persistentSessionId, {
+      approvalId: '',
+      command: String(pendingApproval.command || ''),
+      description: String(pendingApproval.description || 'Hermes needs approval to continue.'),
+      patternKey: '',
+      patternKeys: [],
+      options: [],
+    });
+  } else {
+    clearSessionPendingApproval(persistentSessionId);
+  }
 };
 
 const getSessionMessagesBuffer = (persistentSessionId) => {
@@ -453,22 +538,22 @@ const closeTuiBridge = () => {
     pending.reject(new Error('TUI bridge disconnected'));
   }
   tuiBridgePending.clear();
-  for (const [sessionId, transport] of sessionRunTransportById.entries()) {
-    if (transport === 'tui') {
-      busySessionIds.delete(sessionId);
-      sessionRunTransportById.delete(sessionId);
-      sessionAbortControllersById.delete(sessionId);
-      pendingApprovalsBySessionId.delete(sessionId);
-    }
-  }
-  liveTuiSessionsByPersistentId.clear();
-  persistentIdsByLiveTuiSessionId.clear();
   refreshComposerBusyState();
   renderApprovalModal();
   setTuiBridgeStatus('', { hidden: true });
 };
 
 const getPersistentSessionIdFromTuiEvent = (message) => {
+  const persistentSessionId = String(
+    message?.persistent_session_id || message?.persistentSessionId || ''
+  ).trim();
+  if (persistentSessionId) {
+    const liveSessionId = String(message?.session_id || '').trim();
+    if (liveSessionId) {
+      rememberLiveTuiSession(persistentSessionId, liveSessionId);
+    }
+    return persistentSessionId;
+  }
   const liveSessionId = String(message?.session_id || '').trim();
   if (!liveSessionId) return '';
   return String(getPersistentSessionIdForLiveTuiSession(liveSessionId) || '').trim();
@@ -559,10 +644,6 @@ const handleTuiBridgeEvent = (message) => {
     if (completedSessionId) {
       window.setTimeout(async () => {
         try {
-          const liveMessages = getSessionMessagesBuffer(completedSessionId) || [];
-          await persistSessionDisplayState(completedSessionId, liveMessages, {
-            draftTitle: getSessionTitleById(completedSessionId),
-          });
           await updateSessionSnapshot(completedSessionId, { preserveLiveMessages: true });
           if (isViewingSession(completedSessionId)) {
             syncActiveSessionFromSessions(completedSessionId);
@@ -601,6 +682,38 @@ const handleTuiBridgeEvent = (message) => {
       }
     }
     setTuiBridgeStatus(`TUI tool progress: ${preview.slice(0, 120)}`);
+    return;
+  }
+
+  if (type === 'tool.start') {
+    const persistentSessionId = getPersistentSessionIdFromTuiEvent(message);
+    const preview = String(message?.payload?.context || message?.payload?.name || 'tool');
+    const assistantMessage = getStreamingAssistantMessage(persistentSessionId);
+    if (assistantMessage && preview) {
+      appendProgressEntries(assistantMessage, [preview]);
+      if (isViewingSession(persistentSessionId)) {
+        renderMessages();
+      }
+    }
+    if (preview) {
+      setTuiBridgeStatus(`TUI tool started: ${preview.slice(0, 120)}`);
+    }
+    return;
+  }
+
+  if (type === 'tool.complete') {
+    const persistentSessionId = getPersistentSessionIdFromTuiEvent(message);
+    const summary = String(message?.payload?.summary || message?.payload?.name || 'tool completed');
+    const assistantMessage = getStreamingAssistantMessage(persistentSessionId);
+    if (assistantMessage && summary) {
+      appendProgressEntries(assistantMessage, [summary]);
+      if (isViewingSession(persistentSessionId)) {
+        renderMessages();
+      }
+    }
+    if (summary) {
+      setTuiBridgeStatus(`TUI tool completed: ${summary.slice(0, 120)}`);
+    }
     return;
   }
 
@@ -1062,17 +1175,14 @@ const submitApprovalDecision = async (choice) => {
   setApprovalSubmitting(true);
 
   const approvalSessionId = String(approval.sessionId || '').trim();
-  const liveSessionId = liveTuiSessionsByPersistentId.get(approvalSessionId) || '';
 
   try {
-    if (!liveSessionId) {
-      throw new Error('Approval request is no longer attached to a live session.');
-    }
-
-    await tuiBridgeRpc('approval.respond', {
-      session_id: liveSessionId,
-      choice,
+    const response = await api(`/api/sessions/${encodeURIComponent(approvalSessionId)}/approval`, {
+      method: 'POST',
+      body: JSON.stringify({ choice }),
     });
+    const json = await response.json();
+    applyLiveStateToSession(approvalSessionId, json?.live || null);
     clearSessionPendingApproval(approvalSessionId);
     setApprovalSubmitting(false);
   } catch (error) {
@@ -1710,7 +1820,7 @@ const normalizeMessageForDisplay = (message) => {
     'done' in (message || {});
   const normalizedContent = typeof message?.content === 'string' ? message.content : String(message?.content ?? '');
   const base = {
-    id: `msg-${message?.id ?? uuid()}`,
+    id: normalizeDisplayMessageId(message?.id ?? uuid()),
     role,
     content: '',
     reasoningContent: hasDisplayShape
@@ -2495,6 +2605,9 @@ const refreshSessions = async () => {
       persistentSessionId: session.id,
     }))
     .filter(Boolean);
+  for (const session of sessions) {
+    applyLiveStateToSession(session?.id, session?.live || null);
+  }
   renderChatList();
   renderWorkspaceHeader();
 };
@@ -2528,10 +2641,21 @@ const openSession = async (sessionId) => {
 
   const cachedMessages = getCachedSessionMessages(sessionId);
   if (cachedMessages) {
+    const cachedSession = state.sessions.find((session) => session.id === sessionId) || state.activeSession || null;
+    const liveState = cachedSession?.live || null;
+    applyLiveStateToSession(sessionId, liveState);
+    syncStreamingAssistantStateForSession(sessionId, {
+      liveState,
+      nextMessages: cachedMessages,
+      previousMessages: cachedMessages,
+    });
     state.sessionHistoryLoading = false;
     state.messages = cachedMessages;
     state.shouldAutoScrollMessages = true;
     renderWorkspace();
+    if (ACTIVE_LIVE_SESSION_STATUSES.has(String(liveState?.status || ''))) {
+      ensureTuiBridge().catch(() => {});
+    }
     return;
   }
 
@@ -2541,17 +2665,28 @@ const openSession = async (sessionId) => {
     const normalizedMessages = Array.isArray(json?.messages)
       ? json.messages.map(normalizeMessageForDisplay)
       : [];
+    const liveState = json?.live || json?.session?.live || null;
+    const previousMessages = getCachedSessionMessages(sessionId) || state.messages;
     setLiveSessionMessages(sessionId, normalizedMessages);
     state.activeSession = normalizeSessionSnapshot(
       json?.session
         ? { ...json.session, persistentSessionId: json.session.id }
         : null
     );
+    applyLiveStateToSession(sessionId, liveState);
+    syncStreamingAssistantStateForSession(sessionId, {
+      liveState,
+      nextMessages: normalizedMessages,
+      previousMessages,
+    });
     state.activeSessionId = state.activeSession?.id || null;
     state.sessionHistoryLoading = false;
     state.messages = normalizedMessages;
     state.shouldAutoScrollMessages = true;
     renderWorkspace();
+    if (ACTIVE_LIVE_SESSION_STATUSES.has(String(liveState?.status || ''))) {
+      ensureTuiBridge().catch(() => {});
+    }
   } catch (error) {
     state.sessionHistoryLoading = false;
     renderWorkspace();
@@ -2621,6 +2756,8 @@ const updateSessionSnapshot = async (sessionId, { preserveLiveMessages = false }
   const normalizedMessages = Array.isArray(json?.messages)
     ? json.messages.map(normalizeMessageForDisplay)
     : null;
+  const liveState = json?.live || json?.session?.live || null;
+  const previousMessages = getCachedSessionMessages(sessionId);
   if (!session?.id) {
     return null;
   }
@@ -2628,6 +2765,11 @@ const updateSessionSnapshot = async (sessionId, { preserveLiveMessages = false }
   state.sessions = [session, ...state.sessions.filter((chat) => chat.id !== session.id)];
   if (Array.isArray(normalizedMessages) && (!preserveLiveMessages || !sessionHasStreamingMessages(sessionId))) {
     setLiveSessionMessages(sessionId, normalizedMessages);
+    syncStreamingAssistantStateForSession(sessionId, {
+      liveState,
+      nextMessages: normalizedMessages,
+      previousMessages,
+    });
   }
   if (state.activeSessionId === session.id) {
     state.activeSession = session;
@@ -2731,7 +2873,7 @@ const submitPromptViaTuiBridge = async (prompt) => {
   showChatError('');
 
   const userMessage = {
-    id: uuid(),
+    id: normalizeDisplayMessageId(uuid()),
     role: 'user',
     content: trimmedPrompt,
     files: uploadedAttachments.map((item) => ({
@@ -2750,7 +2892,7 @@ const submitPromptViaTuiBridge = async (prompt) => {
   };
 
   const assistantMessage = {
-    id: uuid(),
+    id: normalizeDisplayMessageId(uuid()),
     role: 'assistant',
     content: '',
     reasoningContent: '',
@@ -2767,40 +2909,80 @@ const submitPromptViaTuiBridge = async (prompt) => {
   state.pendingAttachments = [];
   setLiveSessionMessages(currentSessionId, targetMessages);
   setSessionBusy(currentSessionId, true, { transport: 'tui' });
+  const bridgeReadyPromise = ensureTuiBridge().catch(() => null);
   renderWorkspace();
 
-  let sessionInfo;
   let persistentSessionId = optimisticSessionId;
   try {
-    sessionInfo = await ensureTuiChatSession();
-    if (!sessionInfo?.liveSessionId) {
-      throw new Error('Failed to create or resume TUI chat session');
+    const requestedSessionId = (!state.activeSession || state.activeSession?.isDraft || !optimisticSessionId)
+      ? 'draft'
+      : optimisticSessionId;
+    const response = await api(`/api/sessions/${encodeURIComponent(requestedSessionId)}/turns`, {
+      method: 'POST',
+      body: JSON.stringify({
+        prompt: trimmedPrompt,
+        attachments: uploadedAttachments.map((item) => ({
+          type: item.type,
+          id: item.id,
+          name: item.name,
+          size: item.size,
+          content_type: item.content_type,
+          localPath: item.localPath,
+        })),
+        draft_title: deriveDraftTitleFromUserMessage({
+          content: trimmedPrompt,
+          files: uploadedAttachments,
+        }),
+      }),
+    });
+    const json = await response.json();
+    const nextSession = normalizeSessionSnapshot(
+      json?.session
+        ? { ...json.session, persistentSessionId: json.session.id }
+        : null
+    );
+    const nextMessages = Array.isArray(json?.messages)
+      ? json.messages.map(normalizeMessageForDisplay)
+      : targetMessages;
+
+    if (!nextSession?.id) {
+      throw new Error('Failed to persist session state');
     }
 
-    persistentSessionId = String(sessionInfo.persistentSessionId || getPersistentSessionIdForChat(state.activeSession) || currentSessionId || '');
+    persistentSessionId = String(nextSession.id || '').trim();
     if (draftSessionId && persistentSessionId && draftSessionId !== persistentSessionId) {
       clearLiveSessionMessages(draftSessionId);
       sessionAbortControllersById.delete(draftSessionId);
       sessionRunTransportById.delete(draftSessionId);
       busySessionIds.delete(draftSessionId);
-      setLiveSessionMessages(persistentSessionId, targetMessages);
-      setSessionBusy(persistentSessionId, true, { transport: 'tui' });
     }
 
-    if (persistentSessionId && isDefaultChatTitle(state.activeSession?.title)) {
-      setLocalSessionTitle(
-        persistentSessionId,
-        deriveDraftTitleFromUserMessage({
-          content: trimmedPrompt,
-          files: uploadedAttachments,
-        })
-      );
-    }
+    state.sessions = [nextSession, ...state.sessions.filter((chat) => chat.id !== nextSession.id)];
+    state.draftSession = null;
+    state.activeSession = nextSession;
+    state.activeSessionId = nextSession.id;
+    activePersistentSessionId = nextSession.id;
+    setLiveSessionMessages(nextSession.id, nextMessages);
+    state.messages = nextMessages;
 
-    await tuiBridgeRpc('prompt.submit', {
-      session_id: sessionInfo.liveSessionId,
-      text: buildHermesUserContent(trimmedPrompt, uploadedAttachments),
+    const liveState = json?.live || json?.session?.live || null;
+    applyLiveStateToSession(nextSession.id, liveState);
+    syncStreamingAssistantStateForSession(nextSession.id, {
+      liveState,
+      nextMessages,
+      previousMessages: targetMessages,
     });
+
+    const liveSessionId = String(liveState?.live_session_id || '').trim();
+    if (liveSessionId) {
+      updateActiveTuiSessionMapping({
+        liveSessionId,
+        persistentSessionId: nextSession.id,
+      });
+      bridgeReadyPromise.catch(() => {});
+    }
+
+    renderWorkspace();
   } catch (error) {
     state.streamingMessageIds.delete(assistantMessage.id);
     assistantMessage.done = true;
@@ -3139,12 +3321,8 @@ dom.sendButton.addEventListener('click', async (event) => {
   event.preventDefault();
   event.stopPropagation();
   const activeSessionId = getActivePersistentSessionId();
-  const activeLiveSessionId = liveTuiSessionsByPersistentId.get(activeSessionId) || activeTuiSessionId;
-  if (!activeLiveSessionId) {
-    showChatError('No live TUI session is attached to this conversation.');
-    return;
-  }
-  tuiBridgeRpc('session.interrupt', { session_id: activeLiveSessionId }).catch((error) => {
+  if (!activeSessionId) return;
+  api(`/api/sessions/${encodeURIComponent(activeSessionId)}/interrupt`, { method: 'POST' }).catch((error) => {
     showChatError(String(error.message || 'Failed to interrupt TUI session'));
   });
 });
