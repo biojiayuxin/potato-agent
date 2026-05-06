@@ -116,6 +116,7 @@ const busySessionIds = new Set();
 const sessionRunTransportById = new Map();
 const sessionAbortControllersById = new Map();
 const pendingApprovalsBySessionId = new Map();
+const interruptingSessionIds = new Set();
 
 const SIDEBAR_WIDTH_KEY = 'lite_sidebar_width';
 const FILES_WIDTH_KEY = 'lite_files_width';
@@ -276,6 +277,8 @@ const normalizeSessionSnapshot = (session) => {
     resume_session_id: String(
       session.resume_session_id
       || session.resumeSessionId
+      || session.live?.tip_session_id
+      || session.live?.tipSessionId
       || existingSession?.resume_session_id
       || existingSession?.resumeSessionId
       || sessionId
@@ -422,13 +425,32 @@ const applyLiveStateToSession = (sessionId, live) => {
 
   const liveState = live && typeof live === 'object' ? live : null;
   const liveSessionId = String(liveState?.live_session_id || liveState?.liveSessionId || '').trim();
+  const tipSessionId = String(liveState?.tip_session_id || liveState?.tipSessionId || '').trim();
   const status = String(liveState?.status || '').trim();
   const pendingApproval = liveState?.pending_approval || liveState?.pendingApproval || null;
+
+  const applyLiveSnapshot = (session) => (
+    session
+      ? {
+          ...session,
+          live: liveState,
+          resume_session_id: tipSessionId || session.resume_session_id || session.resumeSessionId || session.id,
+          resumeSessionId: tipSessionId || session.resumeSessionId || session.resume_session_id || session.id,
+        }
+      : session
+  );
 
   if (liveSessionId) {
     rememberLiveTuiSession(persistentSessionId, liveSessionId);
   } else {
     forgetLiveTuiSession(persistentSessionId);
+  }
+
+  state.sessions = state.sessions.map((chat) => (
+    chat.id === persistentSessionId ? applyLiveSnapshot(chat) : chat
+  ));
+  if (state.activeSessionId === persistentSessionId && state.activeSession) {
+    state.activeSession = applyLiveSnapshot(state.activeSession);
   }
 
   if (ACTIVE_LIVE_SESSION_STATUSES.has(status)) {
@@ -518,9 +540,58 @@ const finalizeStreamingAssistantMessage = (sessionId, { text = '', reasoning = '
   if (reasoning) {
     assistantMessage.reasoningContent = reasoning;
   }
-  assistantMessage.done = status !== 'interrupted';
+  assistantMessage.done = true;
   assistantMessage.timestamp = nowSeconds();
   state.streamingMessageIds.delete(assistantMessage.id);
+};
+
+const markSessionInterruptedLocally = (sessionId, liveState = null) => {
+  const persistentSessionId = String(sessionId || '').trim();
+  if (!persistentSessionId) return;
+
+  const targetMessages = getSessionMessagesBuffer(persistentSessionId) || [];
+  for (const message of targetMessages) {
+    if (String(message?.role || '') !== 'assistant') continue;
+    const messageId = String(message?.id || '').trim();
+    if (!messageId || !state.streamingMessageIds.has(messageId)) continue;
+    message.done = true;
+    message.timestamp = nowSeconds();
+    state.streamingMessageIds.delete(messageId);
+  }
+  if (targetMessages.length > 0) {
+    setSessionMessagesBuffer(persistentSessionId, targetMessages);
+  }
+
+  const normalizedLiveState = liveState && typeof liveState === 'object'
+    ? liveState
+    : { status: 'interrupted' };
+  state.sessions = state.sessions.map((chat) => (
+    chat.id === persistentSessionId
+      ? {
+          ...chat,
+          live: normalizedLiveState,
+          is_running: false,
+          has_pending_approval: false,
+          last_active: nowSeconds(),
+        }
+      : chat
+  ));
+  if (state.activeSessionId === persistentSessionId && state.activeSession) {
+    state.activeSession = {
+      ...state.activeSession,
+      live: normalizedLiveState,
+      is_running: false,
+      has_pending_approval: false,
+      last_active: nowSeconds(),
+    };
+  }
+
+  applyLiveStateToSession(
+    persistentSessionId,
+    normalizedLiveState
+  );
+  setSessionBusy(persistentSessionId, false);
+  clearSessionPendingApproval(persistentSessionId);
 };
 
 const nextTuiBridgeRequestId = () => `tui-${++tuiBridgeRequestCounter}`;
@@ -1308,6 +1379,7 @@ const resetWorkspaceState = () => {
   sessionRunTransportById.clear();
   sessionAbortControllersById.clear();
   pendingApprovalsBySessionId.clear();
+  interruptingSessionIds.clear();
   state.pendingAttachments = [];
   state.isSending = false;
   state.pendingApproval = null;
@@ -3322,9 +3394,18 @@ dom.sendButton.addEventListener('click', async (event) => {
   event.stopPropagation();
   const activeSessionId = getActivePersistentSessionId();
   if (!activeSessionId) return;
-  api(`/api/sessions/${encodeURIComponent(activeSessionId)}/interrupt`, { method: 'POST' }).catch((error) => {
+  if (interruptingSessionIds.has(activeSessionId)) return;
+  interruptingSessionIds.add(activeSessionId);
+  try {
+    const response = await api(`/api/sessions/${encodeURIComponent(activeSessionId)}/interrupt`, { method: 'POST' });
+    const json = await response.json().catch(() => ({}));
+    markSessionInterruptedLocally(activeSessionId, json?.live || null);
+    renderWorkspace();
+  } catch (error) {
     showChatError(String(error.message || 'Failed to interrupt TUI session'));
-  });
+  } finally {
+    interruptingSessionIds.delete(activeSessionId);
+  }
 });
 
 dom.refreshFilesButton.addEventListener('click', async () => {

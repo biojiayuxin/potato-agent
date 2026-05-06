@@ -2,12 +2,15 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import inspect
 import json
 import time
 import uuid
 from dataclasses import dataclass
-from typing import Any
+from pathlib import Path
+from typing import Any, Awaitable, Callable
 
+from interface.auth_db import DEFAULT_AUTH_DB_PATH
 from interface.display_store import (
     append_session_event,
     get_display_messages,
@@ -22,8 +25,14 @@ ATTACHMENT_BLOCK_START = "<potato-files>"
 ATTACHMENT_BLOCK_END = "</potato-files>"
 ATTACHMENT_HINT_LINE = "Use the attachment local paths above if you need to inspect the files."
 STREAM_FLUSH_INTERVAL_SECONDS = 0.5
+TIP_RECONCILE_INTERVAL_SECONDS = 60.0
 ACTIVE_LIVE_STATUSES = {"queued", "starting", "running", "awaiting_approval"}
 FINAL_LIVE_STATUSES = {"completed", "failed", "interrupted"}
+STALE_GATEWAY_SESSION_ERROR = (
+    "live TUI session not found; the run is no longer attached to a gateway session"
+)
+
+TipSessionResolver = Callable[[str, str], str | None | Awaitable[str | None]]
 
 
 def now_seconds() -> int:
@@ -114,13 +123,68 @@ class SessionRunContext:
 
 
 class SessionRunManager:
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        *,
+        tip_resolver: TipSessionResolver | None = None,
+        tip_reconcile_interval_seconds: float = TIP_RECONCILE_INTERVAL_SECONDS,
+        db_path: Path = DEFAULT_AUTH_DB_PATH,
+    ) -> None:
+        self._tip_resolver = tip_resolver
+        self._db_path = db_path
+        self._tip_reconcile_interval_seconds = (
+            float(tip_reconcile_interval_seconds)
+            if float(tip_reconcile_interval_seconds or 0) > 0
+            else TIP_RECONCILE_INTERVAL_SECONDS
+        )
         self._bridge_listener_entries: dict[str, tuple[TuiGatewayBridge, str]] = {}
         self._run_contexts_by_session_id: dict[tuple[str, str], SessionRunContext] = {}
         self._run_contexts_by_live_session_id: dict[tuple[str, str], SessionRunContext] = {}
         self._flush_tasks: dict[tuple[str, str], asyncio.Task[None]] = {}
         self._flush_events: dict[tuple[str, str], asyncio.Event] = {}
         self._lock = asyncio.Lock()
+
+    def _get_live_session_state(self, user_id: str, session_id: str) -> dict[str, Any] | None:
+        return get_live_session_state(user_id, session_id, db_path=self._db_path)
+
+    def _save_live_session_state(
+        self,
+        user_id: str,
+        session_id: str,
+        **kwargs: Any,
+    ) -> dict[str, Any]:
+        return save_live_session_state(user_id, session_id, db_path=self._db_path, **kwargs)
+
+    def _get_display_messages(
+        self,
+        user_id: str,
+        session_id: str,
+    ) -> list[dict[str, Any]] | None:
+        return get_display_messages(user_id, session_id, db_path=self._db_path)
+
+    def _save_display_messages(
+        self,
+        user_id: str,
+        session_id: str,
+        messages: list[dict[str, Any]],
+        *,
+        draft_title: str | None = None,
+    ) -> None:
+        save_display_messages(
+            user_id,
+            session_id,
+            messages,
+            draft_title=draft_title,
+            db_path=self._db_path,
+        )
+
+    def _append_session_event(
+        self,
+        user_id: str,
+        session_id: str,
+        **kwargs: Any,
+    ) -> None:
+        append_session_event(user_id, session_id, db_path=self._db_path, **kwargs)
 
     async def attach_bridge(self, bridge: TuiGatewayBridge) -> None:
         async with self._lock:
@@ -166,6 +230,7 @@ class SessionRunManager:
         user_id: str,
         session_id: str,
         live_session_id: str,
+        tip_session_id: str = "",
         prompt: str,
         attachments: list[dict[str, Any]],
         existing_messages: list[dict[str, Any]] | None = None,
@@ -173,7 +238,7 @@ class SessionRunManager:
     ) -> dict[str, Any]:
         await self.attach_bridge(bridge)
 
-        existing_live_state = get_live_session_state(user_id, session_id)
+        existing_live_state = self._get_live_session_state(user_id, session_id)
         if existing_live_state and str(existing_live_state.get("status") or "") in ACTIVE_LIVE_STATUSES:
             raise TuiGatewayBridgeError("session busy")
 
@@ -214,20 +279,21 @@ class SessionRunManager:
         base_messages = (
             _normalize_messages(existing_messages)
             if isinstance(existing_messages, list)
-            else _normalize_messages(get_display_messages(user_id, session_id))
+            else _normalize_messages(self._get_display_messages(user_id, session_id))
         )
         next_messages = [*base_messages, user_message, assistant_message]
-        save_display_messages(
+        self._save_display_messages(
             user_id,
             session_id,
             next_messages,
             draft_title=draft_title or None,
         )
-        save_live_session_state(
+        self._save_live_session_state(
             user_id,
             session_id,
             run_id=run_id,
             live_session_id=live_session_id,
+            tip_session_id=tip_session_id or session_id,
             assistant_message_id=assistant_message_id,
             status="queued",
             pending_approval=None,
@@ -237,7 +303,7 @@ class SessionRunManager:
             started_at=0,
             finished_at=0,
         )
-        append_session_event(
+        self._append_session_event(
             user_id,
             session_id,
             run_id=run_id,
@@ -285,7 +351,7 @@ class SessionRunManager:
             "live_session_id": live_session_id,
             "assistant_message_id": assistant_message_id,
             "messages": next_messages,
-            "live": get_live_session_state(user_id, session_id),
+            "live": self._get_live_session_state(user_id, session_id),
         }
 
     async def _submit_prompt_task(
@@ -296,11 +362,15 @@ class SessionRunManager:
         live_session_id: str,
         text: str,
     ) -> None:
-        save_live_session_state(
+        self._save_live_session_state(
             context.user_id,
             context.session_id,
             run_id=context.run_id,
             live_session_id=live_session_id,
+            tip_session_id=str(
+                (self._get_live_session_state(context.user_id, context.session_id) or {}).get("tip_session_id")
+                or ""
+            ),
             assistant_message_id=context.assistant_message_id,
             status="starting",
             pending_approval=None,
@@ -328,20 +398,49 @@ class SessionRunManager:
         user_id: str,
         session_id: str,
     ) -> dict[str, Any]:
-        live_state = get_live_session_state(user_id, session_id)
+        live_state = self._get_live_session_state(user_id, session_id)
         if live_state is None:
             raise TuiGatewayBridgeError("session not found")
         live_session_id = str(live_state.get("live_session_id") or "").strip()
         if not live_session_id:
             raise TuiGatewayBridgeError("no live session is attached to this conversation")
-        result = await bridge.rpc("session.interrupt", {"session_id": live_session_id})
-        append_session_event(
+        run_id = str(live_state.get("run_id") or "")
+        assistant_message_id = str(live_state.get("assistant_message_id") or "")
+        seq = int(live_state.get("last_event_seq") or 0)
+        try:
+            result = await bridge.rpc("session.interrupt", {"session_id": live_session_id})
+        except TuiGatewayBridgeError as exc:
+            if "session not found" not in str(exc).lower():
+                raise
+            await self._mark_failed(
+                context=SessionRunContext(
+                    user_id=user_id,
+                    session_id=session_id,
+                    run_id=run_id,
+                    assistant_message_id=assistant_message_id,
+                ),
+                live_session_id=live_session_id,
+                error_message=STALE_GATEWAY_SESSION_ERROR,
+                seq=seq,
+            )
+            return {"status": "failed", "message": STALE_GATEWAY_SESSION_ERROR}
+        self._append_session_event(
             user_id,
             session_id,
-            run_id=str(live_state.get("run_id") or ""),
-            seq=int(live_state.get("last_event_seq") or 0),
+            run_id=run_id,
+            seq=seq,
             event_type="session.interrupt",
             payload={"result": result},
+        )
+        await self._mark_interrupted(
+            context=SessionRunContext(
+                user_id=user_id,
+                session_id=session_id,
+                run_id=run_id,
+                assistant_message_id=assistant_message_id,
+            ),
+            live_session_id=live_session_id,
+            seq=seq,
         )
         return result
 
@@ -353,7 +452,7 @@ class SessionRunManager:
         session_id: str,
         choice: str,
     ) -> dict[str, Any]:
-        live_state = get_live_session_state(user_id, session_id)
+        live_state = self._get_live_session_state(user_id, session_id)
         if live_state is None:
             raise TuiGatewayBridgeError("session not found")
         live_session_id = str(live_state.get("live_session_id") or "").strip()
@@ -366,7 +465,7 @@ class SessionRunManager:
                 "choice": choice,
             },
         )
-        save_live_session_state(
+        self._save_live_session_state(
             user_id,
             session_id,
             run_id=str(live_state.get("run_id") or ""),
@@ -377,7 +476,7 @@ class SessionRunManager:
             last_error=str(live_state.get("last_error") or ""),
             last_event_seq=int(live_state.get("last_event_seq") or 0),
         )
-        append_session_event(
+        self._append_session_event(
             user_id,
             session_id,
             run_id=str(live_state.get("run_id") or ""),
@@ -417,8 +516,19 @@ class SessionRunManager:
         )
         if context is None:
             return
+        event["persistent_session_id"] = context.session_id
+        event["run_id"] = context.run_id
 
-        append_session_event(
+        live_state = self._get_live_session_state(context.user_id, context.session_id)
+        if (
+            live_state is not None
+            and str(live_state.get("status") or "").strip() in FINAL_LIVE_STATUSES
+            and event_type != "message.complete"
+        ):
+            return
+        state_live_session_id = self._state_live_session_id(live_state, live_session_id)
+
+        self._append_session_event(
             context.user_id,
             context.session_id,
             run_id=context.run_id,
@@ -428,11 +538,12 @@ class SessionRunManager:
         )
 
         if event_type == "message.start":
-            save_live_session_state(
+            self._save_live_session_state(
                 context.user_id,
                 context.session_id,
                 run_id=context.run_id,
-                live_session_id=live_session_id,
+                live_session_id=state_live_session_id,
+                tip_session_id=str((live_state or {}).get("tip_session_id") or ""),
                 assistant_message_id=context.assistant_message_id,
                 status="running",
                 pending_approval=None,
@@ -445,19 +556,20 @@ class SessionRunManager:
             return
 
         if event_type == "message.delta":
-            await self._append_delta(context, payload, seq, live_session_id)
+            await self._append_delta(context, payload, seq, state_live_session_id)
             return
 
         if event_type == "tool.progress":
-            await self._append_progress(context, payload, seq, live_session_id)
+            await self._append_progress(context, payload, seq, state_live_session_id)
             return
 
         if event_type == "approval.request":
-            save_live_session_state(
+            self._save_live_session_state(
                 context.user_id,
                 context.session_id,
                 run_id=context.run_id,
-                live_session_id=live_session_id,
+                live_session_id=state_live_session_id,
+                tip_session_id=str((live_state or {}).get("tip_session_id") or ""),
                 assistant_message_id=context.assistant_message_id,
                 status="awaiting_approval",
                 pending_approval={
@@ -471,13 +583,19 @@ class SessionRunManager:
             return
 
         if event_type == "message.complete":
-            await self._complete_message(context, payload, seq, live_session_id)
+            live_state = await self._reconcile_tip(context)
+            await self._complete_message(
+                context,
+                payload,
+                seq,
+                self._state_live_session_id(live_state, live_session_id),
+            )
             return
 
         if event_type == "error":
             await self._mark_failed(
                 context=context,
-                live_session_id=live_session_id,
+                live_session_id=state_live_session_id,
                 error_message=str(payload.get("message") or "Unknown bridge error"),
                 seq=seq,
             )
@@ -494,17 +612,34 @@ class SessionRunManager:
             if live_session_id:
                 direct = self._run_contexts_by_live_session_id.get((bridge_user_id, live_session_id))
                 if direct is not None:
+                    live_state = self._get_live_session_state(bridge_user_id, direct.session_id)
+                    if (
+                        live_state is not None
+                        and str(live_state.get("status") or "").strip() in FINAL_LIVE_STATUSES
+                    ):
+                        return None
                     return direct
             if session_id:
                 direct = self._run_contexts_by_session_id.get((bridge_user_id, session_id))
                 if direct is not None:
+                    live_state = self._get_live_session_state(bridge_user_id, direct.session_id)
+                    if (
+                        live_state is not None
+                        and str(live_state.get("status") or "").strip() in FINAL_LIVE_STATUSES
+                    ):
+                        return None
                     return direct
 
         if not session_id:
-            return None
+            return await self._resolve_unknown_live_session_context(
+                bridge_user_id=bridge_user_id,
+                live_session_id=live_session_id,
+            )
 
-        live_state = get_live_session_state(bridge_user_id, session_id)
+        live_state = self._get_live_session_state(bridge_user_id, session_id)
         if live_state is None:
+            return None
+        if str(live_state.get("status") or "").strip() in FINAL_LIVE_STATUSES:
             return None
 
         assistant_message_id = str(live_state.get("assistant_message_id") or "").strip()
@@ -525,6 +660,58 @@ class SessionRunManager:
             self._ensure_flush_task_locked(context)
         return context
 
+    async def _resolve_unknown_live_session_context(
+        self,
+        *,
+        bridge_user_id: str,
+        live_session_id: str,
+    ) -> SessionRunContext | None:
+        normalized_live_session_id = str(live_session_id or "").strip()
+        if not normalized_live_session_id:
+            return None
+
+        async with self._lock:
+            contexts = [
+                context
+                for (user_id, _), context in self._run_contexts_by_session_id.items()
+                if user_id == bridge_user_id
+            ]
+
+        for context in contexts:
+            live_state = await self._reconcile_tip(context)
+            if live_state is None:
+                continue
+            tip_session_id = str(live_state.get("tip_session_id") or "").strip()
+            if tip_session_id != normalized_live_session_id:
+                continue
+            async with self._lock:
+                self._run_contexts_by_live_session_id[
+                    (bridge_user_id, normalized_live_session_id)
+                ] = context
+            return context
+        return None
+
+    def _state_live_session_id(
+        self,
+        live_state: dict[str, Any] | None,
+        event_live_session_id: str,
+    ) -> str:
+        normalized_event_live_session_id = str(event_live_session_id or "").strip()
+        if not isinstance(live_state, dict):
+            return normalized_event_live_session_id
+
+        current_live_session_id = str(live_state.get("live_session_id") or "").strip()
+        tip_session_id = str(live_state.get("tip_session_id") or "").strip()
+        if (
+            normalized_event_live_session_id
+            and tip_session_id
+            and normalized_event_live_session_id == tip_session_id
+            and current_live_session_id
+            and current_live_session_id != normalized_event_live_session_id
+        ):
+            return current_live_session_id
+        return normalized_event_live_session_id or current_live_session_id
+
     async def _append_delta(
         self,
         context: SessionRunContext,
@@ -533,17 +720,19 @@ class SessionRunManager:
         live_session_id: str,
     ) -> None:
         text = str(payload.get("text") or "")
-        messages = _normalize_messages(get_display_messages(context.user_id, context.session_id))
+        messages = _normalize_messages(self._get_display_messages(context.user_id, context.session_id))
         assistant = self._get_or_create_assistant_message(messages, context)
         assistant["content"] = f"{assistant['content']}{text}"
         assistant["timestamp"] = max(int(assistant.get("timestamp") or 0), now_seconds())
         assistant["done"] = False
-        save_display_messages(context.user_id, context.session_id, messages)
-        save_live_session_state(
+        self._save_display_messages(context.user_id, context.session_id, messages)
+        live_state = self._get_live_session_state(context.user_id, context.session_id)
+        self._save_live_session_state(
             context.user_id,
             context.session_id,
             run_id=context.run_id,
             live_session_id=live_session_id,
+            tip_session_id=str((live_state or {}).get("tip_session_id") or ""),
             assistant_message_id=context.assistant_message_id,
             status="running",
             pending_approval=None,
@@ -562,19 +751,21 @@ class SessionRunManager:
         preview = str(payload.get("preview") or payload.get("name") or "").strip()
         if not preview:
             return
-        messages = _normalize_messages(get_display_messages(context.user_id, context.session_id))
+        messages = _normalize_messages(self._get_display_messages(context.user_id, context.session_id))
         assistant = self._get_or_create_assistant_message(messages, context)
         progress_lines = assistant.setdefault("progressLines", [])
         if preview and preview not in progress_lines:
             progress_lines.append(preview)
         assistant["timestamp"] = max(int(assistant.get("timestamp") or 0), now_seconds())
         assistant["done"] = False
-        save_display_messages(context.user_id, context.session_id, messages)
-        save_live_session_state(
+        self._save_display_messages(context.user_id, context.session_id, messages)
+        live_state = self._get_live_session_state(context.user_id, context.session_id)
+        self._save_live_session_state(
             context.user_id,
             context.session_id,
             run_id=context.run_id,
             live_session_id=live_session_id,
+            tip_session_id=str((live_state or {}).get("tip_session_id") or ""),
             assistant_message_id=context.assistant_message_id,
             status="running",
             pending_approval=None,
@@ -590,11 +781,17 @@ class SessionRunManager:
         seq: int,
         live_session_id: str,
     ) -> None:
+        live_state = self._get_live_session_state(context.user_id, context.session_id)
+        if str((live_state or {}).get("status") or "").strip() == "interrupted":
+            await self._request_flush(context)
+            await self._close_run_context(context, live_session_id=live_session_id)
+            return
+
         text = str(payload.get("text") or "")
         reasoning = str(payload.get("reasoning") or "")
         status = str(payload.get("status") or "complete").strip().lower()
         warning = str(payload.get("warning") or "")
-        messages = _normalize_messages(get_display_messages(context.user_id, context.session_id))
+        messages = _normalize_messages(self._get_display_messages(context.user_id, context.session_id))
         assistant = self._get_or_create_assistant_message(messages, context)
         if text and not str(assistant.get("content") or "").strip():
             assistant["content"] = text
@@ -604,8 +801,8 @@ class SessionRunManager:
             combined = str(assistant.get("content") or "")
             assistant["content"] = f"{combined}\n\n[Warning] {warning}".strip()
         assistant["timestamp"] = now_seconds()
-        assistant["done"] = status != "interrupted"
-        save_display_messages(context.user_id, context.session_id, messages)
+        assistant["done"] = True
+        self._save_display_messages(context.user_id, context.session_id, messages)
 
         live_status = "completed"
         if status == "interrupted":
@@ -613,15 +810,45 @@ class SessionRunManager:
         elif status == "error":
             live_status = "failed"
 
-        save_live_session_state(
+        self._save_live_session_state(
             context.user_id,
             context.session_id,
             run_id=context.run_id,
             live_session_id=live_session_id,
+            tip_session_id=str((live_state or {}).get("tip_session_id") or ""),
             assistant_message_id=context.assistant_message_id,
             status=live_status,
             pending_approval=None,
             last_error="" if live_status == "completed" else warning,
+            last_event_seq=seq,
+            finished_at=now_seconds(),
+        )
+        await self._request_flush(context)
+        await self._close_run_context(context, live_session_id=live_session_id)
+
+    async def _mark_interrupted(
+        self,
+        *,
+        context: SessionRunContext,
+        live_session_id: str,
+        seq: int,
+    ) -> None:
+        messages = _normalize_messages(self._get_display_messages(context.user_id, context.session_id))
+        assistant = self._get_or_create_assistant_message(messages, context)
+        assistant["timestamp"] = now_seconds()
+        assistant["done"] = True
+        self._save_display_messages(context.user_id, context.session_id, messages)
+        live_state = self._get_live_session_state(context.user_id, context.session_id)
+        self._save_live_session_state(
+            context.user_id,
+            context.session_id,
+            run_id=context.run_id,
+            live_session_id=live_session_id,
+            tip_session_id=str((live_state or {}).get("tip_session_id") or ""),
+            assistant_message_id=context.assistant_message_id,
+            status="interrupted",
+            pending_approval=None,
+            last_error="",
             last_event_seq=seq,
             finished_at=now_seconds(),
         )
@@ -636,7 +863,7 @@ class SessionRunManager:
         error_message: str,
         seq: int = 0,
     ) -> None:
-        messages = _normalize_messages(get_display_messages(context.user_id, context.session_id))
+        messages = _normalize_messages(self._get_display_messages(context.user_id, context.session_id))
         assistant = self._get_or_create_assistant_message(messages, context)
         current_content = str(assistant.get("content") or "").strip()
         failure_line = f"[Error] {error_message}".strip()
@@ -644,12 +871,14 @@ class SessionRunManager:
             assistant["content"] = f"{current_content}\n\n{failure_line}".strip()
         assistant["timestamp"] = now_seconds()
         assistant["done"] = True
-        save_display_messages(context.user_id, context.session_id, messages)
-        save_live_session_state(
+        self._save_display_messages(context.user_id, context.session_id, messages)
+        live_state = self._get_live_session_state(context.user_id, context.session_id)
+        self._save_live_session_state(
             context.user_id,
             context.session_id,
             run_id=context.run_id,
             live_session_id=live_session_id,
+            tip_session_id=str((live_state or {}).get("tip_session_id") or ""),
             assistant_message_id=context.assistant_message_id,
             status="failed",
             pending_approval=None,
@@ -657,7 +886,7 @@ class SessionRunManager:
             last_event_seq=seq,
             finished_at=now_seconds(),
         )
-        append_session_event(
+        self._append_session_event(
             context.user_id,
             context.session_id,
             run_id=context.run_id,
@@ -676,8 +905,13 @@ class SessionRunManager:
                     continue
                 live_contexts.append((live_session_id, context))
 
+        seen_contexts: set[tuple[str, str]] = set()
         for live_session_id, context in live_contexts:
-            live_state = get_live_session_state(context.user_id, context.session_id)
+            key = (context.user_id, context.session_id)
+            if key in seen_contexts:
+                continue
+            seen_contexts.add(key)
+            live_state = self._get_live_session_state(context.user_id, context.session_id)
             status = str((live_state or {}).get("status") or "")
             if status in FINAL_LIVE_STATUSES:
                 continue
@@ -686,6 +920,76 @@ class SessionRunManager:
                 live_session_id=live_session_id,
                 error_message=str(payload.get("message") or "tui_gateway process exited"),
                 seq=int((live_state or {}).get("last_event_seq") or 0),
+            )
+
+    async def _resolve_tip_session_id(self, context: SessionRunContext) -> str | None:
+        if self._tip_resolver is None:
+            return None
+        result = self._tip_resolver(context.user_id, context.session_id)
+        if inspect.isawaitable(result):
+            result = await result
+        normalized = str(result or "").strip()
+        return normalized or None
+
+    async def _reconcile_tip(self, context: SessionRunContext) -> dict[str, Any] | None:
+        live_state = self._get_live_session_state(context.user_id, context.session_id)
+        if live_state is None:
+            return None
+        if str(live_state.get("status") or "").strip() in FINAL_LIVE_STATUSES:
+            return None
+
+        try:
+            tip_session_id = await self._resolve_tip_session_id(context)
+        except Exception:
+            return None
+        if not tip_session_id:
+            return None
+
+        await self._remember_tip_session(context, tip_session_id)
+
+        current_tip_session_id = str(
+            live_state.get("tip_session_id") or context.session_id
+        ).strip()
+        if tip_session_id == current_tip_session_id:
+            return live_state
+
+        updated = self._save_live_session_state(
+            context.user_id,
+            context.session_id,
+            tip_session_id=tip_session_id,
+        )
+        self._append_session_event(
+            context.user_id,
+            context.session_id,
+            run_id=context.run_id,
+            seq=int(updated.get("last_event_seq") or 0),
+            event_type="session.tip.updated",
+            payload={
+                "root_session_id": context.session_id,
+                "previous_tip_session_id": current_tip_session_id,
+                "tip_session_id": tip_session_id,
+            },
+        )
+        return updated
+
+    async def _remember_tip_session(
+        self,
+        context: SessionRunContext,
+        tip_session_id: str,
+    ) -> None:
+        normalized_tip_session_id = str(tip_session_id or "").strip()
+        if not normalized_tip_session_id:
+            return
+        async with self._lock:
+            self._run_contexts_by_live_session_id[
+                (context.user_id, normalized_tip_session_id)
+            ] = context
+            bridge_entry = self._bridge_listener_entries.get(context.user_id)
+        if bridge_entry is not None:
+            bridge_entry[0].remember_live_session(
+                normalized_tip_session_id,
+                persistent_session_id=context.session_id,
+                run_id=context.run_id,
             )
 
     def _get_or_create_assistant_message(
@@ -721,8 +1025,9 @@ class SessionRunManager:
     ) -> None:
         async with self._lock:
             self._run_contexts_by_session_id.pop((context.user_id, context.session_id), None)
-            if live_session_id:
-                self._run_contexts_by_live_session_id.pop((context.user_id, live_session_id), None)
+            for key, existing_context in list(self._run_contexts_by_live_session_id.items()):
+                if existing_context == context:
+                    self._run_contexts_by_live_session_id.pop(key, None)
 
     def _ensure_flush_task_locked(self, context: SessionRunContext) -> None:
         key = (context.user_id, context.session_id)
@@ -740,12 +1045,31 @@ class SessionRunManager:
 
     async def _flush_loop(self, context: SessionRunContext, event: asyncio.Event) -> None:
         key = (context.user_id, context.session_id)
+        next_tip_reconcile_at = (
+            time.monotonic() + self._tip_reconcile_interval_seconds
+        )
         try:
             while True:
-                await event.wait()
-                event.clear()
-                await asyncio.sleep(STREAM_FLUSH_INTERVAL_SECONDS)
-                live_state = get_live_session_state(context.user_id, context.session_id)
+                timeout_seconds = max(next_tip_reconcile_at - time.monotonic(), 0.0)
+                try:
+                    await asyncio.wait_for(
+                        event.wait(),
+                        timeout=timeout_seconds,
+                    )
+                    event.clear()
+                    await asyncio.sleep(STREAM_FLUSH_INTERVAL_SECONDS)
+                except asyncio.TimeoutError:
+                    await self._reconcile_tip(context)
+                    next_tip_reconcile_at = (
+                        time.monotonic() + self._tip_reconcile_interval_seconds
+                    )
+                else:
+                    if time.monotonic() >= next_tip_reconcile_at:
+                        await self._reconcile_tip(context)
+                        next_tip_reconcile_at = (
+                            time.monotonic() + self._tip_reconcile_interval_seconds
+                        )
+                live_state = self._get_live_session_state(context.user_id, context.session_id)
                 status = str((live_state or {}).get("status") or "")
                 if status in FINAL_LIVE_STATUSES:
                     return
@@ -760,13 +1084,33 @@ class SessionRunManager:
         async with self._lock:
             bridge_listener_entries = list(self._bridge_listener_entries.values())
             self._bridge_listener_entries.clear()
+            live_contexts = list(self._run_contexts_by_live_session_id.items())
+        for bridge, listener_id in bridge_listener_entries:
+            bridge.remove_event_listener(listener_id)
+
+        seen_contexts: set[tuple[str, str]] = set()
+        for (user_id, live_session_id), context in live_contexts:
+            key = (user_id, context.session_id)
+            if key in seen_contexts:
+                continue
+            seen_contexts.add(key)
+            live_state = self._get_live_session_state(context.user_id, context.session_id)
+            status = str((live_state or {}).get("status") or "")
+            if status in FINAL_LIVE_STATUSES:
+                continue
+            await self._mark_failed(
+                context=context,
+                live_session_id=live_session_id,
+                error_message="interface shutdown before the run completed",
+                seq=int((live_state or {}).get("last_event_seq") or 0),
+            )
+
+        async with self._lock:
             tasks = list(self._flush_tasks.values())
             self._flush_tasks.clear()
             self._flush_events.clear()
             self._run_contexts_by_session_id.clear()
             self._run_contexts_by_live_session_id.clear()
-        for bridge, listener_id in bridge_listener_entries:
-            bridge.remove_event_listener(listener_id)
         for task in tasks:
             task.cancel()
         for task in tasks:

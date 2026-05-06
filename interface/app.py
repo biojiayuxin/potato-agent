@@ -65,6 +65,7 @@ from interface.display_store import (
     ensure_display_store,
     get_live_session_state,
     list_live_session_states,
+    mark_active_live_session_states_failed,
     get_display_session_meta,
     get_display_messages,
     list_display_session_metas,
@@ -874,6 +875,38 @@ def _get_logical_session_tip_id(db: Any, logical_session_id: str) -> str:
     return str(db.get_compression_tip(logical_id) or logical_id).strip()
 
 
+def _resolve_tip_session_id_for_user_sync(
+    user_id: str,
+    logical_session_id: str,
+) -> str | None:
+    record = get_user_by_id(str(user_id or "").strip())
+    if record is None or not record.active:
+        return None
+
+    target = mapping_store.resolve_target(
+        mapping_username=record.mapping_username,
+        email=record.email,
+        username=record.username,
+    )
+    if target is None:
+        return None
+
+    with _open_session_db(target) as db:
+        tip_session_id = _get_logical_session_tip_id(db, logical_session_id)
+    return tip_session_id or None
+
+
+async def _resolve_tip_session_id_for_user(
+    user_id: str,
+    logical_session_id: str,
+) -> str | None:
+    return await asyncio.to_thread(
+        _resolve_tip_session_id_for_user_sync,
+        user_id,
+        logical_session_id,
+    )
+
+
 def _get_projected_logical_session_row(
     db: Any, logical_session_id: str
 ) -> dict[str, Any] | None:
@@ -900,8 +933,16 @@ def _normalize_logical_session_row(
 ) -> dict[str, Any]:
     normalized = _normalize_session_row(session)
     normalized["id"] = logical_session_id
+    live_tip_session_id = (
+        str(live_state.get("tip_session_id") or "").strip()
+        if isinstance(live_state, dict)
+        else ""
+    )
     normalized["resume_session_id"] = str(
-        resume_session_id or session.get("id") or logical_session_id
+        live_tip_session_id
+        or resume_session_id
+        or session.get("id")
+        or logical_session_id
     ).strip()
 
     root_title = str((logical_session or {}).get("title") or "").strip()
@@ -1510,10 +1551,15 @@ async def on_startup() -> None:
     ensure_auth_db()
     cleanup_terminal_signup_jobs()
     ensure_display_store()
+    app.state.stale_live_sessions_failed = mark_active_live_session_states_failed(
+        "interface restarted before the run completed"
+    )
     ensure_archive_db()
     ensure_runtime_state_store()
     app.state.tui_gateway_bridges = TuiGatewayBridgeRegistry()
-    app.state.session_run_manager = SessionRunManager()
+    app.state.session_run_manager = SessionRunManager(
+        tip_resolver=_resolve_tip_session_id_for_user
+    )
     app.state.archive_scheduler_task = asyncio.create_task(_archive_scheduler_loop())
     app.state.signup_worker_task = asyncio.create_task(_signup_worker_loop())
     app.state.runtime_idle_scheduler_task = asyncio.create_task(
@@ -2073,6 +2119,7 @@ async def submit_session_turn(
             user_id=user.id,
             session_id=logical_session_id,
             live_session_id=live_session_id,
+            tip_session_id=tip_session_id or logical_session_id,
             prompt=prompt,
             attachments=attachments,
             existing_messages=base_messages,
@@ -2120,7 +2167,8 @@ async def interrupt_session_turn(
             user_id=user.id,
             session_id=session_id,
         )
-        return {"ok": True, "result": result}
+        live_state = get_live_session_state(user.id, session_id)
+        return {"ok": True, "result": result, "live": live_state}
     except TuiGatewayBridgeError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     finally:

@@ -15,6 +15,7 @@ from interface.display_store import (
     get_display_session_meta,
     get_live_session_state,
     list_live_session_states,
+    mark_active_live_session_states_failed,
     save_display_messages,
     save_live_session_state,
 )
@@ -29,6 +30,7 @@ def test_live_state_round_trip() -> None:
         "session-1",
         run_id="run-1",
         live_session_id="live-1",
+        tip_session_id="tip-1",
         assistant_message_id="assistant-1",
         status="running",
         pending_approval=None,
@@ -41,6 +43,7 @@ def test_live_state_round_trip() -> None:
     assert row is not None
     assert row["run_id"] == "run-1"
     assert row["live_session_id"] == "live-1"
+    assert row["tip_session_id"] == "tip-1"
     assert row["status"] == "running"
     assert row["last_event_seq"] == 3
 
@@ -77,6 +80,42 @@ def test_live_state_list_and_event_append() -> None:
     assert rows["session-1"]["pending_approval"]["command"] == "rm -rf /tmp/x"
 
 
+def test_active_live_state_cleanup_marks_stale_rows_failed() -> None:
+    db_path = Path(tempfile.mkdtemp(prefix="potato-display-store-test-")) / "interface.db"
+    ensure_display_store(db_path)
+
+    save_live_session_state(
+        "user-1",
+        "running-session",
+        run_id="run-running",
+        live_session_id="live-running",
+        assistant_message_id="assistant-running",
+        status="running",
+        db_path=db_path,
+    )
+    save_live_session_state(
+        "user-1",
+        "done-session",
+        run_id="run-done",
+        live_session_id="live-done",
+        assistant_message_id="assistant-done",
+        status="completed",
+        db_path=db_path,
+    )
+
+    assert mark_active_live_session_states_failed("stale", db_path=db_path) == 1
+
+    stale = get_live_session_state("user-1", "running-session", db_path=db_path)
+    assert stale is not None
+    assert stale["status"] == "failed"
+    assert stale["last_error"] == "stale"
+    assert stale["finished_at"] > 0
+
+    done = get_live_session_state("user-1", "done-session", db_path=db_path)
+    assert done is not None
+    assert done["status"] == "completed"
+
+
 def test_display_draft_title_is_sticky_after_first_write() -> None:
     db_path = Path(tempfile.mkdtemp(prefix="potato-display-store-test-")) / "interface.db"
     ensure_display_store(db_path)
@@ -104,6 +143,7 @@ def test_display_draft_title_is_sticky_after_first_write() -> None:
 def run() -> None:
     test_live_state_round_trip()
     test_live_state_list_and_event_append()
+    test_active_live_state_cleanup_marks_stale_rows_failed()
     test_display_draft_title_is_sticky_after_first_write()
 
 
