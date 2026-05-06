@@ -13,11 +13,11 @@ from urllib.parse import urlparse
 from interface.hermes_service import DEFAULT_HERMES_BIN, DEFAULT_TERMINAL_TIMEOUT
 from interface.hermes_service import (
     is_service_active,
-    install_user_files,
+    install_user_runtime_files,
     require_binary,
     require_root,
     restart_service,
-    wait_for_hermes_models,
+    wait_for_service_active,
 )
 from interface.mapping import (
     DEFAULT_API_SERVER_HOST,
@@ -525,10 +525,10 @@ def apply_model_config_to_users(
     resolved_config = load_mapping(mapping_path, resolve_env=True)
     for target in targets:
         print(f"Applying config for user: {target.username}")
-        install_user_files(resolved_config, target)
+        install_user_runtime_files(resolved_config, target)
         if is_service_active(target.systemd_service):
             restart_service(target.systemd_service)
-            wait_for_hermes_models(target.api_key, target.api_server_host, target.api_port)
+            wait_for_service_active(target.systemd_service)
             print(f"Restarted Hermes service: {target.systemd_service}")
         else:
             print(

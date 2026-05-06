@@ -180,9 +180,12 @@ def build_systemd_unit(config: dict[str, Any], user: HermesTarget) -> str:
     )
 
 
-def install_user_files(config: dict[str, Any], user: HermesTarget) -> None:
-    ensure_linux_user(user.linux_user)
-    pw = pwd.getpwnam(user.linux_user)
+def install_user_runtime_files(config: dict[str, Any], user: HermesTarget) -> None:
+    try:
+        pw = pwd.getpwnam(user.linux_user)
+    except KeyError as exc:
+        raise RuntimeError(f"Linux user {user.linux_user!r} does not exist.") from exc
+
     gid = pw.pw_gid
 
     for directory in [
@@ -206,6 +209,11 @@ def install_user_files(config: dict[str, Any], user: HermesTarget) -> None:
         encoding="utf-8",
     )
     _set_owner_and_mode(config_path, pw.pw_uid, gid, 0o600)
+
+
+def install_user_files(config: dict[str, Any], user: HermesTarget) -> None:
+    ensure_linux_user(user.linux_user)
+    install_user_runtime_files(config, user)
 
     service_path = Path("/etc/systemd/system") / user.systemd_service
     service_path.write_text(build_systemd_unit(config, user), encoding="utf-8")

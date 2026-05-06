@@ -31,6 +31,7 @@ FINAL_LIVE_STATUSES = {"completed", "failed", "interrupted"}
 STALE_GATEWAY_SESSION_ERROR = (
     "live TUI session not found; the run is no longer attached to a gateway session"
 )
+MODEL_RESPONSE_ERROR_MESSAGE = "模型响应失败，请稍后重试。"
 
 TipSessionResolver = Callable[[str, str], str | None | Awaitable[str | None]]
 
@@ -612,6 +613,8 @@ class SessionRunManager:
             if live_session_id:
                 direct = self._run_contexts_by_live_session_id.get((bridge_user_id, live_session_id))
                 if direct is not None:
+                    if run_id and direct.run_id != run_id:
+                        return None
                     live_state = self._get_live_session_state(bridge_user_id, direct.session_id)
                     if (
                         live_state is not None
@@ -622,10 +625,17 @@ class SessionRunManager:
             if session_id:
                 direct = self._run_contexts_by_session_id.get((bridge_user_id, session_id))
                 if direct is not None:
+                    if run_id and direct.run_id != run_id:
+                        return None
                     live_state = self._get_live_session_state(bridge_user_id, direct.session_id)
                     if (
                         live_state is not None
                         and str(live_state.get("status") or "").strip() in FINAL_LIVE_STATUSES
+                    ):
+                        return None
+                    if live_session_id and not self._event_matches_live_state(
+                        live_state,
+                        live_session_id,
                     ):
                         return None
                     return direct
@@ -640,6 +650,11 @@ class SessionRunManager:
         if live_state is None:
             return None
         if str(live_state.get("status") or "").strip() in FINAL_LIVE_STATUSES:
+            return None
+        if live_session_id and not self._event_matches_live_state(
+            live_state,
+            live_session_id,
+        ):
             return None
 
         assistant_message_id = str(live_state.get("assistant_message_id") or "").strip()
@@ -690,6 +705,23 @@ class SessionRunManager:
                 ] = context
             return context
         return None
+
+    def _event_matches_live_state(
+        self,
+        live_state: dict[str, Any] | None,
+        event_live_session_id: str,
+    ) -> bool:
+        normalized_event_live_session_id = str(event_live_session_id or "").strip()
+        if not normalized_event_live_session_id:
+            return True
+        if not isinstance(live_state, dict):
+            return False
+
+        current_live_session_id = str(live_state.get("live_session_id") or "").strip()
+        tip_session_id = str(live_state.get("tip_session_id") or "").strip()
+        return normalized_event_live_session_id in {
+            item for item in (current_live_session_id, tip_session_id) if item
+        }
 
     def _state_live_session_id(
         self,
@@ -791,13 +823,24 @@ class SessionRunManager:
         reasoning = str(payload.get("reasoning") or "")
         status = str(payload.get("status") or "complete").strip().lower()
         warning = str(payload.get("warning") or "")
+        error_detail = (
+            warning.strip()
+            or str(payload.get("error") or payload.get("message") or "").strip()
+            or MODEL_RESPONSE_ERROR_MESSAGE
+        )
         messages = _normalize_messages(self._get_display_messages(context.user_id, context.session_id))
         assistant = self._get_or_create_assistant_message(messages, context)
         if text and not str(assistant.get("content") or "").strip():
             assistant["content"] = text
         if reasoning:
             assistant["reasoningContent"] = reasoning
-        if warning:
+        if status == "error":
+            combined = str(assistant.get("content") or "").strip()
+            if MODEL_RESPONSE_ERROR_MESSAGE not in combined:
+                assistant["content"] = (
+                    f"{combined}\n\n{MODEL_RESPONSE_ERROR_MESSAGE}".strip()
+                )
+        elif warning:
             combined = str(assistant.get("content") or "")
             assistant["content"] = f"{combined}\n\n[Warning] {warning}".strip()
         assistant["timestamp"] = now_seconds()
@@ -819,7 +862,7 @@ class SessionRunManager:
             assistant_message_id=context.assistant_message_id,
             status=live_status,
             pending_approval=None,
-            last_error="" if live_status == "completed" else warning,
+            last_error="" if live_status == "completed" else error_detail,
             last_event_seq=seq,
             finished_at=now_seconds(),
         )
@@ -1023,11 +1066,26 @@ class SessionRunManager:
         *,
         live_session_id: str,
     ) -> None:
+        live_session_ids_to_forget: set[str] = set()
+        normalized_live_session_id = str(live_session_id or "").strip()
+        if normalized_live_session_id:
+            live_session_ids_to_forget.add(normalized_live_session_id)
+        bridge: TuiGatewayBridge | None = None
         async with self._lock:
             self._run_contexts_by_session_id.pop((context.user_id, context.session_id), None)
             for key, existing_context in list(self._run_contexts_by_live_session_id.items()):
                 if existing_context == context:
+                    if key[1]:
+                        live_session_ids_to_forget.add(key[1])
                     self._run_contexts_by_live_session_id.pop(key, None)
+            bridge_entry = self._bridge_listener_entries.get(context.user_id)
+            if bridge_entry is not None:
+                bridge = bridge_entry[0]
+        if bridge is not None:
+            for session_id_to_forget in live_session_ids_to_forget:
+                forget_live_session = getattr(bridge, "forget_live_session", None)
+                if callable(forget_live_session):
+                    forget_live_session(session_id_to_forget)
 
     def _ensure_flush_task_locked(self, context: SessionRunContext) -> None:
         key = (context.user_id, context.session_id)

@@ -30,6 +30,8 @@ const state = {
   sessionHistoryLoading: false,
 };
 
+const MODEL_RESPONSE_ERROR_MESSAGE = '模型响应失败，请稍后重试。';
+
 const dom = {
   loginView: document.getElementById('login-view'),
   workspaceView: document.getElementById('workspace-view'),
@@ -534,8 +536,18 @@ const getStreamingAssistantMessage = (sessionId) =>
 const finalizeStreamingAssistantMessage = (sessionId, { text = '', reasoning = '', status = 'complete' } = {}) => {
   const assistantMessage = getStreamingAssistantMessage(sessionId);
   if (!assistantMessage) return;
+  const normalizedStatus = String(status || 'complete').trim().toLowerCase();
   if (text && !assistantMessage.content.trim()) {
     assistantMessage.content = text;
+  }
+  if (
+    normalizedStatus === 'error' &&
+    !assistantMessage.content.includes(MODEL_RESPONSE_ERROR_MESSAGE)
+  ) {
+    const currentContent = assistantMessage.content.trim();
+    assistantMessage.content = currentContent
+      ? `${currentContent}\n\n${MODEL_RESPONSE_ERROR_MESSAGE}`
+      : MODEL_RESPONSE_ERROR_MESSAGE;
   }
   if (reasoning) {
     assistantMessage.reasoningContent = reasoning;
@@ -695,11 +707,12 @@ const handleTuiBridgeEvent = (message) => {
 
   if (type === 'message.complete') {
     const text = String(message?.payload?.text || '');
+    const status = String(message?.payload?.status || 'complete');
     const completedSessionId = getPersistentSessionIdFromTuiEvent(message);
     finalizeStreamingAssistantMessage(completedSessionId, {
       text,
       reasoning: String(message?.payload?.reasoning || ''),
-      status: String(message?.payload?.status || 'complete'),
+      status,
     });
     setSessionBusy(completedSessionId, false);
     clearSessionPendingApproval(completedSessionId);
@@ -710,7 +723,9 @@ const handleTuiBridgeEvent = (message) => {
       renderChatList();
     }
     setTuiBridgeStatus(
-      text ? `TUI complete: ${text.slice(0, 120)}` : 'TUI request completed'
+      status.trim().toLowerCase() === 'error'
+        ? MODEL_RESPONSE_ERROR_MESSAGE
+        : (text ? `TUI complete: ${text.slice(0, 120)}` : 'TUI request completed')
     );
     if (completedSessionId) {
       window.setTimeout(async () => {
