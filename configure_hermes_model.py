@@ -5,7 +5,9 @@ from __future__ import annotations
 import argparse
 import getpass
 import sys
+from copy import deepcopy
 from pathlib import Path
+from typing import Any
 from urllib.parse import urlparse
 
 from interface.hermes_service import DEFAULT_HERMES_BIN, DEFAULT_TERMINAL_TIMEOUT
@@ -29,6 +31,7 @@ from interface.mapping import (
 
 
 DEFAULT_UPSTREAM_MODEL_NAME = "gpt-5.4"
+DEFAULT_FALLBACK_PROVIDER = "custom"
 
 
 class ConfigureHermesModelError(RuntimeError):
@@ -61,6 +64,33 @@ def build_parser() -> argparse.ArgumentParser:
         help="Upstream API key written to hermes.model.api_key and hermes.extra_env.OPENAI_API_KEY",
     )
     parser.add_argument(
+        "--fallback-base-url",
+        help=(
+            "Fallback OpenAI-compatible base URL written to "
+            "hermes.fallback_providers[0].base_url"
+        ),
+    )
+    parser.add_argument(
+        "--fallback-model",
+        help="Fallback model name written to hermes.fallback_providers[0].model",
+    )
+    parser.add_argument(
+        "--fallback-api-key",
+        help="Fallback API key written to hermes.fallback_providers[0].api_key",
+    )
+    parser.add_argument(
+        "--fallback-provider",
+        help=(
+            "Fallback provider name written to hermes.fallback_providers[0].provider "
+            f"(default: {DEFAULT_FALLBACK_PROVIDER})"
+        ),
+    )
+    parser.add_argument(
+        "--clear-fallback",
+        action="store_true",
+        help="Remove hermes.fallback_providers and hermes.fallback_model.",
+    )
+    parser.add_argument(
         "--apply-to-users",
         action="store_true",
         help=(
@@ -69,6 +99,18 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     return parser
+
+
+def fallback_args_requested(args: argparse.Namespace) -> bool:
+    return any(
+        value is not None
+        for value in (
+            args.fallback_base_url,
+            args.fallback_model,
+            args.fallback_api_key,
+            args.fallback_provider,
+        )
+    )
 
 
 def prompt_value(
@@ -132,6 +174,86 @@ def validate_base_url(value: str) -> str:
             "Base URL must be a full http(s) URL, e.g. https://gateway.example/v1"
         )
     return normalized
+
+
+def _first_fallback_provider(hermes: dict[str, Any]) -> dict[str, Any] | None:
+    providers = hermes.get("fallback_providers")
+    if isinstance(providers, list):
+        for provider in providers:
+            if isinstance(provider, dict):
+                return deepcopy(provider)
+
+    fallback_model = hermes.get("fallback_model")
+    if isinstance(fallback_model, list):
+        for provider in fallback_model:
+            if isinstance(provider, dict):
+                return deepcopy(provider)
+    if isinstance(fallback_model, dict):
+        return deepcopy(fallback_model)
+    return None
+
+
+def extract_current_fallback_provider(config: dict[str, Any]) -> dict[str, Any] | None:
+    hermes = config.get("hermes") if isinstance(config.get("hermes"), dict) else {}
+    return _first_fallback_provider(hermes)
+
+
+def standardize_fallback_config(hermes: dict[str, Any]) -> None:
+    providers = hermes.get("fallback_providers")
+    if providers is not None and not isinstance(providers, list):
+        raise ConfigureHermesModelError(
+            "users_mapping.yaml has invalid hermes.fallback_providers structure."
+        )
+
+    fallback_model = hermes.get("fallback_model")
+    if isinstance(fallback_model, list):
+        if providers is None:
+            hermes["fallback_providers"] = deepcopy(fallback_model)
+        hermes.pop("fallback_model", None)
+        return
+
+    if fallback_model is not None and not isinstance(fallback_model, dict):
+        raise ConfigureHermesModelError(
+            "users_mapping.yaml has invalid hermes.fallback_model structure."
+        )
+
+    if providers is not None and "fallback_model" in hermes:
+        hermes.pop("fallback_model", None)
+
+
+def set_fallback_provider(
+    hermes: dict[str, Any],
+    *,
+    provider: str,
+    model: str,
+    base_url: str,
+    api_key: str,
+) -> None:
+    current_providers = hermes.get("fallback_providers")
+    tail = (
+        [
+            deepcopy(item)
+            for item in current_providers[1:]
+            if isinstance(item, dict)
+        ]
+        if isinstance(current_providers, list)
+        else []
+    )
+    hermes["fallback_providers"] = [
+        {
+            "provider": provider,
+            "model": model,
+            "base_url": base_url,
+            "api_key": api_key,
+        },
+        *tail,
+    ]
+    hermes.pop("fallback_model", None)
+
+
+def clear_fallback_config(hermes: dict[str, Any]) -> None:
+    hermes.pop("fallback_providers", None)
+    hermes.pop("fallback_model", None)
 
 
 def ensure_mapping_structure(config: dict) -> tuple[dict, list]:
@@ -208,6 +330,7 @@ def ensure_mapping_structure(config: dict) -> tuple[dict, list]:
             "users_mapping.yaml has invalid hermes.extra_env structure."
         )
 
+    standardize_fallback_config(hermes)
     return model, users
 
 
@@ -242,6 +365,16 @@ def mask_secret(value: str | None) -> str:
     return f"{value[:4]}...{value[-4:]}"
 
 
+def format_fallback_provider(value: dict[str, Any] | None) -> str:
+    if not value:
+        return "<empty>"
+    provider = str(value.get("provider") or "<empty>")
+    model = str(value.get("model") or "<empty>")
+    base_url = str(value.get("base_url") or "<empty>")
+    api_key = mask_secret(str(value.get("api_key") or ""))
+    return f"{provider}/{model} @ {base_url} ({api_key})"
+
+
 def format_change_summary(
     *,
     old_base_url: str | None,
@@ -250,11 +383,18 @@ def format_change_summary(
     new_model_name: str,
     old_api_key: str | None,
     new_api_key: str,
+    old_fallback_provider: dict[str, Any] | None,
+    new_fallback_provider: dict[str, Any] | None,
 ) -> list[str]:
     return [
         f"- base_url: {old_base_url or '<empty>'} -> {new_base_url}",
         f"- default model: {old_model_name or '<empty>'} -> {new_model_name}",
         f"- api_key: {mask_secret(old_api_key)} -> {mask_secret(new_api_key)}",
+        (
+            "- fallback_providers[0]: "
+            f"{format_fallback_provider(old_fallback_provider)} -> "
+            f"{format_fallback_provider(new_fallback_provider)}"
+        ),
     ]
 
 
@@ -268,6 +408,8 @@ def confirm_apply_to_users(
     new_model_name: str,
     old_api_key: str | None,
     new_api_key: str,
+    old_fallback_provider: dict[str, Any] | None,
+    new_fallback_provider: dict[str, Any] | None,
 ) -> bool:
     if not sys.stdin.isatty():
         raise ConfigureHermesModelError(
@@ -285,6 +427,8 @@ def confirm_apply_to_users(
         new_model_name=new_model_name,
         old_api_key=old_api_key,
         new_api_key=new_api_key,
+        old_fallback_provider=old_fallback_provider,
+        new_fallback_provider=new_fallback_provider,
     ):
         print(line)
     print(f"Affected users: {len(targets)}")
@@ -310,6 +454,8 @@ def apply_model_config_to_users(
     new_model_name: str,
     old_api_key: str | None,
     new_api_key: str,
+    old_fallback_provider: dict[str, Any] | None,
+    new_fallback_provider: dict[str, Any] | None,
 ) -> None:
     mapping_store = MappingStore(mapping_path)
     targets = mapping_store.load_targets()
@@ -330,6 +476,8 @@ def apply_model_config_to_users(
         new_model_name=new_model_name,
         old_api_key=old_api_key,
         new_api_key=new_api_key,
+        old_fallback_provider=old_fallback_provider,
+        new_fallback_provider=new_fallback_provider,
     ):
         print("Skipped applying config to existing users. users_mapping.yaml was updated.")
         return
@@ -366,6 +514,11 @@ def main() -> int:
     args = build_parser().parse_args()
     mapping_path = args.mapping.expanduser().resolve()
 
+    if args.clear_fallback and fallback_args_requested(args):
+        raise ConfigureHermesModelError(
+            "--clear-fallback cannot be combined with --fallback-* options."
+        )
+
     if not mapping_path.parent.exists():
         raise ConfigureHermesModelError(
             f"Parent directory does not exist: {mapping_path.parent}"
@@ -374,6 +527,7 @@ def main() -> int:
     created = not mapping_path.exists()
     config = build_new_config() if created else load_mapping(mapping_path, resolve_env=False)
     current_base_url, current_model_name, current_api_key = extract_current_values(config)
+    current_fallback_provider = extract_current_fallback_provider(config)
     model, users = ensure_mapping_structure(config)
     hermes = config["hermes"]
     extra_env = hermes["extra_env"]
@@ -404,6 +558,44 @@ def main() -> int:
     model["api_key"] = api_key
     extra_env["OPENAI_API_KEY"] = api_key
 
+    if args.clear_fallback:
+        clear_fallback_config(hermes)
+    elif fallback_args_requested(args):
+        existing_fallback = _first_fallback_provider(hermes) or {}
+        fallback_provider = resolve_value(
+            args.fallback_provider,
+            label="Fallback provider",
+            current=str(existing_fallback.get("provider") or "").strip() or None,
+            default=DEFAULT_FALLBACK_PROVIDER,
+        )
+        fallback_model = resolve_value(
+            args.fallback_model,
+            label="Fallback model name",
+            current=str(existing_fallback.get("model") or "").strip() or None,
+        )
+        fallback_base_url = validate_base_url(
+            resolve_value(
+                args.fallback_base_url,
+                label="Fallback model base URL",
+                current=str(existing_fallback.get("base_url") or "").strip() or None,
+            )
+        )
+        fallback_api_key = resolve_value(
+            args.fallback_api_key,
+            label="Fallback API key",
+            current=str(existing_fallback.get("api_key") or "").strip() or None,
+            secret=True,
+        )
+        set_fallback_provider(
+            hermes,
+            provider=fallback_provider,
+            model=fallback_model,
+            base_url=fallback_base_url,
+            api_key=fallback_api_key,
+        )
+
+    new_fallback_provider = _first_fallback_provider(hermes)
+
     write_mapping(mapping_path, config)
     mapping_path.chmod(0o600)
 
@@ -411,8 +603,12 @@ def main() -> int:
     print(f"{action} Hermes model config in: {mapping_path}")
     print(f"Upstream base URL: {base_url}")
     print(f"Default model: {model_name}")
+    print(f"Fallback provider: {format_fallback_provider(new_fallback_provider)}")
     print(f"Preserved users: {len(users)}")
-    print("Updated fields: hermes.model.*, hermes.extra_env.OPENAI_API_KEY")
+    print(
+        "Updated fields: hermes.model.*, hermes.extra_env.OPENAI_API_KEY, "
+        "hermes.fallback_providers"
+    )
     print("File mode: 600")
     if created:
         print("Users section: []")
@@ -426,6 +622,8 @@ def main() -> int:
             new_model_name=model_name,
             old_api_key=current_api_key,
             new_api_key=api_key,
+            old_fallback_provider=current_fallback_provider,
+            new_fallback_provider=new_fallback_provider,
         )
 
     return 0

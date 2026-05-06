@@ -61,7 +61,9 @@ python3 -m venv /opt/interface-env
 - 上游 `API_KEY`
 
 如果当前没有 `users_mapping.yaml`，脚本会自动创建一个空的 `users: []` 文件。
-如果当前已经有 `users_mapping.yaml`，脚本只会更新模型配置，不会改动已有用户信息。
+如果当前已经有 `users_mapping.yaml`，脚本只会更新模型配置，不会改动已有用户信息。历史的
+`hermes.fallback_model` list 会在写回时迁移为 Hermes 标准的
+`hermes.fallback_providers`。
 
 非交互式示例：
 
@@ -70,6 +72,18 @@ python3 -m venv /opt/interface-env
   --base-url https://your-upstream-model-gateway.example/v1 \
   --model gpt-5.4 \
   --api-key 'sk-...'
+```
+
+配置 fallback provider：
+
+```bash
+/opt/interface-env/bin/python ./configure_hermes_model.py \
+  --base-url https://your-upstream-model-gateway.example/v1 \
+  --model gpt-5.4 \
+  --api-key 'sk-...' \
+  --fallback-base-url https://your-fallback-gateway.example/v1 \
+  --fallback-model gpt-5.4-mini \
+  --fallback-api-key 'sk-fallback-...'
 ```
 
 如果你后面更换上游模型，并希望把新配置立即下发到当前已存在的用户 Hermes 实例：
@@ -198,7 +212,7 @@ systemctl status potato-interface.service
 ## 根目录 Python 脚本
 
 - `configure_hermes_model.py`
-  创建或更新 `users_mapping.yaml` 中的 Hermes 模型配置。可选 `--apply-to-users`，把新配置下发到已存在用户并重启对应 Hermes 服务。
+  创建或更新 `users_mapping.yaml` 中的 Hermes 模型配置。支持 `--fallback-base-url`、`--fallback-model`、`--fallback-api-key` 配置 `hermes.fallback_providers`；可选 `--apply-to-users`，把新配置下发到已存在用户并重启对应 Hermes 服务。
 
 - `provision_interface_user.py`
   创建一个系统托管的新用户。会创建 Linux 用户、写入 `users_mapping.yaml`、初始化 `~/.hermes` 和 `~/work`、安装并启动 Hermes service、创建网页登录账号。

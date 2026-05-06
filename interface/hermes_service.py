@@ -57,6 +57,13 @@ def deep_merge(base: dict[str, Any], overlay: dict[str, Any]) -> dict[str, Any]:
     return base
 
 
+def _apply_fallback_config(data: dict[str, Any], hermes_cfg: dict[str, Any]) -> None:
+    if "fallback_providers" in hermes_cfg:
+        data["fallback_providers"] = deepcopy(hermes_cfg["fallback_providers"])
+    if "fallback_model" in hermes_cfg:
+        data["fallback_model"] = deepcopy(hermes_cfg["fallback_model"])
+
+
 def ensure_linux_user(username: str) -> None:
     result = subprocess.run(["id", "-u", username], capture_output=True, text=True)
     if result.returncode == 0:
@@ -115,6 +122,7 @@ def build_config_data(config: dict[str, Any], user: HermesTarget) -> dict[str, A
     data: dict[str, Any] = {}
     if model_cfg:
         data["model"] = model_cfg
+    _apply_fallback_config(data, hermes_cfg)
     data["terminal"] = terminal_cfg
     data["agent"] = {"reasoning_effort": "high"}
 
