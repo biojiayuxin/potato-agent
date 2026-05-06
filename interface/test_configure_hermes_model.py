@@ -69,6 +69,35 @@ def test_configure_hermes_model_writes_standard_fallback_providers() -> None:
     ]
 
 
+def test_configure_hermes_model_writes_context_length() -> None:
+    mapping_path = Path(tempfile.mkdtemp(prefix="potato-configure-model-test-")) / "users_mapping.yaml"
+
+    result = _run_configure(
+        mapping_path,
+        *_base_args(),
+        "--context-length",
+        "1,050,000",
+    )
+
+    assert result.returncode == 0, result.stderr
+    data = yaml.safe_load(mapping_path.read_text(encoding="utf-8"))
+    assert data["hermes"]["model"]["context_length"] == 1050000
+
+
+def test_configure_hermes_model_rejects_invalid_context_length() -> None:
+    mapping_path = Path(tempfile.mkdtemp(prefix="potato-configure-model-test-")) / "users_mapping.yaml"
+
+    result = _run_configure(
+        mapping_path,
+        *_base_args(),
+        "--context-length",
+        "1050K",
+    )
+
+    assert result.returncode == 1
+    assert "--context-length must be a plain positive integer" in result.stderr
+
+
 def test_configure_hermes_model_migrates_legacy_fallback_model_list() -> None:
     mapping_path = Path(tempfile.mkdtemp(prefix="potato-configure-model-test-")) / "users_mapping.yaml"
     mapping_path.write_text(

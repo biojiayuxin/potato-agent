@@ -64,6 +64,13 @@ def build_parser() -> argparse.ArgumentParser:
         help="Upstream API key written to hermes.model.api_key and hermes.extra_env.OPENAI_API_KEY",
     )
     parser.add_argument(
+        "--context-length",
+        help=(
+            "Total upstream model context window in tokens, e.g. 1050000. "
+            "Leave unset to preserve the current value."
+        ),
+    )
+    parser.add_argument(
         "--fallback-base-url",
         help=(
             "Fallback OpenAI-compatible base URL written to "
@@ -174,6 +181,25 @@ def validate_base_url(value: str) -> str:
             "Base URL must be a full http(s) URL, e.g. https://gateway.example/v1"
         )
     return normalized
+
+
+def parse_context_length(value: str | None) -> int | None:
+    if value is None:
+        return None
+    normalized = value.strip().replace(",", "")
+    if not normalized:
+        return None
+    try:
+        context_length = int(normalized)
+    except ValueError as exc:
+        raise ConfigureHermesModelError(
+            "--context-length must be a plain positive integer, e.g. 1050000"
+        ) from exc
+    if context_length <= 0:
+        raise ConfigureHermesModelError(
+            "--context-length must be a plain positive integer, e.g. 1050000"
+        )
+    return context_length
 
 
 def _first_fallback_provider(hermes: dict[str, Any]) -> dict[str, Any] | None:
@@ -381,6 +407,8 @@ def format_change_summary(
     new_base_url: str,
     old_model_name: str | None,
     new_model_name: str,
+    old_context_length: int | None,
+    new_context_length: int | None,
     old_api_key: str | None,
     new_api_key: str,
     old_fallback_provider: dict[str, Any] | None,
@@ -389,6 +417,10 @@ def format_change_summary(
     return [
         f"- base_url: {old_base_url or '<empty>'} -> {new_base_url}",
         f"- default model: {old_model_name or '<empty>'} -> {new_model_name}",
+        (
+            "- context_length: "
+            f"{old_context_length or '<empty>'} -> {new_context_length or '<empty>'}"
+        ),
         f"- api_key: {mask_secret(old_api_key)} -> {mask_secret(new_api_key)}",
         (
             "- fallback_providers[0]: "
@@ -406,6 +438,8 @@ def confirm_apply_to_users(
     new_base_url: str,
     old_model_name: str | None,
     new_model_name: str,
+    old_context_length: int | None,
+    new_context_length: int | None,
     old_api_key: str | None,
     new_api_key: str,
     old_fallback_provider: dict[str, Any] | None,
@@ -425,6 +459,8 @@ def confirm_apply_to_users(
         new_base_url=new_base_url,
         old_model_name=old_model_name,
         new_model_name=new_model_name,
+        old_context_length=old_context_length,
+        new_context_length=new_context_length,
         old_api_key=old_api_key,
         new_api_key=new_api_key,
         old_fallback_provider=old_fallback_provider,
@@ -452,6 +488,8 @@ def apply_model_config_to_users(
     new_base_url: str,
     old_model_name: str | None,
     new_model_name: str,
+    old_context_length: int | None,
+    new_context_length: int | None,
     old_api_key: str | None,
     new_api_key: str,
     old_fallback_provider: dict[str, Any] | None,
@@ -474,6 +512,8 @@ def apply_model_config_to_users(
         new_base_url=new_base_url,
         old_model_name=old_model_name,
         new_model_name=new_model_name,
+        old_context_length=old_context_length,
+        new_context_length=new_context_length,
         old_api_key=old_api_key,
         new_api_key=new_api_key,
         old_fallback_provider=old_fallback_provider,
@@ -497,7 +537,9 @@ def apply_model_config_to_users(
             )
 
 
-def extract_current_values(config: dict) -> tuple[str | None, str | None, str | None]:
+def extract_current_values(
+    config: dict,
+) -> tuple[str | None, str | None, str | None, int | None]:
     hermes = config.get("hermes") if isinstance(config.get("hermes"), dict) else {}
     model = hermes.get("model") if isinstance(hermes.get("model"), dict) else {}
     extra_env = (
@@ -507,7 +549,10 @@ def extract_current_values(config: dict) -> tuple[str | None, str | None, str | 
     current_base_url = str(model.get("base_url") or "").strip() or None
     current_model_name = str(model.get("default") or "").strip() or None
     current_api_key = str(model.get("api_key") or extra_env.get("OPENAI_API_KEY") or "").strip() or None
-    return current_base_url, current_model_name, current_api_key
+    current_context_length = model.get("context_length")
+    if not isinstance(current_context_length, int) or current_context_length <= 0:
+        current_context_length = None
+    return current_base_url, current_model_name, current_api_key, current_context_length
 
 
 def main() -> int:
@@ -526,7 +571,12 @@ def main() -> int:
 
     created = not mapping_path.exists()
     config = build_new_config() if created else load_mapping(mapping_path, resolve_env=False)
-    current_base_url, current_model_name, current_api_key = extract_current_values(config)
+    (
+        current_base_url,
+        current_model_name,
+        current_api_key,
+        current_context_length,
+    ) = extract_current_values(config)
     current_fallback_provider = extract_current_fallback_provider(config)
     model, users = ensure_mapping_structure(config)
     hermes = config["hermes"]
@@ -556,6 +606,12 @@ def main() -> int:
     model["provider"] = "custom"
     model["base_url"] = base_url
     model["api_key"] = api_key
+    context_length = parse_context_length(args.context_length)
+    if context_length is not None:
+        model["context_length"] = context_length
+    new_context_length = model.get("context_length")
+    if not isinstance(new_context_length, int) or new_context_length <= 0:
+        new_context_length = None
     extra_env["OPENAI_API_KEY"] = api_key
 
     if args.clear_fallback:
@@ -603,6 +659,8 @@ def main() -> int:
     print(f"{action} Hermes model config in: {mapping_path}")
     print(f"Upstream base URL: {base_url}")
     print(f"Default model: {model_name}")
+    if model.get("context_length"):
+        print(f"Context length: {model['context_length']}")
     print(f"Fallback provider: {format_fallback_provider(new_fallback_provider)}")
     print(f"Preserved users: {len(users)}")
     print(
@@ -620,6 +678,8 @@ def main() -> int:
             new_base_url=base_url,
             old_model_name=current_model_name,
             new_model_name=model_name,
+            old_context_length=current_context_length,
+            new_context_length=new_context_length,
             old_api_key=current_api_key,
             new_api_key=api_key,
             old_fallback_provider=current_fallback_provider,
