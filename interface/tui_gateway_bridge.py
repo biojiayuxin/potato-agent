@@ -20,6 +20,7 @@ from interface.runtime_state import (
     FOREGROUND_CHAT_LEASE,
     create_runtime_lease,
     heartbeat_runtime_lease,
+    mark_foreground_activity,
     mark_user_message_activity,
     release_runtime_lease,
 )
@@ -423,6 +424,7 @@ class TuiGatewayBridge:
         heartbeat_task.cancel()
         with contextlib.suppress(asyncio.CancelledError):
             await heartbeat_task
+        await asyncio.to_thread(mark_foreground_activity, self.user_id)
         await asyncio.to_thread(release_runtime_lease, lease_id)
 
     async def _release_all_foreground_leases(self) -> None:

@@ -105,9 +105,14 @@ def mark_runtime_started(user_id: str, db_path: Path = DEFAULT_AUTH_DB_PATH) -> 
         conn.commit()
 
 
-def mark_user_message_activity(
+def mark_foreground_activity(
     user_id: str, db_path: Path = DEFAULT_AUTH_DB_PATH
 ) -> None:
+    """Record foreground chat activity for idle-timeout calculations.
+
+    This intentionally reuses last_user_message_at to avoid a schema change; the
+    field is already part of the runtime idle baseline.
+    """
     ensure_runtime_state_store(db_path)
     now = _now()
     with connect_auth_db(db_path) as conn:
@@ -121,6 +126,12 @@ def mark_user_message_activity(
             (now, now, user_id),
         )
         conn.commit()
+
+
+def mark_user_message_activity(
+    user_id: str, db_path: Path = DEFAULT_AUTH_DB_PATH
+) -> None:
+    mark_foreground_activity(user_id, db_path=db_path)
 
 
 def mark_background_activity(
