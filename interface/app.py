@@ -161,6 +161,11 @@ USER_SESSION_DB_RPC_SCRIPT = (
     "        result = db.get_compression_tip(str(kwargs.get('session_id') or '').strip())\n"
     "    elif method == 'get_messages':\n"
     "        result = db.get_messages(str(kwargs.get('session_id') or '').strip())\n"
+    "    elif method == 'set_session_title':\n"
+    "        result = db.set_session_title(\n"
+    "            str(kwargs.get('session_id') or '').strip(),\n"
+    "            str(kwargs.get('title') or ''),\n"
+    "        )\n"
     "    elif method == 'delete_session':\n"
     "        result = db.delete_session(str(kwargs.get('session_id') or '').strip())\n"
     "    else:\n"
@@ -203,6 +208,10 @@ class SignupRequest(BaseModel):
 class SessionDisplaySyncRequest(BaseModel):
     messages: list[dict[str, Any]]
     draft_title: str = ""
+
+
+class SessionTitleUpdateRequest(BaseModel):
+    title: str = ""
 
 
 class SessionTurnSubmitRequest(BaseModel):
@@ -697,6 +706,9 @@ class _UserSessionDBProxy:
 
         if not isinstance(payload, dict) or not payload.get("ok"):
             detail = str(payload.get("error") or result.stderr.strip() or "unknown error")
+            error_type = str(payload.get("type") or "").strip()
+            if error_type == "ValueError":
+                raise ValueError(detail)
             raise HTTPException(
                 status_code=500,
                 detail=(
@@ -746,6 +758,9 @@ class _UserSessionDBProxy:
     def get_messages(self, session_id: str) -> list[dict[str, Any]]:
         result = self._call("get_messages", session_id=session_id)
         return result if isinstance(result, list) else []
+
+    def set_session_title(self, session_id: str, title: str) -> bool:
+        return bool(self._call("set_session_title", session_id=session_id, title=title))
 
     def delete_session(self, session_id: str) -> bool:
         return bool(self._call("delete_session", session_id=session_id))
@@ -1362,6 +1377,37 @@ def _resolve_logical_session_context(
         or logical_session
     )
     return logical_session_id, logical_session, tip_session_id, projected_session
+
+
+def _session_title_error(
+    status_code: int, code: str, message: str
+) -> HTTPException:
+    return HTTPException(
+        status_code=status_code,
+        detail={"code": code, "message": message},
+    )
+
+
+def _sanitize_session_title_or_raise(raw_title: Any) -> str:
+    from hermes_state import SessionDB  # type: ignore
+
+    try:
+        sanitized = SessionDB.sanitize_title(str(raw_title or ""))
+    except ValueError as exc:
+        raise _session_title_error(
+            status_code=400,
+            code="title_too_long",
+            message=f"Title must be {SessionDB.MAX_TITLE_LENGTH} characters or fewer.",
+        ) from exc
+
+    if not sanitized:
+        raise _session_title_error(
+            status_code=400,
+            code="title_empty",
+            message="Title cannot be empty.",
+        )
+
+    return sanitized
 
 
 async def _archive_expired_sessions_once() -> None:
@@ -2030,6 +2076,89 @@ async def sync_session_display(
     return {
         "ok": True,
         "messages": [_normalize_display_message(item) for item in merged_messages],
+    }
+
+
+@app.put("/api/sessions/{session_id}/title")
+async def update_session_title(
+    session_id: str,
+    payload: SessionTitleUpdateRequest,
+    user: CurrentUser = Depends(get_current_user),
+) -> dict[str, Any]:
+    sanitized_title = _sanitize_session_title_or_raise(payload.title)
+    display_meta = get_display_session_meta(user.id, session_id)
+    with _open_session_db(user.target) as db:
+        logical_session_id, logical_session, tip_session_id, _ = _resolve_logical_session_context(
+            db, session_id
+        )
+        if not logical_session or not _is_interface_managed_source(
+            logical_session.get("source")
+        ):
+            if display_meta is None:
+                raise _session_title_error(
+                    status_code=404,
+                    code="session_not_found",
+                    message="Session not found.",
+                )
+            raise _session_title_error(
+                status_code=404,
+                code="session_not_found",
+                message="Session not found.",
+            )
+
+        try:
+            updated = db.set_session_title(logical_session_id, sanitized_title)
+        except ValueError as exc:
+            detail = str(exc)
+            if "already in use" in detail:
+                raise _session_title_error(
+                    status_code=409,
+                    code="title_duplicate",
+                    message="A chat with this title already exists.",
+                ) from exc
+            if "too long" in detail:
+                raise _session_title_error(
+                    status_code=400,
+                    code="title_too_long",
+                    message="Title must be 100 characters or fewer.",
+                ) from exc
+            raise _session_title_error(
+                status_code=400,
+                code="title_invalid",
+                message="Invalid title.",
+            ) from exc
+
+        if not updated:
+            raise _session_title_error(
+                status_code=404,
+                code="session_not_found",
+                message="Session not found.",
+            )
+
+        refreshed_logical_session = db.get_session(logical_session_id)
+        refreshed_tip_session_id = _get_logical_session_tip_id(db, logical_session_id)
+        projected_session = (
+            _get_projected_logical_session_row(db, logical_session_id)
+            or refreshed_logical_session
+        )
+        raw_messages = db.get_messages(refreshed_tip_session_id)
+
+    display_messages = get_display_messages(user.id, logical_session_id)
+    if display_messages is None:
+        display_messages = _build_fallback_display_messages(raw_messages)
+    live_state = get_live_session_state(user.id, logical_session_id)
+
+    return {
+        "session": _normalize_logical_session_row(
+            projected_session or {"id": logical_session_id, "title": sanitized_title},
+            logical_session_id=logical_session_id,
+            logical_session=refreshed_logical_session,
+            display_meta=get_display_session_meta(user.id, logical_session_id),
+            live_state=live_state,
+            resume_session_id=refreshed_tip_session_id or logical_session_id,
+        ),
+        "messages": [_normalize_display_message(item) for item in display_messages],
+        "live": live_state,
     }
 
 

@@ -242,6 +242,23 @@ def _build_client_and_user():
     return client, interface_app_mod, user
 
 
+def _read_session_title(interface_app_mod, user, session_id: str) -> str | None:
+    target = interface_app_mod.mapping_store.resolve_target(
+        mapping_username=user.mapping_username,
+        email=user.email,
+        username=user.username,
+    )
+    assert target is not None
+    conn = sqlite3.connect(str(target.state_db_path))
+    try:
+        row = conn.execute(
+            "SELECT title FROM sessions WHERE id = ?", (session_id,)
+        ).fetchone()
+        return row[0] if row else None
+    finally:
+        conn.close()
+
+
 def test_session_list_uses_display_store_draft_title() -> None:
     client, _, user = _build_client_and_user()
     try:
@@ -373,12 +390,110 @@ def test_tui_compression_chain_uses_logical_root_and_tip_resume_id() -> None:
         client.close()
 
 
+def test_session_title_update_persists_and_returns_updated_snapshot() -> None:
+    client, interface_app_mod, user = _build_client_and_user()
+    try:
+        response = client.put(
+            "/api/sessions/sess_tui_1/title",
+            json={"title": "Renamed chat"},
+        )
+        assert response.status_code == 200, response.text
+        payload = response.json()
+        assert payload["session"]["id"] == "sess_tui_1"
+        assert payload["session"]["title"] == "Renamed chat"
+
+        list_response = client.get("/api/sessions")
+        assert list_response.status_code == 200, list_response.text
+        list_payload = list_response.json()
+        list_row = next(
+            session for session in list_payload["sessions"] if session["id"] == "sess_tui_1"
+        )
+        assert list_row["title"] == "Renamed chat"
+
+        detail_response = client.get("/api/sessions/sess_tui_1")
+        assert detail_response.status_code == 200, detail_response.text
+        detail_payload = detail_response.json()
+        assert detail_payload["session"]["title"] == "Renamed chat"
+
+        assert _read_session_title(interface_app_mod, user, "sess_tui_1") == "Renamed chat"
+    finally:
+        client.close()
+
+
+def test_session_title_update_targets_logical_root_for_compression_chain() -> None:
+    client, interface_app_mod, user = _build_client_and_user()
+    try:
+        response = client.put(
+            "/api/sessions/sess_tui_tip/title",
+            json={"title": "Compressed thread"},
+        )
+        assert response.status_code == 200, response.text
+        payload = response.json()
+        assert payload["session"]["id"] == "sess_tui_root"
+        assert payload["session"]["resume_session_id"] == "sess_tui_tip"
+        assert payload["session"]["title"] == "Compressed thread"
+        assert _read_session_title(interface_app_mod, user, "sess_tui_root") == "Compressed thread"
+        assert _read_session_title(interface_app_mod, user, "sess_tui_tip") == "compression tip"
+    finally:
+        client.close()
+
+
+def test_session_title_update_rejects_duplicate_titles() -> None:
+    client, _, _ = _build_client_and_user()
+    try:
+        response = client.put(
+            "/api/sessions/sess_tui_1/title",
+            json={"title": "compression root"},
+        )
+        assert response.status_code == 409, response.text
+        payload = response.json()
+        assert payload["detail"]["code"] == "title_duplicate"
+        assert payload["detail"]["message"] == "A chat with this title already exists."
+    finally:
+        client.close()
+
+
+def test_session_title_update_rejects_empty_titles() -> None:
+    client, _, _ = _build_client_and_user()
+    try:
+        response = client.put(
+            "/api/sessions/sess_tui_1/title",
+            json={"title": "   "},
+        )
+        assert response.status_code == 400, response.text
+        payload = response.json()
+        assert payload["detail"]["code"] == "title_empty"
+        assert payload["detail"]["message"] == "Title cannot be empty."
+    finally:
+        client.close()
+
+
+def test_session_title_update_rejects_overlong_titles() -> None:
+    client, _, _ = _build_client_and_user()
+    try:
+        response = client.put(
+            "/api/sessions/sess_tui_1/title",
+            json={"title": "x" * 101},
+        )
+        assert response.status_code == 400, response.text
+        payload = response.json()
+        assert payload["detail"]["code"] == "title_too_long"
+        assert payload["detail"]["message"] == "Title must be 100 characters or fewer."
+    finally:
+        client.close()
+
+
 def run() -> None:
     test_session_list_uses_display_store_draft_title()
     test_session_detail_prefers_saved_display_transcript()
     test_display_sync_merges_progress_with_fallback_tool_context()
     test_session_detail_falls_back_when_display_transcript_missing()
     test_tui_compression_chain_uses_logical_root_and_tip_resume_id()
+    test_session_title_update_persists_and_returns_updated_snapshot()
+    test_session_title_update_targets_logical_root_for_compression_chain()
+    test_session_title_update_rejects_duplicate_titles()
+    test_session_title_update_rejects_empty_titles()
+    test_session_title_update_rejects_overlong_titles()
 
 
 if __name__ == "__main__":

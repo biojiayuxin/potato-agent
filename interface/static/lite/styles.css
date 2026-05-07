@@ -612,6 +612,11 @@ button.stretch {
   gap: 4px;
 }
 
+.chat-item-shell.renaming .chat-item-actions {
+  opacity: 1;
+  pointer-events: auto;
+}
+
 .chat-item {
   width: 100%;
   text-align: left;
@@ -623,6 +628,10 @@ button.stretch {
   display: flex;
   flex-direction: column;
   gap: 6px;
+}
+
+.chat-item-editing {
+  cursor: default;
 }
 
 .chat-item:hover {
@@ -647,6 +656,39 @@ button.stretch {
 .chat-item-title {
   font-size: 14px;
   line-height: 1.4;
+  word-break: break-word;
+}
+
+.chat-item-title-wrap {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+}
+
+.chat-item-title-input {
+  width: 100%;
+  min-width: 0;
+  border: 1px solid var(--primary);
+  border-radius: 8px;
+  background: var(--surface-subtle);
+  color: var(--text);
+  padding: 7px 9px;
+  font: inherit;
+  line-height: 1.4;
+}
+
+.chat-item-title-input:focus {
+  outline: 2px solid rgba(122, 162, 255, 0.28);
+  outline-offset: 1px;
+}
+
+.chat-item-title-error {
+  color: #b42348;
+  font-size: 12px;
+  font-weight: 700;
+  line-height: 1.4;
+  white-space: pre-wrap;
 }
 
 .chat-item-meta {
@@ -656,6 +698,7 @@ button.stretch {
 
 .chat-item-actions {
   display: flex;
+  gap: 6px;
   justify-content: flex-end;
   opacity: 0;
   pointer-events: none;
@@ -668,6 +711,7 @@ button.stretch {
   pointer-events: auto;
 }
 
+.chat-rename-button,
 .chat-delete-button {
   display: inline-flex;
   align-items: center;
@@ -680,9 +724,22 @@ button.stretch {
   padding: 0;
 }
 
+.chat-rename-button:hover {
+  border-color: rgba(122, 162, 255, 0.45);
+  background: rgba(122, 162, 255, 0.12);
+}
+
 .chat-delete-button:hover {
   border-color: rgba(255, 107, 129, 0.45);
   background: rgba(255, 107, 129, 0.08);
+}
+
+.chat-rename-icon {
+  width: 14px;
+  height: 14px;
+  display: block;
+  object-fit: contain;
+  pointer-events: none;
 }
 
 .chat-delete-icon {

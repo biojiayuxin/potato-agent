@@ -28,6 +28,9 @@ const state = {
   shouldAutoScrollMessages: true,
   liveSessionMessages: new Map(),
   sessionHistoryLoading: false,
+  renamingSessionId: null,
+  renamingTitleDraft: '',
+  renamingTitleError: '',
 };
 
 const MODEL_RESPONSE_ERROR_MESSAGE = '模型响应失败，请稍后重试。';
@@ -241,6 +244,36 @@ const getSessionTitleById = (sessionId) => {
   return String(session?.title || '').trim();
 };
 
+const resetSessionRenameState = () => {
+  state.renamingSessionId = null;
+  state.renamingTitleDraft = '';
+  state.renamingTitleError = '';
+};
+
+const startSessionRename = (sessionId) => {
+  const normalizedSessionId = String(sessionId || '').trim();
+  if (!normalizedSessionId) return;
+  state.renamingSessionId = normalizedSessionId;
+  state.renamingTitleDraft = getSessionTitleById(normalizedSessionId) || 'New chat';
+  state.renamingTitleError = '';
+};
+
+const setSessionRenameDraft = (value) => {
+  state.renamingTitleDraft = String(value || '');
+  state.renamingTitleError = '';
+};
+
+const validateSessionTitleDraft = (value) => {
+  const trimmed = String(value || '').trim();
+  if (!trimmed) {
+    return 'Title cannot be empty.';
+  }
+  if (trimmed.length > 100) {
+    return 'Title must be 100 characters or fewer.';
+  }
+  return '';
+};
+
 const isSessionBusy = (sessionId) => {
   const normalizedSessionId = String(sessionId || '').trim();
   return Boolean(normalizedSessionId) && busySessionIds.has(normalizedSessionId);
@@ -316,6 +349,25 @@ const setLocalSessionTitle = (sessionId, title) => {
       persistentSessionId: getPersistentSessionIdForChat(state.activeSession) || targetSessionId,
     };
   }
+};
+
+const applySessionSnapshot = (session) => {
+  const normalizedSession = normalizeSessionSnapshot(session);
+  if (!normalizedSession?.id) return null;
+
+  let replaced = false;
+  state.sessions = state.sessions.map((chat) => {
+    if (chat.id !== normalizedSession.id) return chat;
+    replaced = true;
+    return normalizedSession;
+  });
+  if (!replaced) {
+    state.sessions = [normalizedSession, ...state.sessions];
+  }
+  if (state.activeSessionId === normalizedSession.id) {
+    state.activeSession = normalizedSession;
+  }
+  return normalizedSession;
 };
 
 const persistSessionDisplayState = async (sessionId, messages, { draftTitle = '' } = {}) => {
@@ -1124,6 +1176,7 @@ const activatePersistedSession = (session, { clearMessages = true } = {}) => {
 };
 
 const showDraftChat = () => {
+  resetSessionRenameState();
   activeTuiSessionId = '';
   activePersistentSessionId = '';
   state.sessionHistoryLoading = false;
@@ -1376,6 +1429,7 @@ const resetWorkspaceState = () => {
   state.activeSession = null;
   state.activeSessionId = null;
   state.draftSession = null;
+  resetSessionRenameState();
   state.pendingSessionPromise = null;
   state.shouldAutoScrollMessages = true;
   state.liveSessionMessages.clear();
@@ -1555,7 +1609,14 @@ const api = async (path, options = {}) => {
     let payload = null;
     try {
       payload = await response.json();
-      detail = payload?.detail || payload?.message || payload?.error?.message || payload?.error || detail;
+      const payloadDetail = payload?.detail;
+      detail = (
+        (payloadDetail && typeof payloadDetail === 'object' ? payloadDetail.message : payloadDetail)
+        || payload?.message
+        || payload?.error?.message
+        || payload?.error
+        || detail
+      );
     } catch {
       const text = await response.text().catch(() => '');
       if (text) detail = text;
@@ -1960,6 +2021,43 @@ const getCurrentChatEntries = () => {
 
 const getActiveChatTitle = () => {
   return state.activeSession?.title || 'New chat';
+};
+
+const renameSession = async (sessionId, nextTitle) => {
+  const normalizedSessionId = String(sessionId || '').trim();
+  const validationMessage = validateSessionTitleDraft(nextTitle);
+  if (validationMessage) {
+    state.renamingTitleError = validationMessage;
+    renderChatList();
+    return null;
+  }
+
+  const response = await api(`/api/sessions/${encodeURIComponent(normalizedSessionId)}/title`, {
+    method: 'PUT',
+    body: JSON.stringify({ title: String(nextTitle || '') }),
+  });
+  const json = await response.json();
+  const normalizedSession = applySessionSnapshot(
+    json?.session
+      ? { ...json.session, persistentSessionId: json.session.id }
+      : null
+  );
+  if (normalizedSession?.id) {
+    applyLiveStateToSession(normalizedSession.id, json?.live || normalizedSession.live || null);
+  }
+  if (
+    normalizedSession?.id
+    && state.activeSessionId === normalizedSession.id
+    && Array.isArray(json?.messages)
+    && !sessionHasStreamingMessages(normalizedSession.id)
+  ) {
+    const normalizedMessages = json.messages.map(normalizeMessageForDisplay);
+    setLiveSessionMessages(normalizedSession.id, normalizedMessages);
+    state.messages = normalizedMessages;
+  }
+  resetSessionRenameState();
+  renderWorkspace();
+  return normalizedSession;
 };
 
 const getRawMessageText = (message) => {
@@ -2415,39 +2513,145 @@ const renderChatList = () => {
 
   for (const chat of chats) {
     const fragment = dom.chatItemTemplate.content.cloneNode(true);
+    const shell = fragment.querySelector('.chat-item-shell');
     const button = fragment.querySelector('.chat-item');
     const title = fragment.querySelector('.chat-item-title');
     const meta = fragment.querySelector('.chat-item-meta');
+    const actions = fragment.querySelector('.chat-item-actions');
+    const renameButton = fragment.querySelector('.chat-rename-button');
     const deleteButton = fragment.querySelector('.chat-delete-button');
     const chatSessionId = getPersistentSessionIdForChat(chat) || chat.id;
     const busyLabel = isSessionBusy(chatSessionId) ? 'Responding…' : '';
     const approvalLabel = sessionNeedsApproval(chatSessionId) ? 'Needs approval' : '';
+    const isRenaming = !chat.isDraft && state.renamingSessionId === chat.id;
 
-    title.textContent = getChatDisplayTitle(chat);
-    meta.textContent = [formatTimestamp(chat.last_active || chat.started_at), busyLabel, approvalLabel]
-      .filter(Boolean)
-      .join(' · ');
+    if (isRenaming) {
+      shell?.classList.add('renaming');
+      const replacement = document.createElement('div');
+      replacement.className = `${button.className} chat-item-editing`;
+      if (chat.id === state.activeSessionId) {
+        replacement.classList.add('active');
+      }
+      replacement.setAttribute('aria-current', chat.id === state.activeSessionId ? 'page' : 'false');
+      const titleWrap = document.createElement('div');
+      titleWrap.className = 'chat-item-title-wrap';
 
-    if (chat.id === state.activeSessionId) {
+      const input = document.createElement('input');
+      input.type = 'text';
+      input.className = 'chat-item-title-input';
+      input.value = state.renamingTitleDraft;
+      input.setAttribute('aria-label', 'Chat title');
+
+      const error = document.createElement('div');
+      error.className = 'chat-item-title-error';
+      error.hidden = !state.renamingTitleError;
+      error.textContent = state.renamingTitleError || '';
+
+      const cancelRename = () => {
+        resetSessionRenameState();
+        renderChatList();
+      };
+
+      const submitRename = async () => {
+        try {
+          await renameSession(chat.id, state.renamingTitleDraft);
+        } catch (renameError) {
+          state.renamingTitleError = String(renameError.message || 'Failed to rename chat.');
+          renderChatList();
+        }
+      };
+
+      input.addEventListener('click', (event) => event.stopPropagation());
+      input.addEventListener('input', (event) => {
+        setSessionRenameDraft(event.target.value);
+        if (!error.hidden) {
+          error.hidden = true;
+          error.textContent = '';
+        }
+      });
+      input.addEventListener('keydown', (event) => {
+        event.stopPropagation();
+        if (event.key === 'Enter') {
+          event.preventDefault();
+          submitRename();
+          return;
+        }
+        if (event.key === 'Escape') {
+          event.preventDefault();
+          cancelRename();
+        }
+      });
+      input.addEventListener('blur', () => {
+        window.setTimeout(() => {
+          if (state.renamingSessionId === chat.id) {
+            cancelRename();
+          }
+        }, 0);
+      });
+
+      titleWrap.append(input);
+      titleWrap.append(error);
+      replacement.append(titleWrap);
+      replacement.append(meta);
+      button.replaceWith(replacement);
+
+      window.requestAnimationFrame(() => {
+        input.focus();
+        input.select();
+      });
+    } else {
+      title.textContent = getChatDisplayTitle(chat);
+      meta.textContent = [formatTimestamp(chat.last_active || chat.started_at), busyLabel, approvalLabel]
+        .filter(Boolean)
+        .join(' · ');
+    }
+
+    if (!isRenaming && chat.id === state.activeSessionId) {
       button.classList.add('active');
     }
 
-    button.addEventListener('click', () => {
+    if (!isRenaming) {
+      button.addEventListener('click', () => {
+        if (chat.isDraft) {
+          state.activeSession = chat;
+          state.activeSessionId = chat.id;
+          renderWorkspace();
+          return;
+        }
+        resetSessionRenameState();
+        openSession(chat.id).catch((error) => showChatError(error.message));
+      });
+    }
+
+    if (renameButton) {
       if (chat.isDraft) {
-        state.activeSession = chat;
-        state.activeSessionId = chat.id;
-        renderWorkspace();
-        return;
+        renameButton.hidden = true;
+      } else {
+        renameButton.hidden = false;
+        renameButton.addEventListener('click', (event) => {
+          event.stopPropagation();
+          if (state.renamingSessionId === chat.id) return;
+          startSessionRename(chat.id);
+          renderChatList();
+        });
       }
-      openSession(chat.id).catch((error) => showChatError(error.message));
-    });
+    }
 
     deleteButton.addEventListener('click', async (event) => {
       event.stopPropagation();
+      resetSessionRenameState();
       const confirmed = window.confirm(`Delete chat "${getChatDisplayTitle(chat)}"?`);
       if (!confirmed) return;
       await deleteChat(chat.id, chat.isDraft).catch((error) => showChatError(error.message));
     });
+
+    if (isRenaming && actions) {
+      actions.querySelectorAll('button').forEach((actionButton) => {
+        if (actionButton !== renameButton) {
+          actionButton.tabIndex = -1;
+        }
+      });
+    }
 
     dom.chatList.append(fragment);
   }
@@ -2717,11 +2921,15 @@ const refreshSessions = async () => {
   for (const session of sessions) {
     applyLiveStateToSession(session?.id, session?.live || null);
   }
+  if (state.renamingSessionId && !state.sessions.some((session) => session.id === state.renamingSessionId)) {
+    resetSessionRenameState();
+  }
   renderChatList();
   renderWorkspaceHeader();
 };
 
 const openSession = async (sessionId) => {
+  resetSessionRenameState();
   if (!sessionId) {
     state.activeSession = state.draftSession;
     state.activeSessionId = state.draftSession?.id || null;
