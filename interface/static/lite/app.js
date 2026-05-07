@@ -2004,6 +2004,24 @@ const getRenderedMessageContentHtml = (message) => {
   return rendered;
 };
 
+const formatMessageTimestamp = (timestamp) => {
+  const seconds = Number(timestamp || 0);
+  if (!Number.isFinite(seconds) || seconds <= 0) return '';
+
+  const date = new Date(seconds * 1000);
+  if (Number.isNaN(date.getTime())) return '';
+
+  const pad = (value) => String(value).padStart(2, '0');
+  const hoursMinutes = `${pad(date.getHours())}:${pad(date.getMinutes())}`;
+  const isOlderThan24Hours = Date.now() - date.getTime() > 24 * 60 * 60 * 1000;
+  if (!isOlderThan24Hours) return hoursMinutes;
+
+  const year = date.getFullYear();
+  const month = pad(date.getMonth() + 1);
+  const day = pad(date.getDate());
+  return `${year}-${month}-${day} ${hoursMinutes}`;
+};
+
 const normalizeToolCall = (toolCall) => {
   const normalized = {
     id: toolCall?.id || '',
@@ -2317,6 +2335,7 @@ const renderMessages = () => {
     const role = fragment.querySelector('.message-role');
     const metaSections = fragment.querySelector('.message-meta-sections');
     const fileSection = fragment.querySelector('.message-files');
+    const timestamp = fragment.querySelector('.message-timestamp');
     const content = fragment.querySelector('.message-content');
     const streamingIndicator = fragment.querySelector('.message-streaming-indicator');
     const copyButton = fragment.querySelector('.message-copy-button');
@@ -2328,6 +2347,9 @@ const renderMessages = () => {
     role.textContent = message.role === 'user' ? 'You' : 'Hermes';
     renderMessageMetaSections(metaSections, message);
     renderMessageFiles(fileSection, message);
+    const timestampText = !isStreaming ? formatMessageTimestamp(message.timestamp) : '';
+    timestamp.textContent = timestampText;
+    timestamp.hidden = !timestampText;
     content.classList.remove('streaming-placeholder');
 
     const hasVisibleContent = hasDisplayContent(message);

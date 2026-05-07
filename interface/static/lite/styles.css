@@ -883,6 +883,37 @@ button.stretch {
   background: var(--user-bubble);
 }
 
+.message-timestamp {
+  width: fit-content;
+  max-width: 100%;
+  margin-top: -2px;
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.3;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 120ms ease;
+}
+
+.message-timestamp[hidden] {
+  display: none !important;
+}
+
+.message:hover .message-timestamp,
+.message:focus-within .message-timestamp {
+  opacity: 1;
+}
+
+.message.user .message-timestamp {
+  align-self: flex-end;
+  text-align: right;
+}
+
+.message.assistant .message-timestamp {
+  align-self: flex-start;
+  text-align: left;
+}
+
 .message-content.streaming-placeholder {
   display: inline-flex;
   align-items: center;
