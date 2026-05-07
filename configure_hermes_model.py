@@ -33,10 +33,21 @@ from interface.mapping import (
     load_mapping,
     write_mapping,
 )
+from interface.model_options import (
+    DEFAULT_MODEL_API_MODE,
+    DEFAULT_REASONING_EFFORT,
+    MAX_MODEL_OPTIONS,
+    ModelOptionsError,
+    VALID_API_MODES,
+    VALID_REASONING_EFFORTS,
+    model_option_from_mapping,
+    parse_model_context_length,
+)
 
 
 DEFAULT_UPSTREAM_MODEL_NAME = "gpt-5.4"
 DEFAULT_FALLBACK_PROVIDER = "custom"
+DEFAULT_MODEL_OPTION_ID = "primary"
 FALLBACK_ACTION_PRESERVE = "preserve"
 FALLBACK_ACTION_SET = "set"
 FALLBACK_ACTION_CLEAR = "clear"
@@ -79,6 +90,38 @@ def build_parser() -> argparse.ArgumentParser:
         help=(
             "Total upstream model context window in tokens, e.g. 1050000. "
             "Leave unset to preserve the current value."
+        ),
+    )
+    parser.add_argument(
+        "--api-mode",
+        choices=sorted(VALID_API_MODES),
+        default=DEFAULT_MODEL_API_MODE,
+        help=(
+            "Explicit Hermes API transport for the primary model. "
+            f"Defaults to {DEFAULT_MODEL_API_MODE}."
+        ),
+    )
+    parser.add_argument(
+        "--reasoning-effort",
+        choices=VALID_REASONING_EFFORTS,
+        default=DEFAULT_REASONING_EFFORT,
+        help=(
+            "Default agent reasoning effort written to "
+            "hermes.config_overrides.agent.reasoning_effort. "
+            f"Defaults to {DEFAULT_REASONING_EFFORT}."
+        ),
+    )
+    parser.add_argument(
+        "--option",
+        action="append",
+        default=[],
+        metavar="KEY=VALUE,...",
+        help=(
+            "Additional whitelisted model option. May be passed at most twice. "
+            "Required keys: id,model,base_url,api_key. Optional keys: "
+            "name,provider,context_length,api_mode,reasoning_effort. "
+            f"api_mode defaults to {DEFAULT_MODEL_API_MODE}; "
+            f"reasoning_effort defaults to {DEFAULT_REASONING_EFFORT}."
         ),
     )
     parser.add_argument(
@@ -213,6 +256,51 @@ def parse_context_length(value: str | None) -> int | None:
     return context_length
 
 
+def parse_option_argument(value: str) -> dict[str, Any]:
+    parsed: dict[str, Any] = {}
+    for raw_part in str(value or "").split(","):
+        part = raw_part.strip()
+        if not part:
+            continue
+        key, separator, raw_value = part.partition("=")
+        if not separator:
+            raise ConfigureHermesModelError(
+                "--option entries must use key=value pairs separated by commas."
+            )
+        normalized_key = key.strip()
+        if not normalized_key:
+            raise ConfigureHermesModelError("--option contains an empty key.")
+        parsed[normalized_key] = raw_value.strip()
+    if not parsed:
+        raise ConfigureHermesModelError("--option cannot be empty.")
+    return parsed
+
+
+def parse_option_arguments(values: list[str]) -> list[dict[str, Any]]:
+    if len(values) > MAX_MODEL_OPTIONS - 1:
+        raise ConfigureHermesModelError(
+            "--option may be provided at most twice; the whitelist supports "
+            "1 primary and up to 2 optional models."
+        )
+
+    options: list[dict[str, Any]] = []
+    for index, raw_value in enumerate(values):
+        option = parse_option_argument(raw_value)
+        try:
+            parsed_context_length = parse_model_context_length(
+                option.get("context_length"), path=f"--option[{index}].context_length"
+            )
+            if parsed_context_length is not None:
+                option["context_length"] = parsed_context_length
+            else:
+                option.pop("context_length", None)
+            normalized = model_option_from_mapping(option, path=f"--option[{index}]")
+        except ModelOptionsError as exc:
+            raise ConfigureHermesModelError(str(exc)) from exc
+        options.append(normalized.to_config())
+    return options
+
+
 def _first_fallback_provider(hermes: dict[str, Any]) -> dict[str, Any] | None:
     providers = hermes.get("fallback_providers")
     if isinstance(providers, list):
@@ -322,6 +410,108 @@ def set_compression_context_length(
     compression["context_length"] = context_length
 
 
+def set_agent_reasoning_effort(hermes: dict[str, Any], effort: str) -> None:
+    config_overrides = _ensure_mapping(
+        hermes, "config_overrides", "hermes.config_overrides"
+    )
+    agent = _ensure_mapping(
+        config_overrides,
+        "agent",
+        "hermes.config_overrides.agent",
+    )
+    agent["reasoning_effort"] = effort
+
+
+def set_model_options(
+    hermes: dict[str, Any],
+    *,
+    primary_id: str,
+    primary_name: str,
+    additional_options: list[dict[str, Any]],
+) -> None:
+    model = hermes.get("model")
+    if not isinstance(model, dict):
+        raise ConfigureHermesModelError("users_mapping.yaml has invalid hermes.model structure.")
+    extra_env = hermes.get("extra_env") if isinstance(hermes.get("extra_env"), dict) else {}
+
+    primary_option: dict[str, Any] = {
+        "id": primary_id,
+        "name": primary_name,
+        "provider": model.get("provider") or "custom",
+        "model": model.get("default") or model.get("model"),
+        "base_url": model.get("base_url"),
+        "api_key": model.get("api_key") or extra_env.get("OPENAI_API_KEY"),
+    }
+    if model.get("context_length") is not None:
+        primary_option["context_length"] = model.get("context_length")
+    if model.get("api_mode"):
+        primary_option["api_mode"] = model.get("api_mode")
+    config_overrides = (
+        hermes.get("config_overrides")
+        if isinstance(hermes.get("config_overrides"), dict)
+        else {}
+    )
+    agent = (
+        config_overrides.get("agent")
+        if isinstance(config_overrides.get("agent"), dict)
+        else {}
+    )
+    if agent.get("reasoning_effort"):
+        primary_option["reasoning_effort"] = agent.get("reasoning_effort")
+
+    try:
+        primary = model_option_from_mapping(primary_option, path="hermes.model")
+        normalized_options = [primary.to_config()]
+        seen_ids = {primary.id}
+        for index, option in enumerate(additional_options):
+            normalized = model_option_from_mapping(
+                option, path=f"--option[{index}]"
+            )
+            if normalized.id in seen_ids:
+                raise ModelOptionsError(
+                    f"Duplicate model option id in hermes.model_options: {normalized.id}"
+                )
+            seen_ids.add(normalized.id)
+            normalized_options.append(normalized.to_config())
+    except ModelOptionsError as exc:
+        raise ConfigureHermesModelError(str(exc)) from exc
+
+    hermes["model_options"] = {
+        "primary": primary.id,
+        "options": normalized_options,
+    }
+
+
+def extract_existing_additional_model_options(hermes: dict[str, Any]) -> list[dict[str, Any]]:
+    raw_model_options = hermes.get("model_options")
+    if raw_model_options is None:
+        return []
+    if not isinstance(raw_model_options, dict):
+        raise ConfigureHermesModelError("hermes.model_options must be a mapping/object.")
+    primary_id = str(raw_model_options.get("primary") or "").strip()
+    raw_options = raw_model_options.get("options")
+    if not isinstance(raw_options, list):
+        raise ConfigureHermesModelError("hermes.model_options.options must be a list.")
+    if len(raw_options) > MAX_MODEL_OPTIONS:
+        raise ConfigureHermesModelError(
+            "hermes.model_options.options supports at most 3 entries "
+            "(1 primary and up to 2 optional models)."
+        )
+
+    additional: list[dict[str, Any]] = []
+    try:
+        for index, option in enumerate(raw_options):
+            normalized = model_option_from_mapping(
+                option, path=f"hermes.model_options.options[{index}]"
+            )
+            if normalized.id == primary_id:
+                continue
+            additional.append(normalized.to_config())
+    except ModelOptionsError as exc:
+        raise ConfigureHermesModelError(str(exc)) from exc
+    return additional[: MAX_MODEL_OPTIONS - 1]
+
+
 def ensure_mapping_structure(config: dict) -> tuple[dict, list]:
     if not isinstance(config, dict):
         raise ConfigureHermesModelError(
@@ -365,7 +555,7 @@ def ensure_mapping_structure(config: dict) -> tuple[dict, list]:
         raise ConfigureHermesModelError(
             "users_mapping.yaml has invalid hermes.config_overrides.agent structure."
         )
-    agent.setdefault("reasoning_effort", "high")
+    agent["reasoning_effort"] = DEFAULT_REASONING_EFFORT
 
     terminal = hermes.get("terminal")
     if terminal is None:
@@ -409,7 +599,7 @@ def build_new_config() -> dict:
             "api_server_model_name": DEFAULT_MODEL_NAME,
             "config_overrides": {
                 "agent": {
-                    "reasoning_effort": "high",
+                    "reasoning_effort": DEFAULT_REASONING_EFFORT,
                 }
             },
             "terminal": {
@@ -558,6 +748,15 @@ def _patch_user_hermes_config(
     model = _ensure_mapping(patched, "model", "model")
     for key in ("default", "provider", "base_url", "api_key"):
         model[key] = generated_model[key]
+    if generated_model.get("api_mode"):
+        model["api_mode"] = generated_model["api_mode"]
+    else:
+        model.pop("api_mode", None)
+
+    generated_agent = generated.get("agent")
+    if isinstance(generated_agent, dict) and generated_agent.get("reasoning_effort"):
+        agent = _ensure_mapping(patched, "agent", "agent")
+        agent["reasoning_effort"] = generated_agent["reasoning_effort"]
 
     if context_length is not None:
         model["context_length"] = context_length
@@ -793,6 +992,11 @@ def main() -> int:
         current=current_api_key,
         secret=True,
     )
+    additional_model_options = (
+        parse_option_arguments(args.option)
+        if args.option
+        else extract_existing_additional_model_options(hermes)
+    )
 
     model["default"] = model_name
     model["provider"] = "custom"
@@ -802,10 +1006,18 @@ def main() -> int:
     if context_length is not None:
         model["context_length"] = context_length
         set_compression_context_length(hermes, context_length)
+    model["api_mode"] = args.api_mode
+    set_agent_reasoning_effort(hermes, args.reasoning_effort)
     new_context_length = model.get("context_length")
     if not isinstance(new_context_length, int) or new_context_length <= 0:
         new_context_length = None
     extra_env["OPENAI_API_KEY"] = api_key
+    set_model_options(
+        hermes,
+        primary_id=DEFAULT_MODEL_OPTION_ID,
+        primary_name=model_name,
+        additional_options=additional_model_options,
+    )
 
     fallback_action = FALLBACK_ACTION_PRESERVE
     if args.clear_fallback:
@@ -855,12 +1067,14 @@ def main() -> int:
     print(f"{action} Hermes model config in: {mapping_path}")
     print(f"Upstream base URL: {base_url}")
     print(f"Default model: {model_name}")
+    print(f"Whitelisted models: {1 + len(additional_model_options)}")
     if model.get("context_length"):
         print(f"Context length: {model['context_length']}")
     print(f"Fallback provider: {format_fallback_provider(new_fallback_provider)}")
     print(f"Preserved users: {len(users)}")
     print(
         "Updated fields: hermes.model.*, hermes.extra_env.OPENAI_API_KEY, "
+        "hermes.model_options, "
         "hermes.config_overrides.auxiliary.compression.context_length, "
         "hermes.fallback_providers"
     )

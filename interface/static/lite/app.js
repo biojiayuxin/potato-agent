@@ -75,6 +75,7 @@ const dom = {
   tuiBridgeStatus: document.getElementById('tui-bridge-status'),
   chatTitle: document.getElementById('chat-title'),
   modelName: document.getElementById('model-name'),
+  modelSelect: document.getElementById('model-select'),
   composerForm: document.getElementById('composer-form'),
   promptInput: document.getElementById('prompt-input'),
   fileInput: document.getElementById('file-input'),
@@ -293,6 +294,13 @@ const getActiveSessionPendingApproval = () => {
 const syncActiveSessionUiState = () => {
   state.pendingApproval = getActiveSessionPendingApproval();
   state.isSending = isSessionBusy(getActivePersistentSessionId());
+};
+
+const isAnySessionBusy = () => busySessionIds.size > 0 || pendingApprovalsBySessionId.size > 0;
+
+const getModelDisplayName = (model) => {
+  if (!model) return '';
+  return String(model.name || model.model || model.id || '').trim();
 };
 
 const normalizeSessionSnapshot = (session) => {
@@ -1071,6 +1079,9 @@ const refreshComposerBusyState = () => {
   }
   if (dom.sendButtonIcon) {
     dom.sendButtonIcon.src = busy ? ICON_STOP_PATH : ICON_SEND_PATH;
+  }
+  if (dom.modelSelect) {
+    dom.modelSelect.disabled = isAnySessionBusy() || state.models.length <= 1;
   }
 };
 
@@ -2660,9 +2671,24 @@ const renderChatList = () => {
 const renderWorkspaceHeader = () => {
   dom.userEmail.textContent = state.user?.email || '';
   dom.chatTitle.textContent = getActiveChatTitle();
-  dom.modelName.textContent = state.selectedModel
-    ? `Model: ${state.selectedModel.name || state.selectedModel.id}`
-    : 'No model selected';
+  if (!dom.modelSelect) return;
+  const selectedId = String(state.selectedModel?.id || '').trim();
+  dom.modelSelect.innerHTML = '';
+  if (state.models.length === 0) {
+    const option = document.createElement('option');
+    option.value = '';
+    option.textContent = 'No model selected';
+    dom.modelSelect.append(option);
+  } else {
+    for (const model of state.models) {
+      const option = document.createElement('option');
+      option.value = String(model.id || '').trim();
+      option.textContent = getModelDisplayName(model);
+      dom.modelSelect.append(option);
+    }
+  }
+  dom.modelSelect.value = selectedId;
+  dom.modelSelect.disabled = isAnySessionBusy() || state.models.length <= 1;
 };
 
 const renderFileBrowserControls = () => {
@@ -2903,8 +2929,61 @@ const fetchModels = async () => {
   const response = await api('/api/models', { method: 'GET' });
   const json = await response.json();
   state.models = Array.isArray(json?.data) ? json.data : [];
-  state.selectedModel = state.models[0] || null;
+  const activeId = String(json?.active_id || json?.activeId || '').trim();
+  state.selectedModel = state.models.find((model) => String(model.id || '').trim() === activeId)
+    || state.models.find((model) => Boolean(model.is_active || model.isActive))
+    || state.models[0]
+    || null;
   renderWorkspaceHeader();
+};
+
+const switchActiveModel = async (modelId) => {
+  const requestedId = String(modelId || '').trim();
+  if (!requestedId || requestedId === String(state.selectedModel?.id || '').trim()) {
+    renderWorkspaceHeader();
+    return;
+  }
+  if (isAnySessionBusy()) {
+    showChatError('Cannot switch models while a response or approval is active.');
+    renderWorkspaceHeader();
+    return;
+  }
+
+  const previousModel = state.selectedModel;
+  const nextModel = state.models.find((model) => String(model.id || '').trim() === requestedId) || null;
+  if (!nextModel) {
+    renderWorkspaceHeader();
+    return;
+  }
+
+  try {
+    state.selectedModel = nextModel;
+    renderWorkspaceHeader();
+    const response = await api('/api/models/active', {
+      method: 'PUT',
+      body: JSON.stringify({ id: requestedId }),
+    });
+    const json = await response.json();
+    const activeModel = json?.model || nextModel;
+    state.models = state.models.map((model) => ({
+      ...model,
+      is_active: String(model.id || '').trim() === String(activeModel.id || requestedId).trim(),
+      isActive: String(model.id || '').trim() === String(activeModel.id || requestedId).trim(),
+    }));
+    state.selectedModel = {
+      ...nextModel,
+      ...activeModel,
+      is_active: true,
+      isActive: true,
+    };
+    closeTuiBridge();
+    showChatError('');
+    renderWorkspaceHeader();
+  } catch (error) {
+    state.selectedModel = previousModel;
+    renderWorkspaceHeader();
+    showChatError(String(error.message || 'Failed to switch model'));
+  }
 };
 
 const refreshSessions = async () => {
@@ -3586,6 +3665,10 @@ dom.newChatButton.addEventListener('click', () => {
   activeTuiSessionId = '';
   activePersistentSessionId = '';
   startNewChat().catch((error) => showChatError(error.message));
+});
+
+dom.modelSelect?.addEventListener('change', (event) => {
+  switchActiveModel(event.target.value).catch((error) => showChatError(error.message));
 });
 
 dom.composerForm.addEventListener('submit', async (event) => {

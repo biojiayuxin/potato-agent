@@ -17,6 +17,7 @@ from urllib import request as urllib_request
 import yaml
 
 from interface.mapping import HermesTarget, resolve_env_placeholders
+from interface.model_options import DEFAULT_REASONING_EFFORT
 
 
 ROOT_DIR = Path(__file__).resolve().parent
@@ -124,7 +125,7 @@ def build_config_data(config: dict[str, Any], user: HermesTarget) -> dict[str, A
         data["model"] = model_cfg
     _apply_fallback_config(data, hermes_cfg)
     data["terminal"] = terminal_cfg
-    data["agent"] = {"reasoning_effort": "high"}
+    data["agent"] = {"reasoning_effort": DEFAULT_REASONING_EFFORT}
 
     deep_merge(data, global_overrides)
     deep_merge(data, deepcopy(user.config_overrides))

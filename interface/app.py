@@ -98,6 +98,12 @@ from interface.mapping import (
     write_mapping,
     remove_user_mapping_entry,
 )
+from interface.model_options import (
+    ModelOptionsError,
+    normalize_model_options,
+    get_active_model_option_id,
+    patch_user_active_model,
+)
 from interface.tui_gateway_bridge import (
     TuiGatewayBridge,
     TuiGatewayBridgeError,
@@ -222,6 +228,10 @@ class SessionTurnSubmitRequest(BaseModel):
 
 class SessionApprovalRequest(BaseModel):
     choice: str
+
+
+class ActiveModelUpdateRequest(BaseModel):
+    id: str = ""
 
 
 def _normalized_file_browser_mode() -> str:
@@ -978,6 +988,20 @@ def _normalize_logical_session_row(
     )
 
     return normalized
+
+
+def _active_live_state_conflict(user_id: str) -> bool:
+    for live_state in list_live_session_states(user_id).values():
+        if not isinstance(live_state, dict):
+            continue
+        if str(live_state.get("status") or "").strip() in {
+            "queued",
+            "starting",
+            "running",
+            "awaiting_approval",
+        }:
+            return True
+    return False
 
 
 def _normalize_message_row(message: dict[str, Any]) -> dict[str, Any]:
@@ -1878,43 +1902,92 @@ async def signout(response: Response) -> dict[str, Any]:
 
 @app.get("/api/models")
 async def get_models(user: CurrentUser = Depends(get_current_user)) -> dict[str, Any]:
-    bridge: TuiGatewayBridge | None = None
     try:
-        bridge = await _get_tui_bridge_for_user(user)
-        model_options = await bridge.rpc("model.options", {})
-    except Exception as exc:
+        config = mapping_store.load_config(resolve_env=True)
+        model_options = normalize_model_options(config)
+        active_id = get_active_model_option_id(user.target, model_options)
+    except ModelOptionsError as exc:
         raise HTTPException(
-            status_code=503,
-            detail=f"Failed to load available models: {exc}",
+            status_code=500,
+            detail=f"Invalid model whitelist configuration: {exc}",
         ) from exc
-    finally:
-        if bridge is not None:
-            registry: TuiGatewayBridgeRegistry = app.state.tui_gateway_bridges
-            await registry.maybe_close_if_unused(user.id)
 
-    models: list[dict[str, str]] = []
-    seen_model_ids: set[str] = set()
+    return {
+        "data": [
+            option.to_public(
+                is_primary=option.id == model_options.primary_id,
+                is_active=option.id == active_id,
+            )
+            for option in model_options.options
+        ],
+        "primary_id": model_options.primary_id,
+        "active_id": active_id,
+    }
 
-    def add_model(model_id: Any) -> None:
-        normalized_model_id = str(model_id or "").strip()
-        if not normalized_model_id or normalized_model_id in seen_model_ids:
-            return
-        seen_model_ids.add(normalized_model_id)
-        models.append({"id": normalized_model_id, "name": normalized_model_id})
 
-    add_model(model_options.get("model"))
-    providers = model_options.get("providers")
-    if isinstance(providers, list):
-        for provider in providers:
-            if not isinstance(provider, dict):
-                continue
-            provider_models = provider.get("models")
-            if not isinstance(provider_models, list):
-                continue
-            for model_id in provider_models:
-                add_model(model_id)
+@app.put("/api/models/active")
+async def update_active_model(
+    payload: ActiveModelUpdateRequest,
+    user: CurrentUser = Depends(get_current_user),
+) -> dict[str, Any]:
+    requested_id = str(payload.id or "").strip()
+    if not requested_id:
+        raise HTTPException(status_code=400, detail="Model id is required")
 
-    return {"data": models}
+    try:
+        config = mapping_store.load_config(resolve_env=True)
+        model_options = normalize_model_options(config)
+    except ModelOptionsError as exc:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Invalid model whitelist configuration: {exc}",
+        ) from exc
+
+    selected = model_options.get(requested_id)
+    if selected is None:
+        raise HTTPException(status_code=400, detail="Model is not allowed")
+
+    active_id = get_active_model_option_id(user.target, model_options)
+    if requested_id == active_id:
+        return {
+            "ok": True,
+            "active_id": active_id,
+            "model": selected.to_public(
+                is_primary=selected.id == model_options.primary_id,
+                is_active=True,
+            ),
+        }
+
+    registry: TuiGatewayBridgeRegistry = app.state.tui_gateway_bridges
+    existing_bridge = await registry.get_existing(user.id)
+    if _active_live_state_conflict(user.id) or (
+        existing_bridge is not None and existing_bridge.has_inflight_activity()
+    ):
+        raise HTTPException(
+            status_code=409,
+            detail="Cannot switch models while a response or approval is active",
+        )
+
+    closed = await registry.close_for_reconfigure(user.id)
+    if not closed:
+        raise HTTPException(
+            status_code=409,
+            detail="Cannot switch models while a response or approval is active",
+        )
+
+    try:
+        await asyncio.to_thread(patch_user_active_model, user.target, selected)
+    except ModelOptionsError as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+    return {
+        "ok": True,
+        "active_id": selected.id,
+        "model": selected.to_public(
+            is_primary=selected.id == model_options.primary_id,
+            is_active=True,
+        ),
+    }
 
 
 @app.get("/api/sessions")

@@ -782,12 +782,31 @@ button.stretch {
   align-items: flex-end;
 }
 
-.theme-select {
+.model-select-wrap {
+  display: inline-flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-top: 4px;
+  max-width: min(360px, 48vw);
+}
+
+.theme-select,
+.model-select {
   border: 1px solid var(--border);
   border-radius: 10px;
   background: var(--panel);
   color: var(--text);
   padding: 7px 10px;
+}
+
+.model-select {
+  max-width: 100%;
+  min-width: min(260px, 48vw);
+}
+
+.model-select:disabled {
+  cursor: not-allowed;
+  opacity: 0.72;
 }
 
 .topbar h1 {
@@ -1807,6 +1826,22 @@ button.stretch {
 
   .composer-input-row {
     grid-template-columns: auto minmax(0, 1fr);
+  }
+
+  .topbar {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .topbar-actions {
+    justify-content: flex-start;
+  }
+
+  .model-select-wrap,
+  .model-select {
+    max-width: 100%;
+    min-width: 0;
+    width: 100%;
   }
 
   .attachment-chip {

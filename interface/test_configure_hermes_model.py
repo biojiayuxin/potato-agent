@@ -72,6 +72,12 @@ def _runtime_config() -> dict:
                 "base_url": "https://primary.example/v1",
                 "api_key": "sk-primary",
                 "context_length": 1050000,
+                "api_mode": "codex_responses",
+            },
+            "config_overrides": {
+                "agent": {
+                    "reasoning_effort": "xhigh",
+                },
             },
             "fallback_providers": [
                 {
@@ -131,6 +137,138 @@ def test_configure_hermes_model_writes_context_length() -> None:
         hermes["config_overrides"]["auxiliary"]["compression"]["context_length"]
         == 1050000
     )
+    assert hermes["model_options"]["primary"] == "primary"
+    assert hermes["model_options"]["options"][0] == {
+        "id": "primary",
+        "name": "gpt-5.4",
+        "provider": "custom",
+        "model": "gpt-5.4",
+        "base_url": "https://primary.example/v1",
+        "api_key": "sk-primary",
+        "context_length": 1050000,
+        "api_mode": "codex_responses",
+        "reasoning_effort": "xhigh",
+    }
+
+
+def test_configure_hermes_model_defaults_api_mode_and_reasoning_effort() -> None:
+    mapping_path = Path(tempfile.mkdtemp(prefix="potato-configure-model-test-")) / "users_mapping.yaml"
+
+    result = _run_configure(
+        mapping_path,
+        *_base_args(),
+    )
+
+    assert result.returncode == 0, result.stderr
+    hermes = yaml.safe_load(mapping_path.read_text(encoding="utf-8"))["hermes"]
+    assert hermes["model"]["api_mode"] == "codex_responses"
+    assert hermes["config_overrides"]["agent"]["reasoning_effort"] == "xhigh"
+    assert hermes["model_options"]["options"][0]["api_mode"] == "codex_responses"
+    assert hermes["model_options"]["options"][0]["reasoning_effort"] == "xhigh"
+
+
+def test_configure_hermes_model_allows_explicit_api_mode_and_reasoning_effort() -> None:
+    mapping_path = Path(tempfile.mkdtemp(prefix="potato-configure-model-test-")) / "users_mapping.yaml"
+
+    result = _run_configure(
+        mapping_path,
+        *_base_args(),
+        "--api-mode",
+        "chat_completions",
+        "--reasoning-effort",
+        "high",
+    )
+
+    assert result.returncode == 0, result.stderr
+    hermes = yaml.safe_load(mapping_path.read_text(encoding="utf-8"))["hermes"]
+    assert hermes["model"]["api_mode"] == "chat_completions"
+    assert hermes["config_overrides"]["agent"]["reasoning_effort"] == "high"
+    assert hermes["model_options"]["options"][0]["api_mode"] == "chat_completions"
+    assert hermes["model_options"]["options"][0]["reasoning_effort"] == "high"
+
+
+def test_configure_hermes_model_writes_optional_model_options() -> None:
+    mapping_path = Path(tempfile.mkdtemp(prefix="potato-configure-model-test-")) / "users_mapping.yaml"
+
+    result = _run_configure(
+        mapping_path,
+        *_base_args(),
+        "--option",
+        "id=fast,name=Fast,model=gpt-5.4-mini,base_url=https://fast.example/v1,api_key=sk-fast,context_length=500000",
+        "--option",
+        "id=deep,model=gpt-5.5,base_url=https://deep.example/v1,api_key=sk-deep,api_mode=chat_completions",
+    )
+
+    assert result.returncode == 0, result.stderr
+    hermes = yaml.safe_load(mapping_path.read_text(encoding="utf-8"))["hermes"]
+    assert hermes["model_options"] == {
+        "primary": "primary",
+        "options": [
+            {
+                "id": "primary",
+                "name": "gpt-5.4",
+                "provider": "custom",
+                "model": "gpt-5.4",
+                "base_url": "https://primary.example/v1",
+                "api_key": "sk-primary",
+                "api_mode": "codex_responses",
+                "reasoning_effort": "xhigh",
+            },
+            {
+                "id": "fast",
+                "name": "Fast",
+                "provider": "custom",
+                "model": "gpt-5.4-mini",
+                "base_url": "https://fast.example/v1",
+                "api_key": "sk-fast",
+                "context_length": 500000,
+                "api_mode": "codex_responses",
+                "reasoning_effort": "xhigh",
+            },
+            {
+                "id": "deep",
+                "name": "gpt-5.5",
+                "provider": "custom",
+                "model": "gpt-5.5",
+                "base_url": "https://deep.example/v1",
+                "api_key": "sk-deep",
+                "api_mode": "chat_completions",
+                "reasoning_effort": "xhigh",
+            },
+        ],
+    }
+
+
+def test_configure_hermes_model_rejects_too_many_optional_models() -> None:
+    mapping_path = Path(tempfile.mkdtemp(prefix="potato-configure-model-test-")) / "users_mapping.yaml"
+
+    result = _run_configure(
+        mapping_path,
+        *_base_args(),
+        "--option",
+        "id=one,model=one,base_url=https://one.example/v1,api_key=sk-one",
+        "--option",
+        "id=two,model=two,base_url=https://two.example/v1,api_key=sk-two",
+        "--option",
+        "id=three,model=three,base_url=https://three.example/v1,api_key=sk-three",
+    )
+
+    assert result.returncode == 1
+    assert "--option may be provided at most twice" in result.stderr
+
+
+def test_configure_hermes_model_rejects_duplicate_option_id() -> None:
+    mapping_path = Path(tempfile.mkdtemp(prefix="potato-configure-model-test-")) / "users_mapping.yaml"
+
+    result = _run_configure(
+        mapping_path,
+        *_base_args(),
+        "--option",
+        "id=primary,model=alt,base_url=https://alt.example/v1,api_key=sk-alt",
+    )
+
+    assert result.returncode == 1
+    assert "Duplicate model option id" in result.stderr
 
 
 def test_configure_hermes_model_rejects_invalid_context_length() -> None:
@@ -229,6 +367,7 @@ model:
   base_url: https://old-primary.example/v1
   api_key: sk-old-primary
   context_length: 800000
+  api_mode: chat_completions
 memory:
   enabled: true
 tools:
@@ -274,8 +413,10 @@ fallback_providers:
         "provider": "custom",
         "base_url": "https://primary.example/v1",
         "api_key": "sk-primary",
+        "api_mode": "codex_responses",
         "context_length": 1050000,
     }
+    assert data["agent"] == {"reasoning_effort": "xhigh"}
     assert data["auxiliary"]["compression"]["context_length"] == 1050000
     assert data["auxiliary"]["summarizer"] == {"model": "custom-summary"}
     assert data["memory"] == {"enabled": True}

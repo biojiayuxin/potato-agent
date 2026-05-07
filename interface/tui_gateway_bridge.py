@@ -537,6 +537,25 @@ class TuiGatewayBridgeRegistry:
         await bridge.ensure_started()
         return bridge
 
+    async def get_existing(self, user_id: str) -> TuiGatewayBridge | None:
+        async with self._lock:
+            return self._bridges.get(user_id)
+
+    async def close_for_reconfigure(self, user_id: str) -> bool:
+        async with self._lock:
+            bridge = self._bridges.get(user_id)
+            if bridge is None:
+                return True
+            if bridge.has_inflight_activity():
+                return False
+            self._bridges.pop(user_id, None)
+            close_task = self._close_tasks.pop(user_id, None)
+
+        if close_task is not None:
+            close_task.cancel()
+        await bridge.close()
+        return True
+
     async def maybe_close_if_unused(self, user_id: str) -> None:
         async with self._lock:
             bridge = self._bridges.get(user_id)
