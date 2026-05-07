@@ -4,16 +4,21 @@ from __future__ import annotations
 
 import argparse
 import getpass
+import os
+import pwd
+import re
 import sys
 from copy import deepcopy
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 
+import yaml
+
 from interface.hermes_service import DEFAULT_HERMES_BIN, DEFAULT_TERMINAL_TIMEOUT
 from interface.hermes_service import (
+    build_config_data,
     is_service_active,
-    install_user_runtime_files,
     require_binary,
     require_root,
     restart_service,
@@ -32,6 +37,12 @@ from interface.mapping import (
 
 DEFAULT_UPSTREAM_MODEL_NAME = "gpt-5.4"
 DEFAULT_FALLBACK_PROVIDER = "custom"
+FALLBACK_ACTION_PRESERVE = "preserve"
+FALLBACK_ACTION_SET = "set"
+FALLBACK_ACTION_CLEAR = "clear"
+OPENAI_API_KEY_LINE_RE = re.compile(
+    r"^(?P<prefix>\s*)(?:export\s+)?OPENAI_API_KEY\s*=.*$"
+)
 
 
 class ConfigureHermesModelError(RuntimeError):
@@ -101,7 +112,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--apply-to-users",
         action="store_true",
         help=(
-            "Rewrite Hermes config for all mapped users and restart their "
+            "Update Hermes config for all mapped users and restart their "
             "services after an interactive confirmation prompt."
         ),
     )
@@ -282,6 +293,35 @@ def clear_fallback_config(hermes: dict[str, Any]) -> None:
     hermes.pop("fallback_model", None)
 
 
+def _ensure_mapping(parent: dict[str, Any], key: str, path: str) -> dict[str, Any]:
+    value = parent.get(key)
+    if value is None:
+        value = {}
+        parent[key] = value
+    elif not isinstance(value, dict):
+        raise ConfigureHermesModelError(f"{path} must be a mapping/object.")
+    return value
+
+
+def set_compression_context_length(
+    hermes: dict[str, Any], context_length: int
+) -> None:
+    config_overrides = _ensure_mapping(
+        hermes, "config_overrides", "hermes.config_overrides"
+    )
+    auxiliary = _ensure_mapping(
+        config_overrides,
+        "auxiliary",
+        "hermes.config_overrides.auxiliary",
+    )
+    compression = _ensure_mapping(
+        auxiliary,
+        "compression",
+        "hermes.config_overrides.auxiliary.compression",
+    )
+    compression["context_length"] = context_length
+
+
 def ensure_mapping_structure(config: dict) -> tuple[dict, list]:
     if not isinstance(config, dict):
         raise ConfigureHermesModelError(
@@ -451,7 +491,7 @@ def confirm_apply_to_users(
         )
 
     print()
-    print("WARNING: about to rewrite Hermes config for existing users.")
+    print("WARNING: about to update Hermes config for existing users.")
     print(f"Mapping file: {mapping_path}")
     print("Config changes:")
     for line in format_change_summary(
@@ -473,12 +513,158 @@ def confirm_apply_to_users(
             f"- {target.username} ({target.linux_user}) -> {target.systemd_service}"
         )
     print("This will:")
-    print("- rewrite each user's ~/.hermes/config.yaml")
-    print("- rewrite each user's ~/.hermes/.env")
+    print("- patch each user's ~/.hermes/config.yaml")
+    print("- patch each user's ~/.hermes/.env")
     print("- restart each user's Hermes systemd service")
     print("- interrupt any in-flight requests on those Hermes instances")
     answer = input("Type APPLY to continue: ").strip()
     return answer == "APPLY"
+
+
+def _set_owner_and_mode(path: Path, uid: int, gid: int, mode: int) -> None:
+    os.chown(path, uid, gid)
+    os.chmod(path, mode)
+
+
+def _load_user_config(config_path: Path) -> dict[str, Any]:
+    if not config_path.exists():
+        return {}
+    try:
+        data = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
+    except yaml.YAMLError as exc:
+        raise ConfigureHermesModelError(
+            f"Invalid YAML in user Hermes config {config_path}: {exc}"
+        ) from exc
+    if not isinstance(data, dict):
+        raise ConfigureHermesModelError(
+            f"User Hermes config {config_path} must be a mapping/object."
+        )
+    return data
+
+
+def _patch_user_hermes_config(
+    existing: dict[str, Any],
+    generated: dict[str, Any],
+    *,
+    context_length: int | None,
+    fallback_action: str,
+) -> dict[str, Any]:
+    patched = deepcopy(existing)
+
+    generated_model = generated.get("model")
+    if not isinstance(generated_model, dict):
+        raise ConfigureHermesModelError("Generated Hermes config is missing model.")
+
+    model = _ensure_mapping(patched, "model", "model")
+    for key in ("default", "provider", "base_url", "api_key"):
+        model[key] = generated_model[key]
+
+    if context_length is not None:
+        model["context_length"] = context_length
+        auxiliary = _ensure_mapping(patched, "auxiliary", "auxiliary")
+        compression = _ensure_mapping(
+            auxiliary, "compression", "auxiliary.compression"
+        )
+        compression["context_length"] = context_length
+
+    if fallback_action == FALLBACK_ACTION_CLEAR:
+        patched.pop("fallback_providers", None)
+        patched.pop("fallback_model", None)
+    elif fallback_action == FALLBACK_ACTION_SET:
+        generated_providers = generated.get("fallback_providers")
+        if (
+            not isinstance(generated_providers, list)
+            or not generated_providers
+            or not isinstance(generated_providers[0], dict)
+        ):
+            raise ConfigureHermesModelError(
+                "Generated Hermes config is missing fallback_providers[0]."
+            )
+        existing_providers = patched.get("fallback_providers")
+        tail = existing_providers[1:] if isinstance(existing_providers, list) else []
+        patched["fallback_providers"] = [
+            deepcopy(generated_providers[0]),
+            *deepcopy(tail),
+        ]
+    elif fallback_action != FALLBACK_ACTION_PRESERVE:
+        raise ConfigureHermesModelError(f"Unknown fallback action: {fallback_action}")
+
+    return patched
+
+
+def _quote_env_value(value: str) -> str:
+    allowed = set("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_/-.:")
+    if value and all(char in allowed for char in value):
+        return value
+    return repr(value)
+
+
+def _patch_env_content(existing: str | None, api_key: str) -> str:
+    rendered = f"OPENAI_API_KEY={_quote_env_value(api_key)}"
+    if existing is None:
+        return f"{rendered}\n"
+
+    lines = existing.splitlines(keepends=True)
+    for index, line in enumerate(lines):
+        body = line[:-1] if line.endswith("\n") else line
+        newline = "\n" if line.endswith("\n") else ""
+        match = OPENAI_API_KEY_LINE_RE.match(body)
+        if match:
+            prefix = match.group("prefix") or ""
+            lines[index] = f"{prefix}{rendered}{newline}"
+            return "".join(lines)
+
+    separator = "" if existing.endswith("\n") or not existing else "\n"
+    return f"{existing}{separator}{rendered}\n"
+
+
+def apply_user_runtime_model_patch(
+    resolved_config: dict[str, Any],
+    target,
+    *,
+    context_length: int | None,
+    fallback_action: str,
+) -> None:
+    try:
+        pw = pwd.getpwnam(target.linux_user)
+    except KeyError as exc:
+        raise RuntimeError(f"Linux user {target.linux_user!r} does not exist.") from exc
+
+    gid = pw.pw_gid
+    for directory in [
+        target.home_dir,
+        target.workdir,
+        target.hermes_home,
+        target.hermes_home / "home",
+    ]:
+        directory.mkdir(parents=True, exist_ok=True)
+        _set_owner_and_mode(directory, pw.pw_uid, gid, 0o700)
+
+    generated = build_config_data(resolved_config, target)
+
+    config_path = target.hermes_home / "config.yaml"
+    config_exists = config_path.exists()
+    patched_config = _patch_user_hermes_config(
+        _load_user_config(config_path) if config_exists else deepcopy(generated),
+        generated,
+        context_length=context_length,
+        fallback_action=fallback_action,
+    )
+    config_path.write_text(
+        yaml.safe_dump(patched_config, sort_keys=False, allow_unicode=False),
+        encoding="utf-8",
+    )
+    _set_owner_and_mode(config_path, pw.pw_uid, gid, 0o600)
+
+    model = generated.get("model") if isinstance(generated.get("model"), dict) else {}
+    api_key = str(model.get("api_key") or "").strip()
+    if not api_key:
+        raise ConfigureHermesModelError("Generated Hermes config is missing model.api_key.")
+
+    env_path = target.hermes_home / ".env"
+    existing_env = env_path.read_text(encoding="utf-8") if env_path.exists() else None
+    env_path.write_text(_patch_env_content(existing_env, api_key), encoding="utf-8")
+    _set_owner_and_mode(env_path, pw.pw_uid, gid, 0o600)
 
 
 def apply_model_config_to_users(
@@ -494,6 +680,8 @@ def apply_model_config_to_users(
     new_api_key: str,
     old_fallback_provider: dict[str, Any] | None,
     new_fallback_provider: dict[str, Any] | None,
+    context_length_provided: bool = True,
+    fallback_action: str = FALLBACK_ACTION_PRESERVE,
 ) -> None:
     mapping_store = MappingStore(mapping_path)
     targets = mapping_store.load_targets()
@@ -503,7 +691,6 @@ def apply_model_config_to_users(
 
     require_root()
     require_binary("systemctl")
-    require_binary("useradd")
 
     if not confirm_apply_to_users(
         mapping_path,
@@ -525,7 +712,12 @@ def apply_model_config_to_users(
     resolved_config = load_mapping(mapping_path, resolve_env=True)
     for target in targets:
         print(f"Applying config for user: {target.username}")
-        install_user_runtime_files(resolved_config, target)
+        apply_user_runtime_model_patch(
+            resolved_config,
+            target,
+            context_length=new_context_length if context_length_provided else None,
+            fallback_action=fallback_action,
+        )
         if is_service_active(target.systemd_service):
             restart_service(target.systemd_service)
             wait_for_service_active(target.systemd_service)
@@ -609,13 +801,16 @@ def main() -> int:
     context_length = parse_context_length(args.context_length)
     if context_length is not None:
         model["context_length"] = context_length
+        set_compression_context_length(hermes, context_length)
     new_context_length = model.get("context_length")
     if not isinstance(new_context_length, int) or new_context_length <= 0:
         new_context_length = None
     extra_env["OPENAI_API_KEY"] = api_key
 
+    fallback_action = FALLBACK_ACTION_PRESERVE
     if args.clear_fallback:
         clear_fallback_config(hermes)
+        fallback_action = FALLBACK_ACTION_CLEAR
     elif fallback_args_requested(args):
         existing_fallback = _first_fallback_provider(hermes) or {}
         fallback_provider = resolve_value(
@@ -649,6 +844,7 @@ def main() -> int:
             base_url=fallback_base_url,
             api_key=fallback_api_key,
         )
+        fallback_action = FALLBACK_ACTION_SET
 
     new_fallback_provider = _first_fallback_provider(hermes)
 
@@ -665,6 +861,7 @@ def main() -> int:
     print(f"Preserved users: {len(users)}")
     print(
         "Updated fields: hermes.model.*, hermes.extra_env.OPENAI_API_KEY, "
+        "hermes.config_overrides.auxiliary.compression.context_length, "
         "hermes.fallback_providers"
     )
     print("File mode: 600")
@@ -684,6 +881,8 @@ def main() -> int:
             new_api_key=api_key,
             old_fallback_provider=current_fallback_provider,
             new_fallback_provider=new_fallback_provider,
+            context_length_provided=context_length is not None,
+            fallback_action=fallback_action,
         )
 
     return 0

@@ -5,6 +5,7 @@ import subprocess
 import sys
 import tempfile
 from pathlib import Path
+from types import SimpleNamespace
 
 import yaml
 
@@ -41,6 +42,47 @@ def _base_args() -> list[str]:
         "--api-key",
         "sk-primary",
     ]
+
+
+def _target(tmp_path: Path) -> SimpleNamespace:
+    return SimpleNamespace(
+        username="alice",
+        email="alice@example.com",
+        display_name="Alice",
+        linux_user="hmx_alice",
+        home_dir=tmp_path / "home",
+        hermes_home=tmp_path / "home" / ".hermes",
+        workdir=tmp_path / "home" / "work",
+        api_server_host="127.0.0.1",
+        api_port=8643,
+        api_key="sk-user",
+        api_server_model_name="Hermes",
+        systemd_service="hermes-alice.service",
+        extra_env={"OPENAI_API_KEY": "sk-primary"},
+        config_overrides={},
+    )
+
+
+def _runtime_config() -> dict:
+    return {
+        "hermes": {
+            "model": {
+                "default": "gpt-5.4",
+                "provider": "custom",
+                "base_url": "https://primary.example/v1",
+                "api_key": "sk-primary",
+                "context_length": 1050000,
+            },
+            "fallback_providers": [
+                {
+                    "provider": "custom",
+                    "model": "gpt-5.4-mini",
+                    "base_url": "https://fallback.example/v1",
+                    "api_key": "sk-fallback",
+                }
+            ],
+        }
+    }
 
 
 def test_configure_hermes_model_writes_standard_fallback_providers() -> None:
@@ -83,7 +125,12 @@ def test_configure_hermes_model_writes_context_length() -> None:
 
     assert result.returncode == 0, result.stderr
     data = yaml.safe_load(mapping_path.read_text(encoding="utf-8"))
-    assert data["hermes"]["model"]["context_length"] == 1050000
+    hermes = data["hermes"]
+    assert hermes["model"]["context_length"] == 1050000
+    assert (
+        hermes["config_overrides"]["auxiliary"]["compression"]["context_length"]
+        == 1050000
+    )
 
 
 def test_configure_hermes_model_rejects_invalid_context_length() -> None:
@@ -168,6 +215,242 @@ users: []
     assert "fallback_model" not in hermes
 
 
+def test_apply_user_runtime_patch_preserves_unmanaged_config(
+    monkeypatch, tmp_path
+) -> None:
+    target = _target(tmp_path)
+    target.hermes_home.mkdir(parents=True)
+    config_path = target.hermes_home / "config.yaml"
+    config_path.write_text(
+        """
+model:
+  default: old-model
+  provider: custom
+  base_url: https://old-primary.example/v1
+  api_key: sk-old-primary
+  context_length: 800000
+memory:
+  enabled: true
+tools:
+  filesystem: true
+terminal:
+  backend: local
+  timeout: 300
+auxiliary:
+  summarizer:
+    model: custom-summary
+  compression:
+    context_length: 800000
+fallback_providers:
+  - provider: custom
+    model: keep-fallback
+    base_url: https://keep-fallback.example/v1
+    api_key: sk-keep-fallback
+""".lstrip(),
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(
+        configure_hermes_model.pwd,
+        "getpwnam",
+        lambda username: SimpleNamespace(pw_uid=123, pw_gid=456),
+    )
+    monkeypatch.setattr(
+        configure_hermes_model,
+        "_set_owner_and_mode",
+        lambda path, uid, gid, mode: None,
+    )
+
+    configure_hermes_model.apply_user_runtime_model_patch(
+        _runtime_config(),
+        target,
+        context_length=1050000,
+        fallback_action=configure_hermes_model.FALLBACK_ACTION_PRESERVE,
+    )
+
+    data = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    assert data["model"] == {
+        "default": "gpt-5.4",
+        "provider": "custom",
+        "base_url": "https://primary.example/v1",
+        "api_key": "sk-primary",
+        "context_length": 1050000,
+    }
+    assert data["auxiliary"]["compression"]["context_length"] == 1050000
+    assert data["auxiliary"]["summarizer"] == {"model": "custom-summary"}
+    assert data["memory"] == {"enabled": True}
+    assert data["tools"] == {"filesystem": True}
+    assert data["terminal"] == {"backend": "local", "timeout": 300}
+    assert data["fallback_providers"][0]["model"] == "keep-fallback"
+
+
+def test_apply_user_runtime_patch_updates_only_openai_api_key_in_env(
+    monkeypatch, tmp_path
+) -> None:
+    target = _target(tmp_path)
+    target.hermes_home.mkdir(parents=True)
+    env_path = target.hermes_home / ".env"
+    env_path.write_text(
+        "# keep this comment\nFOO=bar\nOPENAI_API_KEY=sk-old\n\nBAZ=qux\n",
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(
+        configure_hermes_model.pwd,
+        "getpwnam",
+        lambda username: SimpleNamespace(pw_uid=123, pw_gid=456),
+    )
+    monkeypatch.setattr(
+        configure_hermes_model,
+        "_set_owner_and_mode",
+        lambda path, uid, gid, mode: None,
+    )
+
+    configure_hermes_model.apply_user_runtime_model_patch(
+        _runtime_config(),
+        target,
+        context_length=None,
+        fallback_action=configure_hermes_model.FALLBACK_ACTION_PRESERVE,
+    )
+
+    assert env_path.read_text(encoding="utf-8") == (
+        "# keep this comment\nFOO=bar\nOPENAI_API_KEY=sk-primary\n\nBAZ=qux\n"
+    )
+
+
+def test_apply_user_runtime_patch_appends_openai_api_key_to_env(
+    monkeypatch, tmp_path
+) -> None:
+    target = _target(tmp_path)
+    target.hermes_home.mkdir(parents=True)
+    env_path = target.hermes_home / ".env"
+    env_path.write_text("# keep\nFOO=bar", encoding="utf-8")
+
+    monkeypatch.setattr(
+        configure_hermes_model.pwd,
+        "getpwnam",
+        lambda username: SimpleNamespace(pw_uid=123, pw_gid=456),
+    )
+    monkeypatch.setattr(
+        configure_hermes_model,
+        "_set_owner_and_mode",
+        lambda path, uid, gid, mode: None,
+    )
+
+    configure_hermes_model.apply_user_runtime_model_patch(
+        _runtime_config(),
+        target,
+        context_length=None,
+        fallback_action=configure_hermes_model.FALLBACK_ACTION_PRESERVE,
+    )
+
+    assert env_path.read_text(encoding="utf-8") == (
+        "# keep\nFOO=bar\nOPENAI_API_KEY=sk-primary\n"
+    )
+
+
+def test_apply_user_runtime_patch_preserves_fallback_when_unrequested(
+    monkeypatch, tmp_path
+) -> None:
+    target = _target(tmp_path)
+    target.hermes_home.mkdir(parents=True)
+    config_path = target.hermes_home / "config.yaml"
+    config_path.write_text(
+        """
+model:
+  default: old-model
+  provider: custom
+  base_url: https://old.example/v1
+  api_key: sk-old
+fallback_providers:
+  - provider: custom
+    model: keep-fallback
+    base_url: https://keep.example/v1
+    api_key: sk-keep
+""".lstrip(),
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(
+        configure_hermes_model.pwd,
+        "getpwnam",
+        lambda username: SimpleNamespace(pw_uid=123, pw_gid=456),
+    )
+    monkeypatch.setattr(
+        configure_hermes_model,
+        "_set_owner_and_mode",
+        lambda path, uid, gid, mode: None,
+    )
+
+    configure_hermes_model.apply_user_runtime_model_patch(
+        _runtime_config(),
+        target,
+        context_length=None,
+        fallback_action=configure_hermes_model.FALLBACK_ACTION_PRESERVE,
+    )
+
+    data = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    assert data["fallback_providers"] == [
+        {
+            "provider": "custom",
+            "model": "keep-fallback",
+            "base_url": "https://keep.example/v1",
+            "api_key": "sk-keep",
+        }
+    ]
+
+
+def test_apply_user_runtime_patch_clear_fallback_only_removes_fallback(
+    monkeypatch, tmp_path
+) -> None:
+    target = _target(tmp_path)
+    target.hermes_home.mkdir(parents=True)
+    config_path = target.hermes_home / "config.yaml"
+    config_path.write_text(
+        """
+model:
+  default: old-model
+  provider: custom
+  base_url: https://old.example/v1
+  api_key: sk-old
+memory:
+  enabled: true
+fallback_model:
+  provider: custom
+  model: legacy-fallback
+fallback_providers:
+  - provider: custom
+    model: keep-fallback
+    base_url: https://keep.example/v1
+    api_key: sk-keep
+""".lstrip(),
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(
+        configure_hermes_model.pwd,
+        "getpwnam",
+        lambda username: SimpleNamespace(pw_uid=123, pw_gid=456),
+    )
+    monkeypatch.setattr(
+        configure_hermes_model,
+        "_set_owner_and_mode",
+        lambda path, uid, gid, mode: None,
+    )
+
+    configure_hermes_model.apply_user_runtime_model_patch(
+        _runtime_config(),
+        target,
+        context_length=None,
+        fallback_action=configure_hermes_model.FALLBACK_ACTION_CLEAR,
+    )
+
+    data = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    assert "fallback_providers" not in data
+    assert "fallback_model" not in data
+    assert data["memory"] == {"enabled": True}
+
+
 def test_apply_model_config_to_users_does_not_wait_for_legacy_models_endpoint(
     monkeypatch, tmp_path
 ) -> None:
@@ -209,8 +492,10 @@ users:
     monkeypatch.setattr(configure_hermes_model, "require_binary", lambda name: None)
     monkeypatch.setattr(
         configure_hermes_model,
-        "install_user_runtime_files",
-        lambda config, target: calls.append(("install", target.systemd_service)),
+        "apply_user_runtime_model_patch",
+        lambda config, target, **kwargs: calls.append(
+            ("install", target.systemd_service)
+        ),
     )
     monkeypatch.setattr(configure_hermes_model, "is_service_active", lambda name: True)
     monkeypatch.setattr(
