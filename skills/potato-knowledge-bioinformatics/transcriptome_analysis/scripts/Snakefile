@@ -1,0 +1,205 @@
+# ============================================================
+# RNA-seq Snakemake 流程 (v2.3)
+# 功能：构建索引 → 质控 → 比对 → 定量 → 差异分析
+# ============================================================
+
+import os
+
+# 加载配置文件
+configfile: "config.yaml"
+
+# 参数提取（增加兼容性处理）
+INPUT_DIR = os.path.abspath(config["input_dir"])
+GFF_FILE = os.path.abspath(config["gff_file"])
+THREADS = config.get("threads", 8)
+READ_LENGTH = config.get("read_length", 150)
+CONTROL_GROUP = config["groups"]["control"]
+TREAT_GROUP = config["groups"]["treatment"]
+SAMPLES = config["samples"]
+FASTP_EXTRA = config.get("fastp_extra", "")
+FASTP_TIMEOUT = config.get("fastp_timeout", "3h")
+FASTP_KILL_AFTER = config.get("fastp_kill_after", "5m")
+
+# 索引处理逻辑
+# 如果提供了 hisat2_index_prefix 且文件存在，则使用它；
+# 否则，从 genome_fasta 构建。
+GENOME_FASTA = os.path.abspath(config["genome_fasta"]) if "genome_fasta" in config else ""
+INDEX_PREFIX = config.get("hisat2_index_prefix", "01-hisat2/index/genome")
+
+# ============================================================
+# 目标规则
+# ============================================================
+rule all:
+    input:
+        # 索引标记文件
+        "01-hisat2/.hisat2_index.done",
+        # QC 结果
+        expand("00-fastp/{sample}_R1.fq.gz", sample=SAMPLES),
+        # 比对结果
+        expand("01-hisat2/{sample}_hisat.sort.bam", sample=SAMPLES),
+        # 定量矩阵
+        "02-stringtie/gene_count_matrix.csv",
+        "02-stringtie/transcript_count_matrix.csv",
+        # 差异分析结果
+        "03-deseq2/deseq2_result.xls",
+        "03-deseq2/MA_plot.pdf",
+        "03-deseq2/volcano_plot.pdf",
+        "03-deseq2/pca_plot.pdf"
+
+# ============================================================
+# 步骤0：构建 HISAT2 索引
+# 使用标记文件而非具体索引文件，避免文件数量不确定的问题
+# ============================================================
+rule hisat2_index:
+    input:
+        fasta = GENOME_FASTA if GENOME_FASTA else []  # 可为空（用户已有索引）
+    output:
+        touch("01-hisat2/.hisat2_index.done")
+    threads: THREADS
+    log:
+        "logs/hisat2_index.log"
+    params:
+        index = INDEX_PREFIX
+    shell:
+        """
+        mkdir -p $(dirname {params.index})
+        # 如果索引文件已存在，跳过构建
+        if [ -f "{params.index}.1.ht2" ]; then
+            echo "[INFO] 索引已存在，跳过构建" > {log}
+        elif [ -n "{input.fasta}" ] && [ -f "{input.fasta}" ]; then
+            # 从 FASTA 构建
+            hisat2-build -p {threads} {input.fasta} {params.index} > {log} 2>&1
+        else
+            echo "[ERROR] 未找到索引文件且未提供 genome_fasta" >&2
+            exit 1
+        fi
+        """
+
+# ============================================================
+# 步骤1：原始数据质控（fastp）
+# ============================================================
+rule fastp:
+    input:
+        r1 = lambda wildcards: os.path.join(INPUT_DIR, f"{wildcards.sample}_R1.fq.gz"),
+        r2 = lambda wildcards: os.path.join(INPUT_DIR, f"{wildcards.sample}_R2.fq.gz")
+    output:
+        r1 = "00-fastp/{sample}_R1.fq.gz",
+        r2 = "00-fastp/{sample}_R2.fq.gz",
+        json = "00-fastp/{sample}.json",
+        html = "00-fastp/{sample}.html"
+    threads: THREADS
+    params:
+        extra = FASTP_EXTRA,
+        timeout = FASTP_TIMEOUT,
+        kill_after = FASTP_KILL_AFTER
+    shell:
+        """
+        mkdir -p 00-fastp
+        timeout --kill-after={params.kill_after} {params.timeout} fastp \
+              -i {input.r1} -o {output.r1} \
+              -I {input.r2} -O {output.r2} \
+              -j {output.json} \
+              -h {output.html} \
+              -w {threads} \
+              {params.extra}
+        """
+
+# ============================================================
+# 步骤2：参考基因组比对（hisat2 + samtools）
+# ============================================================
+rule hisat2_align:
+    input:
+        r1 = "00-fastp/{sample}_R1.fq.gz",
+        r2 = "00-fastp/{sample}_R2.fq.gz",
+        idx = "01-hisat2/.hisat2_index.done"  # 依赖索引标记文件
+    output:
+        bam = "01-hisat2/{sample}_hisat.sort.bam",
+        bai = "01-hisat2/{sample}_hisat.sort.bam.bai"
+    threads: THREADS
+    params:
+        index = INDEX_PREFIX
+    shell:
+        """
+        hisat2 -p {threads} -x {params.index} \
+               -1 {input.r1} -2 {input.r2} \
+               -S 01-hisat2/{wildcards.sample}.sam
+
+        samtools view -@ {threads} -bS 01-hisat2/{wildcards.sample}.sam \
+            -o 01-hisat2/{wildcards.sample}.bam
+
+        samtools sort -@ {threads} 01-hisat2/{wildcards.sample}.bam \
+            -o {output.bam}
+
+        samtools index {output.bam} {output.bai}
+
+        rm -f 01-hisat2/{wildcards.sample}.sam 01-hisat2/{wildcards.sample}.bam
+        """
+
+# ============================================================
+# 步骤3：表达定量（stringtie）
+# ============================================================
+rule stringtie_quant:
+    input:
+        "01-hisat2/{sample}_hisat.sort.bam"
+    output:
+        gtf = "02-stringtie/{sample}_stringtie/{sample}.gtf",
+        abundance = "02-stringtie/{sample}_stringtie/{sample}_gene_abundance.txt"
+    threads: THREADS
+    params:
+        gff = GFF_FILE
+    shell:
+        """
+        mkdir -p 02-stringtie/{wildcards.sample}_stringtie
+        stringtie {input} \
+            -G {params.gff} \
+            -p {threads} \
+            -o {output.gtf} \
+            -A {output.abundance} \
+            -B -e
+        """
+
+rule prep_count_matrix:
+    input:
+        expand("02-stringtie/{sample}_stringtie/{sample}.gtf", sample=SAMPLES)
+    output:
+        gene = "02-stringtie/gene_count_matrix.csv",
+        transcript = "02-stringtie/transcript_count_matrix.csv"
+    params:
+        read_length = READ_LENGTH
+    shell:
+        """
+        # 使用任务目录中的脚本执行矩阵生成
+        python3 prepDE.py3 \
+            -i 02-stringtie \
+            -g {output.gene} \
+            -t {output.transcript} \
+            -l {params.read_length}
+        """
+
+# ============================================================
+# 步骤4：差异分析（DESeq2）
+# ============================================================
+rule deseq2_analysis:
+    input:
+        count_matrix = "02-stringtie/gene_count_matrix.csv",
+        groups = "groups.txt"
+    output:
+        result = "03-deseq2/deseq2_result.xls",
+        ma = "03-deseq2/MA_plot.pdf",
+        volcano = "03-deseq2/volcano_plot.pdf",
+        pca = "03-deseq2/pca_plot.pdf"
+    params:
+        control = CONTROL_GROUP,
+        treat = TREAT_GROUP
+    shell:
+        """
+        mkdir -p 03-deseq2
+        Rscript run_deseq2.R
+        """
+
+# ============================================================
+# 辅助规则
+# ============================================================
+rule clean:
+    shell:
+        "rm -rf 00-fastp 01-hisat2 02-stringtie 03-deseq2 logs"

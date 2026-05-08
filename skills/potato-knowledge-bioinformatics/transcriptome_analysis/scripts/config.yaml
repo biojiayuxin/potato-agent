@@ -1,0 +1,46 @@
+# ============================================================
+# RNA-seq 分析配置文件
+# 智能体根据实际参数生成
+# ============================================================
+
+# 原始测序数据目录（包含 *_R1.fq.gz 和 *_R2.fq.gz）
+input_dir: ""
+
+# 参考基因组 FASTA 文件（用于构建索引）
+genome_fasta: ""
+
+# HISAT2 索引前缀（不含 .ht2 后缀）
+# 若索引已存在，可直接指向现有索引前缀
+hisat2_index_prefix: "01-hisat2/index/genome"
+
+# 基因注释文件路径（GFF/GFF3 格式）
+gff_file: ""
+
+# 线程数
+threads: 8
+
+# fastp 额外参数与卡死/假死超时保护
+# 正常样本不受影响；若 fastp 超过 fastp_timeout 仍不退出，timeout 会终止该 rule，Snakemake 可断点重跑。
+fastp_extra: ""
+fastp_timeout: "3h"
+fastp_kill_after: "5m"
+
+# read 长度（用于 prepDE.py3）
+read_length: 150
+
+# 样本列表
+samples: []
+
+# 分组信息
+groups:
+  control: ""
+  treatment: ""
+
+# ============================================================
+# 分组文件 groups.txt 格式（需单独创建）：
+# sample_name	group
+# sample1	CK
+# sample2	CK
+# sample3	Treat
+# sample4	Treat
+# ============================================================

@@ -21,6 +21,32 @@ DEFAULT_START_PORT = 8643
 DEFAULT_API_SERVER_HOST = "127.0.0.1"
 DEFAULT_MODEL_NAME = "Hermes"
 ENV_PLACEHOLDER_RE = re.compile(r"^\$\{([^}]+)\}$")
+DEFAULT_USERADD_CONFIG_PATH = Path("/etc/default/useradd")
+
+
+def _load_default_linux_home_base() -> Path:
+    try:
+        content = DEFAULT_USERADD_CONFIG_PATH.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return Path("/home")
+
+    for line in content.splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        if not stripped.startswith("HOME="):
+            continue
+        home_base = stripped.split("=", 1)[1].strip()
+        if home_base:
+            return Path(home_base)
+    return Path("/home")
+
+
+DEFAULT_LINUX_HOME_BASE = _load_default_linux_home_base()
+
+
+def _default_home_dir(linux_user: str) -> Path:
+    return (DEFAULT_LINUX_HOME_BASE / linux_user).resolve()
 
 
 @dataclass(frozen=True)
@@ -170,7 +196,9 @@ def _build_target(config: dict[str, Any], raw_user: dict[str, Any]) -> HermesTar
 
     username = str(raw_user.get("username") or "").strip()
     linux_user = str(raw_user.get("linux_user") or f"hmx_{username}").strip()
-    home_dir = Path(str(raw_user.get("home_dir") or f"/home/{linux_user}")).resolve()
+    home_dir = Path(
+        str(raw_user.get("home_dir") or _default_home_dir(linux_user))
+    ).resolve()
     hermes_home = Path(
         str(raw_user.get("hermes_home") or (home_dir / ".hermes"))
     ).resolve()
@@ -294,15 +322,17 @@ def upsert_user_mapping_entry(
             break
 
     slug = slugify_username(username)
+    default_linux_user = f"hmx_{username}"
     if entry is None:
+        default_home_dir = _default_home_dir(default_linux_user)
         entry = {
             "username": username,
             "email": email,
             "display_name": display_name,
-            "linux_user": f"hmx_{username}",
-            "home_dir": f"/home/hmx_{username}",
-            "hermes_home": f"/home/hmx_{username}/.hermes",
-            "workdir": f"/home/hmx_{username}",
+            "linux_user": default_linux_user,
+            "home_dir": str(default_home_dir),
+            "hermes_home": str(default_home_dir / ".hermes"),
+            "workdir": str(default_home_dir),
             "api_port": select_next_port(config),
             "api_server_model_name": DEFAULT_MODEL_NAME,
             "systemd_service": f"hermes-{slug}.service",
@@ -311,10 +341,14 @@ def upsert_user_mapping_entry(
 
     entry["email"] = email
     entry["display_name"] = display_name
-    entry.setdefault("linux_user", f"hmx_{username}")
-    entry.setdefault("home_dir", f"/home/{entry['linux_user']}")
-    entry.setdefault("hermes_home", f"{entry['home_dir']}/.hermes")
-    entry.setdefault("workdir", f"{entry['home_dir']}")
+    entry.setdefault("linux_user", default_linux_user)
+    home_dir = Path(
+        str(entry.get("home_dir") or _default_home_dir(str(entry["linux_user"])))
+    )
+    home_dir = home_dir.resolve()
+    entry.setdefault("home_dir", str(home_dir))
+    entry.setdefault("hermes_home", str(home_dir / ".hermes"))
+    entry.setdefault("workdir", str(home_dir))
     entry.setdefault("api_port", select_next_port(config))
     entry.setdefault("api_server_model_name", DEFAULT_MODEL_NAME)
     entry.setdefault("systemd_service", f"hermes-{slug}.service")

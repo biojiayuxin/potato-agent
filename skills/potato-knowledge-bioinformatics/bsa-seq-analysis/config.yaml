@@ -1,0 +1,18 @@
+# BSA-Seq 分析配置文件
+# 生成时间: 2026-03-17 22:58
+
+# 必需参数
+genome_fa: /work/genomes/RH.fa
+fastq_dir: /data/data_BSA_20
+sample_A: CR-F2-7-P    # 突变型混池
+sample_B: CR-F2-7-G    # 野生型混池
+chr_prefix: RH_chr
+chr_num: 12
+threads: 20
+
+# 可选参数
+qual_threshold: 50
+window_size: 1000000
+step_size: 100000
+delta_threshold: 0.4
+

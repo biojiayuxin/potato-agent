@@ -1,0 +1,16 @@
+interface:
+  display_name: "Potato Gene Search"
+  short_description: "Search potato DMv8 genes and fetch compact gene details"
+  default_prompt: >-
+    Use $potato-gene-search to search Potato Knowledge Hub gene APIs. Use search
+    for symbols/reported IDs/uncertain queries, details for DMv8 gene IDs, and
+    do not return full cds/pep/genomic/promoter sequences unless the user
+    explicitly asks for sequences.
+
+policy:
+  allow_implicit_invocation: true
+
+hints:
+  - "DM8CxxGxxxxx IDs can go directly to details."
+  - "Symbols, LOC/PGSC/Soltu/St_E4 IDs, and partial IDs should use search first."
+  - "For details, default output omits full cds/pep/genomic/promoter and keeps sequence_summary only."

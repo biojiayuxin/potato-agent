@@ -6,6 +6,7 @@ import json
 import os
 import pwd
 import shutil
+import stat
 import subprocess
 import time
 from copy import deepcopy
@@ -28,6 +29,13 @@ DEFAULT_SERVICE_RESTART_SEC = 3
 DEFAULT_TERMINAL_TIMEOUT = 180
 DEFAULT_RUNTIME_READY_TIMEOUT = 45
 DEFAULT_RUNTIME_LOCK_DIR = Path("/run/potato-agent/runtime-start")
+DEFAULT_SOUL_TEMPLATE_PATH = REPO_ROOT / "soul_settings" / "SOUL.md"
+MANAGED_BIOINFORMATICS_SKILLS_DIR_NAME = "potato-knowledge-bioinformatics"
+DEFAULT_BIOINFORMATICS_SKILLS_PATH = (
+    REPO_ROOT / "skills" / MANAGED_BIOINFORMATICS_SKILLS_DIR_NAME
+)
+
+
 def _run_command(command: list[str]) -> str:
     result = subprocess.run(command, capture_output=True, text=True, check=False)
     if result.returncode != 0:
@@ -91,6 +99,45 @@ def get_linux_user_info(username: str) -> dict[str, Any]:
 def _set_owner_and_mode(path: Path, uid: int, gid: int, mode: int) -> None:
     os.chown(path, uid, gid)
     os.chmod(path, mode)
+
+
+def _set_owner_preserving_mode(path: Path, uid: int, gid: int) -> None:
+    _set_owner_and_mode(path, uid, gid, stat.S_IMODE(path.stat().st_mode))
+
+
+def _set_owner_recursive(path: Path, uid: int, gid: int) -> None:
+    _set_owner_preserving_mode(path, uid, gid)
+    for child in path.rglob("*"):
+        _set_owner_preserving_mode(child, uid, gid)
+
+
+def install_soul_file(user: HermesTarget, *, uid: int, gid: int) -> None:
+    if not DEFAULT_SOUL_TEMPLATE_PATH.is_file():
+        raise RuntimeError(f"SOUL template not found: {DEFAULT_SOUL_TEMPLATE_PATH}")
+
+    soul_path = user.hermes_home / "SOUL.md"
+    shutil.copyfile(DEFAULT_SOUL_TEMPLATE_PATH, soul_path)
+    _set_owner_and_mode(soul_path, uid, gid, 0o600)
+
+
+def install_bioinformatics_skills(user: HermesTarget, *, uid: int, gid: int) -> None:
+    if not DEFAULT_BIOINFORMATICS_SKILLS_PATH.is_dir():
+        raise RuntimeError(
+            f"Bioinformatics skills not found: {DEFAULT_BIOINFORMATICS_SKILLS_PATH}"
+        )
+
+    skills_root = user.hermes_home / "skills"
+    skills_root.mkdir(parents=True, exist_ok=True)
+    _set_owner_and_mode(skills_root, uid, gid, 0o700)
+
+    target_path = skills_root / MANAGED_BIOINFORMATICS_SKILLS_DIR_NAME
+    if target_path.is_dir() and not target_path.is_symlink():
+        shutil.rmtree(target_path)
+    elif target_path.exists() or target_path.is_symlink():
+        target_path.unlink()
+
+    shutil.copytree(DEFAULT_BIOINFORMATICS_SKILLS_PATH, target_path)
+    _set_owner_recursive(target_path, uid, gid)
 
 
 def build_env_content(user: HermesTarget) -> str:
@@ -210,6 +257,8 @@ def install_user_runtime_files(config: dict[str, Any], user: HermesTarget) -> No
         encoding="utf-8",
     )
     _set_owner_and_mode(config_path, pw.pw_uid, gid, 0o600)
+    install_soul_file(user, uid=pw.pw_uid, gid=gid)
+    install_bioinformatics_skills(user, uid=pw.pw_uid, gid=gid)
 
 
 def install_user_files(config: dict[str, Any], user: HermesTarget) -> None:

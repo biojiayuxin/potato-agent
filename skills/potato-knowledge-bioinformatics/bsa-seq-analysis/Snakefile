@@ -1,0 +1,292 @@
+# BSA-Seq Snakemake 流程
+# 基于bcftools变异检测管道
+
+import os
+
+# 加载配置
+configfile: "config.yaml"
+
+# 原始参考基因组与任务目录内副本
+RAW_GENOME = config["genome_fa"]
+GENOME = "reference/genome.fa"
+
+# 样本列表
+SAMPLES = [config["sample_A"], config["sample_B"]]
+
+# 染色体列表
+CHROMS = [config["chr_prefix"] + f"{i:02d}" for i in range(1, config["chr_num"] + 1)]
+
+# 通用参数
+THREADS = config["threads"]
+FASTQ_DIR = config["fastq_dir"]
+QUAL_THRES = config["qual_threshold"]
+WINDOW_SIZE = config["window_size"]
+STEP_SIZE = config["step_size"]
+DELTA_THRES = config["delta_threshold"]
+
+# ============================================================
+# Rule all: 最终目标
+# ============================================================
+rule all:
+    input:
+        "fls.txt",
+        expand("00-qc/{sample}_fastp.html", sample=SAMPLES),
+        expand("01-mapping/{sample}.sort.bam", sample=SAMPLES),
+        expand("02-markdup/{sample}.markdup.bam", sample=SAMPLES),
+        expand("03-call/{sample}.{chrom}.g.vcf.gz", sample=SAMPLES, chrom=CHROMS),
+        expand("04-filter/{sample}.{chrom}.g.vcf", sample=SAMPLES, chrom=CHROMS),
+        expand("05-index/{sample}.{chrom}.g.vcf.gz", sample=SAMPLES, chrom=CHROMS),
+        expand("06-merge/{chrom}.g.vcf", chrom=CHROMS),
+        "07-delta_index/delta_index.txt",
+        "08-slide_window/window_result.txt",
+        "08-slide_window/BSA_figure.pdf"
+
+
+# ============================================================
+# Rule 0: 测序数据量统计
+# ============================================================
+rule prepare_genome:
+    input:
+        RAW_GENOME
+    output:
+        GENOME
+    shell:
+        """
+        mkdir -p reference
+        cp -f {input} {output}
+        """
+
+rule summarize_fastq_depth:
+    input:
+        expand(os.path.join(FASTQ_DIR, "{sample}_R1.fq.gz"), sample=SAMPLES),
+        expand(os.path.join(FASTQ_DIR, "{sample}_R2.fq.gz"), sample=SAMPLES)
+    output:
+        "fls.txt"
+    params:
+        fastq_dir = FASTQ_DIR
+    shell:
+        """
+        python3 scripts/sum_fastq_base_number.py \
+            --fastq-dir {params.fastq_dir} \
+            --output {output} \
+            --threads {THREADS}
+        """
+
+# ============================================================
+# Rule 1: 基因组索引
+# ============================================================
+rule bwa_index:
+    input:
+        GENOME
+    output:
+        idx_amb = GENOME + ".amb",
+        idx_ann = GENOME + ".ann",
+        idx_bwt = GENOME + ".bwt",
+        idx_pac = GENOME + ".pac",
+        idx_sa = GENOME + ".sa"
+    shell:
+        """
+        bwa index {input}
+        """
+
+# ============================================================
+# Rule 2: 质量控制 (fastp)
+# ============================================================
+rule fastp:
+    input:
+        r1 = lambda wildcards: os.path.join(FASTQ_DIR, f"{wildcards.sample}_R1.fq.gz"),
+        r2 = lambda wildcards: os.path.join(FASTQ_DIR, f"{wildcards.sample}_R2.fq.gz")
+    output:
+        r1 = "00-qc/{sample}_R1.clean.fq.gz",
+        r2 = "00-qc/{sample}_R2.clean.fq.gz",
+        html = "00-qc/{sample}_fastp.html",
+        json = "00-qc/{sample}_fastp.json"
+    threads: 4
+    shell:
+        """
+        fastp -i {input.r1} -I {input.r2} \
+              -o {output.r1} -O {output.r2} \
+              -h {output.html} -j {output.json} \
+              -w {threads} --detect_adapter_for_pe
+        """
+
+# ============================================================
+# Rule 3: 序列比对 (bwa mem)
+# ============================================================
+rule bwa_mem:
+    input:
+        r1 = "00-qc/{sample}_R1.clean.fq.gz",
+        r2 = "00-qc/{sample}_R2.clean.fq.gz",
+        idx_bwt = GENOME + ".bwt"
+    output:
+        bam = "01-mapping/{sample}.sort.bam",
+        bai = "01-mapping/{sample}.sort.bam.bai"
+    threads: THREADS
+    params:
+        rg = lambda wildcards: "@RG\\tID:" + wildcards.sample + "\\tSM:" + wildcards.sample + "\\tPL:ILLUMINA"
+    shell:
+        """
+        bwa mem -t {threads} -R '{params.rg}' {GENOME} {input.r1} {input.r2} | \
+        samtools sort -@ {threads} -o {output.bam}
+        samtools index {output.bam}
+        """
+
+# ============================================================
+# Rule 4: 去重复 (GATK)
+# ============================================================
+rule markdup:
+    input:
+        bam = "01-mapping/{sample}.sort.bam",
+        bai = "01-mapping/{sample}.sort.bam.bai"
+    output:
+        bam = "02-markdup/{sample}.markdup.bam",
+        bai = "02-markdup/{sample}.markdup.bam.bai",
+        metrics = "02-markdup/{sample}.markdup.metrics.txt"
+    threads: 2
+    params:
+        java_mem = "10G"
+    shell:
+        """
+        set -euo pipefail
+        gatk --java-options "-Xmx{params.java_mem}" MarkDuplicates \
+            -I {input.bam} \
+            -O {output.bam} \
+            -M {output.metrics}
+        samtools index {output.bam}
+        """
+
+# ============================================================
+# Rule 5: 变异检测 (bcftools mpileup + call)
+# ============================================================
+rule call_variants:
+    input:
+        bam = "02-markdup/{sample}.markdup.bam",
+        bai = "02-markdup/{sample}.markdup.bam.bai"
+    output:
+        vcf = "03-call/{sample}.{chrom}.g.vcf.gz",
+        csi = "03-call/{sample}.{chrom}.g.vcf.gz.csi"
+    threads: THREADS
+    params:
+        chrom = "{chrom}"
+    shell:
+        """
+        bcftools mpileup -Ou --threads {threads} -r {params.chrom} -f {GENOME} {input.bam} | \
+        bcftools call -m --threads {threads} -Oz -V indels --write-index -o {output.vcf}
+        """
+
+# ============================================================
+# Rule 6: 变异过滤
+# 说明：filter_vcf_by_sample_depth.py 会读取 fls.txt 中的样本测序数据量(Gb)，
+# 对于基因组大小约 1 Gb 的物种，这里将 Gb 数值近似视为平均测序深度(X)，
+# 并据此粗略估计位点 DP 过滤范围（dp_min = depth/3, dp_max = depth*3）。
+# 这是经验近似而非严格单位换算；若基因组大小明显偏离 1 Gb，应调整该策略。
+# ============================================================
+rule filter_variants:
+    input:
+        vcf = "03-call/{sample}.{chrom}.g.vcf.gz",
+        fls = "fls.txt"
+    output:
+        vcf = "04-filter/{sample}.{chrom}.g.vcf"
+    params:
+        qual = QUAL_THRES,
+        sample = "{sample}"
+    shell:
+        """
+        python3 scripts/filter_vcf_by_sample_depth.py \
+            --input-vcf {input.vcf} \
+            --output-vcf {output.vcf} \
+            --sample {params.sample} \
+            --fls {input.fls} \
+            --qual {params.qual}
+        """
+
+# ============================================================
+# Rule 7: 先计算单样本 SNP-index
+# ============================================================
+rule calculate_index:
+    input:
+        vcf = "04-filter/{sample}.{chrom}.g.vcf"
+    output:
+        vcf = "05-index/{sample}.{chrom}.g.vcf.gz",
+        csi = "05-index/{sample}.{chrom}.g.vcf.gz.csi"
+    threads: THREADS
+    shell:
+        """
+        python3 scripts/calculate_SNP_index.py {input.vcf} | \
+        bcftools view --threads {threads} -Oz --write-index -o {output.vcf}
+        """
+
+# ============================================================
+# Rule 8: 合并样本
+# ============================================================
+rule merge_samples:
+    input:
+        lambda wildcards: expand("05-index/{sample}." + wildcards.chrom + ".g.vcf.gz", sample=SAMPLES)
+    output:
+        vcf = "06-merge/{chrom}.g.vcf"
+    threads: THREADS
+    shell:
+        """
+        bcftools merge --threads {threads} {input} -Ov -o {output.vcf}
+        """
+
+# ============================================================
+# Rule 9: ΔSNP-index 计算（暂沿用旧逻辑，后续再调整）
+# ============================================================
+rule delta_index:
+    input:
+        expand("06-merge/{chrom}.g.vcf", chrom=CHROMS)
+    output:
+        txt = "07-delta_index/delta_index.txt"
+    params:
+        input_pattern = "06-merge/*.g.vcf",
+        sample_a = SAMPLES[0],
+        sample_b = SAMPLES[1]
+    shell:
+        """
+        python3 scripts/calc_delta_index.py \
+            --input-pattern '{params.input_pattern}' \
+            --output {output.txt} \
+            --sample-a '{params.sample_a}' \
+            --sample-b '{params.sample_b}'
+        """
+
+# ============================================================
+# Rule 10: 滑动窗口分析
+# ============================================================
+rule slide_window:
+    input:
+        delta = "07-delta_index/delta_index.txt",
+        genome = GENOME
+    output:
+        txt = "08-slide_window/window_result.txt"
+    params:
+        window = WINDOW_SIZE,
+        step = STEP_SIZE
+    shell:
+        """
+        python3 scripts/slide_window_bsa.py \
+            --input {input.delta} \
+            --output {output.txt} \
+            --genome-fasta {input.genome} \
+            --window-size {params.window} \
+            --step-size {params.step}
+        """
+
+# ============================================================
+# Rule 11: 可视化
+# ============================================================
+rule visualization:
+    input:
+        "08-slide_window/window_result.txt"
+    output:
+        pdf = "08-slide_window/BSA_figure.pdf"
+    params:
+        sample_a = config["sample_A"],
+        sample_b = config["sample_B"],
+        delta_threshold = config["delta_threshold"]
+    shell:
+        """
+        Rscript scripts/plot_bsa_window_figure.R {input} {output.pdf} {params.sample_a} {params.sample_b} {params.delta_threshold}
+        """
+
