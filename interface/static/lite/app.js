@@ -112,23 +112,31 @@ let bootstrapInFlight = false;
 let signupInFlight = false;
 let tuiBridge = null;
 let tuiBridgeConnectPromise = null;
+let tuiBridgeConnectingSocket = null;
 let tuiBridgeRequestCounter = 0;
 const tuiBridgePending = new Map();
 let activeTuiSessionId = '';
 let activePersistentSessionId = '';
 const liveTuiSessionsByPersistentId = new Map();
+const liveTuiSessionAliasesByPersistentId = new Map();
 const persistentIdsByLiveTuiSessionId = new Map();
 const busySessionIds = new Set();
 const sessionRunTransportById = new Map();
 const sessionAbortControllersById = new Map();
 const pendingApprovalsBySessionId = new Map();
 const interruptingSessionIds = new Set();
+const recoveringTuiSessionIds = new Set();
+const tuiBridgeReconnectTimersBySessionId = new Map();
+const tuiBridgeReconnectAttemptsBySessionId = new Map();
+const intentionallyClosedTuiBridges = new WeakSet();
 
 const SIDEBAR_WIDTH_KEY = 'lite_sidebar_width';
 const FILES_WIDTH_KEY = 'lite_files_width';
 const THEME_MODE_KEY = 'lite_theme_mode';
 const MAX_ATTACHMENT_SIZE_BYTES = 20 * 1024 * 1024;
 const AUTH_POLL_INTERVAL_MS = 60 * 1000;
+const TUI_BRIDGE_RECONNECT_BASE_DELAY_MS = 1000;
+const TUI_BRIDGE_RECONNECT_MAX_DELAY_MS = 15000;
 const ATTACHMENT_BLOCK_START = '<potato-files>';
 const ATTACHMENT_BLOCK_END = '</potato-files>';
 const ATTACHMENT_HINT_LINE = 'Use the attachment local paths above if you need to inspect the files.';
@@ -407,11 +415,18 @@ const persistSessionDisplayState = async (sessionId, messages, { draftTitle = ''
   return response.json();
 };
 
-const rememberLiveTuiSession = (persistentSessionId, liveSessionId) => {
+const rememberLiveTuiSession = (persistentSessionId, liveSessionId, { primary = true } = {}) => {
   const persistentId = String(persistentSessionId || '').trim();
   const liveId = String(liveSessionId || '').trim();
   if (!persistentId || !liveId) return;
-  liveTuiSessionsByPersistentId.set(persistentId, liveId);
+  if (primary) {
+    liveTuiSessionsByPersistentId.set(persistentId, liveId);
+  } else if (!liveTuiSessionsByPersistentId.has(persistentId)) {
+    liveTuiSessionsByPersistentId.set(persistentId, liveId);
+  }
+  const aliases = liveTuiSessionAliasesByPersistentId.get(persistentId) || new Set();
+  aliases.add(liveId);
+  liveTuiSessionAliasesByPersistentId.set(persistentId, aliases);
   persistentIdsByLiveTuiSessionId.set(liveId, persistentId);
 };
 
@@ -426,9 +441,14 @@ const normalizeDisplayMessageId = (messageId) => {
 const forgetLiveTuiSession = (persistentSessionId) => {
   const persistentId = String(persistentSessionId || '').trim();
   if (!persistentId) return;
-  const liveId = liveTuiSessionsByPersistentId.get(persistentId) || '';
+  const liveIds = new Set(liveTuiSessionAliasesByPersistentId.get(persistentId) || []);
+  const primaryLiveId = liveTuiSessionsByPersistentId.get(persistentId) || '';
+  if (primaryLiveId) {
+    liveIds.add(primaryLiveId);
+  }
   liveTuiSessionsByPersistentId.delete(persistentId);
-  if (liveId) {
+  liveTuiSessionAliasesByPersistentId.delete(persistentId);
+  for (const liveId of liveIds) {
     persistentIdsByLiveTuiSessionId.delete(liveId);
   }
 };
@@ -502,8 +522,13 @@ const applyLiveStateToSession = (sessionId, live) => {
       : session
   );
 
-  if (liveSessionId) {
+  if (ACTIVE_LIVE_SESSION_STATUSES.has(status) && liveSessionId) {
     rememberLiveTuiSession(persistentSessionId, liveSessionId);
+    if (tipSessionId && tipSessionId !== liveSessionId) {
+      rememberLiveTuiSession(persistentSessionId, tipSessionId, { primary: false });
+    }
+  } else if (tipSessionId && ACTIVE_LIVE_SESSION_STATUSES.has(status)) {
+    rememberLiveTuiSession(persistentSessionId, tipSessionId);
   } else {
     forgetLiveTuiSession(persistentSessionId);
   }
@@ -518,6 +543,16 @@ const applyLiveStateToSession = (sessionId, live) => {
   if (ACTIVE_LIVE_SESSION_STATUSES.has(status)) {
     setSessionBusy(persistentSessionId, true, { transport: 'tui' });
   } else {
+    resetTuiBridgeReconnectState(persistentSessionId);
+    recoveringTuiSessionIds.delete(persistentSessionId);
+    const targetMessages = getSessionMessagesBuffer(persistentSessionId) || [];
+    for (const message of targetMessages) {
+      if (String(message?.role || '') !== 'assistant') continue;
+      const messageId = String(message?.id || '').trim();
+      if (messageId && state.streamingMessageIds.has(messageId)) {
+        state.streamingMessageIds.delete(messageId);
+      }
+    }
     setSessionBusy(persistentSessionId, false);
   }
 
@@ -666,16 +701,172 @@ const markSessionInterruptedLocally = (sessionId, liveState = null) => {
   clearSessionPendingApproval(persistentSessionId);
 };
 
+const shouldRecoverTuiSession = (sessionId) => {
+  if (!state.user) return false;
+  const persistentSessionId = String(sessionId || '').trim();
+  if (!persistentSessionId) return false;
+  if (isSessionBusy(persistentSessionId)) return true;
+  return sessionHasStreamingMessages(persistentSessionId);
+};
+
+const clearTuiBridgeReconnectTimer = (sessionId = '') => {
+  const persistentSessionId = String(sessionId || '').trim();
+  if (persistentSessionId) {
+    const timer = tuiBridgeReconnectTimersBySessionId.get(persistentSessionId);
+    if (timer) {
+      window.clearTimeout(timer);
+      tuiBridgeReconnectTimersBySessionId.delete(persistentSessionId);
+    }
+    return;
+  }
+  for (const timer of tuiBridgeReconnectTimersBySessionId.values()) {
+    window.clearTimeout(timer);
+  }
+  tuiBridgeReconnectTimersBySessionId.clear();
+};
+
+const resetTuiBridgeReconnectState = (sessionId = '') => {
+  const persistentSessionId = String(sessionId || '').trim();
+  clearTuiBridgeReconnectTimer(persistentSessionId);
+  if (persistentSessionId) {
+    tuiBridgeReconnectAttemptsBySessionId.delete(persistentSessionId);
+    return;
+  }
+  tuiBridgeReconnectAttemptsBySessionId.clear();
+};
+
+const getTuiBridgeReconnectDelay = (sessionId) => {
+  const persistentSessionId = String(sessionId || '').trim();
+  const attempts = tuiBridgeReconnectAttemptsBySessionId.get(persistentSessionId) || 0;
+  const delay = TUI_BRIDGE_RECONNECT_BASE_DELAY_MS * (2 ** Math.max(attempts, 0));
+  return Math.min(delay, TUI_BRIDGE_RECONNECT_MAX_DELAY_MS);
+};
+
+const scheduleTuiBridgeRecovery = (sessionId) => {
+  const persistentSessionId = String(sessionId || '').trim();
+  if (!persistentSessionId || !state.user) return;
+  const attempts = tuiBridgeReconnectAttemptsBySessionId.get(persistentSessionId) || 0;
+  const delay = getTuiBridgeReconnectDelay(persistentSessionId);
+  tuiBridgeReconnectAttemptsBySessionId.set(persistentSessionId, attempts + 1);
+  clearTuiBridgeReconnectTimer(persistentSessionId);
+  const timer = window.setTimeout(() => {
+    tuiBridgeReconnectTimersBySessionId.delete(persistentSessionId);
+    recoverTuiBridgeAfterDisconnect(persistentSessionId).catch(() => {});
+  }, delay);
+  tuiBridgeReconnectTimersBySessionId.set(persistentSessionId, timer);
+};
+
+const recoverTuiBridgeAfterDisconnect = async (sessionId) => {
+  const persistentSessionId = String(sessionId || '').trim();
+  if (!persistentSessionId || !state.user || recoveringTuiSessionIds.has(persistentSessionId)) return;
+
+  recoveringTuiSessionIds.add(persistentSessionId);
+  try {
+    let bridgeReadyBeforeSnapshot = false;
+    try {
+      await ensureTuiBridge();
+      bridgeReadyBeforeSnapshot = true;
+    } catch {
+      // The snapshot fetch below still tells us whether the run already finished.
+    }
+    let session = await updateSessionSnapshot(persistentSessionId, {
+      forceReplaceLiveMessages: true,
+    });
+    let liveState = session?.live || (isViewingSession(persistentSessionId) ? state.activeSession?.live : null);
+    let status = String(liveState?.status || '').trim();
+    if (!ACTIVE_LIVE_SESSION_STATUSES.has(status)) {
+      resetTuiBridgeReconnectState(persistentSessionId);
+      if (isViewingSession(persistentSessionId)) {
+        renderWorkspace();
+      } else {
+        renderChatList();
+      }
+      return;
+    }
+
+    try {
+      await ensureTuiBridge();
+      if (!bridgeReadyBeforeSnapshot) {
+        session = await updateSessionSnapshot(persistentSessionId, {
+          forceReplaceLiveMessages: true,
+        });
+        liveState = session?.live || (isViewingSession(persistentSessionId) ? state.activeSession?.live : null);
+        status = String(liveState?.status || '').trim();
+        if (!ACTIVE_LIVE_SESSION_STATUSES.has(status)) {
+          resetTuiBridgeReconnectState(persistentSessionId);
+          if (isViewingSession(persistentSessionId)) {
+            renderWorkspace();
+          } else {
+            renderChatList();
+          }
+          return;
+        }
+      }
+      resetTuiBridgeReconnectState(persistentSessionId);
+      if (isViewingSession(persistentSessionId)) {
+        renderWorkspace();
+      } else {
+        renderChatList();
+      }
+    } catch {
+      scheduleTuiBridgeRecovery(persistentSessionId);
+    }
+  } catch {
+    scheduleTuiBridgeRecovery(persistentSessionId);
+  } finally {
+    recoveringTuiSessionIds.delete(persistentSessionId);
+  }
+};
+
+const handleTuiBridgeClosed = (closedBridge = null) => {
+  if (closedBridge && tuiBridge && tuiBridge !== closedBridge) {
+    return;
+  }
+  if (closedBridge && tuiBridgeConnectingSocket && tuiBridgeConnectingSocket !== closedBridge) {
+    return;
+  }
+  if (closedBridge && intentionallyClosedTuiBridges.has(closedBridge)) {
+    return;
+  }
+  const sessionsToRecover = new Set();
+  const activeSessionId = getActivePersistentSessionId();
+  if (shouldRecoverTuiSession(activeSessionId)) {
+    sessionsToRecover.add(activeSessionId);
+  }
+  for (const sessionId of busySessionIds) {
+    if (sessionRunTransportById.get(sessionId) === 'tui' || sessionHasStreamingMessages(sessionId)) {
+      sessionsToRecover.add(sessionId);
+    }
+  }
+
+  closeTuiBridge({ suppressRecovery: false });
+
+  for (const sessionId of sessionsToRecover) {
+    recoverTuiBridgeAfterDisconnect(sessionId).catch(() => {});
+  }
+};
+
 const nextTuiBridgeRequestId = () => `tui-${++tuiBridgeRequestCounter}`;
 
-const closeTuiBridge = () => {
-  if (tuiBridge) {
+const closeTuiBridge = ({ suppressRecovery = true } = {}) => {
+  const bridgeToClose = tuiBridge;
+  const connectingBridgeToClose = (
+    tuiBridgeConnectingSocket && tuiBridgeConnectingSocket !== bridgeToClose
+      ? tuiBridgeConnectingSocket
+      : null
+  );
+  const bridgesToClose = [bridgeToClose, connectingBridgeToClose].filter(Boolean);
+  for (const bridge of bridgesToClose) {
+    if (suppressRecovery && bridge.readyState !== WebSocket.CLOSED) {
+      intentionallyClosedTuiBridges.add(bridge);
+    }
     try {
-      tuiBridge.close();
+      bridge.close();
     } catch {}
   }
   tuiBridge = null;
   tuiBridgeConnectPromise = null;
+  tuiBridgeConnectingSocket = null;
   activeTuiSessionId = '';
   for (const pending of tuiBridgePending.values()) {
     pending.reject(new Error('TUI bridge disconnected'));
@@ -774,6 +965,7 @@ const handleTuiBridgeEvent = (message) => {
       reasoning: String(message?.payload?.reasoning || ''),
       status,
     });
+    forgetLiveTuiSession(completedSessionId);
     setSessionBusy(completedSessionId, false);
     clearSessionPendingApproval(completedSessionId);
     if (isViewingSession(completedSessionId)) {
@@ -906,11 +1098,15 @@ const ensureTuiBridge = async () => {
   tuiBridgeConnectPromise = new Promise((resolve, reject) => {
     const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
     const ws = new WebSocket(`${protocol}//${window.location.host}/api/tui/ws`);
+    tuiBridgeConnectingSocket = ws;
 
     const cleanup = () => {
       ws.removeEventListener('open', onOpen);
       ws.removeEventListener('error', onError);
       ws.removeEventListener('close', onCloseBeforeOpen);
+      if (tuiBridgeConnectingSocket === ws) {
+        tuiBridgeConnectingSocket = null;
+      }
     };
 
     const onOpen = () => {
@@ -919,7 +1115,7 @@ const ensureTuiBridge = async () => {
       tuiBridgeConnectPromise = null;
       ws.addEventListener('message', handleTuiBridgeMessage);
       ws.addEventListener('close', () => {
-        closeTuiBridge();
+        handleTuiBridgeClosed(ws);
       }, { once: true });
       setTuiBridgeStatus('TUI gateway connected');
       resolve(ws);
@@ -1436,6 +1632,14 @@ const setAuthViewMode = (mode) => {
 };
 
 const resetWorkspaceState = () => {
+  resetTuiBridgeReconnectState();
+  closeTuiBridge();
+  recoveringTuiSessionIds.clear();
+  liveTuiSessionsByPersistentId.clear();
+  liveTuiSessionAliasesByPersistentId.clear();
+  persistentIdsByLiveTuiSessionId.clear();
+  activeTuiSessionId = '';
+  activePersistentSessionId = '';
   state.sessions = [];
   state.activeSession = null;
   state.activeSessionId = null;
@@ -2976,6 +3180,7 @@ const switchActiveModel = async (modelId) => {
       is_active: true,
       isActive: true,
     };
+    resetTuiBridgeReconnectState();
     closeTuiBridge();
     showChatError('');
     renderWorkspaceHeader();
@@ -3050,7 +3255,7 @@ const openSession = async (sessionId) => {
     state.shouldAutoScrollMessages = true;
     renderWorkspace();
     if (ACTIVE_LIVE_SESSION_STATUSES.has(String(liveState?.status || ''))) {
-      ensureTuiBridge().catch(() => {});
+      recoverTuiBridgeAfterDisconnect(sessionId).catch(() => {});
     }
     return;
   }
@@ -3081,7 +3286,7 @@ const openSession = async (sessionId) => {
     state.shouldAutoScrollMessages = true;
     renderWorkspace();
     if (ACTIVE_LIVE_SESSION_STATUSES.has(String(liveState?.status || ''))) {
-      ensureTuiBridge().catch(() => {});
+      recoverTuiBridgeAfterDisconnect(sessionId).catch(() => {});
     }
   } catch (error) {
     state.sessionHistoryLoading = false;
@@ -3143,7 +3348,10 @@ const createSessionForCurrentMode = async () => {
   return created;
 };
 
-const updateSessionSnapshot = async (sessionId, { preserveLiveMessages = false } = {}) => {
+const updateSessionSnapshot = async (
+  sessionId,
+  { preserveLiveMessages = false, forceReplaceLiveMessages = false } = {},
+) => {
   if (!sessionId) return null;
 
   const response = await api(`/api/sessions/${encodeURIComponent(sessionId)}`, { method: 'GET' });
@@ -3158,8 +3366,16 @@ const updateSessionSnapshot = async (sessionId, { preserveLiveMessages = false }
     return null;
   }
 
-  state.sessions = [session, ...state.sessions.filter((chat) => chat.id !== session.id)];
-  if (Array.isArray(normalizedMessages) && (!preserveLiveMessages || !sessionHasStreamingMessages(sessionId))) {
+  const sessionWithLive = {
+    ...session,
+    live: liveState,
+  };
+  state.sessions = [sessionWithLive, ...state.sessions.filter((chat) => chat.id !== session.id)];
+  applyLiveStateToSession(session.id, liveState);
+  const shouldReplaceMessages = forceReplaceLiveMessages
+    || !preserveLiveMessages
+    || !sessionHasStreamingMessages(sessionId);
+  if (Array.isArray(normalizedMessages) && shouldReplaceMessages) {
     setLiveSessionMessages(sessionId, normalizedMessages);
     syncStreamingAssistantStateForSession(sessionId, {
       liveState,
@@ -3168,12 +3384,13 @@ const updateSessionSnapshot = async (sessionId, { preserveLiveMessages = false }
     });
   }
   if (state.activeSessionId === session.id) {
-    state.activeSession = session;
-    if (Array.isArray(normalizedMessages) && !sessionHasStreamingMessages(sessionId)) {
+    state.activeSession = sessionWithLive;
+    applyLiveStateToSession(session.id, liveState);
+    if (Array.isArray(normalizedMessages) && shouldReplaceMessages) {
       state.messages = normalizedMessages;
     }
   }
-  return session;
+  return state.sessions.find((chat) => chat.id === session.id) || sessionWithLive;
 };
 
 const isViewingSession = (sessionId) => Boolean(sessionId) && state.activeSessionId === sessionId;
@@ -3594,6 +3811,7 @@ dom.signupBackButton.addEventListener('click', () => {
 dom.logoutButton.addEventListener('click', async () => {
   state.pendingAttachments = [];
   stopAuthPolling();
+  resetTuiBridgeReconnectState();
   closeTuiBridge();
   activeTuiSessionId = '';
   activePersistentSessionId = '';

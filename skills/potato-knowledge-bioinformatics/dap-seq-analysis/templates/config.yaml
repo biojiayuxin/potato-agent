@@ -1,0 +1,58 @@
+# DAP-Seq Snakemake 配置模板
+# 智能体生成正式任务时，应复制本文件并替换路径。
+
+# 样品表；相对路径按 Snakefile 所在目录解析。
+samples_tsv: "config/samples.tsv"
+
+# 用于传给辅助脚本的配置文件路径。若使用 --configfile other.yaml，建议同时传：
+#   --config config_file=other.yaml
+config_file: "config/config.yaml"
+
+# 辅助脚本目录；相对路径按 Snakefile 所在目录解析。
+script_dir: "scripts"
+
+# 参考基因组 FASTA。
+genome_fasta: "/path/to/genome.fa"
+
+# BWA 索引前缀。推荐写到结果目录，避免污染公共参考基因组目录。
+bwa_index_prefix: "results/reference/bwa/genome"
+
+# 基因注释 GFF3/GTF，用于 ChIPseeker peak 注释。
+gff_file: "/path/to/annotation.gff3"
+
+# 可选：基因功能注释表，两列 TSV：gene_id/transcript_id 与 annotation。
+# 若为空，ChIPseeker 输出不额外追加功能注释。
+annotation_table: ""
+
+# 输出目录。
+outdir: "results"
+
+# 线程数；Snakefile 中各规则会按需使用该值。
+threads: 15
+
+# MACS2 参数。
+macs2:
+  genome_size: "8e+8"
+  format: "BAMPE"
+  call_summits: true
+  bdg: true
+  extra: ""
+
+# ChIPseeker 注释窗口：TSS 上游 5 kb 到 TSS。
+# drop_annotation/keep_count 由 scripts/06_sum_chipseeker.py 后处理脚本使用。
+chipseeker:
+  tss_upstream: 5000
+  tss_downstream: 0
+  rscript: "Rscript"
+  drop_annotation: "Distal Intergenic"
+  keep_count: false
+
+# HOMER motif 输入：summit 左右扩展 bp 数；100 表示生成 200 bp 区域。
+homer:
+  summit_flank: 100
+  genome_for_homer: "/path/to/genome.softmasked.fa"
+  extra: "-mask"
+
+# samtools 去重复方法。
+# rmdup 与原始示例一致；若需 markdup，建议在项目正式流程中单独实现 fixmate/markdup 链。
+dedup_method: "rmdup"

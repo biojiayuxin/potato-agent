@@ -109,7 +109,7 @@ from interface.tui_gateway_bridge import (
     TuiGatewayBridgeError,
     TuiGatewayBridgeRegistry,
 )
-from interface.session_run_manager import SessionRunManager
+from interface.session_run_manager import ACTIVE_LIVE_STATUSES, SessionRunManager
 
 
 ROOT_DIR = Path(__file__).resolve().parent
@@ -2104,6 +2104,22 @@ async def get_session_detail(
     if display_messages is None:
         display_messages = _build_fallback_display_messages(raw_messages)
     live_state = get_live_session_state(user.id, logical_session_id)
+    if (
+        isinstance(live_state, dict)
+        and str(live_state.get("status") or "").strip() in ACTIVE_LIVE_STATUSES
+    ):
+        session_run_manager: SessionRunManager | None = getattr(
+            app.state,
+            "session_run_manager",
+            None,
+        )
+        if session_run_manager is not None:
+            live_state = await session_run_manager.reconcile_active_session_tip(
+                user.id,
+                logical_session_id,
+            )
+            with _open_session_db(user.target) as db:
+                tip_session_id = _get_logical_session_tip_id(db, logical_session_id) or tip_session_id
 
     return {
         "session": _normalize_logical_session_row(

@@ -163,8 +163,69 @@ def test_tip_reconcile_keeps_late_child_events_on_root_transcript() -> None:
     assert assistant["done"] is True
 
 
+def test_snapshot_reconcile_remembers_compressed_tip_alias() -> None:
+    db_path = Path(tempfile.mkdtemp(prefix="potato-run-manager-tip-snapshot-")) / "interface.db"
+    os.environ["INTERFACE_AUTH_DB"] = str(db_path)
+
+    from interface.display_store import (
+        get_live_session_state,
+        save_display_messages,
+        save_live_session_state,
+    )
+    from interface.session_run_manager import SessionRunManager
+
+    def resolve_tip(user_id: str, session_id: str) -> str:
+        assert user_id == "user-1"
+        assert session_id == "session-root"
+        return "session-tip"
+
+    save_display_messages(
+        "user-1",
+        "session-root",
+        [
+            {"id": "user-msg", "role": "user", "content": "hello", "done": True},
+            {"id": "assistant-1", "role": "assistant", "content": "partial", "done": False},
+        ],
+        db_path=db_path,
+    )
+    save_live_session_state(
+        "user-1",
+        "session-root",
+        run_id="run-1",
+        live_session_id="live-1",
+        tip_session_id="session-root",
+        assistant_message_id="assistant-1",
+        status="running",
+        pending_approval=None,
+        last_error="",
+        last_event_seq=2,
+        db_path=db_path,
+    )
+
+    async def scenario() -> _Bridge:
+        bridge = _Bridge()
+        manager = SessionRunManager(
+            tip_resolver=resolve_tip,
+            db_path=db_path,
+        )
+        await manager.attach_bridge(bridge)  # type: ignore[arg-type]
+        updated = await manager.reconcile_active_session_tip("user-1", "session-root")
+        assert updated is not None
+        return bridge
+
+    bridge = _run(scenario())
+
+    live_state = get_live_session_state("user-1", "session-root", db_path=db_path)
+    assert live_state is not None
+    assert live_state["status"] == "running"
+    assert live_state["live_session_id"] == "live-1"
+    assert live_state["tip_session_id"] == "session-tip"
+    assert ("session-tip", "session-root", "run-1") in bridge.remembered
+
+
 def run() -> None:
     test_tip_reconcile_keeps_late_child_events_on_root_transcript()
+    test_snapshot_reconcile_remembers_compressed_tip_alias()
 
 
 if __name__ == "__main__":

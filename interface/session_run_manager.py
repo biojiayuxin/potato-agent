@@ -974,6 +974,36 @@ class SessionRunManager:
         normalized = str(result or "").strip()
         return normalized or None
 
+    async def reconcile_active_session_tip(
+        self,
+        user_id: str,
+        session_id: str,
+    ) -> dict[str, Any] | None:
+        live_state = self._get_live_session_state(user_id, session_id)
+        if live_state is None:
+            return None
+        if str(live_state.get("status") or "").strip() in FINAL_LIVE_STATUSES:
+            return live_state
+
+        run_id = str(live_state.get("run_id") or "").strip()
+        assistant_message_id = str(live_state.get("assistant_message_id") or "").strip()
+        if not run_id or not assistant_message_id:
+            return live_state
+
+        context = SessionRunContext(
+            user_id=user_id,
+            session_id=session_id,
+            run_id=run_id,
+            assistant_message_id=assistant_message_id,
+        )
+        async with self._lock:
+            self._run_contexts_by_session_id[(user_id, session_id)] = context
+            live_session_id = str(live_state.get("live_session_id") or "").strip()
+            if live_session_id:
+                self._run_contexts_by_live_session_id[(user_id, live_session_id)] = context
+            self._ensure_flush_task_locked(context)
+        return await self._reconcile_tip(context) or live_state
+
     async def _reconcile_tip(self, context: SessionRunContext) -> dict[str, Any] | None:
         live_state = self._get_live_session_state(context.user_id, context.session_id)
         if live_state is None:

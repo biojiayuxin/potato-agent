@@ -1,0 +1,6 @@
+# DAP-Seq 示例样品表；正式分析时由智能体按用户 FASTQ 生成。
+# 暂不纳入 bZIP1_rep1，仅保留 input 与 ERF1 两个重复。
+sample_id	target_id	replicate	read1	read2	control_id	is_control
+input	input	0	/mnt/data/potato_agent/data/DAP-Seq_example/input_R1.fq.gz	/mnt/data/potato_agent/data/DAP-Seq_example/input_R2.fq.gz	.	yes
+ERF1_rep1	ERF1	1	/mnt/data/potato_agent/data/DAP-Seq_example/ERF1_rep1_R1.fq.gz	/mnt/data/potato_agent/data/DAP-Seq_example/ERF1_rep1_R2.fq.gz	input	no
+ERF1_rep2	ERF1	2	/mnt/data/potato_agent/data/DAP-Seq_example/ERF1_rep2_R1.fq.gz	/mnt/data/potato_agent/data/DAP-Seq_example/ERF1_rep2_R2.fq.gz	input	no

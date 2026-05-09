@@ -1,0 +1,300 @@
+# DAP-Seq Snakemake workflow template
+#
+# This workflow is intentionally configuration-driven so an agent can reuse it
+# across DAP-Seq projects by generating config/config.yaml and config/samples.tsv.
+
+import csv
+from pathlib import Path
+
+configfile: "config/config.yaml"
+
+WORKDIR = Path(workflow.basedir)
+
+
+def resolve_path(path_text):
+    """Resolve project-relative paths against the Snakefile directory."""
+    path_text = str(path_text or "")
+    if path_text == "":
+        return ""
+    p = Path(path_text)
+    if p.is_absolute():
+        return str(p)
+    return str(WORKDIR / p)
+
+
+CONFIG_FILE = resolve_path(config.get("config_file", "config/config.yaml"))
+SAMPLES_TSV = resolve_path(config.get("samples_tsv", "config/samples.tsv"))
+SCRIPT_DIR = Path(resolve_path(config.get("script_dir", "scripts")))
+OUTDIR = config.get("outdir", "results")
+GENOME_FASTA = resolve_path(config.get("genome_fasta", ""))
+GFF_FILE = resolve_path(config.get("gff_file", ""))
+ANNOTATION_TABLE = resolve_path(config.get("annotation_table", "")) if config.get("annotation_table", "") else ""
+BWA_INDEX_PREFIX = resolve_path(config.get("bwa_index_prefix", f"{OUTDIR}/reference/bwa/genome"))
+THREADS = int(config.get("threads", 8))
+DEDUP_METHOD = config.get("dedup_method", "rmdup")
+
+MACS2 = config.get("macs2", {}) or {}
+MACS2_GENOME_SIZE = str(MACS2.get("genome_size", "8e+8"))
+MACS2_FORMAT = str(MACS2.get("format", "BAMPE"))
+MACS2_CALL_SUMMITS = str(MACS2.get("call_summits", True)).lower()
+MACS2_BDG = str(MACS2.get("bdg", True)).lower()
+MACS2_EXTRA = str(MACS2.get("extra", "") or "")
+
+CHIPSEEKER = config.get("chipseeker", {}) or {}
+CHIPSEEKER_RSCRIPT = str(CHIPSEEKER.get("rscript", "Rscript"))
+CHIPSEEKER_TSS_UPSTREAM = int(CHIPSEEKER.get("tss_upstream", 5000))
+CHIPSEEKER_TSS_DOWNSTREAM = int(CHIPSEEKER.get("tss_downstream", 0))
+CHIPSEEKER_DROP_ANNOTATION = str(CHIPSEEKER.get("drop_annotation", "Distal Intergenic"))
+
+HOMER = config.get("homer", {}) or {}
+HOMER_FLANK = int(HOMER.get("summit_flank", 100))
+HOMER_GENOME = resolve_path(HOMER.get("genome_for_homer", ""))
+HOMER_EXTRA = str(HOMER.get("extra", "") or "")
+
+
+def load_samples(path):
+    lines = [line for line in Path(path).read_text().splitlines() if line.strip() and not line.startswith("#")]
+    if not lines:
+        raise ValueError("samples.tsv has no header/sample rows")
+    rows = list(csv.DictReader(lines, delimiter="\t"))
+    required = ["sample_id", "target_id", "replicate", "read1", "read2", "control_id", "is_control"]
+    missing = [col for col in required if col not in (rows[0].keys() if rows else [])]
+    if missing:
+        raise ValueError(f"samples.tsv missing required columns: {missing}")
+    return rows
+
+
+SAMPLES = load_samples(SAMPLES_TSV)
+SAMPLE_IDS = [row["sample_id"] for row in SAMPLES]
+SAMPLE_BY_ID = {row["sample_id"]: row for row in SAMPLES}
+CONTROL_IDS = [row["sample_id"] for row in SAMPLES if row["is_control"].lower() in {"yes", "y", "true", "1"}]
+TREATMENT_ROWS = [row for row in SAMPLES if row["is_control"].lower() not in {"yes", "y", "true", "1"}]
+TARGET_IDS = sorted({row["target_id"] for row in TREATMENT_ROWS})
+
+
+def sample_r1(wildcards):
+    return resolve_path(SAMPLE_BY_ID[wildcards.sample_id]["read1"])
+
+
+def sample_r2(wildcards):
+    return resolve_path(SAMPLE_BY_ID[wildcards.sample_id]["read2"])
+
+
+def target_treatment_bams(wildcards):
+    rows = [row for row in TREATMENT_ROWS if row["target_id"] == wildcards.target_id]
+    return [f"{OUTDIR}/01-mapping/{row['sample_id']}.flt.bam" for row in rows]
+
+
+def target_control_bam(wildcards):
+    rows = [row for row in TREATMENT_ROWS if row["target_id"] == wildcards.target_id]
+    controls = sorted({row["control_id"] for row in rows})
+    if len(controls) != 1:
+        raise ValueError(f"target {wildcards.target_id} must have exactly one control_id, got {controls}")
+    return f"{OUTDIR}/01-mapping/{controls[0]}.flt.bam"
+
+
+BWA_INDEX_FILES = expand(
+    BWA_INDEX_PREFIX + ".{suffix}",
+    suffix=["amb", "ann", "bwt", "pac", "sa"],
+)
+
+
+rule all:
+    input:
+        f"{OUTDIR}/00-qc/input_check.ok",
+        expand(f"{OUTDIR}/01-mapping/{{sample_id}}.flt.bam", sample_id=SAMPLE_IDS),
+        expand(f"{OUTDIR}/01-mapping/{{sample_id}}.flt.bam.bai", sample_id=SAMPLE_IDS),
+        expand(f"{OUTDIR}/02-callpeaks/{{target_id}}/{{target_id}}_peaks.narrowPeak", target_id=TARGET_IDS),
+        expand(f"{OUTDIR}/02-callpeaks/{{target_id}}/{{target_id}}_summits.bed", target_id=TARGET_IDS),
+        expand(f"{OUTDIR}/03-chipseeker/{{target_id}}.anno.with_intergenic.txt", target_id=TARGET_IDS),
+        expand(f"{OUTDIR}/03-chipseeker/{{target_id}}.anno.no_distal_intergenic.txt", target_id=TARGET_IDS),
+        expand(f"{OUTDIR}/03-chipseeker/{{target_id}}.anno.no_distal_intergenic.merge_by_transcript.tsv", target_id=TARGET_IDS),
+        expand(f"{OUTDIR}/03-chipseeker/{{target_id}}.peaks_sum.txt", target_id=TARGET_IDS),
+        expand(f"{OUTDIR}/04-homer/{{target_id}}_peaks.bed", target_id=TARGET_IDS),
+        expand(f"{OUTDIR}/04-homer/{{target_id}}/homerResults.html", target_id=TARGET_IDS),
+
+
+rule check_inputs:
+    input:
+        config=CONFIG_FILE,
+        samples=SAMPLES_TSV,
+    output:
+        touch(f"{OUTDIR}/00-qc/input_check.ok"),
+    log:
+        f"{OUTDIR}/logs/check_inputs.log",
+    shell:
+        """
+        mkdir -p {OUTDIR}/00-qc {OUTDIR}/logs
+        python3 {SCRIPT_DIR}/00_check_inputs.py \
+          --config {input.config} \
+          --samples {input.samples} \
+          --base-dir {WORKDIR} \
+          > {log} 2>&1
+        """
+
+
+rule bwa_index:
+    input:
+        genome=GENOME_FASTA,
+    output:
+        BWA_INDEX_FILES,
+    log:
+        f"{OUTDIR}/logs/bwa_index.log",
+    shell:
+        """
+        mkdir -p {OUTDIR}/logs
+        bash {SCRIPT_DIR}/00_bwa_index.sh \
+          --genome {input.genome} \
+          --prefix {BWA_INDEX_PREFIX} \
+          > {log} 2>&1
+        """
+
+
+rule map_sample:
+    input:
+        r1=sample_r1,
+        r2=sample_r2,
+        index=BWA_INDEX_FILES,
+        checked=f"{OUTDIR}/00-qc/input_check.ok",
+    output:
+        sort_bam=f"{OUTDIR}/01-mapping/{{sample_id}}.sort.bam",
+        rmdup_bam=f"{OUTDIR}/01-mapping/{{sample_id}}.rmdup.bam",
+        flt_bam=f"{OUTDIR}/01-mapping/{{sample_id}}.flt.bam",
+        bai=f"{OUTDIR}/01-mapping/{{sample_id}}.flt.bam.bai",
+    threads: THREADS
+    log:
+        f"{OUTDIR}/logs/{{sample_id}}.map.log",
+    shell:
+        """
+        mkdir -p {OUTDIR}/01-mapping {OUTDIR}/logs
+        bash {SCRIPT_DIR}/01_map_sample.sh \
+          --sample-id {wildcards.sample_id} \
+          --r1 {input.r1} \
+          --r2 {input.r2} \
+          --index-prefix {BWA_INDEX_PREFIX} \
+          --threads {threads} \
+          --sort-bam {output.sort_bam} \
+          --rmdup-bam {output.rmdup_bam} \
+          --flt-bam {output.flt_bam} \
+          --dedup-method {DEDUP_METHOD} \
+          > {log} 2>&1
+        """
+
+
+rule call_peaks:
+    input:
+        treatment_bams=target_treatment_bams,
+        control_bam=target_control_bam,
+    output:
+        narrowpeak=f"{OUTDIR}/02-callpeaks/{{target_id}}/{{target_id}}_peaks.narrowPeak",
+        summits=f"{OUTDIR}/02-callpeaks/{{target_id}}/{{target_id}}_summits.bed",
+    log:
+        f"{OUTDIR}/logs/{{target_id}}.macs2.log",
+    shell:
+        """
+        mkdir -p {OUTDIR}/02-callpeaks/{wildcards.target_id} {OUTDIR}/logs
+        bash {SCRIPT_DIR}/02_call_peaks.sh \
+          --target-id {wildcards.target_id} \
+          --treatment-bams {input.treatment_bams} \
+          --control-bam {input.control_bam} \
+          --outdir {OUTDIR}/02-callpeaks/{wildcards.target_id} \
+          --name {wildcards.target_id} \
+          --genome-size {MACS2_GENOME_SIZE} \
+          --format {MACS2_FORMAT} \
+          --call-summits {MACS2_CALL_SUMMITS} \
+          --bdg {MACS2_BDG} \
+          --extra "{MACS2_EXTRA}" \
+          > {log} 2>&1
+        """
+
+
+rule chipseeker_annotate:
+    input:
+        narrowpeak=f"{OUTDIR}/02-callpeaks/{{target_id}}/{{target_id}}_peaks.narrowPeak",
+        gff=GFF_FILE,
+    output:
+        f"{OUTDIR}/03-chipseeker/{{target_id}}.anno.with_intergenic.txt",
+    log:
+        f"{OUTDIR}/logs/{{target_id}}.chipseeker.log",
+    shell:
+        """
+        mkdir -p {OUTDIR}/03-chipseeker {OUTDIR}/tmp/chipseeker {OUTDIR}/logs
+        {CHIPSEEKER_RSCRIPT} {SCRIPT_DIR}/03_chipseeker_annotate.R \
+          --target-id {wildcards.target_id} \
+          --narrowpeak {input.narrowpeak} \
+          --gff {input.gff} \
+          --out {output} \
+          --tmp-dir {OUTDIR}/tmp/chipseeker \
+          --annotation-table "{ANNOTATION_TABLE}" \
+          --tss-upstream {CHIPSEEKER_TSS_UPSTREAM} \
+          --tss-downstream {CHIPSEEKER_TSS_DOWNSTREAM} \
+          > {log} 2>&1
+        """
+
+
+rule sum_chipseeker:
+    input:
+        anno=f"{OUTDIR}/03-chipseeker/{{target_id}}.anno.with_intergenic.txt",
+        config=CONFIG_FILE,
+    output:
+        filtered=f"{OUTDIR}/03-chipseeker/{{target_id}}.anno.no_distal_intergenic.txt",
+        merged=f"{OUTDIR}/03-chipseeker/{{target_id}}.anno.no_distal_intergenic.merge_by_transcript.tsv",
+        peaks_sum=f"{OUTDIR}/03-chipseeker/{{target_id}}.peaks_sum.txt",
+    log:
+        f"{OUTDIR}/logs/{{target_id}}.sum_chipseeker.log",
+    shell:
+        """
+        mkdir -p {OUTDIR}/03-chipseeker {OUTDIR}/logs
+        python3 {SCRIPT_DIR}/06_sum_chipseeker.py \
+          --config {input.config} \
+          --base-dir {WORKDIR} \
+          --sample-id {wildcards.target_id} \
+          --input {input.anno} \
+          --outdir {OUTDIR}/03-chipseeker \
+          --filtered-output {output.filtered} \
+          --merged-output {output.merged} \
+          --peaks-sum-output {output.peaks_sum} \
+          --drop-annotation "{CHIPSEEKER_DROP_ANNOTATION}" \
+          > {log} 2>&1
+        """
+
+
+rule prepare_homer_bed:
+    input:
+        summits=f"{OUTDIR}/02-callpeaks/{{target_id}}/{{target_id}}_summits.bed",
+    output:
+        f"{OUTDIR}/04-homer/{{target_id}}_peaks.bed",
+    log:
+        f"{OUTDIR}/logs/{{target_id}}.prepare_homer_bed.log",
+    shell:
+        """
+        mkdir -p {OUTDIR}/04-homer {OUTDIR}/logs
+        python3 {SCRIPT_DIR}/04_prepare_homer_bed.py \
+          --target-id {wildcards.target_id} \
+          --summits {input.summits} \
+          --out {output} \
+          --flank {HOMER_FLANK} \
+          > {log} 2>&1
+        """
+
+
+rule homer_motif:
+    input:
+        bed=f"{OUTDIR}/04-homer/{{target_id}}_peaks.bed",
+        genome=HOMER_GENOME,
+    output:
+        html=f"{OUTDIR}/04-homer/{{target_id}}/homerResults.html",
+    log:
+        f"{OUTDIR}/logs/{{target_id}}.homer.log",
+    shell:
+        """
+        mkdir -p {OUTDIR}/04-homer/{wildcards.target_id} {OUTDIR}/logs
+        bash {SCRIPT_DIR}/05_homer_motif.sh \
+          --target-id {wildcards.target_id} \
+          --bed {input.bed} \
+          --genome {input.genome} \
+          --outdir {OUTDIR}/04-homer/{wildcards.target_id} \
+          --extra "{HOMER_EXTRA}" \
+          --preparsed-dir {OUTDIR}/04-homer/.homer-preparsed \
+          > {log} 2>&1
+        """
