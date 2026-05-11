@@ -30,6 +30,12 @@ DEFAULT_TERMINAL_TIMEOUT = 180
 DEFAULT_RUNTIME_READY_TIMEOUT = 45
 DEFAULT_RUNTIME_LOCK_DIR = Path("/run/potato-agent/runtime-start")
 DEFAULT_SOUL_TEMPLATE_PATH = REPO_ROOT / "soul_settings" / "SOUL.md"
+DEFAULT_INACCESSIBLE_PATHS = (
+    "/srv/potato_agent",
+    "/var/lib/potato-agent",
+    "/etc/potato-agent",
+    "/opt/interface-env",
+)
 MANAGED_BIOINFORMATICS_SKILLS_DIR_NAME = "potato-knowledge-bioinformatics"
 DEFAULT_BIOINFORMATICS_SKILLS_PATH = (
     REPO_ROOT / "skills" / MANAGED_BIOINFORMATICS_SKILLS_DIR_NAME
@@ -198,6 +204,11 @@ def build_systemd_unit(config: dict[str, Any], user: HermesTarget) -> str:
     restart = str(service_cfg.get("restart") or DEFAULT_SERVICE_RESTART)
     restart_sec = int(service_cfg.get("restart_sec") or DEFAULT_SERVICE_RESTART_SEC)
     hermes_bin = str(hermes_cfg.get("executable") or DEFAULT_HERMES_BIN)
+    inaccessible_paths = service_cfg.get("inaccessible_paths")
+    if inaccessible_paths is None:
+        inaccessible_paths = DEFAULT_INACCESSIBLE_PATHS
+    if not isinstance(inaccessible_paths, (list, tuple)):
+        inaccessible_paths = DEFAULT_INACCESSIBLE_PATHS
 
     rendered_description = description_template.format(
         username=user.username,
@@ -218,6 +229,13 @@ def build_systemd_unit(config: dict[str, Any], user: HermesTarget) -> str:
             f"Environment=HOME={user.home_dir}",
             f"Environment=HERMES_HOME={user.hermes_home}",
             f"ExecStart={hermes_bin} gateway run --replace",
+            "PrivateTmp=yes",
+            "NoNewPrivileges=yes",
+            *[
+                f"InaccessiblePaths=-{path}"
+                for path in inaccessible_paths
+                if str(path).strip()
+            ],
             f"Restart={restart}",
             f"RestartSec={restart_sec}",
             "",
@@ -290,6 +308,7 @@ def start_service(service_name: str) -> None:
 
 def stop_service(service_name: str) -> None:
     _run_command(["systemctl", "stop", service_name])
+    _run_command_result(["systemctl", "reset-failed", service_name])
 
 
 def is_service_active(service_name: str) -> bool:

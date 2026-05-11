@@ -3,7 +3,11 @@ from __future__ import annotations
 from pathlib import Path
 from types import SimpleNamespace
 
-from interface.hermes_service import build_config_data, install_user_runtime_files
+from interface.hermes_service import (
+    build_config_data,
+    build_systemd_unit,
+    install_user_runtime_files,
+)
 from interface.mapping import HermesTarget
 
 
@@ -109,6 +113,16 @@ def test_build_config_data_passes_both_standard_fallback_fields() -> None:
 
     assert data["fallback_providers"] == fallback_providers
     assert data["fallback_model"] == fallback_model
+
+
+def test_build_systemd_unit_hides_interface_paths() -> None:
+    unit = build_systemd_unit({"hermes": {}}, _target())
+
+    assert "PrivateTmp=yes" in unit
+    assert "NoNewPrivileges=yes" in unit
+    assert "InaccessiblePaths=-/srv/potato_agent" in unit
+    assert "InaccessiblePaths=-/var/lib/potato-agent" in unit
+    assert "InaccessiblePaths=-/opt/interface-env" in unit
 
 
 def test_install_user_runtime_files_writes_only_user_runtime_paths(

@@ -9,6 +9,7 @@
 约定：
 
 - 仓库部署在 `/srv/potato_agent`
+- 运行状态文件部署在 `/var/lib/potato-agent`
 - 下面所有命令都在仓库根目录执行
 - 默认以 `root` 身份执行，便于创建 Linux 用户、写入 `/etc/systemd/system`，并调用 `systemctl`
 - 目标机器已经具备：Linux、systemd、Python 3、Python `venv` 模块、`rsync`
@@ -20,6 +21,20 @@
 mkdir -p /srv/potato_agent
 rsync -a ./ /srv/potato_agent/
 cd /srv/potato_agent
+```
+
+创建运行状态目录和 interface 服务用户：
+
+```bash
+useradd --system --home-dir /nonexistent --shell /usr/sbin/nologin potato-interface 2>/dev/null || true
+mkdir -p /var/lib/potato-agent
+mkdir -p /var/lib/potato-agent/config /var/lib/potato-agent/data
+chown root:potato-interface /var/lib/potato-agent /var/lib/potato-agent/config
+chown potato-interface:potato-interface /var/lib/potato-agent/data
+chmod 750 /var/lib/potato-agent /var/lib/potato-agent/config
+chmod 700 /var/lib/potato-agent/data
+chown -R root:potato-interface /srv/potato_agent
+chmod 750 /srv/potato_agent
 ```
 
 ### 1. 安装 Hermes 运行时
@@ -64,6 +79,9 @@ python3 -m venv /opt/interface-env
 如果当前已经有 `users_mapping.yaml`，脚本只会更新模型配置，不会改动已有用户信息。历史的
 `hermes.fallback_model` list 会在写回时迁移为 Hermes 标准的
 `hermes.fallback_providers`。
+
+默认映射文件路径是 `/var/lib/potato-agent/config/users_mapping.yaml`。如需使用其它路径，设置
+`POTATO_AGENT_MAPPING_PATH`。
 
 非交互式示例：
 
@@ -147,10 +165,29 @@ http://<host>:3000/lite
 
 ### 6. 再改成 systemd 常驻服务
 
-当前架构下，`interface` 建议由 root 的 systemd 服务启动。原因是：
+当前架构下，`interface` 推荐由非 root 的 `potato-interface` 用户运行。少数需要 root
+的动作通过固定命令集的 privileged helper 执行，例如创建 Linux 用户、安装用户 systemd
+service、按目标 Linux 用户读取 `~/.hermes/state.db`。
 
-- 需要读取各用户 `700` 权限的 home、`work` 和 `.hermes/state.db`
-- 注册或自动开通用户时，需要创建 Linux 用户并管理 systemd 服务
+先安装 helper 入口和 sudoers 规则：
+
+```bash
+mkdir -p /usr/local/libexec
+cat >/usr/local/libexec/potato-agent-privileged-helper <<'EOF'
+#!/bin/sh
+export PYTHONPATH=/srv/potato_agent${PYTHONPATH:+:$PYTHONPATH}
+exec /opt/interface-env/bin/python -m interface.privileged_helper "$@"
+EOF
+chown root:root /usr/local/libexec/potato-agent-privileged-helper
+chmod 0755 /usr/local/libexec/potato-agent-privileged-helper
+cat >/etc/sudoers.d/potato-agent-interface <<'EOF'
+potato-interface ALL=(root) NOPASSWD: /usr/local/libexec/potato-agent-privileged-helper *
+EOF
+chmod 0440 /etc/sudoers.d/potato-agent-interface
+```
+
+如果你的仓库或状态目录不是上面的默认路径，请在 helper wrapper 里额外 `export`
+`POTATO_AGENT_REPO_ROOT`、`POTATO_AGENT_MAPPING_PATH`、`INTERFACE_TUI_GATEWAY_PYTHON`。
 
 先生成一个固定的 `INTERFACE_SESSION_SECRET`：
 
@@ -167,9 +204,15 @@ After=network.target
 
 [Service]
 Type=simple
+User=potato-interface
+Group=potato-interface
 WorkingDirectory=/srv/potato_agent
 Environment=INTERFACE_SESSION_SECRET=replace-with-a-long-random-string
 Environment=INTERFACE_FILE_BROWSER_MODE=user_readable
+Environment=POTATO_AGENT_MAPPING_PATH=/var/lib/potato-agent/config/users_mapping.yaml
+Environment=INTERFACE_AUTH_DB=/var/lib/potato-agent/data/interface.db
+Environment=INTERFACE_ARCHIVE_DB=/var/lib/potato-agent/data/archive.db
+Environment=INTERFACE_PRIVILEGED_HELPER=/usr/local/libexec/potato-agent-privileged-helper
 ExecStart=/opt/interface-env/bin/python -m uvicorn interface.app:app --host 0.0.0.0 --port 3000
 Restart=always
 RestartSec=3
@@ -182,6 +225,8 @@ WantedBy=multi-user.target
 
 - `WorkingDirectory` 必须改成你实际部署这个仓库的目录
 - `INTERFACE_SESSION_SECRET` 必须固定；如果不固定，`interface` 每次重启都会让现有登录态失效
+- `POTATO_AGENT_MAPPING_PATH` 应指向 `/var/lib/potato-agent/config` 下的 root-owned 配置文件
+- `INTERFACE_AUTH_DB`、`INTERFACE_ARCHIVE_DB` 应指向 `/var/lib/potato-agent/data` 下的 interface-owned 数据库
 - `INTERFACE_TUI_GATEWAY_PYTHON` 默认是 `/opt/hermes-agent-venv/bin/python3`；如果你的 Hermes 虚拟环境装在别处，需要把这个环境变量改成对应的 Python 路径
 - `INTERFACE_RUNTIME_IDLE_TIMEOUT_SECONDS` 默认是 1800；测试时可以临时调小，例如 300 表示 5 分钟
 - 聊天主链路通过 `tui_gateway`，不再依赖浏览器侧 `api_server` 回退
@@ -203,11 +248,24 @@ systemctl status potato-interface.service
 
 下面这些文件属于本机部署状态，不应该同步到 Git：
 
-- `users_mapping.yaml`
-- `interface/data/interface.db`
-- `interface/data/archive.db`
+- `/var/lib/potato-agent/config/users_mapping.yaml`
+- `/var/lib/potato-agent/data/interface.db`
+- `/var/lib/potato-agent/data/archive.db`
 
 其中 `users_mapping.yaml` 里可能直接包含上游模型 `API_KEY`。
+
+如果你是从旧版本升级，先停止服务，再迁移旧状态文件：
+
+```bash
+systemctl stop potato-interface.service
+mv /srv/potato_agent/users_mapping.yaml /var/lib/potato-agent/config/users_mapping.yaml
+mv /srv/potato_agent/interface/data/interface.db /var/lib/potato-agent/data/interface.db
+mv /srv/potato_agent/interface/data/archive.db /var/lib/potato-agent/data/archive.db
+chown root:potato-interface /var/lib/potato-agent/config/users_mapping.yaml
+chown potato-interface:potato-interface /var/lib/potato-agent/data/interface.db /var/lib/potato-agent/data/archive.db
+chmod 640 /var/lib/potato-agent/config/users_mapping.yaml
+chmod 600 /var/lib/potato-agent/data/interface.db /var/lib/potato-agent/data/archive.db
+```
 
 ## 根目录 Python 脚本
 

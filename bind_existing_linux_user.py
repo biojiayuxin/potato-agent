@@ -5,9 +5,8 @@ from __future__ import annotations
 import argparse
 import secrets
 import sys
-from pathlib import Path
 
-from interface.auth_db import email_exists, upsert_user, username_exists
+from interface.auth_db import DEFAULT_AUTH_DB_PATH, email_exists, upsert_user, username_exists
 from interface.hermes_service import (
     get_linux_user_info,
     install_user_files,
@@ -15,6 +14,7 @@ from interface.hermes_service import (
     require_root,
 )
 from interface.mapping import (
+    DEFAULT_MAPPING_PATH,
     DEFAULT_MODEL_NAME,
     infer_shared_api_key_placeholder,
     MappingStore,
@@ -23,11 +23,6 @@ from interface.mapping import (
     slugify_username,
     write_mapping,
 )
-
-
-PROJECT_ROOT = Path(__file__).resolve().parent
-DEFAULT_MAPPING_PATH = PROJECT_ROOT / "users_mapping.yaml"
-DEFAULT_AUTH_DB_PATH = PROJECT_ROOT / "interface" / "data" / "interface.db"
 
 
 class BindExistingUserError(RuntimeError):

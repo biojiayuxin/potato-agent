@@ -8,15 +8,22 @@ import uuid
 from pathlib import Path
 from typing import Any
 
+from interface.secure_paths import (
+    DEFAULT_PRIVATE_WRITABLE_DIR_MODE,
+    DEFAULT_STATE_DIR,
+    ensure_private_directory,
+    ensure_sqlite_sidecar_modes,
+)
+
 
 ROOT_DIR = Path(__file__).resolve().parent
 DEFAULT_ARCHIVE_DB_PATH = Path(
-    os.getenv("INTERFACE_ARCHIVE_DB") or (ROOT_DIR / "data" / "archive.db")
+    os.getenv("INTERFACE_ARCHIVE_DB") or (DEFAULT_STATE_DIR / "data" / "archive.db")
 )
 
 
 def _connect_archive_db(db_path: Path = DEFAULT_ARCHIVE_DB_PATH) -> sqlite3.Connection:
-    db_path.parent.mkdir(parents=True, exist_ok=True)
+    ensure_private_directory(db_path.parent, mode=DEFAULT_PRIVATE_WRITABLE_DIR_MODE)
     conn = sqlite3.connect(str(db_path))
     conn.row_factory = sqlite3.Row
     return conn
@@ -63,6 +70,7 @@ CREATE TABLE IF NOT EXISTS archive_runs (
 """
         )
         conn.commit()
+    ensure_sqlite_sidecar_modes(db_path)
     return db_path
 
 

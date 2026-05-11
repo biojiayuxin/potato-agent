@@ -9,10 +9,17 @@ from pathlib import Path
 
 import bcrypt
 
+from interface.secure_paths import (
+    DEFAULT_PRIVATE_WRITABLE_DIR_MODE,
+    DEFAULT_STATE_DIR,
+    ensure_private_directory,
+    ensure_sqlite_sidecar_modes,
+)
+
 
 ROOT_DIR = Path(__file__).resolve().parent
 DEFAULT_AUTH_DB_PATH = Path(
-    os.getenv("INTERFACE_AUTH_DB") or (ROOT_DIR / "data" / "interface.db")
+    os.getenv("INTERFACE_AUTH_DB") or (DEFAULT_STATE_DIR / "data" / "interface.db")
 )
 
 SCHEMA_SQL = """
@@ -88,7 +95,7 @@ def _row_to_user(row: sqlite3.Row | None) -> InterfaceUser | None:
 
 
 def ensure_auth_db(db_path: Path = DEFAULT_AUTH_DB_PATH) -> Path:
-    db_path.parent.mkdir(parents=True, exist_ok=True)
+    ensure_private_directory(db_path.parent, mode=DEFAULT_PRIVATE_WRITABLE_DIR_MODE)
     with sqlite3.connect(str(db_path)) as conn:
         conn.executescript(SCHEMA_SQL)
         for index_name, column_name in (
@@ -108,6 +115,7 @@ def ensure_auth_db(db_path: Path = DEFAULT_AUTH_DB_PATH) -> Path:
                     "where status in ('pending', 'provisioning')"
                 )
         conn.commit()
+    ensure_sqlite_sidecar_modes(db_path)
     return db_path
 
 

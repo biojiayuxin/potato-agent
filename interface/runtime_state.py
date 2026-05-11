@@ -108,7 +108,7 @@ def mark_runtime_started(user_id: str, db_path: Path = DEFAULT_AUTH_DB_PATH) -> 
 def mark_foreground_activity(
     user_id: str, db_path: Path = DEFAULT_AUTH_DB_PATH
 ) -> None:
-    """Record foreground chat activity for idle-timeout calculations.
+    """Record foreground user activity for idle-timeout calculations.
 
     This intentionally reuses last_user_message_at to avoid a schema change; the
     field is already part of the runtime idle baseline.

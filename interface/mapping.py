@@ -11,11 +11,18 @@ from typing import Any
 
 import yaml
 
+from interface.secure_paths import (
+    DEFAULT_MAPPING_FILE_MODE,
+    DEFAULT_STATE_DIR,
+    ensure_private_directory,
+    ensure_private_file,
+)
+
 
 ROOT_DIR = Path(__file__).resolve().parent
 REPO_ROOT = ROOT_DIR.parent
 DEFAULT_MAPPING_PATH = Path(
-    os.getenv("POTATO_AGENT_MAPPING_PATH") or (REPO_ROOT / "users_mapping.yaml")
+    os.getenv("POTATO_AGENT_MAPPING_PATH") or (DEFAULT_STATE_DIR / "config" / "users_mapping.yaml")
 )
 DEFAULT_START_PORT = 8643
 DEFAULT_API_SERVER_HOST = "127.0.0.1"
@@ -125,10 +132,12 @@ def load_mapping(
 
 
 def write_mapping(path: Path, config: dict[str, Any]) -> None:
+    ensure_private_directory(path.parent)
     path.write_text(
         yaml.safe_dump(config, sort_keys=False, allow_unicode=False),
         encoding="utf-8",
     )
+    ensure_private_file(path, mode=DEFAULT_MAPPING_FILE_MODE)
 
 
 def slugify_username(username: str) -> str:

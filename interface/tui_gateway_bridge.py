@@ -16,6 +16,7 @@ from typing import Any, Awaitable, Callable
 from fastapi import WebSocket
 
 from interface.mapping import HermesTarget
+from interface.privileged_client import privileged_client
 from interface.runtime_state import (
     FOREGROUND_CHAT_LEASE,
     create_runtime_lease,
@@ -38,6 +39,14 @@ class _PendingRequest:
 
 
 BridgeEventListener = Callable[[dict[str, Any]], Awaitable[None]]
+
+
+def _force_helper_enabled() -> bool:
+    return os.getenv("INTERFACE_FORCE_PRIVILEGED_HELPER", "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+    }
 
 
 class TuiGatewayBridge:
@@ -112,7 +121,7 @@ class TuiGatewayBridge:
             stderr=subprocess.PIPE,
             text=True,
             bufsize=1,
-            cwd=str(self.target.workdir),
+            cwd=str(self._build_cwd()),
             env=env,
         )
         self._started_at = time.monotonic()
@@ -135,22 +144,12 @@ class TuiGatewayBridge:
             raise TuiGatewayBridgeError(detail) from exc
 
     def _build_command(self) -> list[str]:
-        python_bin = os.getenv("INTERFACE_TUI_GATEWAY_PYTHON") or "/opt/hermes-agent-venv/bin/python3"
-        return [
-            "runuser",
-            "-u",
-            self.target.linux_user,
-            "--",
-            "env",
-            f"HOME={self.target.home_dir}",
-            f"HERMES_HOME={self.target.hermes_home}",
-            f"TERMINAL_CWD={self.target.workdir}",
-            f"PATH={os.environ.get('PATH', '')}",
-            "PYTHONUNBUFFERED=1",
-            python_bin,
-            "-m",
-            "tui_gateway.entry",
-        ]
+        return privileged_client.tui_gateway_command(self.target)
+
+    def _build_cwd(self) -> Path:
+        if os.geteuid() == 0 and not _force_helper_enabled():
+            return self.target.workdir
+        return Path(os.getenv("POTATO_AGENT_REPO_ROOT") or "/srv/potato_agent")
 
     def _build_env(self) -> dict[str, str]:
         env = os.environ.copy()

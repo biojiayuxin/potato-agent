@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import importlib
 import os
+import sqlite3
 import sys
 import tempfile
+import time
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -156,6 +158,102 @@ model:
         assert "https://primary.example" not in response.text
         assert "sk-primary" not in response.text
         assert "sk-fast" not in response.text
+    finally:
+        client.close()
+
+
+def test_get_models_reads_active_model_through_helper_when_not_root(monkeypatch) -> None:
+    client, interface_app_mod, _, _ = _build_client_and_user(monkeypatch)
+    calls: list[str] = []
+
+    def fake_get_active_model_id(username: str) -> str:
+        calls.append(username)
+        return "fast"
+
+    monkeypatch.setattr(interface_app_mod.os, "geteuid", lambda: 1000)
+    monkeypatch.setattr(
+        interface_app_mod.privileged_client,
+        "get_active_model_id",
+        fake_get_active_model_id,
+    )
+
+    try:
+        response = client.get("/api/models")
+        assert response.status_code == 200, response.text
+        payload = response.json()
+        assert payload["active_id"] == "fast"
+        assert payload["data"][1]["is_active"] is True
+        assert calls == ["alice"]
+    finally:
+        client.close()
+
+
+def test_authenticated_api_request_refreshes_idle_activity(monkeypatch) -> None:
+    client, _, user, _ = _build_client_and_user(monkeypatch)
+    try:
+        from interface.runtime_state import (
+            ensure_runtime_state_store,
+            get_runtime_state,
+            mark_runtime_started,
+        )
+
+        db_path = Path(os.environ["INTERFACE_AUTH_DB"])
+        ensure_runtime_state_store(db_path)
+        mark_runtime_started(user.id, db_path=db_path)
+        old_activity_at = int(time.time()) - 3600
+        with sqlite3.connect(str(db_path)) as conn:
+            conn.execute(
+                """
+                UPDATE runtime_state
+                SET runtime_started_at = ?,
+                    last_user_message_at = ?,
+                    updated_at = ?
+                WHERE user_id = ?
+                """,
+                (old_activity_at, old_activity_at, old_activity_at, user.id),
+            )
+            conn.commit()
+
+        response = client.get("/api/models")
+        assert response.status_code == 200, response.text
+        state = get_runtime_state(user.id, db_path=db_path)
+        assert state is not None
+        assert int(state["last_user_message_at"]) > old_activity_at
+    finally:
+        client.close()
+
+
+def test_auth_session_poll_does_not_refresh_idle_activity(monkeypatch) -> None:
+    client, _, user, _ = _build_client_and_user(monkeypatch)
+    try:
+        from interface.runtime_state import (
+            ensure_runtime_state_store,
+            get_runtime_state,
+            mark_runtime_started,
+        )
+
+        db_path = Path(os.environ["INTERFACE_AUTH_DB"])
+        ensure_runtime_state_store(db_path)
+        mark_runtime_started(user.id, db_path=db_path)
+        old_activity_at = int(time.time()) - 3600
+        with sqlite3.connect(str(db_path)) as conn:
+            conn.execute(
+                """
+                UPDATE runtime_state
+                SET runtime_started_at = ?,
+                    last_user_message_at = ?,
+                    updated_at = ?
+                WHERE user_id = ?
+                """,
+                (old_activity_at, old_activity_at, old_activity_at, user.id),
+            )
+            conn.commit()
+
+        response = client.get("/api/auth/session")
+        assert response.status_code == 200, response.text
+        state = get_runtime_state(user.id, db_path=db_path)
+        assert state is not None
+        assert int(state["last_user_message_at"]) == old_activity_at
     finally:
         client.close()
 

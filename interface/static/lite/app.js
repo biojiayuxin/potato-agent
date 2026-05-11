@@ -34,6 +34,7 @@ const state = {
 };
 
 const MODEL_RESPONSE_ERROR_MESSAGE = '模型响应失败，请稍后重试。';
+const SESSION_EXPIRED_MESSAGE = 'Workspace slept after inactivity. Please sign in again.';
 
 const dom = {
   loginView: document.getElementById('login-view'),
@@ -1551,7 +1552,7 @@ const handleSessionExpired = (message) => {
   resetWorkspaceState();
   showLogin();
   setAuthViewMode('signin');
-  showError(dom.loginError, message || 'Workspace slept after 30 minutes of inactivity. Please sign in again.');
+  showError(dom.loginError, message || SESSION_EXPIRED_MESSAGE);
 };
 
 const setLoginPending = (pending) => {
@@ -1733,7 +1734,7 @@ const pollAuthSession = async () => {
     const json = await response.json();
     if (!json?.authenticated) {
       handleSessionExpired(
-        json?.message || 'Workspace slept after 30 minutes of inactivity. Please sign in again.'
+        json?.message || SESSION_EXPIRED_MESSAGE
       );
       return;
     }
@@ -2975,16 +2976,13 @@ const downloadFile = async (path) => {
   if (state.workspaceRoot) {
     query.set('root', state.workspaceRoot);
   }
-  const response = await api(`/api/files/download?${query.toString()}`, { method: 'GET' });
-  const blob = await response.blob();
-  const url = URL.createObjectURL(blob);
   const link = document.createElement('a');
-  link.href = url;
+  link.href = `/api/files/download?${query.toString()}`;
   link.download = path.split('/').pop() || 'file';
+  link.hidden = true;
   document.body.append(link);
   link.click();
   link.remove();
-  URL.revokeObjectURL(url);
 };
 
 const renderTreeNode = async (path, depth = 0) => {

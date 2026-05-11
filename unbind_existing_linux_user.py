@@ -4,21 +4,16 @@ from __future__ import annotations
 
 import argparse
 import sys
-from pathlib import Path
 
-from interface.auth_db import connect_auth_db
+from interface.auth_db import DEFAULT_AUTH_DB_PATH, connect_auth_db
 from interface.hermes_service import require_binary, require_root, stop_and_remove_service
 from interface.mapping import (
+    DEFAULT_MAPPING_PATH,
     MappingStore,
     load_mapping,
     remove_user_mapping_entry,
     write_mapping,
 )
-
-
-PROJECT_ROOT = Path(__file__).resolve().parent
-DEFAULT_MAPPING_PATH = PROJECT_ROOT / "users_mapping.yaml"
-DEFAULT_AUTH_DB_PATH = PROJECT_ROOT / "interface" / "data" / "interface.db"
 
 
 class UnbindExistingUserError(RuntimeError):

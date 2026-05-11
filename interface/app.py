@@ -3,6 +3,7 @@ from __future__ import annotations
 import contextlib
 import asyncio
 import json
+import logging
 import os
 import pwd
 import sqlite3
@@ -31,6 +32,8 @@ from fastapi import (
     status,
 )
 from fastapi.responses import FileResponse
+from fastapi.responses import Response as FastAPIResponse
+from fastapi.responses import StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
@@ -73,13 +76,9 @@ from interface.display_store import (
 )
 from interface.mapping import DEFAULT_MAPPING_PATH, HermesTarget, MappingStore
 from interface.hermes_service import (
-    ensure_service_ready,
-    install_user_files,
     is_service_active,
-    remove_linux_user,
     service_operation_lock,
     stop_service,
-    stop_and_remove_service,
 )
 from interface.runtime_state import (
     cleanup_expired_runtime_leases,
@@ -89,14 +88,9 @@ from interface.runtime_state import (
     has_active_runtime_leases,
     list_idle_runtime_candidates,
     mark_background_activity,
+    mark_foreground_activity,
     mark_runtime_started,
     revoke_runtime_session,
-)
-from interface.mapping import (
-    load_mapping,
-    upsert_user_mapping_entry,
-    write_mapping,
-    remove_user_mapping_entry,
 )
 from interface.model_options import (
     ModelOptionsError,
@@ -104,6 +98,7 @@ from interface.model_options import (
     get_active_model_option_id,
     patch_user_active_model,
 )
+from interface.privileged_client import PrivilegedClientError, privileged_client
 from interface.tui_gateway_bridge import (
     TuiGatewayBridge,
     TuiGatewayBridgeError,
@@ -112,6 +107,7 @@ from interface.tui_gateway_bridge import (
 from interface.session_run_manager import ACTIVE_LIVE_STATUSES, SessionRunManager
 
 
+LOGGER = logging.getLogger("potato_interface")
 ROOT_DIR = Path(__file__).resolve().parent
 REPO_ROOT = ROOT_DIR.parent
 STATIC_DIR = ROOT_DIR / "static"
@@ -139,6 +135,11 @@ RUNTIME_IDLE_CHECK_INTERVAL_SECONDS = int(
 )
 FILENAME_SANITIZE_RE = re.compile(r"[^A-Za-z0-9._-]+")
 INTERFACE_SESSION_SOURCES = ("tui",)
+ACTIVITY_REFRESH_EXCLUDED_PATHS = {
+    "/api/auth/session",
+    "/api/auth/signin",
+    "/api/auth/signout",
+}
 
 HERMES_SRC = REPO_ROOT / "hermes-agent"
 if str(HERMES_SRC) not in sys.path:
@@ -282,41 +283,31 @@ async def _signup_worker_loop() -> None:
         display_name = str(job["display_name"])
         set_signup_job_status(job_id, status="provisioning")
 
-        target = None
         try:
-            config = load_mapping(DEFAULT_MAPPING_PATH, resolve_env=False)
-            upsert_user_mapping_entry(
-                config,
+            privileged_client.provision_user(
                 username=username,
                 email=email,
                 display_name=display_name,
             )
-            write_mapping(DEFAULT_MAPPING_PATH, config)
-            resolved_config = load_mapping(DEFAULT_MAPPING_PATH, resolve_env=True)
             mapping_store._mtime_ns = None
             mapping_store._targets = []
             target = mapping_store.get_target_by_username(username)
             if target is None:
                 raise RuntimeError("Failed to resolve newly created mapping target.")
 
-            install_user_files(resolved_config, target)
             activate_signup_user(job_id, mapping_username=username)
             set_signup_job_status(job_id, status="completed")
         except Exception as exc:
             try:
-                config = load_mapping(DEFAULT_MAPPING_PATH, resolve_env=False)
-                remove_user_mapping_entry(config, username)
-                write_mapping(DEFAULT_MAPPING_PATH, config)
                 mapping_store._mtime_ns = None
                 mapping_store._targets = []
             except Exception:
                 pass
 
-            if target is not None:
-                with contextlib.suppress(Exception):
-                    stop_and_remove_service(target.systemd_service)
-                with contextlib.suppress(Exception):
-                    remove_linux_user(target.linux_user, delete_home=True)
+            with contextlib.suppress(Exception):
+                privileged_client.deprovision_user(username, delete_home=True)
+            with contextlib.suppress(Exception):
+                privileged_client.remove_mapping(username)
 
             set_signup_job_status(job_id, status="failed", error_message=str(exc))
 
@@ -381,7 +372,8 @@ def _serialize_user(user: CurrentUser) -> dict[str, Any]:
 
 def _revocation_message(reason: str) -> str:
     if reason == "idle_timeout":
-        return "Workspace slept after 30 minutes of inactivity. Please sign in again."
+        minutes = max(int(RUNTIME_IDLE_TIMEOUT_SECONDS) // 60, 1)
+        return f"Workspace slept after {minutes} minutes of inactivity. Please sign in again."
     return "Session expired"
 
 
@@ -661,6 +653,24 @@ class _UserSessionDBProxy:
         self.spec = spec
 
     def _call(self, method: str, **kwargs: Any) -> Any:
+        if os.geteuid() != 0 or os.getenv("INTERFACE_FORCE_PRIVILEGED_HELPER", "").strip().lower() in {
+            "1",
+            "true",
+            "yes",
+        }:
+            try:
+                return privileged_client.session_db_call(
+                    self.spec.username, method, kwargs
+                )
+            except PrivilegedClientError as exc:
+                raise HTTPException(
+                    status_code=500,
+                    detail=(
+                        f"Failed to access Hermes session DB as "
+                        f"{self.spec.linux_user}: {exc}"
+                    ),
+                ) from exc
+
         result = subprocess.run(
             [
                 "runuser",
@@ -1518,62 +1528,97 @@ async def _archive_scheduler_loop() -> None:
             pass
 
 
+def _stop_idle_runtime_candidate(auth_user: Any, target: HermesTarget) -> bool:
+    if not target.systemd_service or not target.username:
+        return False
+    if not os.path.exists(f"/etc/systemd/system/{target.systemd_service}"):
+        return False
+
+    if os.geteuid() != 0 or privileged_client.force_helper:
+        result = privileged_client.stop_idle_runtime(target.username, auth_user.id)
+        stopped = bool(result.get("stopped"))
+        if stopped:
+            LOGGER.info(
+                "Stopped idle runtime for %s after %s seconds",
+                target.username,
+                RUNTIME_IDLE_TIMEOUT_SECONDS,
+            )
+        elif result.get("reason"):
+            LOGGER.info(
+                "Kept idle runtime for %s active: %s",
+                target.username,
+                result.get("reason"),
+            )
+        return stopped
+
+    with service_operation_lock(target.systemd_service):
+        cleanup_expired_runtime_leases()
+        if has_active_runtime_leases(auth_user.id):
+            return False
+        try:
+            if _has_active_background_processes_for_target(target):
+                mark_background_activity(auth_user.id)
+                return False
+        except Exception:
+            LOGGER.exception(
+                "Keeping runtime active because background process check failed for %s",
+                target.username,
+            )
+            return False
+        if not is_service_active(target.systemd_service):
+            return False
+        if os.geteuid() == 0:
+            stop_service(target.systemd_service)
+        else:
+            privileged_client.stop_runtime(target.username)
+        revoke_runtime_session(
+            auth_user.id,
+            reason="idle_timeout",
+        )
+        LOGGER.info(
+            "Stopped idle runtime for %s after %s seconds",
+            target.username,
+            RUNTIME_IDLE_TIMEOUT_SECONDS,
+        )
+        return True
+
+
+async def _run_runtime_idle_check_once() -> int:
+    await asyncio.to_thread(cleanup_expired_runtime_leases)
+    candidates = await asyncio.to_thread(
+        list_idle_runtime_candidates,
+        idle_timeout_seconds=RUNTIME_IDLE_TIMEOUT_SECONDS,
+    )
+    if not candidates:
+        return 0
+
+    stopped = 0
+    users_by_id = {user.id: user for user in list_users()}
+    for candidate in candidates:
+        auth_user = users_by_id.get(str(candidate.get("user_id") or ""))
+        if auth_user is None:
+            continue
+        target = mapping_store.resolve_target(
+            mapping_username=auth_user.mapping_username,
+            email=auth_user.email,
+            username=auth_user.username,
+        )
+        if target is None:
+            continue
+        if await asyncio.to_thread(_stop_idle_runtime_candidate, auth_user, target):
+            stopped += 1
+    return stopped
+
+
 async def _runtime_idle_scheduler_loop() -> None:
     while True:
         await asyncio.sleep(max(RUNTIME_IDLE_CHECK_INTERVAL_SECONDS, 5))
         try:
-            await asyncio.to_thread(cleanup_expired_runtime_leases)
-            candidates = await asyncio.to_thread(
-                list_idle_runtime_candidates,
-                idle_timeout_seconds=RUNTIME_IDLE_TIMEOUT_SECONDS,
-            )
-            if not candidates:
-                continue
-
-            users_by_id = {user.id: user for user in list_users()}
-            for candidate in candidates:
-                auth_user = users_by_id.get(str(candidate.get("user_id") or ""))
-                if auth_user is None:
-                    continue
-                target = mapping_store.resolve_target(
-                    mapping_username=auth_user.mapping_username,
-                    email=auth_user.email,
-                    username=auth_user.username,
-                )
-                if target is None:
-                    continue
-
-                def _stop_if_idle() -> None:
-                    with service_operation_lock(target.systemd_service):
-                        cleanup_expired_runtime_leases()
-                        if has_active_runtime_leases(auth_user.id):
-                            return
-                        try:
-                            if has_active_background_processes(target):
-                                mark_background_activity(auth_user.id)
-                                return
-                        except Exception:
-                            # Fail open: if we cannot read or validate Hermes' process
-                            # registry, keep the runtime alive rather than risk killing
-                            # a long-running background task.
-                            return
-                        if not target.systemd_service or not os.path.exists(
-                            f"/etc/systemd/system/{target.systemd_service}"
-                        ):
-                            return
-                        if not target.systemd_service or not target.username:
-                            return
-                        if not is_service_active(target.systemd_service):
-                            return
-                        stop_service(target.systemd_service)
-                        revoke_runtime_session(
-                            auth_user.id,
-                            reason="idle_timeout",
-                        )
-
-                await asyncio.to_thread(_stop_if_idle)
+            await _run_runtime_idle_check_once()
+        except asyncio.CancelledError:
+            raise
         except Exception:
-            pass
+            LOGGER.exception("Runtime idle scheduler failed")
 
 
 def _sanitize_filename(filename: str) -> str:
@@ -1612,8 +1657,48 @@ def _ensure_upload_root(user: CurrentUser) -> Path:
     return upload_root
 
 
+def _use_privileged_file_helper() -> bool:
+    return os.geteuid() != 0 or privileged_client.force_helper
+
+
+def _has_active_background_processes_for_target(target: HermesTarget) -> bool:
+    if os.geteuid() == 0 and not privileged_client.force_helper:
+        return has_active_background_processes(target)
+    return privileged_client.has_active_background_processes(target.username)
+
+
+def _get_active_model_id_for_user(
+    target: HermesTarget,
+    model_options: Any,
+) -> str:
+    if os.geteuid() == 0 and not privileged_client.force_helper:
+        return get_active_model_option_id(target, model_options)
+    return privileged_client.get_active_model_id(target.username)
+
+
 app = FastAPI(title="Potato Interface")
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
+
+
+def _should_refresh_activity_for_request(request: Request) -> bool:
+    path = request.url.path
+    if not path.startswith("/api/"):
+        return False
+    if path in ACTIVITY_REFRESH_EXCLUDED_PATHS:
+        return False
+    if path.startswith("/api/auth/signup/"):
+        return False
+    return True
+
+
+@app.middleware("http")
+async def refresh_authenticated_activity(request: Request, call_next):
+    response = await call_next(request)
+    if response.status_code < 400 and _should_refresh_activity_for_request(request):
+        user, _ = _resolve_current_user(request)
+        if user is not None:
+            await asyncio.to_thread(mark_foreground_activity, user.id)
+    return response
 
 
 @app.on_event("startup")
@@ -1687,7 +1772,7 @@ async def auth_session(request: Request) -> dict[str, Any]:
 @app.post("/api/runtime/start")
 async def start_runtime(user: CurrentUser = Depends(get_current_user)) -> dict[str, Any]:
     try:
-        runtime = await asyncio.to_thread(ensure_service_ready, user.target)
+        runtime = await asyncio.to_thread(privileged_client.ensure_runtime, user.target)
         await asyncio.to_thread(mark_runtime_started, user.id)
         await asyncio.to_thread(clear_session_revocation, user.id)
     except Exception as exc:
@@ -1790,9 +1875,7 @@ async def api_status(user: CurrentUser = Depends(get_current_user)) -> dict[str,
     return {
         "status": True,
         "user": _serialize_user(user),
-        "mapping_path": str(DEFAULT_MAPPING_PATH),
         "workspace_service": user.target.systemd_service,
-        "state_db_path": str(user.target.state_db_path),
         "archived_session_count": count_archived_sessions(),
     }
 
@@ -1905,11 +1988,16 @@ async def get_models(user: CurrentUser = Depends(get_current_user)) -> dict[str,
     try:
         config = mapping_store.load_config(resolve_env=True)
         model_options = normalize_model_options(config)
-        active_id = get_active_model_option_id(user.target, model_options)
+        active_id = _get_active_model_id_for_user(user.target, model_options)
     except ModelOptionsError as exc:
         raise HTTPException(
             status_code=500,
             detail=f"Invalid model whitelist configuration: {exc}",
+        ) from exc
+    except PrivilegedClientError as exc:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to read active model: {exc}",
         ) from exc
 
     return {
@@ -1947,16 +2035,19 @@ async def update_active_model(
     if selected is None:
         raise HTTPException(status_code=400, detail="Model is not allowed")
 
-    active_id = get_active_model_option_id(user.target, model_options)
-    if requested_id == active_id:
-        return {
-            "ok": True,
-            "active_id": active_id,
-            "model": selected.to_public(
-                is_primary=selected.id == model_options.primary_id,
-                is_active=True,
-            ),
-        }
+    try:
+        active_id = _get_active_model_id_for_user(user.target, model_options)
+        if requested_id == active_id:
+            return {
+                "ok": True,
+                "active_id": active_id,
+                "model": selected.to_public(
+                    is_primary=selected.id == model_options.primary_id,
+                    is_active=True,
+                ),
+            }
+    except (ModelOptionsError, PrivilegedClientError) as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
 
     registry: TuiGatewayBridgeRegistry = app.state.tui_gateway_bridges
     existing_bridge = await registry.get_existing(user.id)
@@ -1976,8 +2067,15 @@ async def update_active_model(
         )
 
     try:
-        await asyncio.to_thread(patch_user_active_model, user.target, selected)
-    except ModelOptionsError as exc:
+        if os.geteuid() == 0 and not privileged_client.force_helper:
+            await asyncio.to_thread(patch_user_active_model, user.target, selected)
+        else:
+            await asyncio.to_thread(
+                privileged_client.patch_active_model,
+                user.target.username,
+                selected.id,
+            )
+    except (ModelOptionsError, PrivilegedClientError) as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
     return {
@@ -2453,6 +2551,23 @@ async def files_tree(
     root: str | None = None,
     user: CurrentUser = Depends(get_current_user),
 ) -> dict[str, Any]:
+    if _use_privileged_file_helper():
+        try:
+            payload = await asyncio.to_thread(
+                privileged_client.file_tree,
+                user.target.username,
+                mode=_normalized_file_browser_mode(),
+                root=root,
+                path=path,
+            )
+        except PrivilegedClientError as exc:
+            raise HTTPException(status_code=403, detail=str(exc)) from exc
+        return {
+            "root": str(payload.get("root") or ""),
+            "path": str(payload.get("path") or ""),
+            "entries": payload.get("entries") if isinstance(payload.get("entries"), list) else [],
+        }
+
     browser_root = _resolve_file_browser_root(user, root)
     relative_path, target = _resolve_file_browser_target(browser_root, path)
     if not browser_root.exists():
@@ -2487,6 +2602,26 @@ async def open_directory(
     user: CurrentUser = Depends(get_current_user),
 ) -> dict[str, Any]:
     mode = _normalized_file_browser_mode()
+    if _use_privileged_file_helper():
+        try:
+            payload = await asyncio.to_thread(
+                privileged_client.file_tree,
+                user.target.username,
+                mode=mode,
+                root=path,
+                path="",
+            )
+        except PrivilegedClientError as exc:
+            raise HTTPException(status_code=403, detail=str(exc)) from exc
+        opened_path = str(payload.get("root") or "")
+        return {
+            "mode": mode,
+            "root": opened_path,
+            "path": "",
+            "opened_path": opened_path,
+            "entries": payload.get("entries") if isinstance(payload.get("entries"), list) else [],
+        }
+
     target = _resolve_file_browser_root(user, path)
     _assert_user_can_open_directory(target, linux_user=user.target.linux_user)
     entries = _list_directory_as_user(
@@ -2508,7 +2643,63 @@ async def files_download(
     path: str,
     root: str | None = None,
     user: CurrentUser = Depends(get_current_user),
-) -> FileResponse:
+) -> FastAPIResponse:
+    if _use_privileged_file_helper():
+        try:
+            info = await asyncio.to_thread(
+                privileged_client.file_info,
+                user.target.username,
+                mode=_normalized_file_browser_mode(),
+                root=root,
+                path=path,
+            )
+        except PrivilegedClientError as exc:
+            raise HTTPException(status_code=403, detail=str(exc)) from exc
+        filename = Path(str(info.get("filename") or path or "download.bin")).name
+        headers = {"Content-Disposition": f'attachment; filename="{filename}"'}
+        size = info.get("size")
+        if isinstance(size, int) and size >= 0:
+            headers["Content-Length"] = str(size)
+
+        command = privileged_client.file_stream_command(
+            user.target.username,
+            mode=_normalized_file_browser_mode(),
+            root=root,
+            path=path,
+        )
+
+        def iter_file() -> Iterator[bytes]:
+            process = subprocess.Popen(
+                command,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+            assert process.stdout is not None
+            try:
+                while True:
+                    chunk = process.stdout.read(1024 * 1024)
+                    if not chunk:
+                        break
+                    yield chunk
+                returncode = process.wait()
+                if returncode != 0:
+                    stderr = ""
+                    if process.stderr is not None:
+                        stderr = process.stderr.read().decode("utf-8", errors="replace").strip()
+                    raise RuntimeError(stderr or f"file stream failed with exit code {returncode}")
+            finally:
+                if process.poll() is None:
+                    process.kill()
+                if process.stderr is not None:
+                    process.stderr.close()
+                process.stdout.close()
+
+        return StreamingResponse(
+            iter_file(),
+            media_type="application/octet-stream",
+            headers=headers,
+        )
+
     browser_root = _resolve_file_browser_root(user, root)
     _, target = _resolve_file_browser_target(browser_root, path)
     _assert_user_can_read_file(target, linux_user=user.target.linux_user)
@@ -2521,6 +2712,42 @@ async def upload_file(
 ) -> dict[str, Any]:
     if not file.filename:
         raise HTTPException(status_code=400, detail="Filename is required")
+
+    if _use_privileged_file_helper():
+        total_size = 0
+        chunks: list[bytes] = []
+        try:
+            while True:
+                chunk = await file.read(1024 * 1024)
+                if not chunk:
+                    break
+                total_size += len(chunk)
+                if total_size > MAX_UPLOAD_SIZE_BYTES:
+                    raise HTTPException(
+                        status_code=413,
+                        detail=f"Upload file too large (> {MAX_UPLOAD_SIZE_BYTES // (1024 * 1024)} MB).",
+                    )
+                chunks.append(chunk)
+        finally:
+            await file.close()
+        try:
+            stored = await asyncio.to_thread(
+                privileged_client.file_upload,
+                user.target.username,
+                filename=file.filename,
+                content=b"".join(chunks),
+                upload_dir_name=UPLOAD_DIR_NAME,
+            )
+        except PrivilegedClientError as exc:
+            raise HTTPException(status_code=403, detail=str(exc)) from exc
+        file_id = uuid.uuid4().hex
+        return {
+            "id": file_id,
+            "name": str(stored.get("name") or _sanitize_filename(file.filename)),
+            "size": int(stored.get("size") or total_size),
+            "content_type": file.content_type or "application/octet-stream",
+            "path": str(stored.get("path") or ""),
+        }
 
     upload_root = _ensure_upload_root(user)
     safe_name = _sanitize_filename(file.filename)
