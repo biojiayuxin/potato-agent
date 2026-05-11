@@ -1,0 +1,243 @@
+import os
+from pathlib import Path
+
+configfile: "config.yaml"
+
+ENV_PREFIX = config.get("env_prefix", "")
+A = config["species"]["a"]
+B = config["species"]["b"]
+M = config["mcscan"]
+P = config["plot"]
+
+AP = A["prefix"]
+BP = B["prefix"]
+PAIR = f"{AP}.{BP}"
+DBTYPE = M.get("dbtype", "prot")
+SUFFIX = "pep" if DBTYPE == "prot" else "cds"
+THREADS = int(M.get("cpus", 16))
+CSCORE = str(M.get("cscore", 0.9))
+MINSPAN = str(M.get("minspan", 30))
+SEQPAIRS = M.get("seqpairs", "") or ""
+FORMATS = P.get("formats", ["pdf", "png"])
+
+FINAL_OUTPUTS = [
+    f"results/{PAIR}.last.filtered",
+    f"results/{PAIR}.anchors",
+    f"results/{PAIR}.lifted.anchors",
+    f"results/{PAIR}.anchors.simple",
+]
+FINAL_OUTPUTS += [f"results/{PAIR}.macrosynteny.{fmt}" for fmt in FORMATS]
+if P.get("line_pdf", True):
+    FINAL_OUTPUTS.append(f"results/{PAIR}.macrosynteny.line.pdf")
+
+shell.prefix(f"export PATH={ENV_PREFIX}/bin:$PATH; export MPLBACKEND=Agg; set -euo pipefail; ")
+
+rule all:
+    input:
+        FINAL_OUTPUTS
+
+rule mkdirs:
+    output:
+        touch("work/.dirs.done")
+    shell:
+        "mkdir -p work results logs && touch {output}"
+
+rule gff_to_bed_a:
+    input:
+        rules.mkdirs.output,
+        gff=A["gff3"]
+    output:
+        f"work/{AP}.bed"
+    log:
+        f"logs/{AP}.gff_to_bed.log"
+    params:
+        gff_type=A.get("gff_type", "mRNA"),
+        gff_key=A.get("gff_key", "ID")
+    shell:
+        "python -m jcvi.formats.gff bed --type={params.gff_type} --key={params.gff_key} {input.gff} -o {output} > {log} 2>&1"
+
+rule gff_to_bed_b:
+    input:
+        rules.mkdirs.output,
+        gff=B["gff3"]
+    output:
+        f"work/{BP}.bed"
+    log:
+        f"logs/{BP}.gff_to_bed.log"
+    params:
+        gff_type=B.get("gff_type", "mRNA"),
+        gff_key=B.get("gff_key", "ID")
+    shell:
+        "python -m jcvi.formats.gff bed --type={params.gff_type} --key={params.gff_key} {input.gff} -o {output} > {log} 2>&1"
+
+rule link_fasta_a:
+    input:
+        rules.mkdirs.output,
+        fasta=A["fasta"]
+    output:
+        f"work/{AP}.{SUFFIX}"
+    shell:
+        "ln -sf $(readlink -f {input.fasta}) {output}"
+
+rule link_fasta_b:
+    input:
+        rules.mkdirs.output,
+        fasta=B["fasta"]
+    output:
+        f"work/{BP}.{SUFFIX}"
+    shell:
+        "ln -sf $(readlink -f {input.fasta}) {output}"
+
+rule check_ids:
+    input:
+        bed_a=f"work/{AP}.bed",
+        fa_a=f"work/{AP}.{SUFFIX}",
+        bed_b=f"work/{BP}.bed",
+        fa_b=f"work/{BP}.{SUFFIX}"
+    output:
+        "results/id_check.tsv"
+    params:
+        ap=AP,
+        bp=BP
+    shell:
+        r"""
+        python - {input.bed_a} {input.fa_a} {params.ap} {input.bed_b} {input.fa_b} {params.bp} > {output} <<'PY'
+import sys
+args = sys.argv[1:]
+print('prefix\tbed_ids\tfasta_ids\tbed_not_in_fasta\tfasta_not_in_bed')
+for i in range(0, len(args), 3):
+    bed, fa, prefix = args[i:i+3]
+    bed_ids = set()
+    with open(bed) as f:
+        for line in f:
+            if line.strip():
+                bed_ids.add(line.rstrip('\n').split('\t')[3])
+    fa_ids = set()
+    with open(fa) as f:
+        for line in f:
+            if line.startswith('>'):
+                fa_ids.add(line[1:].strip().split()[0])
+    print(prefix, len(bed_ids), len(fa_ids), len(bed_ids - fa_ids), len(fa_ids - bed_ids), sep='\t')
+    if bed_ids - fa_ids:
+        raise SystemExit(f'ERROR: {prefix} has BED IDs absent from FASTA, e.g. {sorted(bed_ids-fa_ids)[:5]}')
+PY
+        """
+
+rule mcscan:
+    input:
+        "results/id_check.tsv",
+        bed_a=f"work/{AP}.bed",
+        fa_a=f"work/{AP}.{SUFFIX}",
+        bed_b=f"work/{BP}.bed",
+        fa_b=f"work/{BP}.{SUFFIX}"
+    output:
+        last=f"results/{PAIR}.last",
+        filtered=f"results/{PAIR}.last.filtered",
+        anchors=f"results/{PAIR}.anchors",
+        lifted=f"results/{PAIR}.lifted.anchors"
+    log:
+        "logs/mcscan.log"
+    threads: THREADS
+    params:
+        extra="--no_strip_names" if M.get("no_strip_names", True) else "",
+        dot="--no_dotplot" if M.get("no_dotplot", True) else "",
+        align_soft=M.get("align_soft", "diamond_blastp")
+    shell:
+        r"""
+        tmp=$(mktemp -d work/mcscan_tmp.XXXXXX)
+        ln -sf $(readlink -f {input.bed_a}) $tmp/{AP}.bed
+        ln -sf $(readlink -f {input.fa_a}) $tmp/{AP}.{SUFFIX}
+        ln -sf $(readlink -f {input.bed_b}) $tmp/{BP}.bed
+        ln -sf $(readlink -f {input.fa_b}) $tmp/{BP}.{SUFFIX}
+        cd $tmp
+        python -m jcvi.compara.catalog ortholog {AP} {BP} \
+          --dbtype={DBTYPE} \
+          --align_soft={params.align_soft} \
+          {params.extra} \
+          --cscore={CSCORE} \
+          --cpus={threads} \
+          {params.dot} > ../../{log} 2>&1
+        cd ../..
+        mv $tmp/{PAIR}.last {output.last}
+        mv $tmp/{PAIR}.last.filtered {output.filtered}
+        mv $tmp/{PAIR}.anchors {output.anchors}
+        mv $tmp/{PAIR}.lifted.anchors {output.lifted}
+        rm -rf $tmp
+        """
+
+rule screen_simple:
+    input:
+        anchors=f"results/{PAIR}.anchors",
+        bed_a=f"work/{AP}.bed",
+        bed_b=f"work/{BP}.bed"
+    output:
+        simple=f"results/{PAIR}.anchors.simple",
+        new=f"results/{PAIR}.anchors.new"
+    log:
+        "logs/screen_simple.log"
+    params:
+        seqpairs=lambda wc: f"--seqpairs={SEQPAIRS}" if SEQPAIRS else ""
+    shell:
+        r"""
+        cp {input.bed_a} results/{AP}.bed
+        cp {input.bed_b} results/{BP}.bed
+        cd results
+        python -m jcvi.compara.synteny screen {params.seqpairs} --qbed={AP}.bed --sbed={BP}.bed --minspan={MINSPAN} --simple \
+          {PAIR}.anchors {PAIR}.anchors.new > ../{log} 2>&1
+        """
+
+rule write_plot_inputs:
+    input:
+        simple=f"results/{PAIR}.anchors.simple",
+        bed_a=f"work/{AP}.bed",
+        bed_b=f"work/{BP}.bed"
+    output:
+        seqids="results/seqids",
+        layout="results/layout"
+    run:
+        Path("results").mkdir(exist_ok=True)
+        Path(output.seqids).write_text(",".join(P["seqids_a"]) + "\n" + ",".join(P["seqids_b"]) + "\n")
+        lay = P["layout"]
+        Path(output.layout).write_text(
+            "# y, xstart, xend, rotation, color, label, va, bed, label_va\n"
+            f"{lay.get('y_a', 0.65)}, {lay.get('xstart', 0.08)}, {lay.get('xend', 0.92)}, 0, {lay.get('color_a', '')}, {A['label']}, top, {AP}.bed, center\n"
+            f"{lay.get('y_b', 0.35)}, {lay.get('xstart', 0.08)}, {lay.get('xend', 0.92)}, 0, {lay.get('color_b', '')}, {B['label']}, top, {BP}.bed, center\n"
+            "# edges\n"
+            f"e, 0, 1, {PAIR}.anchors.simple\n"
+        )
+        shell("cp {input.bed_a} results/{AP}.bed; cp {input.bed_b} results/{BP}.bed")
+
+rule plot_macrosynteny:
+    input:
+        seqids="results/seqids",
+        layout="results/layout",
+        simple=f"results/{PAIR}.anchors.simple"
+    output:
+        f"results/{PAIR}.macrosynteny.{{fmt}}"
+    log:
+        "logs/plot_{fmt}.log"
+    shell:
+        r"""
+        cd results
+        fmt={wildcards.fmt}
+        if [ "$fmt" = "pdf" ]; then
+          python -m jcvi.graphics.karyotype seqids layout --notex --chrstyle=rect -o {PAIR}.macrosynteny.pdf > ../{log} 2>&1
+        else
+          python -m jcvi.graphics.karyotype seqids layout --notex --chrstyle=rect --format=$fmt -o {PAIR}.macrosynteny.$fmt > ../{log} 2>&1
+        fi
+        """
+
+rule plot_macrosynteny_line:
+    input:
+        seqids="results/seqids",
+        layout="results/layout",
+        simple=f"results/{PAIR}.anchors.simple"
+    output:
+        f"results/{PAIR}.macrosynteny.line.pdf"
+    log:
+        "logs/plot_line_pdf.log"
+    shell:
+        r"""
+        cd results
+        python -m jcvi.graphics.karyotype seqids layout --notex --chrstyle=rect --shadestyle=line -o {PAIR}.macrosynteny.line.pdf > ../{log} 2>&1
+        """

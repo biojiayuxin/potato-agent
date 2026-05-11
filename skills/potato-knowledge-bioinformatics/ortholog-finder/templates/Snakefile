@@ -1,0 +1,218 @@
+import os
+from pathlib import Path
+from collections import Counter
+
+configfile: "config.yaml"
+
+ENV_PREFIX = config.get("env_prefix", "")
+A = config["species"]["a"]
+B = config["species"]["b"]
+M = config["mcscan"]
+
+AP = A["prefix"]
+BP = B["prefix"]
+PAIR = f"{AP}.{BP}"
+DBTYPE = M.get("dbtype", "prot")
+SUFFIX = "pep" if DBTYPE == "prot" else "cds"
+THREADS = int(M.get("cpus", 16))
+CSCORE = str(M.get("cscore", 0.9))
+
+FINAL_OUTPUTS = [
+    "results/id_check.tsv",
+    f"results/{PAIR}.last.filtered.one_to_one.best.tsv",
+]
+
+if ENV_PREFIX:
+    shell.prefix(f"export PATH={ENV_PREFIX}/bin:$PATH; set -euo pipefail; ")
+else:
+    shell.prefix("set -euo pipefail; ")
+
+rule all:
+    input:
+        FINAL_OUTPUTS
+
+rule mkdirs:
+    output:
+        touch("work/.dirs.done")
+    shell:
+        "mkdir -p work results logs && touch {output}"
+
+rule gff_to_bed_a:
+    input:
+        rules.mkdirs.output,
+        gff=A["gff3"]
+    output:
+        f"work/{AP}.bed"
+    log:
+        f"logs/{AP}.gff_to_bed.log"
+    params:
+        gff_type=A.get("gff_type", "mRNA"),
+        gff_key=A.get("gff_key", "ID")
+    shell:
+        "python -m jcvi.formats.gff bed --type={params.gff_type} --key={params.gff_key} {input.gff} -o {output} > {log} 2>&1"
+
+rule gff_to_bed_b:
+    input:
+        rules.mkdirs.output,
+        gff=B["gff3"]
+    output:
+        f"work/{BP}.bed"
+    log:
+        f"logs/{BP}.gff_to_bed.log"
+    params:
+        gff_type=B.get("gff_type", "mRNA"),
+        gff_key=B.get("gff_key", "ID")
+    shell:
+        "python -m jcvi.formats.gff bed --type={params.gff_type} --key={params.gff_key} {input.gff} -o {output} > {log} 2>&1"
+
+rule link_fasta_a:
+    input:
+        rules.mkdirs.output,
+        fasta=A["fasta"]
+    output:
+        f"work/{AP}.{SUFFIX}"
+    shell:
+        "ln -sf $(readlink -f {input.fasta}) {output}"
+
+rule link_fasta_b:
+    input:
+        rules.mkdirs.output,
+        fasta=B["fasta"]
+    output:
+        f"work/{BP}.{SUFFIX}"
+    shell:
+        "ln -sf $(readlink -f {input.fasta}) {output}"
+
+rule check_ids:
+    input:
+        bed_a=f"work/{AP}.bed",
+        fa_a=f"work/{AP}.{SUFFIX}",
+        bed_b=f"work/{BP}.bed",
+        fa_b=f"work/{BP}.{SUFFIX}"
+    output:
+        "results/id_check.tsv"
+    params:
+        ap=AP,
+        bp=BP
+    shell:
+        r"""
+        python - {input.bed_a} {input.fa_a} {params.ap} {input.bed_b} {input.fa_b} {params.bp} > {output} <<'PY'
+import sys
+args = sys.argv[1:]
+print('prefix\tbed_ids\tfasta_ids\tbed_not_in_fasta\tfasta_not_in_bed')
+for i in range(0, len(args), 3):
+    bed, fa, prefix = args[i:i+3]
+    bed_ids = set()
+    with open(bed) as f:
+        for line in f:
+            if line.strip():
+                fields = line.rstrip('\n').split('\t')
+                if len(fields) >= 4:
+                    bed_ids.add(fields[3])
+    fa_ids = set()
+    with open(fa) as f:
+        for line in f:
+            if line.startswith('>'):
+                fa_ids.add(line[1:].strip().split()[0])
+    print(prefix, len(bed_ids), len(fa_ids), len(bed_ids - fa_ids), len(fa_ids - bed_ids), sep='\t')
+    if bed_ids - fa_ids:
+        raise SystemExit(f'ERROR: {prefix} has BED IDs absent from FASTA, e.g. {sorted(bed_ids-fa_ids)[:5]}')
+PY
+        """
+
+rule mcscan_filtered:
+    input:
+        "results/id_check.tsv",
+        bed_a=f"work/{AP}.bed",
+        fa_a=f"work/{AP}.{SUFFIX}",
+        bed_b=f"work/{BP}.bed",
+        fa_b=f"work/{BP}.{SUFFIX}"
+    output:
+        last=f"results/{PAIR}.last",
+        filtered=f"results/{PAIR}.last.filtered"
+    log:
+        "logs/mcscan_ortholog.log"
+    threads: THREADS
+    params:
+        extra="--no_strip_names" if M.get("no_strip_names", True) else "",
+        dot="--no_dotplot" if M.get("no_dotplot", True) else "",
+        align_soft=M.get("align_soft", "diamond_blastp")
+    shell:
+        r"""
+        tmp=$(mktemp -d work/mcscan_tmp.XXXXXX)
+        ln -sf $(readlink -f {input.bed_a}) $tmp/{AP}.bed
+        ln -sf $(readlink -f {input.fa_a}) $tmp/{AP}.{SUFFIX}
+        ln -sf $(readlink -f {input.bed_b}) $tmp/{BP}.bed
+        ln -sf $(readlink -f {input.fa_b}) $tmp/{BP}.{SUFFIX}
+        cd $tmp
+        python -m jcvi.compara.catalog ortholog {AP} {BP} \
+          --dbtype={DBTYPE} \
+          --align_soft={params.align_soft} \
+          {params.extra} \
+          --cscore={CSCORE} \
+          --cpus={threads} \
+          {params.dot} > ../../{log} 2>&1
+        cd ../..
+        mv -f $tmp/{PAIR}.last {output.last}
+        mv -f $tmp/{PAIR}.last.filtered {output.filtered}
+        rm -rf $tmp
+        """
+
+rule one_to_one_best:
+    input:
+        filtered=f"results/{PAIR}.last.filtered"
+    output:
+        best=f"results/{PAIR}.last.filtered.one_to_one.best.tsv"
+    log:
+        "logs/one_to_one_best.log"
+    run:
+        records = []
+        query_ids = []
+        subject_ids = []
+        with open(input.filtered) as fh:
+            for lineno, line in enumerate(fh, 1):
+                if not line.strip():
+                    continue
+                fields = line.rstrip("\n").split("\t")
+                if len(fields) < 12:
+                    raise ValueError(f"Expected at least 12 columns in {input.filtered}, line {lineno}; got {len(fields)}")
+                query, subject = fields[0], fields[1]
+                identity = float(fields[2])
+                align_len = int(fields[3])
+                mismatches = int(fields[4])
+                gaps = int(fields[5])
+                evalue = float(fields[10])
+                bitscore = float(fields[11])
+                # Best-match priority: bitscore desc, identity desc, alignment length desc,
+                # e-value asc, mismatches+gaps asc, then original line number for stability.
+                sort_key = (-bitscore, -identity, -align_len, evalue, mismatches + gaps, lineno)
+                records.append((sort_key, query, subject, line))
+                query_ids.append(query)
+                subject_ids.append(subject)
+
+        used_queries = set()
+        used_subjects = set()
+        kept = []
+        for _, query, subject, line in sorted(records, key=lambda x: x[0]):
+            if query in used_queries or subject in used_subjects:
+                continue
+            kept.append(line)
+            used_queries.add(query)
+            used_subjects.add(subject)
+
+        Path(output.best).write_text("".join(kept))
+        qcnt = Counter(query_ids)
+        scnt = Counter(subject_ids)
+        log_text = (
+            f"input={input.filtered}\n"
+            f"output={output.best}\n"
+            f"total_pairs={len(records)}\n"
+            f"unique_query_ids={len(qcnt)}\n"
+            f"duplicate_query_ids={sum(1 for v in qcnt.values() if v > 1)}\n"
+            f"unique_subject_ids={len(scnt)}\n"
+            f"duplicate_subject_ids={sum(1 for v in scnt.values() if v > 1)}\n"
+            f"retained_one_to_one_best_pairs={len(kept)}\n"
+            f"removed_conflicting_pairs={len(records) - len(kept)}\n"
+            "priority=bitscore_desc,identity_desc,alignment_length_desc,evalue_asc,mismatches_plus_gaps_asc,line_number_asc\n"
+        )
+        Path(str(log)).write_text(log_text)

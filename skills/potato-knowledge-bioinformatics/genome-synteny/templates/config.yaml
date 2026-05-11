@@ -1,0 +1,75 @@
+# Reproducible MCScan/jcvi macrosynteny config
+
+env_prefix: "/mnt/data/potato_agent/.hermes/home/.micromamba/envs/mcscan_jcvi"
+
+workdir: "."
+
+species:
+  a:
+    prefix: "speciesA"
+    label: "SpeciesA"
+    gff3: "/path/to/speciesA.gff3"
+    fasta: "/path/to/speciesA.pep.fa"
+    gff_type: "mRNA"
+    gff_key: "ID"
+  b:
+    prefix: "speciesB"
+    label: "SpeciesB"
+    gff3: "/path/to/speciesB.gff3"
+    fasta: "/path/to/speciesB.pep.fa"
+    gff_type: "mRNA"
+    gff_key: "ID"
+
+mcscan:
+  # prot uses .pep and is recommended for protein-similarity synteny.
+  # nucl uses .cds.
+  dbtype: "prot"
+  align_soft: "diamond_blastp"
+  # Default for close potato genomes. Tell the user before running.
+  cscore: 0.9
+  cpus: 16
+  minspan: 30
+  no_strip_names: true
+  no_dotplot: true
+  # Optional: path to seqpairs file to restrict kept block pairs.
+  # Example line: chr01,E4-63_chr01
+  seqpairs: ""
+
+plot:
+  seqids_a:
+    - "chr01"
+    - "chr02"
+    - "chr03"
+    - "chr04"
+    - "chr05"
+    - "chr06"
+    - "chr07"
+    - "chr08"
+    - "chr09"
+    - "chr10"
+    - "chr11"
+    - "chr12"
+  seqids_b:
+    - "SpeciesB_chr01"
+    - "SpeciesB_chr02"
+    - "SpeciesB_chr03"
+    - "SpeciesB_chr04"
+    - "SpeciesB_chr05"
+    - "SpeciesB_chr06"
+    - "SpeciesB_chr07"
+    - "SpeciesB_chr08"
+    - "SpeciesB_chr09"
+    - "SpeciesB_chr10"
+    - "SpeciesB_chr11"
+    - "SpeciesB_chr12"
+  layout:
+    y_a: 0.65
+    y_b: 0.35
+    xstart: 0.08
+    xend: 0.92
+    color_a: ""
+    color_b: ""
+  formats:
+    - "pdf"
+    - "png"
+  line_pdf: true

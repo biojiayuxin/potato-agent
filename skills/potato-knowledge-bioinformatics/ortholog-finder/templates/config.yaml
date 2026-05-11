@@ -1,0 +1,33 @@
+# Reproducible ortholog-finder config
+# Goal: generate results/<speciesA>.<speciesB>.last.filtered.one_to_one.best.tsv
+
+env_prefix: "/mnt/data/potato_agent/.hermes/home/.micromamba/envs/mcscan_jcvi"
+
+workdir: "."
+
+species:
+  a:
+    prefix: "speciesA"
+    label: "SpeciesA"
+    gff3: "/path/to/speciesA.gff3"
+    fasta: "/path/to/speciesA.pep.fa"
+    gff_type: "mRNA"
+    gff_key: "ID"
+  b:
+    prefix: "speciesB"
+    label: "SpeciesB"
+    gff3: "/path/to/speciesB.gff3"
+    fasta: "/path/to/speciesB.pep.fa"
+    gff_type: "mRNA"
+    gff_key: "ID"
+
+mcscan:
+  # prot uses .pep and is recommended for protein-based ortholog candidates.
+  # nucl uses .cds.
+  dbtype: "prot"
+  align_soft: "diamond_blastp"
+  # Default for close potato genomes. Tell the user before running.
+  cscore: 0.9
+  cpus: 16
+  no_strip_names: true
+  no_dotplot: true
