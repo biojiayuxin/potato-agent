@@ -1566,7 +1566,16 @@ def _stop_idle_runtime_candidate(auth_user: Any, target: HermesTarget) -> bool:
             )
             return False
         if not is_service_active(target.systemd_service):
-            return False
+            revoke_runtime_session(
+                auth_user.id,
+                reason="idle_timeout",
+            )
+            LOGGER.info(
+                "Revoked idle runtime session for inactive service %s after %s seconds",
+                target.username,
+                RUNTIME_IDLE_TIMEOUT_SECONDS,
+            )
+            return True
         if os.geteuid() == 0:
             stop_service(target.systemd_service)
         else:

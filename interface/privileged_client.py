@@ -213,7 +213,8 @@ class PrivilegedClient:
                     mark_background_activity(user_id)
                     return {"stopped": False, "reason": "background_jobs"}
                 if not is_service_active(target.systemd_service):
-                    return {"stopped": False, "reason": "service_inactive"}
+                    revoke_runtime_session(user_id, reason="idle_timeout")
+                    return {"stopped": True, "reason": "service_inactive"}
                 stop_service(target.systemd_service)
                 revoke_runtime_session(user_id, reason="idle_timeout")
                 return {"stopped": True}

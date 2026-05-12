@@ -499,7 +499,8 @@ def main() -> int:
                     mark_background_activity(args.user_id)
                     return _emit({"ok": True, "stopped": False, "reason": "background_jobs"})
                 if not is_service_active(target.systemd_service):
-                    return _emit({"ok": True, "stopped": False, "reason": "service_inactive"})
+                    revoke_runtime_session(args.user_id, reason="idle_timeout")
+                    return _emit({"ok": True, "stopped": True, "reason": "service_inactive"})
                 stop_service(target.systemd_service)
                 revoke_runtime_session(args.user_id, reason="idle_timeout")
                 return _emit({"ok": True, "stopped": True})
