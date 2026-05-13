@@ -65,7 +65,7 @@ cp "$SKILL_DIR/templates/Snakefile" "$WORK/Snakefile"
 
 ## 运行
 
-本技能使用模板化 Snakemake 流程。运行前先确认模板文件存在，并确保 `config.yaml` 中的 `env_prefix` 环境包含 `jcvi`、`snakemake`，蛋白模式下还需要 `diamond`。
+本技能使用模板化 Snakemake 流程。运行前先确认模板文件存在，并确保 `config.yaml` 中的 `env_prefix` 环境包含 `jcvi`；`snakemake` 使用系统环境中已安装的命令，蛋白模式下还需要 `diamond`。
 
 ```bash
 test -s "$SKILL_DIR/templates/config.yaml"
@@ -80,7 +80,7 @@ test -s "$SKILL_DIR/templates/Snakefile"
 ENV=/mnt/data/potato_agent/.hermes/home/.micromamba/envs/mcscan_jcvi
 ```
 
-检查运行环境；若缺少 Snakemake 或 diamond，则优先补装到该环境：
+检查运行环境；Snakemake 使用系统命令，若缺少 diamond 则优先补装到该环境：
 
 ```bash
 ENV="$(python3 - <<'PY'
@@ -95,27 +95,24 @@ else:
     print(fallback)
 PY
 )"
+SNAKEMAKE_BIN="$(command -v snakemake)"
 export PATH="$ENV/bin:$PATH"
 
-if ! command -v snakemake >/dev/null 2>&1; then
-  /opt/micromamba/bin/micromamba install -y -p "$ENV" \
-    -c conda-forge -c bioconda snakemake
-fi
 if ! command -v diamond >/dev/null 2>&1; then
   /opt/micromamba/bin/micromamba install -y -p "$ENV" \
     -c conda-forge -c bioconda diamond
 fi
 
 python -m jcvi.compara.catalog ortholog -h >/dev/null
-snakemake --version
+"$SNAKEMAKE_BIN" --version
 ```
 
 Snakemake 路径：
 
 ```bash
 cd "$WORK"
-snakemake -n --cores 1
-snakemake --cores 16 --printshellcmds --rerun-incomplete
+"$SNAKEMAKE_BIN" -n --cores 1
+"$SNAKEMAKE_BIN" --cores 16 --printshellcmds --rerun-incomplete
 ```
 
 长任务优先结合 `slurm-for-long-running-tasks` 提交 Slurm 后台运行。

@@ -70,7 +70,7 @@ R -q -e "if(require('DESeq2', quietly=TRUE)) cat('OK\n') else quit(status=1)"
 
 ```bash
 /opt/micromamba/bin/micromamba create -y -p /path/to/env -c conda-forge -c bioconda \
-  python=3.11 snakemake fastp hisat2 samtools stringtie
+  python=3.11 fastp hisat2 samtools stringtie
 ```
 
 创建后可用以下方式执行命令而不必先激活：
@@ -329,7 +329,7 @@ disown
 2. 一个 Slurm 脚本（例如 `submit_snakemake_80cpu_50g.slurm.sh`），设置 `--cpus-per-task`、`--mem`、`--time`、`--chdir`、`--output/--error`，调用运行脚本。
 **要求**：若 `snakemake -n` 报错，必须先修复流程文件后再提交运行。
 
-**Snakemake 版本兼容注意**：在本机已验证 Snakemake 9.20.0 不支持旧版常见参数 `--reason`，正式运行脚本中不要使用该参数，否则任务会打印 usage 后立即退出。需要详细日志时可使用 `--printshellcmds --show-failed-logs`；Snakemake 9.x 的日志通常仍会输出 rule 的 reason 信息。
+**Snakemake 兼容注意**：当前系统 Snakemake 不支持旧版常见参数 `--reason`，正式运行脚本中不要使用该参数，否则任务会打印 usage 后立即退出。需要详细日志时可使用 `--printshellcmds --show-failed-logs`；日志通常仍会输出 rule 的 reason 信息。
 
 **修复 FASTQ 后重跑原则**：若原始 FASTQ 曾损坏并已补下载/替换，正式重跑前应删除所有受影响的旧 fastp 输出；如果不容易精确定位受影响样本，用户要求“重新运行整套分析”时可删除整个 `01-fastp/` 及 `logs/fastp/` 后重建空目录，避免 Snakemake 复用由损坏 FASTQ 产生的 clean FASTQ。若存在旧坏文件备份（如 `fastq_ena/*/*.fastq.gz.bad.*`），用户明确要求删除时可先写入删除清单到 `logs/cleanup_before_rerun_TIMESTAMP/`，再删除备份文件并核查残留为 0。删除后必须重新检查 manifest 行数、`sample_id` 唯一性、R1/R2 路径缺失数，以及 `snakemake -n`。
 

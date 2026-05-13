@@ -66,7 +66,6 @@ done
   -c conda-forge -c bioconda \
   python=3.11 \
   jcvi \
-  snakemake \
   diamond \
   last \
   blast \
@@ -78,18 +77,18 @@ done
   ete4
 ```
 
-若环境已存在但缺少 Snakemake 或绘图依赖，可补装：
+若环境已存在但缺少绘图依赖，可补装：
 
 ```bash
 /opt/micromamba/bin/micromamba install -y -n mcscan_jcvi \
-  -c conda-forge -c bioconda snakemake ete4 diamond last blast
+  -c conda-forge -c bioconda ete4 diamond last blast
 ```
 
 安装后验证：
 
 ```bash
 /opt/micromamba/bin/micromamba run -n mcscan_jcvi jcvi --version
-/opt/micromamba/bin/micromamba run -n mcscan_jcvi snakemake --version
+snakemake --version
 /opt/micromamba/bin/micromamba run -n mcscan_jcvi python -m jcvi.compara.catalog ortholog -h
 /opt/micromamba/bin/micromamba run -n mcscan_jcvi python -m jcvi.graphics.karyotype -h
 ```
@@ -166,7 +165,7 @@ test -s "$SKILL_DIR/templates/Snakefile"
 ENV=/mnt/data/potato_agent/.hermes/home/.micromamba/envs/mcscan_jcvi
 ```
 
-检查 Snakemake；若环境中找不到则自动安装到该环境：
+检查 Snakemake；Snakemake 使用系统命令，若环境中缺少绘图或比对依赖则补装到该环境：
 
 ```bash
 ENV="$(python3 - <<'PY'
@@ -180,21 +179,18 @@ else:
     print('/mnt/data/potato_agent/.hermes/home/.micromamba/envs/mcscan_jcvi')
 PY
 )"
+SNAKEMAKE_BIN="$(command -v snakemake)"
 export PATH="$ENV/bin:$PATH"
 
-if ! command -v snakemake >/dev/null 2>&1; then
-  /opt/micromamba/bin/micromamba install -y -p "$ENV" \
-    -c conda-forge -c bioconda snakemake
-fi
-snakemake --version
+"$SNAKEMAKE_BIN" --version
 ```
 
 Snakemake 路径：
 
 ```bash
 cd "$WORK"
-snakemake -n --cores 1
-snakemake --cores 16 --printshellcmds --rerun-incomplete
+"$SNAKEMAKE_BIN" -n --cores 1
+"$SNAKEMAKE_BIN" --cores 16 --printshellcmds --rerun-incomplete
 ```
 
 大基因组任务优先提交 Slurm，加载 `slurm-for-long-running-tasks`，用其 `scripts/submit-job.sh` 提交 Snakemake 运行脚本。

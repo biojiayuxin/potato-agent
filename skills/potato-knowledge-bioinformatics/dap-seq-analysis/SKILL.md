@@ -106,12 +106,11 @@ Rscript -e "suppressPackageStartupMessages({library(ChIPseeker); library(cluster
 findMotifsGenome.pl 2>&1 | head -5
 ```
 
-推荐优先按本参考环境版本安装：
+推荐优先按本参考环境版本补齐分析依赖。Snakemake 使用系统环境中已安装的命令，不在任务环境中固定版本或重复安装：
 
 | 软件 / 包 | 推荐版本 |
 |---|---:|
 | Python | 3.11.15 |
-| Snakemake | 9.20.0 |
 | BWA | 0.7.19-r1273 |
 | samtools | 1.23.1 |
 | MACS2 | 2.2.9.1 |
@@ -125,7 +124,7 @@ findMotifsGenome.pl 2>&1 | head -5
 
 必需组件：
 
-- Snakemake
+- Snakemake（使用系统环境已安装命令）
 - BWA
 - samtools
 - MACS2
@@ -151,13 +150,13 @@ source /etc/profile.d/micromamba.sh
 
 ### 4.3 推荐环境创建命令
 
-推荐在任务目录或用户指定位置创建独立环境。MACS2 优先通过 `pip` 在环境内源码安装，避免预编译包兼容性问题：
+推荐在任务目录或用户指定位置创建独立环境，用于 BWA、samtools、R 包、HOMER 等分析依赖；不要把 Snakemake 加入该任务环境。MACS2 优先通过 `pip` 在环境内源码安装，避免预编译包兼容性问题：
 
 ```bash
 /opt/micromamba/bin/micromamba create -y \
   -p /path/to/DAP-Seq.<job_id>/envs/dapseq \
   -c conda-forge -c bioconda \
-  python=3.11.15 pip pyyaml=6.0.3 snakemake=9.20.0 bwa=0.7.19 samtools=1.23.1 \
+  python=3.11.15 pip pyyaml=6.0.3 bwa=0.7.19 samtools=1.23.1 \
   r-base=4.5.3 bioconductor-chipseeker=1.46.1 bioconductor-clusterprofiler=4.18.4 \
   bioconductor-genomicfeatures=1.62.0 bioconductor-txdbmaker=1.6.2 \
   homer=5.1
@@ -169,7 +168,7 @@ source /etc/profile.d/micromamba.sh
 运行时优先使用：
 
 ```bash
-/opt/micromamba/bin/micromamba run -p /path/to/env snakemake --version
+snakemake --version
 /opt/micromamba/bin/micromamba run -p /path/to/env Rscript --version
 ```
 
@@ -321,11 +320,12 @@ bash -n scripts/run_all.sh
 snakemake -s Snakefile --configfile config/config.yaml -n --printshellcmds
 ```
 
-如果使用 micromamba 环境：
+如果分析依赖来自 micromamba 环境，先固定系统 Snakemake 路径，再把任务环境加入 `PATH`：
 
 ```bash
-/opt/micromamba/bin/micromamba run -p envs/dapseq \
-  snakemake -s Snakefile --configfile config/config.yaml -n --printshellcmds
+SNAKEMAKE_BIN="$(command -v snakemake)"
+export PATH="$PWD/envs/dapseq/bin:$PATH"
+"$SNAKEMAKE_BIN" -s Snakefile --configfile config/config.yaml -n --printshellcmds
 ```
 
 **如果 dry-run 报错，必须先修复，不得提交 Slurm。**
@@ -377,17 +377,19 @@ cd /path/to/DAP-Seq.<job_id>
 export XDG_CACHE_HOME="$PWD/.cache"
 mkdir -p "$XDG_CACHE_HOME" logs
 
-/opt/micromamba/bin/micromamba run -p envs/dapseq \
-  snakemake -s Snakefile \
-    --configfile config/config.yaml \
-    --cores <CPUS> \
-    --rerun-incomplete \
-    --printshellcmds \
-    --show-failed-logs \
-    > logs/pipeline.log 2>&1
+SNAKEMAKE_BIN="$(command -v snakemake)"
+export PATH="$PWD/envs/dapseq/bin:$PATH"
+
+"$SNAKEMAKE_BIN" -s Snakefile \
+  --configfile config/config.yaml \
+  --cores <CPUS> \
+  --rerun-incomplete \
+  --printshellcmds \
+  --show-failed-logs \
+  > logs/pipeline.log 2>&1
 ```
 
-如果不使用 micromamba 环境，则将命令替换为环境中可用的 `snakemake`。
+如果不使用 micromamba 环境，则可省略 `PATH` 调整，直接使用系统 `snakemake`。
 
 ### 10.2 提交命令
 
