@@ -158,6 +158,8 @@ test -s "$SKILL_DIR/templates/config.yaml"
 test -s "$SKILL_DIR/templates/Snakefile"
 ```
 
+若当前技能目录缺少 `templates/Snakefile`（某些本地安装只带 `templates/config.yaml`），不要盲目复制不存在的模板；应先在项目目录生成一个自包含 Snakefile，明确实现 GFF3→BED、FASTA 链接、ID 检查、`jcvi.compara.catalog ortholog`、`jcvi.compara.synteny screen --simple` 和结果统计/绘图步骤，再执行 `snakemake -n` 干跑验证。
+
 若 `config.yaml` 中的 `env_prefix` 未设置，默认使用：
 
 ```bash

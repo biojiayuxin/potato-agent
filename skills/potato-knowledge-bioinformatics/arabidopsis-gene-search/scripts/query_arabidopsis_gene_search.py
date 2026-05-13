@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Query Arabidopsis gene function via TAIR + PlantConnectome.
+"""Query Arabidopsis genes via TAIR + PlantConnectome.
 
 Workflow:
 1. Use TAIR public search API to resolve gene symbol/alias/AGI ID.
@@ -393,7 +393,7 @@ def to_jsonable(obj: Any) -> Any:
 
 def plant_summary_lines(pc: Dict[str, Any]) -> List[str]:
     lines: List[str] = []
-    lines.append(f"PlantConnectome geneID 查询：{pc.get('gene_id')}")
+    lines.append(f"PlantConnectome 查询词：{pc.get('gene_id')}")
     prev = pc.get("preview", {})
     lines.append(f"预览实体数：{prev.get('row_count')} | URL: {prev.get('url')}")
     rows = prev.get("rows") or []
@@ -496,7 +496,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     parser.add_argument("--format", choices=["json", "summary"], default="json")
     parser.add_argument("--max-candidates", type=int, default=10)
     parser.add_argument("--max-entities", type=int, default=3)
-    parser.add_argument("--max-edges", type=int, default=200)
+    parser.add_argument("--max-edges", type=int, default=50)
     parser.add_argument("--snippets", type=int, default=0, help="fetch snippets for first N p_source values")
     parser.add_argument("--include-aliases", action="store_true", help="in full mode, also query TAIR-confirmed long aliases/full names in PlantConnectome")
     parser.add_argument("--max-alias-queries", type=int, default=2, help="maximum TAIR-confirmed alias/full-name PlantConnectome queries")

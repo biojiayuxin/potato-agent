@@ -322,6 +322,14 @@ If chromosome ordering or subset display is needed, add options such as:
 - `--chr`
 - `--reg`
 
+For `--chrord`, the file must contain **one reference chromosome ID per line** (not one tab-separated line). Example:
+```text
+Chr01
+Chr02
+Chr03
+```
+A tab-separated single-line order file makes plotsr treat the whole line as one chromosome and fail with `Chromosome ... is not a chromosome in alignment file`.
+
 Always inspect `plotsr --help` for dataset-specific customization.
 
 ---
@@ -406,6 +414,19 @@ ls -lh ${PREFIX}.syri.out ${PREFIX}.plotsr.pdf
 
 ## Common pitfalls
 
+### 0. micromamba activate fails in Slurm non-interactive shells
+When using `micromamba` inside a Slurm batch script, `micromamba activate <env>` will fail with:
+```text
+critical libmamba Shell not initialized
+'micromamba' is running as a subprocess and can't modify the parent shell.
+```
+because the shell hook is not loaded in non-interactive contexts. The fix is to initialize the shell hook first:
+```bash
+eval "$(/path/to/micromamba shell hook --shell bash)"
+micromamba activate syri_env
+```
+Do NOT rely on `source /etc/profile.d/micromamba.sh` alone — it is insufficient in Slurm.
+
 ### 1. Wrong environment
 If `which syri`, `which nucmer`, or `which plotsr` do not point into the dedicated `syri_env`, the workflow may break or become irreproducible.
 
@@ -444,8 +465,30 @@ instead of:
 
 Syri can also emit warnings when reference and query chromosome IDs do not match exactly. In such cases, inspect `${PREFIX}.mapids.txt` to see the automatic chromosome mapping that was used.
 
+**Unequal number of chromosomes error:** If Syri exits with `Unequal number of chromosomes in the genomes. Exiting`, check the sequence count in both genomes (e.g., via `.fai` files). This typically happens when one assembly has extra scaffolds/contigs beyond the core chromosomes. Fix by extracting only the matching chromosome set — for example, extract `chr01`-`chr12` with a Python script:
+```python
+chr_ids = {f"chr{i:02d}" for i in range(1, 13)}
+keep = False
+with open(ref_fa) as fin, open(out_fa, "w") as fout:
+    for line in fin:
+        if line.startswith(">"):
+            seq_id = line[1:].split()[0]
+            keep = seq_id in chr_ids
+            if keep: fout.write(line)
+        elif keep:
+            fout.write(line)
+```
+
 ### 5. Expecting SNP outputs while using `--nosnp`
 If `--nosnp` is enabled, Syri may warn about SNP-related outputs. That is acceptable when the task is structural rearrangement analysis only.
+
+### 6. Homologous chromosomes are reordered or opposite-strand between assemblies
+SyRI expects each reference chromosome to align mainly to its homologous query chromosome with compatible orientation. If it reports messages like:
+```text
+No syntenic region found for chromosome ... different strands ... Reverse complement the chromosome
+Reference chromosome ... do not have any directed alignments with its homologous chromosome
+```
+then inspect the nucmer/show-coords table to infer the dominant ref-query chromosome pairs and strand direction. For each reference chromosome, sum high-identity alignment lengths by `(ref_chr, query_chr, strand)`, choose the dominant homolog, then generate a query FASTA renamed to the reference chromosome IDs; reverse-complement query chromosomes whose dominant alignments are on the minus strand. Re-run nucmer/SyRI against this oriented query FASTA before plotting.
 
 ---
 

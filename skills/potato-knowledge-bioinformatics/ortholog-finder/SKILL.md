@@ -15,6 +15,7 @@ metadata:
 
 当用户要求：
 
+- 在两个基因组之间寻找共线性基因；
 - 在两个马铃薯或植物基因组之间寻找直系同源/同源候选基因对；
 - 已有 GFF3 + 蛋白 FASTA 或 CDS FASTA，需要产出可复用的一对一直系同源候选基因表；
 - 需要 MCScan/jcvi 的前置序列相似性过滤结果，并进一步去除一对多和多对一冲突；
@@ -27,7 +28,7 @@ metadata:
    - 检查 BED 第 4 列基因 ID 是否存在于 FASTA header；
    - 运行 `python -m jcvi.compara.catalog ortholog` 生成 `results/<speciesA>.<speciesB>.last.filtered`；
    - 将 `.last.filtered` 按最佳匹配优先级过滤为最终结果 `results/<speciesA>.<speciesB>.last.filtered.one_to_one.best.tsv`。
-2. 默认不继续做 `screen --simple`、`.anchors.simple` 和绘图。
+2. 默认不继续做 `screen --simple`、`.anchors.simple` 和绘图。若用户明确说“用 ortholog-finder 这个技能做就行”或目标只是得到共线性/直系同源候选基因表，不要自行扩展到 `genome-synteny` 的 macrosynteny/karyotype 绘图流程；只产出 `last`、`last.filtered`、`one_to_one.best.tsv`、ID 检查和摘要日志。
 3. 一对一最佳过滤采用贪心策略：先按 `bitscore` 高、`identity` 高、`alignment_length` 长、`evalue` 小、`mismatches + gaps` 少、原始行号靠前排序；从高到低保留基因对，若 query 或 subject 已经在已保留结果中出现，则剔除该冲突行。
 
 ## 推荐项目结构
@@ -70,6 +71,8 @@ cp "$SKILL_DIR/templates/Snakefile" "$WORK/Snakefile"
 test -s "$SKILL_DIR/templates/config.yaml"
 test -s "$SKILL_DIR/templates/Snakefile"
 ```
+
+若当前技能目录缺少 `templates/Snakefile`（某些本地安装只带 `templates/config.yaml`），不要盲目复制不存在的模板；应在项目目录生成一个自包含 Snakefile，明确实现 GFF3→BED、FASTA 链接、ID 检查、`jcvi.compara.catalog ortholog`、`.last.filtered` 解析，以及一对一最佳匹配过滤后再运行。
 
 若 `config.yaml` 中的 `env_prefix` 未设置，默认使用：
 
@@ -125,6 +128,16 @@ snakemake --cores 16 --printshellcmds --rerun-incomplete
 results/<speciesA>.<speciesB>.last.filtered.one_to_one.best.tsv
 results/id_check.tsv
 ```
+
+### 单基因 ID 映射查询
+
+当用户要求“从已有 ortholog 结果目录查询某个基因在另一个版本/物种中的对应基因号”时，应优先查询 `results/<speciesA>.<speciesB>.last.filtered.one_to_one.best.tsv`，而不是仅做 ID 字符串风格转换。常用步骤：
+
+1. 在指定 `results/` 目录列出实际结果文件，确认是否存在 `.one_to_one.best.tsv`、`.last.filtered` 和 `.last`。
+2. 对用户输入的基因 ID 同时尝试基因级和转录本级匹配，例如 `DM8C03G24900` 与 `DM8C03G24900.1`。
+3. 先查 `.one_to_one.best.tsv`；若无命中，再查 `.last.filtered` / `.last` 作为候选证据，并明确说明不是最终一对一结果。
+4. 报告时去掉转录本后缀得到基因号：如 `DM8C03G24900.1 -> DM8.2_chr03G22620.1` 对应基因号 `DM8.2_chr03G22620`。
+5. 若发现直接 ID 风格转换结果（如 `DM8C03G24900 -> DM8.2_chr03G24900`）与 ortholog 表不一致，以用户指定的 ortholog 结果为准，并说明该直接转换 ID 可能对应另一个源基因。
 
 辅助输出：
 

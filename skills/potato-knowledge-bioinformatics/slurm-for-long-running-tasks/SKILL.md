@@ -1,6 +1,6 @@
 ---
 name: "slurm-for-long-running-tasks"
-description: "将长时间运行的计算任务（批量下载、MD5 校验、基因组索引构建、大规模转录组比对/定量等）提交到 Slurm 后台，避免前台超时中断。提供 submit-job / list-jobs / job-status / cancel-job 四个脚本，优先使用打包脚本而非手写 sbatch/squeue。"
+description: "将长时间运行的计算任务提交到 Slurm 后台。提供 submit-job / list-jobs / job-status / cancel-job 四个脚本。内存可根据任务在 2G–20G 间灵活选择，提交前需向用户确认。"
 ---
 
 # Slurm for Long-Running Tasks
@@ -58,12 +58,16 @@ All scripts are relative to this skill's root directory (`SKILL_DIR`). After loa
    - Use `--command` for straightforward one-liners.
    - If the payload needs multiple shell steps, exports environment variables, or contains `$VARS` that may interact badly with shell quoting or `set -u`, write a small wrapper script and submit with `--script` instead of forcing everything through `--command`.
    - Require explicit `--time` and `--mem-gb`.
+   - Memory can be chosen flexibly between 2G–20G depending on the task, to avoid blocking the server. Before submitting, confirm the chosen memory with the user.
    - Respect the 100G per-job memory cap.
 
 ## Pitfalls
 
 - **Always resolve scripts via `SKILL_DIR`.** Hard-coded shortcuts like `~/slurm-skill/` are not portable and may not exist on a given host. After loading the skill, resolve `SKILL_DIR` to the actual installation path before calling any script.
-- On this server, `AccountingStorageType=(null)` means Slurm has no accounting database configured. **Do NOT pass `--account=X` to `sbatch`** — jobs submitted with `--account` will stay `PENDING` forever with reason `InvalidAccount`. The `submit-job.sh` wrapper correctly omits `--account`, so prefer it over raw `sbatch`. If using raw `sbatch`, omit `--account` entirely.
+- On this server, `AccountingStorageType=(null)` means Slurm has no accounting database configured. **Do NOT pass `--account=X` to `sbatch`** — the `submit-job.sh` wrapper correctly omits `--account`, so prefer it over raw `sbatch`. If using raw `sbatch`, omit `--account` entirely.
+- When a job shows `State=PENDING Reason=InvalidAccount`, the scheduler may have fallen back to this reason. Possible causes:
+  1. `--account=X` was mistakenly set (cancel and resubmit without it).
+  2. System resources are insufficient. Use `scontrol show node agent-server` to check resources, then confirm with the user whether to adjust the resource request.
 - On this host, complex inline `--command` payloads can fail when variable expansion collides with strict-shell behavior such as `set -u`. A real observed example was `XDG_CACHE_HOME` triggering an "unbound variable" error during submission logic.
 - For Snakemake or other tools that need exported cache/config variables, prefer a dedicated batch script that does `set -euo pipefail`, `export ...`, `mkdir -p ...`, then `exec` the real command.
 - Use `scripts/submit-job.sh --print-only ...` first when validating quoting, resource flags, output path, and working directory for a new submission pattern.
@@ -80,7 +84,6 @@ All scripts are relative to this skill's root directory (`SKILL_DIR`). After loa
 bash "${SKILL_DIR}/scripts/submit-job.sh" \
   --job-name fastqc \
   --cpus 8 \
-  --mem-gb 16 \
   --time 04:00:00 \
   --command 'fastqc *.fastq.gz'
 ```

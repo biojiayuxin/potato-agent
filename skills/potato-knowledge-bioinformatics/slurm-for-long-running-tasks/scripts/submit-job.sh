@@ -14,7 +14,7 @@ Usage:
 
 Required:
   --job-name NAME       Slurm job name
-  --mem-gb N            Memory request in GiB, max 100
+  --mem-gb N            Memory request in GiB (2–100)
   --time TIME           Slurm time limit, e.g. 02:00:00 or 1-00:00:00
 
 Exactly one of:
