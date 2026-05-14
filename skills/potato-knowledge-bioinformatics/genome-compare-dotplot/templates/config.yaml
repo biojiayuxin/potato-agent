@@ -1,0 +1,25 @@
+project:
+  name: "ref_vs_qry"
+
+inputs:
+  # Reference is plotted on X-axis; query is plotted on Y-axis.
+  ref: "/path/to/reference.fa"
+  qry: "/path/to/query.fa"
+
+resources:
+  threads: 20
+
+nucmer:
+  # Use --maxmatch for raw dot plots that retain repeat/multicopy signals.
+  # Alternatives: --mum, --mumreference
+  match_mode: "--maxmatch"
+  minmatch: 100
+  mincluster: 500
+  maxgap: 1000
+  breaklen: 500
+
+mummerplot:
+  terminal: "png"
+  size: "large"
+  color: true
+  title: "ref vs qry MUMmer4 dot plot"

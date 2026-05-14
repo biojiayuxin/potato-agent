@@ -1,0 +1,131 @@
+configfile: "config/config.yaml"
+shell.executable("/bin/bash")
+
+PROJECT = config["project"]["name"]
+REF = config["inputs"]["ref"]
+QRY = config["inputs"]["qry"]
+THREADS = int(config.get("resources", {}).get("threads", 1))
+
+REF_ORDER = f"results/orders/{PROJECT}.ref.order.tsv"
+QRY_ORDER = f"results/orders/{PROJECT}.qry.order.tsv"
+DELTA = f"results/nucmer/{PROJECT}.delta"
+COORDS = f"results/qc/{PROJECT}.coords.tsv"
+PLOT_PREFIX = f"results/plots/{PROJECT}.dotplot"
+PLOT_PNG = f"{PLOT_PREFIX}.png"
+PLOT_GP = f"{PLOT_PREFIX}.gp"
+
+rule all:
+    input:
+        REF_ORDER,
+        QRY_ORDER,
+        DELTA,
+        COORDS,
+        PLOT_PNG,
+        PLOT_GP
+
+rule make_order_files:
+    input:
+        ref=REF,
+        qry=QRY
+    output:
+        ref_order=REF_ORDER,
+        qry_order=QRY_ORDER
+    log:
+        "logs/make_order_files.log"
+    shell:
+        r'''
+        mkdir -p results/orders logs
+        python3 scripts/fasta_to_order.py \
+          {input.ref} {input.qry} \
+          {output.ref_order} {output.qry_order} \
+          > {log} 2>&1
+        test -s {output.ref_order}
+        test -s {output.qry_order}
+        '''
+
+rule nucmer_align:
+    input:
+        ref=REF,
+        qry=QRY
+    output:
+        delta=DELTA
+    threads: THREADS
+    params:
+        match_mode=config["nucmer"].get("match_mode", "--maxmatch"),
+        minmatch=config["nucmer"].get("minmatch", 100),
+        mincluster=config["nucmer"].get("mincluster", 500),
+        maxgap=config["nucmer"].get("maxgap", 1000),
+        breaklen=config["nucmer"].get("breaklen", 500),
+        prefix=f"results/nucmer/{PROJECT}"
+    log:
+        stdout="logs/nucmer.stdout.log",
+        stderr="logs/nucmer.stderr.log"
+    shell:
+        r'''
+        mkdir -p results/nucmer logs
+        nucmer \
+          {params.match_mode} \
+          -l {params.minmatch} \
+          -c {params.mincluster} \
+          -g {params.maxgap} \
+          -b {params.breaklen} \
+          -t {threads} \
+          --prefix {params.prefix} \
+          {input.ref} {input.qry} \
+          > {log.stdout} 2> {log.stderr}
+        test -s {output.delta}
+        '''
+
+rule show_coords_qc:
+    input:
+        delta=DELTA
+    output:
+        coords=COORDS
+    log:
+        "logs/show_coords.log"
+    shell:
+        r'''
+        mkdir -p results/qc logs
+        show-coords -THrd {input.delta} > {output.coords} 2> {log}
+        test -s {output.coords}
+        '''
+
+rule mummerplot:
+    input:
+        delta=DELTA,
+        ref_order=REF_ORDER,
+        qry_order=QRY_ORDER
+    output:
+        png=PLOT_PNG,
+        gp=PLOT_GP
+    params:
+        terminal=config["mummerplot"].get("terminal", "png"),
+        size=config["mummerplot"].get("size", "large"),
+        color="--color" if config["mummerplot"].get("color", True) else "--nocolor",
+        title=config["mummerplot"].get("title", PROJECT),
+        prefix=PLOT_PREFIX
+    log:
+        stdout="logs/mummerplot.stdout.log",
+        stderr="logs/mummerplot.stderr.log",
+        gnuplot="logs/gnuplot.log"
+    shell:
+        r'''
+        mkdir -p results/plots logs
+        mummerplot \
+          {params.color} \
+          --{params.size} \
+          --terminal {params.terminal} \
+          --prefix {params.prefix} \
+          --Rfile {input.ref_order} \
+          --Qfile {input.qry_order} \
+          --title "{params.title}" \
+          {input.delta} \
+          > {log.stdout} 2> {log.stderr}
+
+        if [[ ! -s {output.png} && -s {output.gp} ]]; then
+          gnuplot {output.gp} > {log.gnuplot} 2>&1 || true
+        fi
+
+        test -s {output.gp}
+        test -s {output.png}
+        '''
