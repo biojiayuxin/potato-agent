@@ -374,6 +374,12 @@ def _tui_gateway_command(target: HermesTarget) -> list[str]:
     ]
 
 
+def _exec_tui_gateway(target: HermesTarget) -> None:
+    os.chdir(target.workdir)
+    command = _tui_gateway_command(target)
+    os.execvp(command[0], command)
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Potato Agent root helper")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -440,8 +446,7 @@ def main() -> int:
 
     try:
         if args.command == "tui-gateway":
-            command = _tui_gateway_command(_load_target(args.username))
-            os.execvp(command[0], command)
+            _exec_tui_gateway(_load_target(args.username))
             raise RuntimeError("failed to exec tui_gateway")
 
         if args.command == "provision-user":
