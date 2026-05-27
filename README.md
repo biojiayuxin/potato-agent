@@ -69,6 +69,7 @@ chmod 0600 /var/lib/potato-agent/data/*.db 2>/dev/null || true
 - `rsync`
 - `sudo`
 - `systemctl`
+- `micromamba`，用于生信技能按用户隔离安装工具环境
 - Hermes Python 依赖需要的编译工具
 
 Debian 或 Ubuntu 可先安装基础包：
@@ -76,6 +77,18 @@ Debian 或 Ubuntu 可先安装基础包：
 ```bash
 apt-get update
 apt-get install -y python3 python3-venv python3-pip git rsync sudo build-essential
+```
+
+`micromamba` 推荐系统级安装到 `/opt/micromamba/bin/micromamba`，但环境根目录使用每个
+Linux 用户自己的 `$HOME/.micromamba`。这样网页用户运行 Hermes skill 时，可以在自己的 home
+下创建和维护隔离环境，不需要写入 `/opt` 或项目目录。
+
+已部署服务器上的约定配置是：
+
+```text
+binary: /opt/micromamba/bin/micromamba
+profile: /etc/profile.d/micromamba.sh
+MAMBA_ROOT_PREFIX: $HOME/.micromamba
 ```
 
 ## 全新部署
@@ -117,7 +130,46 @@ chown root:potato-interface /var/lib/potato-agent/config/users_mapping.yaml
 chmod 0640 /var/lib/potato-agent/config/users_mapping.yaml
 ```
 
-### 3. 安装 Hermes 运行时
+### 3. 安装 micromamba
+
+如果机器上还没有 `/opt/micromamba/bin/micromamba`，按下面方式安装。该安装只放置
+micromamba 二进制和系统 profile 配置；实际 conda-style 环境默认创建到各 Linux 用户自己的
+`$HOME/.micromamba`。
+
+```bash
+mkdir -p /opt/micromamba/bin
+curl -L https://micro.mamba.pm/api/micromamba/linux-64/latest \
+  | tar -xvj -C /opt/micromamba/bin --strip-components=1 bin/micromamba
+
+chown -R root:root /opt/micromamba
+chmod 0755 /opt/micromamba /opt/micromamba/bin
+chmod 0755 /opt/micromamba/bin/micromamba
+
+cat >/etc/profile.d/micromamba.sh <<'EOF'
+# micromamba setup - system-wide
+export PATH="/opt/micromamba/bin:$PATH"
+export MAMBA_ROOT_PREFIX="$HOME/.micromamba"
+EOF
+
+chown root:root /etc/profile.d/micromamba.sh
+chmod 0644 /etc/profile.d/micromamba.sh
+```
+
+验证：
+
+```bash
+/opt/micromamba/bin/micromamba --version
+su -s /bin/bash -c 'source /etc/profile.d/micromamba.sh && command -v micromamba && micromamba info | sed -n "1,30p"' potato-interface
+```
+
+部署脚本、skill 或 Slurm 作业里不要假设登录 shell 一定已加载 profile。需要可靠调用时，直接使用
+`/opt/micromamba/bin/micromamba`，或者先执行：
+
+```bash
+source /etc/profile.d/micromamba.sh
+```
+
+### 4. 安装 Hermes 运行时
 
 ```bash
 mkdir -p /opt/hermes-agent-src
@@ -133,7 +185,7 @@ ln -sf /opt/hermes-agent-venv/bin/hermes /usr/local/bin/hermes
 
 每用户 Hermes service 默认使用 `/usr/local/bin/hermes`。
 
-### 4. 安装 interface 运行时
+### 5. 安装 interface 运行时
 
 ```bash
 python3 -m venv /opt/interface-env
@@ -141,7 +193,7 @@ python3 -m venv /opt/interface-env
 /opt/interface-env/bin/pip install -r /srv/potato_agent/interface/requirements.txt
 ```
 
-### 5. 配置上游模型网关
+### 6. 配置上游模型网关
 
 上游模型网关需要兼容 OpenAI API。用户映射文件放在仓库外：
 
@@ -189,7 +241,7 @@ export POTATO_AGENT_MAPPING_PATH=/var/lib/potato-agent/config/users_mapping.yaml
 `--apply-to-users` 会先打印摘要，并要求手动输入 `APPLY`，然后才会重写已有用户的 Hermes
 配置并重启当前正在运行的 Hermes service。
 
-### 6. 安装 privileged helper
+### 7. 安装 privileged helper
 
 ```bash
 mkdir -p /usr/local/libexec
@@ -213,7 +265,7 @@ visudo -cf /etc/sudoers.d/potato-agent-interface
 
 helper 只暴露 `interface.privileged_helper` 中实现的固定命令集。
 
-### 7. 安装 systemd service
+### 8. 安装 systemd service
 
 生成固定的 session secret：
 
@@ -263,7 +315,7 @@ systemctl status potato-interface.service
 http://<server>:3000/lite
 ```
 
-### 8. 创建用户
+### 9. 创建用户
 
 创建系统托管的 Linux 用户和网页账号：
 
@@ -346,6 +398,7 @@ chmod 0600 /var/lib/potato-agent/data/*.db 2>/dev/null || true
 重复全新部署中的这些步骤：
 
 - 同步代码到 `/srv/potato_agent`
+- 安装 micromamba
 - 安装 Hermes 运行时
 - 安装 interface 运行时
 - 安装 privileged helper
