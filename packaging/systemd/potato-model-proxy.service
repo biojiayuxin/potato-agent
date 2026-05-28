@@ -1,0 +1,17 @@
+[Unit]
+Description=Potato Agent Local Model Proxy
+After=network.target
+
+[Service]
+Type=simple
+User=root
+Group=potato-interface
+WorkingDirectory=/srv/potato_agent
+Environment=POTATO_AGENT_MAPPING_PATH=/var/lib/potato-agent/config/users_mapping.yaml
+Environment=POTATO_MODEL_PROXY_CONFIG_PATH=/var/lib/potato-agent/config/model_proxy.yaml
+ExecStart=/opt/interface-env/bin/python -m uvicorn interface.model_proxy:app --host 127.0.0.1 --port 8765
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target

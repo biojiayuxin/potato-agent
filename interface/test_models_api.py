@@ -138,8 +138,8 @@ def test_get_models_returns_whitelist_without_api_keys(monkeypatch) -> None:
 model:
   default: gpt-5.4-mini
   provider: custom
-  base_url: https://fast.example/v1
-  api_key: sk-fast
+  base_url: http://127.0.0.1:8765/v1
+  api_key: alice-local-token
   context_length: 500000
   api_mode: codex_responses
 """.lstrip(),
@@ -304,14 +304,12 @@ def test_put_active_model_updates_user_config(monkeypatch) -> None:
         assert config["model"] == {
             "default": "gpt-5.4-mini",
             "provider": "custom",
-            "base_url": "https://fast.example/v1",
-            "api_key": "sk-fast",
+            "base_url": "http://127.0.0.1:8765/v1",
+            "api_key": "alice-local-token",
             "context_length": 500000,
             "api_mode": "codex_responses",
         }
         assert config["agent"] == {"reasoning_effort": "xhigh"}
-        assert (hermes_home / ".env").read_text(encoding="utf-8") == (
-            "OPENAI_API_KEY=sk-fast\n"
-        )
+        assert (hermes_home / ".env").read_text(encoding="utf-8") == ""
     finally:
         client.close()

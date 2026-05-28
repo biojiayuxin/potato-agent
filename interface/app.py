@@ -98,6 +98,7 @@ from interface.model_options import (
     get_active_model_option_id,
     patch_user_active_model,
 )
+from interface.model_proxy_config import get_model_proxy_base_url
 from interface.privileged_client import PrivilegedClientError, privileged_client
 from interface.tui_gateway_bridge import (
     TuiGatewayBridge,
@@ -1679,9 +1680,13 @@ def _has_active_background_processes_for_target(target: HermesTarget) -> bool:
 def _get_active_model_id_for_user(
     target: HermesTarget,
     model_options: Any,
+    *,
+    config: dict[str, Any] | None = None,
 ) -> str:
     if os.geteuid() == 0 and not privileged_client.force_helper:
-        return get_active_model_option_id(target, model_options)
+        return get_active_model_option_id(
+            target, model_options, proxy_base_url=get_model_proxy_base_url(config)
+        )
     return privileged_client.get_active_model_id(target.username)
 
 
@@ -1997,7 +2002,7 @@ async def get_models(user: CurrentUser = Depends(get_current_user)) -> dict[str,
     try:
         config = mapping_store.load_config(resolve_env=True)
         model_options = normalize_model_options(config)
-        active_id = _get_active_model_id_for_user(user.target, model_options)
+        active_id = _get_active_model_id_for_user(user.target, model_options, config=config)
     except ModelOptionsError as exc:
         raise HTTPException(
             status_code=500,
@@ -2045,7 +2050,7 @@ async def update_active_model(
         raise HTTPException(status_code=400, detail="Model is not allowed")
 
     try:
-        active_id = _get_active_model_id_for_user(user.target, model_options)
+        active_id = _get_active_model_id_for_user(user.target, model_options, config=config)
         if requested_id == active_id:
             return {
                 "ok": True,
@@ -2077,7 +2082,12 @@ async def update_active_model(
 
     try:
         if os.geteuid() == 0 and not privileged_client.force_helper:
-            await asyncio.to_thread(patch_user_active_model, user.target, selected)
+            await asyncio.to_thread(
+                patch_user_active_model,
+                user.target,
+                selected,
+                proxy_base_url=get_model_proxy_base_url(config),
+            )
         else:
             await asyncio.to_thread(
                 privileged_client.patch_active_model,

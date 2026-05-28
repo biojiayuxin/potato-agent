@@ -43,6 +43,7 @@ from interface.model_options import (
     patch_user_active_model,
 )
 from interface.model_options import normalize_model_options
+from interface.model_proxy_config import get_model_proxy_base_url
 from interface.runtime_state import (
     cleanup_expired_runtime_leases,
     has_active_runtime_leases,
@@ -512,17 +513,23 @@ def main() -> int:
 
         if args.command == "patch-active-model":
             target = _load_target(args.username)
-            model_options = normalize_model_options(load_mapping(DEFAULT_MAPPING_PATH, resolve_env=True))
+            config = load_mapping(DEFAULT_MAPPING_PATH, resolve_env=True)
+            model_options = normalize_model_options(config)
             option = model_options.get(args.model_id)
             if option is None:
                 raise ModelOptionsError("Model is not allowed")
-            patch_user_active_model(target, option)
+            patch_user_active_model(
+                target, option, proxy_base_url=get_model_proxy_base_url(config)
+            )
             return _emit({"ok": True})
 
         if args.command == "get-active-model":
             target = _load_target(args.username)
-            model_options = normalize_model_options(load_mapping(DEFAULT_MAPPING_PATH, resolve_env=True))
-            active_id = get_active_model_option_id(target, model_options)
+            config = load_mapping(DEFAULT_MAPPING_PATH, resolve_env=True)
+            model_options = normalize_model_options(config)
+            active_id = get_active_model_option_id(
+                target, model_options, proxy_base_url=get_model_proxy_base_url(config)
+            )
             return _emit({"ok": True, "active_id": active_id})
 
         if args.command == "session-db":

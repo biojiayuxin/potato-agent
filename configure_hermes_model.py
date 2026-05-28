@@ -6,7 +6,6 @@ import argparse
 import getpass
 import os
 import pwd
-import re
 import sys
 from copy import deepcopy
 from pathlib import Path
@@ -42,6 +41,14 @@ from interface.model_options import (
     VALID_REASONING_EFFORTS,
     model_option_from_mapping,
     parse_model_context_length,
+    strip_openai_api_key_env,
+)
+from interface.model_proxy_config import (
+    DEFAULT_MODEL_PROXY_PORT,
+    get_model_proxy_base_url,
+    get_model_proxy_config_path,
+    load_model_proxy_config,
+    write_model_proxy_config,
 )
 
 
@@ -51,11 +58,6 @@ DEFAULT_MODEL_OPTION_ID = "primary"
 FALLBACK_ACTION_PRESERVE = "preserve"
 FALLBACK_ACTION_SET = "set"
 FALLBACK_ACTION_CLEAR = "clear"
-OPENAI_API_KEY_LINE_RE = re.compile(
-    r"^(?P<prefix>\s*)(?:export\s+)?OPENAI_API_KEY\s*=.*$"
-)
-
-
 class ConfigureHermesModelError(RuntimeError):
     pass
 
@@ -74,6 +76,20 @@ def build_parser() -> argparse.ArgumentParser:
         help=f"Path to users_mapping.yaml (default: {DEFAULT_MAPPING_PATH})",
     )
     parser.add_argument(
+        "--proxy-config",
+        type=Path,
+        help=(
+            "Path to model_proxy.yaml. Defaults to model_proxy.yaml next to "
+            "users_mapping.yaml unless POTATO_MODEL_PROXY_CONFIG_PATH is set."
+        ),
+    )
+    parser.add_argument(
+        "--proxy-port",
+        type=int,
+        default=DEFAULT_MODEL_PROXY_PORT,
+        help=f"Local model proxy port (default: {DEFAULT_MODEL_PROXY_PORT})",
+    )
+    parser.add_argument(
         "--base-url",
         help="Upstream OpenAI-compatible base URL, e.g. https://gateway.example/v1",
     )
@@ -83,7 +99,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--api-key",
-        help="Upstream API key written to hermes.model.api_key and hermes.extra_env.OPENAI_API_KEY",
+        help="Upstream API key written only to root-owned model_proxy.yaml",
     )
     parser.add_argument(
         "--context-length",
@@ -127,22 +143,22 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--fallback-base-url",
         help=(
-            "Fallback OpenAI-compatible base URL written to "
-            "hermes.fallback_providers[0].base_url"
+            "Fallback OpenAI-compatible base URL written to root-owned "
+            "model_proxy.yaml only."
         ),
     )
     parser.add_argument(
         "--fallback-model",
-        help="Fallback model name written to hermes.fallback_providers[0].model",
+        help="Fallback model name written to root-owned model_proxy.yaml only",
     )
     parser.add_argument(
         "--fallback-api-key",
-        help="Fallback API key written to hermes.fallback_providers[0].api_key",
+        help="Fallback API key written to root-owned model_proxy.yaml only",
     )
     parser.add_argument(
         "--fallback-provider",
         help=(
-            "Fallback provider name written to hermes.fallback_providers[0].provider "
+            "Fallback provider name written to root-owned model_proxy.yaml "
             f"(default: {DEFAULT_FALLBACK_PROVIDER})"
         ),
     )
@@ -301,6 +317,66 @@ def parse_option_arguments(values: list[str]) -> list[dict[str, Any]]:
     return options
 
 
+def _existing_proxy_model_entries(proxy_config_path: Path) -> dict[str, dict[str, Any]]:
+    try:
+        proxy_config = load_model_proxy_config(proxy_config_path)
+    except Exception:
+        return {}
+    raw_models = proxy_config.get("models")
+    if not isinstance(raw_models, list):
+        return {}
+    entries: dict[str, dict[str, Any]] = {}
+    for item in raw_models:
+        if not isinstance(item, dict):
+            continue
+        model_name = str(item.get("model") or item.get("id") or "").strip()
+        if model_name and model_name not in entries:
+            entries[model_name] = deepcopy(item)
+    return entries
+
+
+def _rehydrate_private_model_fields(
+    options: list[dict[str, Any]], existing_entries: dict[str, dict[str, Any]]
+) -> list[dict[str, Any]]:
+    hydrated: list[dict[str, Any]] = []
+    for option in options:
+        item = deepcopy(option)
+        model_name = str(item.get("model") or item.get("default") or "").strip()
+        existing = existing_entries.get(model_name) or {}
+        for key in ("base_url", "api_key"):
+            if not str(item.get(key) or "").strip() and existing.get(key):
+                item[key] = existing[key]
+        hydrated.append(item)
+    return hydrated
+
+
+def build_proxy_config(
+    *,
+    host: str,
+    port: int,
+    models: list[dict[str, Any]],
+) -> dict[str, Any]:
+    normalized_models: list[dict[str, Any]] = []
+    seen_model_names: set[str] = set()
+    for index, model in enumerate(models):
+        normalized = model_option_from_mapping(
+            model, path=f"model_proxy.models[{index}]"
+        )
+        if not normalized.base_url or not normalized.api_key:
+            raise ConfigureHermesModelError(
+                f"model_proxy.models[{index}] is missing required field(s): "
+                "base_url, api_key."
+            )
+        if normalized.model in seen_model_names:
+            continue
+        seen_model_names.add(normalized.model)
+        normalized_models.append(normalized.to_config())
+    return {
+        "listen": {"host": host, "port": port},
+        "models": normalized_models,
+    }
+
+
 def _first_fallback_provider(hermes: dict[str, Any]) -> dict[str, Any] | None:
     providers = hermes.get("fallback_providers")
     if isinstance(providers, list):
@@ -344,36 +420,6 @@ def standardize_fallback_config(hermes: dict[str, Any]) -> None:
 
     if providers is not None and "fallback_model" in hermes:
         hermes.pop("fallback_model", None)
-
-
-def set_fallback_provider(
-    hermes: dict[str, Any],
-    *,
-    provider: str,
-    model: str,
-    base_url: str,
-    api_key: str,
-) -> None:
-    current_providers = hermes.get("fallback_providers")
-    tail = (
-        [
-            deepcopy(item)
-            for item in current_providers[1:]
-            if isinstance(item, dict)
-        ]
-        if isinstance(current_providers, list)
-        else []
-    )
-    hermes["fallback_providers"] = [
-        {
-            "provider": provider,
-            "model": model,
-            "base_url": base_url,
-            "api_key": api_key,
-        },
-        *tail,
-    ]
-    hermes.pop("fallback_model", None)
 
 
 def clear_fallback_config(hermes: dict[str, Any]) -> None:
@@ -432,20 +478,16 @@ def set_model_options(
     model = hermes.get("model")
     if not isinstance(model, dict):
         raise ConfigureHermesModelError("users_mapping.yaml has invalid hermes.model structure.")
-    extra_env = hermes.get("extra_env") if isinstance(hermes.get("extra_env"), dict) else {}
 
     primary_option: dict[str, Any] = {
         "id": primary_id,
         "name": primary_name,
         "provider": model.get("provider") or "custom",
         "model": model.get("default") or model.get("model"),
-        "base_url": model.get("base_url"),
-        "api_key": model.get("api_key") or extra_env.get("OPENAI_API_KEY"),
+        "api_mode": model.get("api_mode"),
     }
     if model.get("context_length") is not None:
         primary_option["context_length"] = model.get("context_length")
-    if model.get("api_mode"):
-        primary_option["api_mode"] = model.get("api_mode")
     config_overrides = (
         hermes.get("config_overrides")
         if isinstance(hermes.get("config_overrides"), dict)
@@ -461,7 +503,7 @@ def set_model_options(
 
     try:
         primary = model_option_from_mapping(primary_option, path="hermes.model")
-        normalized_options = [primary.to_config()]
+        normalized_options = [primary.to_config(include_private=False)]
         seen_ids = {primary.id}
         for index, option in enumerate(additional_options):
             normalized = model_option_from_mapping(
@@ -472,7 +514,7 @@ def set_model_options(
                     f"Duplicate model option id in hermes.model_options: {normalized.id}"
                 )
             seen_ids.add(normalized.id)
-            normalized_options.append(normalized.to_config())
+            normalized_options.append(normalized.to_config(include_private=False))
     except ModelOptionsError as exc:
         raise ConfigureHermesModelError(str(exc)) from exc
 
@@ -732,6 +774,21 @@ def _load_user_config(config_path: Path) -> dict[str, Any]:
     return data
 
 
+
+
+def _strip_api_keys_outside_model(
+    value: Any, *, protected_model: dict[str, Any] | None = None
+) -> None:
+    if isinstance(value, dict):
+        if value is not protected_model:
+            value.pop("api_key", None)
+        for child in list(value.values()):
+            _strip_api_keys_outside_model(child, protected_model=protected_model)
+    elif isinstance(value, list):
+        for child in value:
+            _strip_api_keys_outside_model(child, protected_model=protected_model)
+
+
 def _patch_user_hermes_config(
     existing: dict[str, Any],
     generated: dict[str, Any],
@@ -770,51 +827,15 @@ def _patch_user_hermes_config(
         patched.pop("fallback_providers", None)
         patched.pop("fallback_model", None)
     elif fallback_action == FALLBACK_ACTION_SET:
-        generated_providers = generated.get("fallback_providers")
-        if (
-            not isinstance(generated_providers, list)
-            or not generated_providers
-            or not isinstance(generated_providers[0], dict)
-        ):
-            raise ConfigureHermesModelError(
-                "Generated Hermes config is missing fallback_providers[0]."
-            )
-        existing_providers = patched.get("fallback_providers")
-        tail = existing_providers[1:] if isinstance(existing_providers, list) else []
-        patched["fallback_providers"] = [
-            deepcopy(generated_providers[0]),
-            *deepcopy(tail),
-        ]
+        patched.pop("fallback_providers", None)
+        patched.pop("fallback_model", None)
     elif fallback_action != FALLBACK_ACTION_PRESERVE:
         raise ConfigureHermesModelError(f"Unknown fallback action: {fallback_action}")
 
+    patched.pop("fallback_providers", None)
+    patched.pop("fallback_model", None)
+    _strip_api_keys_outside_model(patched, protected_model=model)
     return patched
-
-
-def _quote_env_value(value: str) -> str:
-    allowed = set("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_/-.:")
-    if value and all(char in allowed for char in value):
-        return value
-    return repr(value)
-
-
-def _patch_env_content(existing: str | None, api_key: str) -> str:
-    rendered = f"OPENAI_API_KEY={_quote_env_value(api_key)}"
-    if existing is None:
-        return f"{rendered}\n"
-
-    lines = existing.splitlines(keepends=True)
-    for index, line in enumerate(lines):
-        body = line[:-1] if line.endswith("\n") else line
-        newline = "\n" if line.endswith("\n") else ""
-        match = OPENAI_API_KEY_LINE_RE.match(body)
-        if match:
-            prefix = match.group("prefix") or ""
-            lines[index] = f"{prefix}{rendered}{newline}"
-            return "".join(lines)
-
-    separator = "" if existing.endswith("\n") or not existing else "\n"
-    return f"{existing}{separator}{rendered}\n"
 
 
 def apply_user_runtime_model_patch(
@@ -855,14 +876,9 @@ def apply_user_runtime_model_patch(
     )
     _set_owner_and_mode(config_path, pw.pw_uid, gid, 0o600)
 
-    model = generated.get("model") if isinstance(generated.get("model"), dict) else {}
-    api_key = str(model.get("api_key") or "").strip()
-    if not api_key:
-        raise ConfigureHermesModelError("Generated Hermes config is missing model.api_key.")
-
     env_path = target.hermes_home / ".env"
     existing_env = env_path.read_text(encoding="utf-8") if env_path.exists() else None
-    env_path.write_text(_patch_env_content(existing_env, api_key), encoding="utf-8")
+    env_path.write_text(strip_openai_api_key_env(existing_env), encoding="utf-8")
     _set_owner_and_mode(env_path, pw.pw_uid, gid, 0o600)
 
 
@@ -929,7 +945,7 @@ def apply_model_config_to_users(
 
 
 def extract_current_values(
-    config: dict,
+    config: dict, proxy_config_path: Path | None = None
 ) -> tuple[str | None, str | None, str | None, int | None]:
     hermes = config.get("hermes") if isinstance(config.get("hermes"), dict) else {}
     model = hermes.get("model") if isinstance(hermes.get("model"), dict) else {}
@@ -940,15 +956,40 @@ def extract_current_values(
     current_base_url = str(model.get("base_url") or "").strip() or None
     current_model_name = str(model.get("default") or "").strip() or None
     current_api_key = str(model.get("api_key") or extra_env.get("OPENAI_API_KEY") or "").strip() or None
+    if current_base_url == get_model_proxy_base_url(config):
+        current_base_url = None
+    if current_api_key == "{username}-local-token" or (
+        current_api_key and current_api_key.endswith("-local-token")
+    ):
+        current_api_key = None
     current_context_length = model.get("context_length")
     if not isinstance(current_context_length, int) or current_context_length <= 0:
         current_context_length = None
+
+    if proxy_config_path is not None:
+        existing_proxy = _existing_proxy_model_entries(proxy_config_path)
+        proxy_entry = existing_proxy.get(current_model_name or "")
+        if proxy_entry is None and existing_proxy:
+            proxy_entry = next(iter(existing_proxy.values()))
+        if isinstance(proxy_entry, dict):
+            current_base_url = str(proxy_entry.get("base_url") or "").strip() or current_base_url
+            current_api_key = str(proxy_entry.get("api_key") or "").strip() or current_api_key
+            current_model_name = str(proxy_entry.get("model") or "").strip() or current_model_name
+            proxy_context = proxy_entry.get("context_length")
+            if isinstance(proxy_context, int) and proxy_context > 0:
+                current_context_length = proxy_context
+
     return current_base_url, current_model_name, current_api_key, current_context_length
 
 
 def main() -> int:
     args = build_parser().parse_args()
     mapping_path = args.mapping.expanduser().resolve()
+    proxy_config_path = (
+        args.proxy_config.expanduser().resolve()
+        if args.proxy_config is not None
+        else get_model_proxy_config_path(mapping_path)
+    )
 
     if args.clear_fallback and fallback_args_requested(args):
         raise ConfigureHermesModelError(
@@ -967,11 +1008,16 @@ def main() -> int:
         current_model_name,
         current_api_key,
         current_context_length,
-    ) = extract_current_values(config)
+    ) = extract_current_values(config, proxy_config_path)
     current_fallback_provider = extract_current_fallback_provider(config)
     model, users = ensure_mapping_structure(config)
     hermes = config["hermes"]
     extra_env = hermes["extra_env"]
+    hermes["model_proxy"] = {
+        "host": DEFAULT_API_SERVER_HOST,
+        "port": args.proxy_port,
+        "base_url": f"http://{DEFAULT_API_SERVER_HOST}:{args.proxy_port}/v1",
+    }
 
     base_url = validate_base_url(
         resolve_value(
@@ -992,26 +1038,43 @@ def main() -> int:
         current=current_api_key,
         secret=True,
     )
+    existing_proxy_entries = _existing_proxy_model_entries(proxy_config_path)
     additional_model_options = (
         parse_option_arguments(args.option)
         if args.option
-        else extract_existing_additional_model_options(hermes)
+        else _rehydrate_private_model_fields(
+            extract_existing_additional_model_options(hermes), existing_proxy_entries
+        )
     )
+    proxy_models = [
+        {
+            "id": DEFAULT_MODEL_OPTION_ID,
+            "name": model_name,
+            "provider": "custom",
+            "model": model_name,
+            "base_url": base_url,
+            "api_key": api_key,
+            "api_mode": args.api_mode,
+            "reasoning_effort": args.reasoning_effort,
+        },
+        *additional_model_options,
+    ]
 
     model["default"] = model_name
     model["provider"] = "custom"
-    model["base_url"] = base_url
-    model["api_key"] = api_key
+    model["base_url"] = get_model_proxy_base_url(config)
+    model["api_key"] = "{username}-local-token"
     context_length = parse_context_length(args.context_length)
     if context_length is not None:
         model["context_length"] = context_length
+        proxy_models[0]["context_length"] = context_length
         set_compression_context_length(hermes, context_length)
     model["api_mode"] = args.api_mode
     set_agent_reasoning_effort(hermes, args.reasoning_effort)
     new_context_length = model.get("context_length")
     if not isinstance(new_context_length, int) or new_context_length <= 0:
         new_context_length = None
-    extra_env["OPENAI_API_KEY"] = api_key
+    extra_env.pop("OPENAI_API_KEY", None)
     set_model_options(
         hermes,
         primary_id=DEFAULT_MODEL_OPTION_ID,
@@ -1019,10 +1082,15 @@ def main() -> int:
         additional_options=additional_model_options,
     )
 
-    fallback_action = FALLBACK_ACTION_PRESERVE
+    fallback_action = FALLBACK_ACTION_CLEAR
+    fallback_summary_provider: dict[str, Any] | None = None
+    existing_proxy_model_names = {
+        str(item.get("model") or "").strip()
+        for item in proxy_models
+        if isinstance(item, dict)
+    }
     if args.clear_fallback:
         clear_fallback_config(hermes)
-        fallback_action = FALLBACK_ACTION_CLEAR
     elif fallback_args_requested(args):
         existing_fallback = _first_fallback_provider(hermes) or {}
         fallback_provider = resolve_value(
@@ -1049,36 +1117,84 @@ def main() -> int:
             current=str(existing_fallback.get("api_key") or "").strip() or None,
             secret=True,
         )
-        set_fallback_provider(
-            hermes,
-            provider=fallback_provider,
-            model=fallback_model,
-            base_url=fallback_base_url,
-            api_key=fallback_api_key,
-        )
+        fallback_summary_provider = {
+            "provider": fallback_provider,
+            "model": fallback_model,
+            "base_url": fallback_base_url,
+            "api_key": fallback_api_key,
+        }
+        if fallback_model not in existing_proxy_model_names:
+            proxy_models.append(
+                {
+                    "id": f"fallback-{len(proxy_models)}",
+                    "name": fallback_model,
+                    "provider": fallback_provider,
+                    "model": fallback_model,
+                    "base_url": fallback_base_url,
+                    "api_key": fallback_api_key,
+                    "api_mode": DEFAULT_MODEL_API_MODE,
+                    "reasoning_effort": DEFAULT_REASONING_EFFORT,
+                }
+            )
+            existing_proxy_model_names.add(fallback_model)
+        clear_fallback_config(hermes)
         fallback_action = FALLBACK_ACTION_SET
+    elif current_fallback_provider:
+        fallback_summary_provider = current_fallback_provider
+        fallback_model_name = str(current_fallback_provider.get("model") or "").strip()
+        fallback_base_url = str(current_fallback_provider.get("base_url") or "").strip()
+        fallback_api_key = str(current_fallback_provider.get("api_key") or "").strip()
+        if (
+            fallback_model_name
+            and fallback_base_url
+            and fallback_api_key
+            and fallback_model_name not in existing_proxy_model_names
+        ):
+            proxy_models.append(
+                {
+                    "id": f"fallback-{len(proxy_models)}",
+                    "name": fallback_model_name,
+                    "provider": str(current_fallback_provider.get("provider") or DEFAULT_FALLBACK_PROVIDER),
+                    "model": fallback_model_name,
+                    "base_url": fallback_base_url,
+                    "api_key": fallback_api_key,
+                    "api_mode": DEFAULT_MODEL_API_MODE,
+                    "reasoning_effort": DEFAULT_REASONING_EFFORT,
+                }
+            )
+            existing_proxy_model_names.add(fallback_model_name)
+        clear_fallback_config(hermes)
+    else:
+        clear_fallback_config(hermes)
 
-    new_fallback_provider = _first_fallback_provider(hermes)
+    new_fallback_provider = None
+
+    proxy_config = build_proxy_config(
+        host=DEFAULT_API_SERVER_HOST,
+        port=args.proxy_port,
+        models=proxy_models,
+    )
+    write_model_proxy_config(proxy_config_path, proxy_config)
 
     write_mapping(mapping_path, config)
-    mapping_path.chmod(0o600)
 
     action = "Created" if created else "Updated"
     print(f"{action} Hermes model config in: {mapping_path}")
+    print(f"Updated model proxy config in: {proxy_config_path}")
+    print(f"Local proxy base URL: {get_model_proxy_base_url(config)}")
     print(f"Upstream base URL: {base_url}")
     print(f"Default model: {model_name}")
     print(f"Whitelisted models: {1 + len(additional_model_options)}")
     if model.get("context_length"):
         print(f"Context length: {model['context_length']}")
-    print(f"Fallback provider: {format_fallback_provider(new_fallback_provider)}")
+    print(f"Fallback provider: {format_fallback_provider(fallback_summary_provider)}")
     print(f"Preserved users: {len(users)}")
     print(
-        "Updated fields: hermes.model.*, hermes.extra_env.OPENAI_API_KEY, "
-        "hermes.model_options, "
+        "Updated fields: hermes.model.*, hermes.model_options, "
         "hermes.config_overrides.auxiliary.compression.context_length, "
-        "hermes.fallback_providers"
+        "model_proxy.yaml.models"
     )
-    print("File mode: 600")
+    print("File mode: 640")
     if created:
         print("Users section: []")
 

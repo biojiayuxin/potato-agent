@@ -141,12 +141,15 @@ python3 -m venv /opt/interface-env
 /opt/interface-env/bin/pip install -r /srv/potato_agent/interface/requirements.txt
 ```
 
-### 5. 配置上游模型网关
+### 5. 配置本地模型代理
 
-上游模型网关需要兼容 OpenAI API。用户映射文件放在仓库外：
+上游模型网关需要兼容 OpenAI API。真实上游 API key 只写入 root-owned
+`/var/lib/potato-agent/config/model_proxy.yaml`；每个用户的 Hermes 配置只会包含
+`http://127.0.0.1:8765/v1` 和 `{username}-local-token`。
 
 ```bash
 export POTATO_AGENT_MAPPING_PATH=/var/lib/potato-agent/config/users_mapping.yaml
+export POTATO_MODEL_PROXY_CONFIG_PATH=/var/lib/potato-agent/config/model_proxy.yaml
 ```
 
 交互式配置：
@@ -164,7 +167,7 @@ export POTATO_AGENT_MAPPING_PATH=/var/lib/potato-agent/config/users_mapping.yaml
   --api-key 'replace-with-upstream-api-key'
 ```
 
-可选 fallback provider：
+可选 fallback provider 会写入 proxy 配置，但不会写入用户目录：
 
 ```bash
 /opt/interface-env/bin/python /srv/potato_agent/configure_hermes_model.py \
@@ -176,7 +179,18 @@ export POTATO_AGENT_MAPPING_PATH=/var/lib/potato-agent/config/users_mapping.yaml
   --fallback-api-key 'replace-with-fallback-api-key'
 ```
 
-如果要把新的模型配置立即下发到已有用户：
+安装并启动本地 proxy service：
+
+```bash
+install -D -m 0644 /srv/potato_agent/packaging/systemd/potato-model-proxy.service \
+  /etc/systemd/system/potato-model-proxy.service
+chown root:potato-interface /var/lib/potato-agent/config/model_proxy.yaml
+chmod 0640 /var/lib/potato-agent/config/model_proxy.yaml
+systemctl daemon-reload
+systemctl enable --now potato-model-proxy.service
+```
+
+如果要把新的 proxy 配置立即下发到已有用户：
 
 ```bash
 /opt/interface-env/bin/python /srv/potato_agent/configure_hermes_model.py \
@@ -187,7 +201,8 @@ export POTATO_AGENT_MAPPING_PATH=/var/lib/potato-agent/config/users_mapping.yaml
 ```
 
 `--apply-to-users` 会先打印摘要，并要求手动输入 `APPLY`，然后才会重写已有用户的 Hermes
-配置并重启当前正在运行的 Hermes service。
+配置并重启当前正在运行的 Hermes service。升级旧部署后可以运行
+`cleanup_hermes_user_keys.py --dry-run` 检查历史 key，再去掉 `--dry-run` 执行清理。
 
 ### 6. 安装 privileged helper
 

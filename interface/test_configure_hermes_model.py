@@ -91,7 +91,7 @@ def _runtime_config() -> dict:
     }
 
 
-def test_configure_hermes_model_writes_standard_fallback_providers() -> None:
+def test_configure_hermes_model_writes_fallback_to_proxy_only() -> None:
     mapping_path = Path(tempfile.mkdtemp(prefix="potato-configure-model-test-")) / "users_mapping.yaml"
 
     result = _run_configure(
@@ -107,16 +107,13 @@ def test_configure_hermes_model_writes_standard_fallback_providers() -> None:
 
     assert result.returncode == 0, result.stderr
     data = yaml.safe_load(mapping_path.read_text(encoding="utf-8"))
+    proxy = yaml.safe_load(mapping_path.with_name("model_proxy.yaml").read_text(encoding="utf-8"))
     hermes = data["hermes"]
     assert "fallback_model" not in hermes
-    assert hermes["fallback_providers"] == [
-        {
-            "provider": "custom",
-            "model": "gpt-5.4-mini",
-            "base_url": "https://fallback.example/v1",
-            "api_key": "sk-fallback",
-        }
-    ]
+    assert "fallback_providers" not in hermes
+    assert proxy["models"][-1]["model"] == "gpt-5.4-mini"
+    assert proxy["models"][-1]["api_key"] == "sk-fallback"
+    assert "sk-fallback" not in mapping_path.read_text(encoding="utf-8")
 
 
 def test_configure_hermes_model_writes_context_length() -> None:
@@ -143,12 +140,13 @@ def test_configure_hermes_model_writes_context_length() -> None:
         "name": "gpt-5.4",
         "provider": "custom",
         "model": "gpt-5.4",
-        "base_url": "https://primary.example/v1",
-        "api_key": "sk-primary",
         "context_length": 1050000,
         "api_mode": "codex_responses",
         "reasoning_effort": "xhigh",
     }
+    proxy = yaml.safe_load(mapping_path.with_name("model_proxy.yaml").read_text(encoding="utf-8"))
+    assert proxy["models"][0]["base_url"] == "https://primary.example/v1"
+    assert proxy["models"][0]["api_key"] == "sk-primary"
 
 
 def test_configure_hermes_model_defaults_api_mode_and_reasoning_effort() -> None:
@@ -209,8 +207,6 @@ def test_configure_hermes_model_writes_optional_model_options() -> None:
                 "name": "gpt-5.4",
                 "provider": "custom",
                 "model": "gpt-5.4",
-                "base_url": "https://primary.example/v1",
-                "api_key": "sk-primary",
                 "api_mode": "codex_responses",
                 "reasoning_effort": "xhigh",
             },
@@ -219,8 +215,6 @@ def test_configure_hermes_model_writes_optional_model_options() -> None:
                 "name": "Fast",
                 "provider": "custom",
                 "model": "gpt-5.4-mini",
-                "base_url": "https://fast.example/v1",
-                "api_key": "sk-fast",
                 "context_length": 500000,
                 "api_mode": "codex_responses",
                 "reasoning_effort": "xhigh",
@@ -230,13 +224,18 @@ def test_configure_hermes_model_writes_optional_model_options() -> None:
                 "name": "gpt-5.5",
                 "provider": "custom",
                 "model": "gpt-5.5",
-                "base_url": "https://deep.example/v1",
-                "api_key": "sk-deep",
                 "api_mode": "chat_completions",
                 "reasoning_effort": "xhigh",
             },
         ],
     }
+    proxy = yaml.safe_load(mapping_path.with_name("model_proxy.yaml").read_text(encoding="utf-8"))
+    assert [item["api_key"] for item in proxy["models"]] == [
+        "sk-primary",
+        "sk-fast",
+        "sk-deep",
+    ]
+    assert "sk-fast" not in mapping_path.read_text(encoding="utf-8")
 
 
 def test_configure_hermes_model_rejects_too_many_optional_models() -> None:
@@ -313,14 +312,11 @@ users: []
     data = yaml.safe_load(mapping_path.read_text(encoding="utf-8"))
     hermes = data["hermes"]
     assert "fallback_model" not in hermes
-    assert hermes["fallback_providers"] == [
-        {
-            "provider": "custom",
-            "model": "old-fallback",
-            "base_url": "https://old-fallback.example/v1",
-            "api_key": "sk-old-fallback",
-        }
-    ]
+    assert "fallback_providers" not in hermes
+    proxy = yaml.safe_load(mapping_path.with_name("model_proxy.yaml").read_text(encoding="utf-8"))
+    assert proxy["models"][-1]["model"] == "old-fallback"
+    assert proxy["models"][-1]["api_key"] == "sk-old-fallback"
+    assert "sk-old-fallback" not in mapping_path.read_text(encoding="utf-8")
 
 
 def test_configure_hermes_model_clear_fallback_removes_fallback_config() -> None:
@@ -411,8 +407,8 @@ fallback_providers:
     assert data["model"] == {
         "default": "gpt-5.4",
         "provider": "custom",
-        "base_url": "https://primary.example/v1",
-        "api_key": "sk-primary",
+        "base_url": "http://127.0.0.1:8765/v1",
+        "api_key": "alice-local-token",
         "api_mode": "codex_responses",
         "context_length": 1050000,
     }
@@ -422,10 +418,10 @@ fallback_providers:
     assert data["memory"] == {"enabled": True}
     assert data["tools"] == {"filesystem": True}
     assert data["terminal"] == {"backend": "local", "timeout": 300}
-    assert data["fallback_providers"][0]["model"] == "keep-fallback"
+    assert "fallback_providers" not in data
 
 
-def test_apply_user_runtime_patch_updates_only_openai_api_key_in_env(
+def test_apply_user_runtime_patch_removes_openai_api_key_from_env(
     monkeypatch, tmp_path
 ) -> None:
     target = _target(tmp_path)
@@ -455,11 +451,11 @@ def test_apply_user_runtime_patch_updates_only_openai_api_key_in_env(
     )
 
     assert env_path.read_text(encoding="utf-8") == (
-        "# keep this comment\nFOO=bar\nOPENAI_API_KEY=sk-primary\n\nBAZ=qux\n"
+        "# keep this comment\nFOO=bar\n\nBAZ=qux\n"
     )
 
 
-def test_apply_user_runtime_patch_appends_openai_api_key_to_env(
+def test_apply_user_runtime_patch_does_not_append_openai_api_key_to_env(
     monkeypatch, tmp_path
 ) -> None:
     target = _target(tmp_path)
@@ -485,9 +481,7 @@ def test_apply_user_runtime_patch_appends_openai_api_key_to_env(
         fallback_action=configure_hermes_model.FALLBACK_ACTION_PRESERVE,
     )
 
-    assert env_path.read_text(encoding="utf-8") == (
-        "# keep\nFOO=bar\nOPENAI_API_KEY=sk-primary\n"
-    )
+    assert env_path.read_text(encoding="utf-8") == "# keep\nFOO=bar"
 
 
 def test_apply_user_runtime_patch_preserves_fallback_when_unrequested(
@@ -531,14 +525,7 @@ fallback_providers:
     )
 
     data = yaml.safe_load(config_path.read_text(encoding="utf-8"))
-    assert data["fallback_providers"] == [
-        {
-            "provider": "custom",
-            "model": "keep-fallback",
-            "base_url": "https://keep.example/v1",
-            "api_key": "sk-keep",
-        }
-    ]
+    assert "fallback_providers" not in data
 
 
 def test_apply_user_runtime_patch_clear_fallback_only_removes_fallback(
