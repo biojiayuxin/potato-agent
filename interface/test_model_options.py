@@ -218,7 +218,7 @@ fallback_providers:
 
     data = yaml.safe_load(config_path.read_text(encoding="utf-8"))
     assert data["model"] == {
-        "default": "gpt-5.4-mini",
+        "default": "Fast",
         "provider": "custom",
         "base_url": "http://127.0.0.1:8765/v1",
         "api_key": "alice-local-token",
@@ -293,3 +293,44 @@ auxiliary:
     assert "context_length" not in data["auxiliary"]["compression"]
     assert data["auxiliary"]["summarizer"] == {"model": "summary"}
     assert data["agent"] == {"reasoning_effort": "xhigh"}
+
+
+def test_active_model_matching_accepts_proxy_route_name(tmp_path) -> None:
+    target = _target(tmp_path)
+    target.hermes_home.mkdir(parents=True)
+    (target.hermes_home / "config.yaml").write_text(
+        """
+model:
+  default: Alt
+  provider: custom
+  base_url: http://127.0.0.1:8765/v1
+  api_key: alice-local-token
+  api_mode: codex_responses
+""".lstrip(),
+        encoding="utf-8",
+    )
+    options = normalize_model_options(
+        {
+            "hermes": {
+                "model_options": {
+                    "primary": "primary",
+                    "options": [
+                        {
+                            "id": "primary",
+                            "name": "Main",
+                            "model": "gpt-5.4",
+                        },
+                        {
+                            "id": "alt",
+                            "name": "Alt",
+                            "model": "gpt-5.4",
+                        },
+                    ],
+                }
+            }
+        }
+    )
+
+    from interface.model_options import get_active_model_option_id
+
+    assert get_active_model_option_id(target, options) == "alt"

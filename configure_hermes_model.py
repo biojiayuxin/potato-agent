@@ -329,7 +329,7 @@ def _existing_proxy_model_entries(proxy_config_path: Path) -> dict[str, dict[str
     for item in raw_models:
         if not isinstance(item, dict):
             continue
-        model_name = str(item.get("model") or item.get("id") or "").strip()
+        model_name = str(item.get("name") or item.get("model") or item.get("id") or "").strip()
         if model_name and model_name not in entries:
             entries[model_name] = deepcopy(item)
     return entries
@@ -341,7 +341,9 @@ def _rehydrate_private_model_fields(
     hydrated: list[dict[str, Any]] = []
     for option in options:
         item = deepcopy(option)
-        model_name = str(item.get("model") or item.get("default") or "").strip()
+        model_name = str(
+            item.get("name") or item.get("model") or item.get("default") or ""
+        ).strip()
         existing = existing_entries.get(model_name) or {}
         for key in ("base_url", "api_key"):
             if not str(item.get(key) or "").strip() and existing.get(key):
@@ -367,9 +369,10 @@ def build_proxy_config(
                 f"model_proxy.models[{index}] is missing required field(s): "
                 "base_url, api_key."
             )
-        if normalized.model in seen_model_names:
+        route_name = normalized.name or normalized.model
+        if route_name in seen_model_names:
             continue
-        seen_model_names.add(normalized.model)
+        seen_model_names.add(route_name)
         normalized_models.append(normalized.to_config())
     return {
         "listen": {"host": host, "port": port},

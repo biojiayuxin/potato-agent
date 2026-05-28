@@ -238,6 +238,24 @@ def test_configure_hermes_model_writes_optional_model_options() -> None:
     assert "sk-fast" not in mapping_path.read_text(encoding="utf-8")
 
 
+def test_configure_hermes_model_preserves_duplicate_upstream_model_names_by_option_name() -> None:
+    mapping_path = Path(tempfile.mkdtemp(prefix="potato-configure-model-test-")) / "users_mapping.yaml"
+
+    result = _run_configure(
+        mapping_path,
+        *_base_args(),
+        "--option",
+        "id=alt,name=Alt,model=gpt-5.4,base_url=https://alt.example/v1,api_key=sk-alt",
+    )
+
+    assert result.returncode == 0, result.stderr
+    proxy = yaml.safe_load(mapping_path.with_name("model_proxy.yaml").read_text(encoding="utf-8"))
+    assert [(item["name"], item["model"], item["base_url"]) for item in proxy["models"]] == [
+        ("gpt-5.4", "gpt-5.4", "https://primary.example/v1"),
+        ("Alt", "gpt-5.4", "https://alt.example/v1"),
+    ]
+
+
 def test_configure_hermes_model_rejects_too_many_optional_models() -> None:
     mapping_path = Path(tempfile.mkdtemp(prefix="potato-configure-model-test-")) / "users_mapping.yaml"
 

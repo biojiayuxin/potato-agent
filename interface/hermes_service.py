@@ -44,6 +44,13 @@ DEFAULT_INACCESSIBLE_PATHS = (
     "/etc/potato-agent",
     "/opt/interface-env",
 )
+AGENT_SERVICE_PRIORITY_DIRECTIVES = (
+    "CPUWeight=1000",
+    "IOWeight=10000",
+    "Nice=-5",
+    "IOSchedulingClass=best-effort",
+    "IOSchedulingPriority=0",
+)
 MANAGED_BIOINFORMATICS_SKILLS_DIR_NAME = "potato-knowledge-bioinformatics"
 DEFAULT_BIOINFORMATICS_SKILLS_PATH = (
     REPO_ROOT / "skills" / MANAGED_BIOINFORMATICS_SKILLS_DIR_NAME
@@ -194,7 +201,7 @@ def build_config_data(config: dict[str, Any], user: HermesTarget) -> dict[str, A
         active_option = None
     if active_option is not None:
         data["model"] = {
-            "default": active_option.model,
+            "default": active_option.name,
             "provider": active_option.provider,
             "base_url": get_model_proxy_base_url(config),
             "api_key": local_model_proxy_token(user.username),
@@ -269,6 +276,7 @@ def build_systemd_unit(config: dict[str, Any], user: HermesTarget) -> str:
             f"Environment=HOME={user.home_dir}",
             f"Environment=HERMES_HOME={user.hermes_home}",
             f"ExecStart={hermes_bin} gateway run --replace",
+            *AGENT_SERVICE_PRIORITY_DIRECTIVES,
             "PrivateTmp=yes",
             "NoNewPrivileges=yes",
             *[

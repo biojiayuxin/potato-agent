@@ -102,7 +102,7 @@ class ModelOption:
         expected_base_urls = {self.base_url, proxy_base_url or get_model_proxy_base_url()}
         expected_base_urls.discard("")
         return (
-            configured_model == self.model
+            configured_model in {self.name, self.model}
             and configured_provider == self.provider
             and (not expected_base_urls or configured_base_url in expected_base_urls)
             and configured_api_mode == self.api_mode
@@ -383,7 +383,7 @@ def _patch_user_hermes_config(
 ) -> dict[str, Any]:
     patched = deepcopy(existing)
     model = _ensure_mapping(patched, "model", "model")
-    model["default"] = option.model
+    model["default"] = option.name
     model["provider"] = option.provider
     model["base_url"] = (proxy_base_url or get_model_proxy_base_url()).rstrip("/")
     model["api_key"] = local_model_proxy_token(target.username)

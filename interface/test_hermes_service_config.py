@@ -162,6 +162,16 @@ def test_build_systemd_unit_hides_interface_paths() -> None:
     assert "InaccessiblePaths=-/opt/interface-env" in unit
 
 
+def test_build_systemd_unit_prioritizes_agent_runtime() -> None:
+    unit = build_systemd_unit({"hermes": {}}, _target())
+
+    assert "CPUWeight=1000" in unit
+    assert "IOWeight=10000" in unit
+    assert "Nice=-5" in unit
+    assert "IOSchedulingClass=best-effort" in unit
+    assert "IOSchedulingPriority=0" in unit
+
+
 def test_install_user_runtime_files_writes_only_user_runtime_paths(
     monkeypatch, tmp_path
 ) -> None:
@@ -224,6 +234,7 @@ def test_install_user_runtime_files_writes_only_user_runtime_paths(
     env_body = (user.hermes_home / ".env").read_text(encoding="utf-8")
     config_body = (user.hermes_home / "config.yaml").read_text(encoding="utf-8")
     config_data = yaml.safe_load(config_body)
+    assert config_data["model"]["default"] == "gpt-5.5"
     assert "OPENAI_API_KEY" not in env_body
     assert "sk-user" not in env_body
     assert config_data["model"]["base_url"] == "http://127.0.0.1:8765/v1"

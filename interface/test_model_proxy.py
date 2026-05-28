@@ -32,6 +32,10 @@ hermes:
         name: Fast
         provider: custom
         model: gpt-5.4-mini
+      - id: alt
+        name: Alt
+        provider: custom
+        model: gpt-5.4
 users:
   - username: alice
     email: alice@example.com
@@ -64,6 +68,12 @@ models:
     model: gpt-5.4-mini
     base_url: https://fast.example/v1
     api_key: sk-fast
+  - id: alt
+    name: Alt
+    provider: custom
+    model: gpt-5.4
+    base_url: https://alt.example/v1
+    api_key: sk-alt
 """.lstrip(),
         encoding="utf-8",
     )
@@ -97,8 +107,9 @@ def test_proxy_lists_authorized_models_without_api_keys(monkeypatch, tmp_path) -
 
     assert response.status_code == 200, response.text
     assert [item["id"] for item in response.json()["data"]] == [
-        "gpt-5.4",
-        "gpt-5.4-mini",
+        "Main",
+        "Fast",
+        "Alt",
     ]
     assert "sk-primary" not in response.text
     assert "https://primary.example" not in response.text
@@ -117,14 +128,14 @@ def test_proxy_rejects_unallowed_or_unknown_models(monkeypatch, tmp_path) -> Non
     proxy_path = Path(os.environ["POTATO_MODEL_PROXY_CONFIG_PATH"])
     proxy_path.write_text(
         proxy_path.read_text(encoding="utf-8").replace(
-            "    model: gpt-5.4-mini", "    model: proxy-only-model"
+            "    name: Fast", "    name: ProxyOnly"
         ),
         encoding="utf-8",
     )
     unknown = client.post(
         "/v1/chat/completions",
         headers={"authorization": "Bearer alice-local-token"},
-        json={"model": "gpt-5.4-mini", "messages": []},
+        json={"model": "Fast", "messages": []},
     )
     assert unknown.status_code == 404
 
@@ -165,7 +176,7 @@ def test_proxy_sanitizes_null_required_in_responses_tool_schemas(
         "/v1/responses",
         headers={"authorization": "Bearer alice-local-token"},
         json={
-            "model": "gpt-5.4",
+            "model": "Main",
             "input": [{"role": "user", "content": "hi"}],
             "tools": [
                 {
@@ -246,7 +257,7 @@ def test_proxy_normalizes_malformed_responses_sse_terminal_output(
     response = client.post(
         "/v1/responses",
         headers={"authorization": "Bearer alice-local-token"},
-        json={"model": "gpt-5.4", "input": [{"role": "user", "content": "hi"}]},
+        json={"model": "Main", "input": [{"role": "user", "content": "hi"}]},
     )
 
     assert response.status_code == 200, response.text
@@ -306,10 +317,54 @@ def test_proxy_forwards_original_model_and_upstream_key(monkeypatch, tmp_path) -
     response = client.post(
         "/v1/chat/completions",
         headers={"authorization": "Bearer alice-local-token"},
-        json={"model": "gpt-5.4-mini", "messages": [{"role": "user", "content": "hi"}]},
+        json={"model": "Fast", "messages": [{"role": "user", "content": "hi"}]},
     )
 
     assert response.status_code == 200, response.text
     assert captured["url"] == "https://fast.example/v1/chat/completions"
     assert captured["headers"]["authorization"] == "Bearer sk-fast"
     assert b'"model":"gpt-5.4-mini"' in captured["content"]
+
+
+def test_proxy_routes_duplicate_upstream_models_by_name(monkeypatch, tmp_path) -> None:
+    client, model_proxy = _client(tmp_path, monkeypatch)
+    captured = {}
+
+    class FakeResponse:
+        status_code = 200
+        headers = {"content-type": "application/json"}
+
+        async def aiter_bytes(self):
+            yield b'{"ok":true}'
+
+        async def aclose(self):
+            return None
+
+    class FakeAsyncClient:
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+
+        def build_request(self, method, url, *, content, headers, params):
+            captured["url"] = url
+            captured["content"] = content
+            captured["headers"] = headers
+            return SimpleNamespace()
+
+        async def send(self, request, *, stream):
+            return FakeResponse()
+
+        async def aclose(self):
+            return None
+
+    monkeypatch.setattr(model_proxy.httpx, "AsyncClient", FakeAsyncClient)
+
+    response = client.post(
+        "/v1/chat/completions",
+        headers={"authorization": "Bearer alice-local-token"},
+        json={"model": "Alt", "messages": [{"role": "user", "content": "hi"}]},
+    )
+
+    assert response.status_code == 200, response.text
+    assert captured["url"] == "https://alt.example/v1/chat/completions"
+    assert captured["headers"]["authorization"] == "Bearer sk-alt"
+    assert b'"model":"gpt-5.4"' in captured["content"]

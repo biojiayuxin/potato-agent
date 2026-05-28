@@ -50,7 +50,7 @@ class ProxyModel:
 
     def to_models_api_item(self) -> dict[str, Any]:
         item: dict[str, Any] = {
-            "id": self.model,
+            "id": self.name or self.model,
             "object": "model",
             "owned_by": self.provider or "custom",
         }
@@ -101,12 +101,13 @@ def _load_proxy_models() -> dict[str, ProxyModel]:
             raise ModelProxyError(
                 f"models[{index}] is missing required field(s): {', '.join(missing)}."
             )
-        if model in models:
-            raise ModelProxyError(f"Duplicate proxy model: {model}")
+        route_name = str(item.get("name") or model).strip()
+        if route_name in models:
+            raise ModelProxyError(f"Duplicate proxy model name: {route_name}")
         context_length = item.get("context_length")
-        models[model] = ProxyModel(
+        models[route_name] = ProxyModel(
             id=str(item.get("id") or model).strip(),
-            name=str(item.get("name") or model).strip(),
+            name=route_name,
             provider=str(item.get("provider") or "custom").strip(),
             model=model,
             base_url=base_url,
@@ -144,7 +145,7 @@ def _authorized_model_names(username: str) -> set[str]:
         raise HTTPException(
             status_code=500, detail=f"Invalid model whitelist configuration: {exc}"
         ) from exc
-    return {option.model for option in options.options}
+    return {option.name for option in options.options}
 
 
 def _sanitize_schema_required_fields(schema: Any) -> tuple[Any, bool]:
@@ -453,6 +454,10 @@ async def _forward_model_request(request: Request, endpoint: str) -> Response:
     body = await request.body()
     model, payload = _select_model_for_body(username, body)
     sanitized_payload, payload_changed = _sanitize_outbound_model_payload(payload)
+    if str(sanitized_payload.get("model") or "").strip() != model.model:
+        sanitized_payload = dict(sanitized_payload)
+        sanitized_payload["model"] = model.model
+        payload_changed = True
     if payload_changed:
         body = json.dumps(
             sanitized_payload, ensure_ascii=False, separators=(",", ":")
