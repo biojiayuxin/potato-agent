@@ -133,7 +133,7 @@
               <div class="brand small">Potato Agent</div>
               <div id="user-email" class="muted tiny"></div>
             </div>
-            <button id="logout-button" class="ghost small">Sign out</button>
+            <button id="logout-button" class="ghost small" type="button">Sign out</button>
           </div>
 
           <div class="sidebar-actions">
@@ -156,6 +156,7 @@
               </label>
             </div>
             <div class="topbar-actions">
+              <button id="change-password-button" class="ghost small topbar-password-button" type="button">Change password</button>
               <label class="theme-select-wrap" for="theme-select">
                 <span class="tiny muted">Theme</span>
                 <select id="theme-select" class="theme-select" aria-label="Theme">
@@ -239,6 +240,34 @@
             <button id="approval-allow-always" type="button" class="ghost">Always allow</button>
             <button id="approval-deny" type="button" class="danger-button">Deny</button>
           </div>
+        </section>
+      </div>
+
+      <div id="password-modal" class="password-modal" hidden>
+        <div id="password-backdrop" class="password-backdrop"></div>
+        <section class="password-dialog" role="dialog" aria-modal="true" aria-labelledby="password-title">
+          <div class="approval-kicker">Account</div>
+          <h2 id="password-title">Change password</h2>
+          <form id="password-form" class="password-form">
+            <label class="stack gap-6">
+              <span>Current password</span>
+              <input id="current-password" name="current-password" type="password" autocomplete="current-password" required />
+            </label>
+            <label class="stack gap-6">
+              <span>New password</span>
+              <input id="new-password" name="new-password" type="password" autocomplete="new-password" required />
+            </label>
+            <label class="stack gap-6">
+              <span>Confirm new password</span>
+              <input id="confirm-new-password" name="confirm-new-password" type="password" autocomplete="new-password" required />
+            </label>
+            <div id="password-success" class="success" hidden></div>
+            <div id="password-error" class="error" hidden></div>
+            <div class="password-actions">
+              <button id="password-cancel-button" type="button" class="ghost">Cancel</button>
+              <button id="password-save-button" type="submit" class="primary">Save</button>
+            </div>
+          </form>
         </section>
       </div>
     </div>

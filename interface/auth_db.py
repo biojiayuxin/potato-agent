@@ -33,6 +33,7 @@ CREATE TABLE IF NOT EXISTS users (
     role TEXT NOT NULL DEFAULT 'user',
     mapping_username TEXT NOT NULL,
     active INTEGER NOT NULL DEFAULT 1,
+    auth_session_version INTEGER NOT NULL DEFAULT 0,
     created_at INTEGER NOT NULL,
     updated_at INTEGER NOT NULL
 );
@@ -106,6 +107,7 @@ class InterfaceUser:
     role: str
     mapping_username: str
     active: bool
+    auth_session_version: int
     created_at: int
     updated_at: int
 
@@ -135,6 +137,11 @@ def _row_to_user(row: sqlite3.Row | None) -> InterfaceUser | None:
         role=str(row["role"]),
         mapping_username=str(row["mapping_username"]),
         active=bool(int(row["active"] or 0)),
+        auth_session_version=int(
+            row["auth_session_version"]
+            if "auth_session_version" in row.keys()
+            else 0
+        ),
         created_at=int(row["created_at"] or 0),
         updated_at=int(row["updated_at"] or 0),
     )
@@ -157,6 +164,12 @@ def ensure_auth_db(db_path: Path = DEFAULT_AUTH_DB_PATH) -> Path:
     ensure_private_directory(db_path.parent, mode=DEFAULT_PRIVATE_WRITABLE_DIR_MODE)
     with sqlite3.connect(str(db_path)) as conn:
         conn.executescript(SCHEMA_SQL)
+        _add_column_if_missing(
+            conn,
+            "users",
+            "auth_session_version",
+            "INTEGER NOT NULL DEFAULT 0",
+        )
         _add_column_if_missing(conn, "signup_jobs", "email_verification_id", "TEXT")
         _add_column_if_missing(conn, "signup_jobs", "email_verified_at", "INTEGER")
         for index_name, column_name in (
@@ -385,7 +398,7 @@ def get_user_by_login(
     login: str, db_path: Path = DEFAULT_AUTH_DB_PATH
 ) -> InterfaceUser | None:
     query = (
-        "select id, username, email, name, role, mapping_username, active, created_at, updated_at, password_hash "
+        "select id, username, email, name, role, mapping_username, active, auth_session_version, created_at, updated_at, password_hash "
         "from users where lower(email) = lower(?) or username = ? limit 1"
     )
     with connect_auth_db(db_path) as conn:
@@ -397,7 +410,7 @@ def get_user_with_password_by_login(
     login: str, db_path: Path = DEFAULT_AUTH_DB_PATH
 ) -> tuple[InterfaceUser | None, str | None]:
     query = (
-        "select id, username, email, name, role, mapping_username, active, created_at, updated_at, password_hash "
+        "select id, username, email, name, role, mapping_username, active, auth_session_version, created_at, updated_at, password_hash "
         "from users where lower(email) = lower(?) or username = ? limit 1"
     )
     with connect_auth_db(db_path) as conn:
@@ -407,11 +420,25 @@ def get_user_with_password_by_login(
     return _row_to_user(row), str(row["password_hash"])
 
 
+def get_user_with_password_by_id(
+    user_id: str, db_path: Path = DEFAULT_AUTH_DB_PATH
+) -> tuple[InterfaceUser | None, str | None]:
+    query = (
+        "select id, username, email, name, role, mapping_username, active, auth_session_version, created_at, updated_at, password_hash "
+        "from users where id = ? limit 1"
+    )
+    with connect_auth_db(db_path) as conn:
+        row = conn.execute(query, (user_id,)).fetchone()
+    if row is None:
+        return None, None
+    return _row_to_user(row), str(row["password_hash"])
+
+
 def get_user_by_id(
     user_id: str, db_path: Path = DEFAULT_AUTH_DB_PATH
 ) -> InterfaceUser | None:
     query = (
-        "select id, username, email, name, role, mapping_username, active, created_at, updated_at "
+        "select id, username, email, name, role, mapping_username, active, auth_session_version, created_at, updated_at "
         "from users where id = ? limit 1"
     )
     with connect_auth_db(db_path) as conn:
@@ -421,7 +448,7 @@ def get_user_by_id(
 
 def list_users(db_path: Path = DEFAULT_AUTH_DB_PATH) -> list[InterfaceUser]:
     query = (
-        "select id, username, email, name, role, mapping_username, active, created_at, updated_at "
+        "select id, username, email, name, role, mapping_username, active, auth_session_version, created_at, updated_at "
         "from users order by username"
     )
     with connect_auth_db(db_path) as conn:
@@ -492,6 +519,26 @@ def upsert_user(
     if user is None:
         raise RuntimeError("Failed to load interface user after upsert")
     return user
+
+
+def update_user_password(
+    user_id: str,
+    new_password: str,
+    db_path: Path = DEFAULT_AUTH_DB_PATH,
+) -> InterfaceUser | None:
+    normalized_user_id = user_id.strip()
+    password_hash = hash_password(new_password)
+    now = int(time.time())
+    with connect_auth_db(db_path) as conn:
+        cursor = conn.execute(
+            "update users set password_hash = ?, auth_session_version = coalesce(auth_session_version, 0) + 1, updated_at = ? "
+            "where id = ?",
+            (password_hash, now, normalized_user_id),
+        )
+        conn.commit()
+        if cursor.rowcount <= 0:
+            return None
+    return get_user_by_id(normalized_user_id, db_path)
 
 
 def create_signup_job(

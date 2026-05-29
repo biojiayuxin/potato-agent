@@ -37,6 +37,7 @@ const state = {
   renamingSessionId: null,
   renamingTitleDraft: '',
   renamingTitleError: '',
+  passwordChangeSubmitting: false,
 };
 
 const MODEL_RESPONSE_ERROR_MESSAGE = '模型响应失败，请稍后重试。';
@@ -95,6 +96,7 @@ const dom = {
   sendButton: document.getElementById('send-button'),
   sendButtonIcon: document.getElementById('send-button-icon'),
   newChatButton: document.getElementById('new-chat-button'),
+  changePasswordButton: document.getElementById('change-password-button'),
   logoutButton: document.getElementById('logout-button'),
   userEmail: document.getElementById('user-email'),
   fileTree: document.getElementById('file-tree'),
@@ -116,6 +118,16 @@ const dom = {
   approvalAllowSession: document.getElementById('approval-allow-session'),
   approvalAllowAlways: document.getElementById('approval-allow-always'),
   approvalDeny: document.getElementById('approval-deny'),
+  passwordModal: document.getElementById('password-modal'),
+  passwordBackdrop: document.getElementById('password-backdrop'),
+  passwordForm: document.getElementById('password-form'),
+  currentPassword: document.getElementById('current-password'),
+  newPassword: document.getElementById('new-password'),
+  confirmNewPassword: document.getElementById('confirm-new-password'),
+  passwordSuccess: document.getElementById('password-success'),
+  passwordError: document.getElementById('password-error'),
+  passwordCancelButton: document.getElementById('password-cancel-button'),
+  passwordSaveButton: document.getElementById('password-save-button'),
 };
 
 let loginInFlight = false;
@@ -1466,6 +1478,7 @@ const escapeHtml = (text) =>
     .replaceAll("'", '&#39;');
 
 const showError = (element, message) => {
+  if (!element) return;
   if (!message) {
     element.hidden = true;
     element.textContent = '';
@@ -1585,6 +1598,90 @@ const setSignupPending = (pending) => {
   submitButton.disabled = pending;
   submitButton.textContent = pending ? 'Creating account...' : 'Create account';
   renderEmailVerificationState();
+};
+
+const setPasswordChangeSubmitting = (submitting) => {
+  state.passwordChangeSubmitting = submitting;
+  if (dom.passwordSaveButton) {
+    dom.passwordSaveButton.disabled = submitting;
+    dom.passwordSaveButton.textContent = submitting ? 'Saving...' : 'Save';
+  }
+  if (dom.passwordCancelButton) {
+    dom.passwordCancelButton.disabled = submitting;
+  }
+  for (const input of [dom.currentPassword, dom.newPassword, dom.confirmNewPassword]) {
+    if (input) input.disabled = submitting;
+  }
+};
+
+const clearPasswordForm = () => {
+  if (dom.passwordForm) {
+    dom.passwordForm.reset();
+  }
+  showError(dom.passwordError, '');
+  showError(dom.passwordSuccess, '');
+  setPasswordChangeSubmitting(false);
+};
+
+const openPasswordModal = () => {
+  if (!dom.passwordModal) return;
+  clearPasswordForm();
+  dom.passwordModal.hidden = false;
+  window.requestAnimationFrame(() => dom.currentPassword?.focus());
+};
+
+const closePasswordModal = () => {
+  if (state.passwordChangeSubmitting || !dom.passwordModal) return;
+  dom.passwordModal.hidden = true;
+  clearPasswordForm();
+};
+
+const handlePasswordChangeSubmit = async (event) => {
+  event.preventDefault();
+  if (state.passwordChangeSubmitting) return;
+
+  const currentPassword = dom.currentPassword?.value || '';
+  const newPassword = dom.newPassword?.value || '';
+  const confirmNewPassword = dom.confirmNewPassword?.value || '';
+  showError(dom.passwordError, '');
+  showError(dom.passwordSuccess, '');
+
+  if (!currentPassword || !newPassword) {
+    showError(dom.passwordError, 'Current password and new password are required.');
+    return;
+  }
+  if (newPassword.length < 8) {
+    showError(dom.passwordError, 'Password must be at least 8 characters.');
+    return;
+  }
+  if (newPassword !== confirmNewPassword) {
+    showError(dom.passwordError, 'Passwords do not match.');
+    return;
+  }
+
+  try {
+    setPasswordChangeSubmitting(true);
+    const response = await api('/api/auth/password', {
+      method: 'POST',
+      body: JSON.stringify({
+        current_password: currentPassword,
+        new_password: newPassword,
+      }),
+    });
+    const json = await response.json();
+    if (json?.user) {
+      state.user = json.user;
+      renderWorkspaceHeader();
+    }
+    if (dom.passwordForm) {
+      dom.passwordForm.reset();
+    }
+    showError(dom.passwordSuccess, 'Password changed.');
+  } catch (error) {
+    showError(dom.passwordError, String(error.message || 'Failed to change password'));
+  } finally {
+    setPasswordChangeSubmitting(false);
+  }
 };
 
 const stopEmailVerificationTimer = () => {
@@ -1787,6 +1884,11 @@ const resetWorkspaceState = () => {
   state.isSending = false;
   state.pendingApproval = null;
   state.approvalSubmitting = false;
+  state.passwordChangeSubmitting = false;
+  if (dom.passwordModal) {
+    dom.passwordModal.hidden = true;
+  }
+  clearPasswordForm();
   renderApprovalModal();
 };
 
@@ -1955,7 +2057,16 @@ const api = async (path, options = {}) => {
       const text = await response.text().catch(() => '');
       if (text) detail = text;
     }
-    if ((response.status === 401 || response.status === 403) && (payload?.reason === 'idle_timeout' || /Workspace slept/i.test(detail) || /Please sign in again/i.test(detail))) {
+    if (
+      (response.status === 401 || response.status === 403)
+      && (
+        payload?.reason === 'idle_timeout'
+        || payload?.reason === 'password_changed'
+        || /Workspace slept/i.test(detail)
+        || /Password changed/i.test(detail)
+        || /Please sign in again/i.test(detail)
+      )
+    ) {
       handleSessionExpired(payload?.message || detail);
     }
     throw new Error(detail);
@@ -3955,6 +4066,14 @@ dom.signupBackButton.addEventListener('click', () => {
   stopSignupPolling();
   setAuthViewMode('register');
 });
+
+dom.changePasswordButton?.addEventListener('click', openPasswordModal);
+
+dom.passwordForm?.addEventListener('submit', handlePasswordChangeSubmit);
+
+dom.passwordCancelButton?.addEventListener('click', closePasswordModal);
+
+dom.passwordBackdrop?.addEventListener('click', closePasswordModal);
 
 dom.logoutButton.addEventListener('click', async () => {
   state.pendingAttachments = [];

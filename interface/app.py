@@ -52,11 +52,13 @@ from interface.auth_db import (
     get_next_pending_signup_job,
     get_signup_job,
     get_user_by_id,
+    get_user_with_password_by_id,
     get_user_with_password_by_login,
     list_users,
     mark_email_verification_failed,
     record_email_verification_sent,
     set_signup_job_status,
+    update_user_password,
     username_exists,
     verify_password,
 )
@@ -232,6 +234,11 @@ class SignupRequest(BaseModel):
     email_verification_code: str = ""
 
 
+class PasswordChangeRequest(BaseModel):
+    current_password: str
+    new_password: str
+
+
 class EmailVerificationRequest(BaseModel):
     email: str
 
@@ -386,10 +393,14 @@ async def _signup_worker_loop() -> None:
             set_signup_job_status(job_id, status="failed", error_message=str(exc))
 
 
-def _create_session_token(user_id: str) -> str:
+def _create_session_token(user_id: str, session_version: int | None = None) -> str:
     now = datetime.now(UTC)
+    if session_version is None:
+        record = get_user_by_id(user_id)
+        session_version = int(record.auth_session_version) if record is not None else 0
     payload = {
         "sub": user_id,
+        "sv": int(session_version),
         "iat": int(now.timestamp()),
         "exp": int((now + timedelta(seconds=SESSION_TTL_SECONDS)).timestamp()),
         "jti": str(uuid.uuid4()),
@@ -448,6 +459,8 @@ def _revocation_message(reason: str) -> str:
     if reason == "idle_timeout":
         minutes = max(int(RUNTIME_IDLE_TIMEOUT_SECONDS) // 60, 1)
         return f"Workspace slept after {minutes} minutes of inactivity. Please sign in again."
+    if reason == "password_changed":
+        return "Password changed. Please sign in again."
     return "Session expired"
 
 
@@ -476,6 +489,9 @@ def _resolve_current_user(request: Request) -> tuple[CurrentUser | None, str | N
     record = get_user_by_id(user_id)
     if record is None or not record.active:
         return None, None
+    token_session_version = int(decoded.get("sv") or 0)
+    if token_session_version != int(record.auth_session_version):
+        return None, "password_changed"
 
     runtime_state = get_runtime_state(record.id)
     revoked_after = int((runtime_state or {}).get("session_revoked_after") or 0)
@@ -2022,7 +2038,7 @@ async def signin(payload: SigninRequest, response: Response) -> dict[str, Any]:
         mapping_username=record.mapping_username,
         target=target,
     )
-    _set_session_cookie(response, _create_session_token(user.id))
+    _set_session_cookie(response, _create_session_token(user.id, record.auth_session_version))
     return _serialize_user(user)
 
 
@@ -2184,6 +2200,40 @@ async def signup_status(job_id: str) -> dict[str, Any]:
 @app.get("/api/auth/me")
 async def auth_me(user: CurrentUser = Depends(get_current_user)) -> dict[str, Any]:
     return _serialize_user(user)
+
+
+@app.post("/api/auth/password")
+async def change_password(
+    payload: PasswordChangeRequest,
+    response: Response,
+    user: CurrentUser = Depends(get_current_user),
+) -> dict[str, Any]:
+    current_password = payload.current_password
+    new_password = payload.new_password
+    if not current_password or not new_password:
+        raise HTTPException(
+            status_code=400, detail="Current password and new password are required."
+        )
+    if len(new_password) < 8:
+        raise HTTPException(
+            status_code=400, detail="Password must be at least 8 characters."
+        )
+
+    record, password_hash = get_user_with_password_by_id(user.id)
+    if record is None or record.id != user.id or not verify_password(
+        current_password, password_hash
+    ):
+        raise HTTPException(status_code=401, detail="Current password is incorrect.")
+
+    updated_record = update_user_password(user.id, new_password)
+    if updated_record is None:
+        raise HTTPException(status_code=404, detail="User not found.")
+
+    _set_session_cookie(
+        response,
+        _create_session_token(user.id, updated_record.auth_session_version),
+    )
+    return {"ok": True, "user": _serialize_user(user)}
 
 
 @app.post("/api/auth/signout")
