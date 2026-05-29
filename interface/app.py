@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import contextlib
 import asyncio
+import hashlib
+import hmac
 import json
 import logging
 import os
@@ -38,16 +40,22 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from interface.auth_db import (
+    EMAIL_VERIFICATION_PURPOSE_SIGNUP,
+    EmailVerificationError,
     activate_signup_user,
     cleanup_terminal_signup_jobs,
-    create_signup_job,
+    create_pending_email_verification,
+    create_signup_job_with_email_verification,
     ensure_auth_db,
     email_exists,
+    email_verification_send_stats,
     get_next_pending_signup_job,
     get_signup_job,
     get_user_by_id,
     get_user_with_password_by_login,
     list_users,
+    mark_email_verification_failed,
+    record_email_verification_sent,
     set_signup_job_status,
     username_exists,
     verify_password,
@@ -75,6 +83,11 @@ from interface.display_store import (
     save_display_messages,
 )
 from interface.mapping import DEFAULT_MAPPING_PATH, HermesTarget, MappingStore
+from interface.mailer import (
+    MailerConfigurationError,
+    MailerDeliveryError,
+    send_signup_verification_email,
+)
 from interface.hermes_service import (
     is_service_active,
     service_operation_lock,
@@ -141,6 +154,10 @@ ACTIVITY_REFRESH_EXCLUDED_PATHS = {
     "/api/auth/signin",
     "/api/auth/signout",
 }
+EMAIL_VERIFICATION_TTL_SECONDS = 10 * 60
+EMAIL_VERIFICATION_RESEND_COOLDOWN_SECONDS = 60
+EMAIL_VERIFICATION_EMAIL_HOURLY_LIMIT = 5
+EMAIL_VERIFICATION_IP_HOURLY_LIMIT = 20
 
 HERMES_SRC = REPO_ROOT / "hermes-agent"
 if str(HERMES_SRC) not in sys.path:
@@ -211,6 +228,12 @@ class SignupRequest(BaseModel):
     email: str
     password: str
     display_name: str = ""
+    email_verification_id: str = ""
+    email_verification_code: str = ""
+
+
+class EmailVerificationRequest(BaseModel):
+    email: str
 
 
 class SessionDisplaySyncRequest(BaseModel):
@@ -246,28 +269,78 @@ def _now_seconds() -> int:
     return int(datetime.now(UTC).timestamp())
 
 
-def _validate_signup_payload(payload: SignupRequest) -> tuple[str, str, str, str]:
+def _validate_signup_email(email: str) -> str:
+    normalized_email = email.strip().lower()
+    if (
+        "@" not in normalized_email
+        or len(normalized_email) > 254
+        or any(char.isspace() for char in normalized_email)
+    ):
+        raise HTTPException(status_code=400, detail="Invalid email address.")
+    return normalized_email
+
+
+def _hash_email_verification_code(email: str, code: str) -> str:
+    normalized_email = email.strip().lower()
+    normalized_code = code.strip()
+    message = f"{EMAIL_VERIFICATION_PURPOSE_SIGNUP}:{normalized_email}:{normalized_code}"
+    return hmac.new(
+        SESSION_SECRET.encode("utf-8"),
+        message.encode("utf-8"),
+        hashlib.sha256,
+    ).hexdigest()
+
+
+def _client_ip_for_request(request: Request) -> str:
+    forwarded_for = request.headers.get("x-forwarded-for", "")
+    if forwarded_for:
+        return forwarded_for.split(",", 1)[0].strip() or "unknown"
+    real_ip = request.headers.get("x-real-ip", "").strip()
+    if real_ip:
+        return real_ip
+    return request.client.host if request.client is not None else "unknown"
+
+
+def _hash_client_ip(client_ip: str) -> str:
+    return hmac.new(
+        SESSION_SECRET.encode("utf-8"),
+        f"client-ip:{client_ip.strip()}".encode("utf-8"),
+        hashlib.sha256,
+    ).hexdigest()
+
+
+def _validate_signup_payload(
+    payload: SignupRequest,
+) -> tuple[str, str, str, str, str, str]:
     username = payload.username.strip()
-    email = payload.email.strip().lower()
+    email = _validate_signup_email(payload.email)
     password = payload.password
     display_name = payload.display_name.strip() or username
+    verification_id = payload.email_verification_id.strip()
+    verification_code = payload.email_verification_code.strip()
 
     if not re.fullmatch(r"[A-Za-z0-9_]{3,32}", username):
         raise HTTPException(
             status_code=400,
             detail="Username must be 3-32 characters and contain only letters, numbers, or underscores.",
         )
-    if "@" not in email or len(email) > 254:
-        raise HTTPException(status_code=400, detail="Invalid email address.")
     if len(password) < 8:
         raise HTTPException(
             status_code=400, detail="Password must be at least 8 characters."
+        )
+    if not verification_id:
+        raise HTTPException(
+            status_code=400, detail="Email verification is required."
+        )
+    if not re.fullmatch(r"\d{6}", verification_code):
+        raise HTTPException(
+            status_code=400, detail="Verification code must be 6 digits."
         )
     if username_exists(username):
         raise HTTPException(status_code=409, detail="Username is already taken.")
     if email_exists(email):
         raise HTTPException(status_code=409, detail="Email is already taken.")
-    return username, email, password, display_name
+    return username, email, password, display_name, verification_id, verification_code
 
 
 async def _signup_worker_loop() -> None:
@@ -1953,16 +2026,138 @@ async def signin(payload: SigninRequest, response: Response) -> dict[str, Any]:
     return _serialize_user(user)
 
 
+@app.post("/api/auth/signup/email-verifications")
+async def create_signup_email_verification(
+    payload: EmailVerificationRequest, request: Request
+) -> dict[str, Any]:
+    email = _validate_signup_email(payload.email)
+    if email_exists(email):
+        raise HTTPException(status_code=409, detail="Email is already taken.")
+
+    now = _now_seconds()
+    client_ip_hash = _hash_client_ip(_client_ip_for_request(request))
+    stats = email_verification_send_stats(
+        email=email,
+        purpose=EMAIL_VERIFICATION_PURPOSE_SIGNUP,
+        client_ip_hash=client_ip_hash,
+        now=now,
+    )
+    if stats.last_email_sent_at is not None:
+        resend_after = max(
+            EMAIL_VERIFICATION_RESEND_COOLDOWN_SECONDS
+            - (now - stats.last_email_sent_at),
+            1,
+        )
+        raise HTTPException(
+            status_code=429,
+            detail={
+                "message": "Verification code was sent recently. Please wait before requesting another code.",
+                "resend_after": resend_after,
+            },
+        )
+    if stats.email_hourly_count >= EMAIL_VERIFICATION_EMAIL_HOURLY_LIMIT:
+        raise HTTPException(
+            status_code=429,
+            detail="Too many verification emails sent to this address. Please try again later.",
+        )
+    if stats.ip_hourly_count >= EMAIL_VERIFICATION_IP_HOURLY_LIMIT:
+        raise HTTPException(
+            status_code=429,
+            detail="Too many verification email requests. Please try again later.",
+        )
+
+    code = f"{secrets.randbelow(1_000_000):06d}"
+    expires_at = now + EMAIL_VERIFICATION_TTL_SECONDS
+    verification_id = create_pending_email_verification(
+        email=email,
+        code_hash=_hash_email_verification_code(email, code),
+        purpose=EMAIL_VERIFICATION_PURPOSE_SIGNUP,
+        client_ip_hash=client_ip_hash,
+        expires_at=expires_at,
+        now=now,
+    )
+
+    try:
+        result = await send_signup_verification_email(
+            email=email,
+            code=code,
+            verification_id=verification_id,
+            expires_at=expires_at,
+        )
+    except MailerConfigurationError as exc:
+        mark_email_verification_failed(verification_id)
+        LOGGER.warning(
+            "Signup verification email is not configured: error_type=%s",
+            type(exc).__name__,
+        )
+        raise HTTPException(
+            status_code=503,
+            detail="Verification email could not be sent. Please try again later.",
+        ) from exc
+    except MailerDeliveryError as exc:
+        mark_email_verification_failed(verification_id)
+        LOGGER.warning(
+            "Signup verification email send failed: status=%s error_type=%s",
+            exc.status_code,
+            exc.error_type,
+        )
+        raise HTTPException(
+            status_code=503,
+            detail="Verification email could not be sent. Please try again later.",
+        ) from exc
+    except Exception as exc:
+        mark_email_verification_failed(verification_id)
+        LOGGER.warning(
+            "Signup verification email send failed: error_type=%s",
+            type(exc).__name__,
+        )
+        raise HTTPException(
+            status_code=503,
+            detail="Verification email could not be sent. Please try again later.",
+        ) from exc
+
+    record_email_verification_sent(
+        verification_id,
+        resend_email_id=result.email_id,
+        now=_now_seconds(),
+    )
+    LOGGER.info(
+        "Signup verification email sent: status=%s email_id=%s",
+        result.status_code,
+        result.email_id,
+    )
+    return {
+        "ok": True,
+        "verification_id": verification_id,
+        "expires_at": expires_at,
+        "resend_after": EMAIL_VERIFICATION_RESEND_COOLDOWN_SECONDS,
+    }
+
+
 @app.post("/api/auth/signup")
 async def signup(payload: SignupRequest) -> dict[str, Any]:
-    username, email, password, display_name = _validate_signup_payload(payload)
+    (
+        username,
+        email,
+        password,
+        display_name,
+        verification_id,
+        verification_code,
+    ) = _validate_signup_payload(payload)
     try:
-        job_id = create_signup_job(
+        job_id = create_signup_job_with_email_verification(
             username=username,
             email=email,
             password=password,
             display_name=display_name,
+            email_verification_id=verification_id,
+            email_verification_code_hash=_hash_email_verification_code(
+                email, verification_code
+            ),
         )
+    except EmailVerificationError as exc:
+        status_code = 429 if exc.reason == "too_many_attempts" else 400
+        raise HTTPException(status_code=status_code, detail=exc.message) from exc
     except sqlite3.IntegrityError as exc:
         detail = str(exc).lower()
         if "signup_jobs.email" in detail or "users.email" in detail or "email" in detail:

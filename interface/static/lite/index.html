@@ -61,8 +61,16 @@
                 </label>
                 <label class="stack gap-6">
                   <span>Email</span>
-                  <input id="register-email" name="register-email" type="email" autocomplete="email" />
+                  <div class="email-verification-row">
+                    <input id="register-email" name="register-email" type="email" autocomplete="email" />
+                    <button id="send-email-code-button" type="button" class="ghost email-code-button">Send code</button>
+                  </div>
                 </label>
+                <label class="stack gap-6">
+                  <span>Verification code</span>
+                  <input id="register-email-code" name="register-email-code" type="text" inputmode="numeric" maxlength="6" autocomplete="one-time-code" />
+                </label>
+                <div id="register-code-status" class="code-status" hidden></div>
                 <label class="stack gap-6">
                   <span>Password</span>
                   <input id="register-password" name="register-password" type="password" autocomplete="new-password" />

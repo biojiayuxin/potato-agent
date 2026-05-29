@@ -308,6 +308,8 @@ Environment=INTERFACE_AUTH_DB=/var/lib/potato-agent/data/interface.db
 Environment=INTERFACE_ARCHIVE_DB=/var/lib/potato-agent/data/archive.db
 Environment=INTERFACE_PRIVILEGED_HELPER=/usr/local/libexec/potato-agent-privileged-helper
 Environment=INTERFACE_TUI_GATEWAY_PYTHON=/opt/hermes-agent-venv/bin/python3
+Environment=INTERFACE_RESEND_API_KEY=replace-with-resend-api-key
+Environment="INTERFACE_MAIL_FROM=Potato Agent <noreply@mail.example.com>"
 ExecStart=/opt/interface-env/bin/python -m uvicorn interface.app:app --host 0.0.0.0 --port 3000
 Restart=always
 RestartSec=3
@@ -315,6 +317,35 @@ RestartSec=3
 [Install]
 WantedBy=multi-user.target
 ```
+
+注册流程会通过 Resend HTTPS API 发送邮箱验证码，不使用 SMTP 端口。部署前需要在 Resend 中完成
+发件域名验证，并创建 API key。`INTERFACE_MAIL_FROM` 必须使用已验证域名下的地址；如果验证的是
+`mail.example.com`，发件地址应类似 `noreply@mail.example.com`。可选设置
+`INTERFACE_MAIL_REPLY_TO`：
+
+```ini
+Environment=INTERFACE_RESEND_API_KEY=replace-with-resend-api-key
+Environment="INTERFACE_MAIL_FROM=Potato Agent <noreply@mail.example.com>"
+Environment=INTERFACE_MAIL_REPLY_TO=support@example.com
+```
+
+如果是升级已有部署，也可以用 drop-in 单独写入 Resend 配置，避免改动主 unit：
+
+```bash
+install -d -o root -g root -m 0755 /etc/systemd/system/potato-interface.service.d
+cat >/etc/systemd/system/potato-interface.service.d/20-resend-env.conf <<'EOF'
+[Service]
+Environment=INTERFACE_RESEND_API_KEY=replace-with-resend-api-key
+Environment="INTERFACE_MAIL_FROM=Potato Agent <noreply@mail.example.com>"
+EOF
+chown root:root /etc/systemd/system/potato-interface.service.d/20-resend-env.conf
+chmod 0640 /etc/systemd/system/potato-interface.service.d/20-resend-env.conf
+systemctl daemon-reload
+systemctl restart potato-interface.service
+```
+
+未配置 Resend key 或发件地址时，注册发送验证码接口会返回 503。新版本启动时会自动创建邮箱验证
+所需的 SQLite 表和列，不需要手工迁移数据库。
 
 启用服务：
 

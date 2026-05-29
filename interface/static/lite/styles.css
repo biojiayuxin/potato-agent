@@ -397,6 +397,30 @@ button {
   margin-top: 4px;
 }
 
+.email-verification-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 118px;
+  gap: 8px;
+  align-items: stretch;
+}
+
+.login-card .email-code-button {
+  min-height: 0;
+  padding: 0 10px;
+  white-space: nowrap;
+}
+
+.code-status {
+  color: rgba(18, 32, 59, 0.72);
+  font-size: 13px;
+  line-height: 1.45;
+}
+
+.login-card button:disabled {
+  cursor: not-allowed;
+  opacity: 0.58;
+}
+
 .brand {
   color: var(--primary);
   font-size: 13px;

@@ -22,6 +22,12 @@ const state = {
   authPollTimer: null,
   signupJobId: null,
   signupPollTimer: null,
+  emailVerificationId: '',
+  emailVerificationEmail: '',
+  emailVerificationExpiresAt: 0,
+  emailVerificationResendAt: 0,
+  emailVerificationTimer: null,
+  emailVerificationSending: false,
   pendingApproval: null,
   approvalSubmitting: false,
   pendingSessionPromise: null,
@@ -49,6 +55,10 @@ const dom = {
   authCardCopy: document.getElementById('auth-card-copy'),
   registerForm: document.getElementById('register-form'),
   registerError: document.getElementById('register-error'),
+  registerEmail: document.getElementById('register-email'),
+  registerEmailCode: document.getElementById('register-email-code'),
+  sendEmailCodeButton: document.getElementById('send-email-code-button'),
+  registerCodeStatus: document.getElementById('register-code-status'),
   showRegisterButton: document.getElementById('show-register-button'),
   showLoginButton: document.getElementById('show-login-button'),
   authBackButton: document.getElementById('auth-back-button'),
@@ -147,6 +157,7 @@ const ICON_COPY_PATH = './static/lite/icons/copy_button.png';
 const ICON_COPIED_PATH = './static/lite/icons/copied.png';
 const MESSAGE_AUTO_SCROLL_THRESHOLD_PX = 48;
 const TUI_DEBUG_STATUS_STORAGE_KEY = 'lite_tui_bridge_debug';
+const EMAIL_VERIFICATION_COUNTDOWN_INTERVAL_MS = 1000;
 
 const getSystemTheme = () =>
   window.matchMedia?.('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
@@ -1573,6 +1584,107 @@ const setSignupPending = (pending) => {
   const submitButton = dom.registerForm.querySelector('button[type="submit"]');
   submitButton.disabled = pending;
   submitButton.textContent = pending ? 'Creating account...' : 'Create account';
+  renderEmailVerificationState();
+};
+
+const stopEmailVerificationTimer = () => {
+  if (state.emailVerificationTimer) {
+    window.clearInterval(state.emailVerificationTimer);
+    state.emailVerificationTimer = null;
+  }
+};
+
+const setRegisterCodeStatus = (message) => {
+  if (!dom.registerCodeStatus) return;
+  dom.registerCodeStatus.hidden = !message;
+  dom.registerCodeStatus.textContent = message || '';
+};
+
+const renderEmailVerificationState = () => {
+  const button = dom.sendEmailCodeButton;
+  if (!button) return;
+
+  const now = nowSeconds();
+  const cooldown = Math.max(0, Number(state.emailVerificationResendAt || 0) - now);
+  const expiresIn = Math.max(0, Number(state.emailVerificationExpiresAt || 0) - now);
+
+  button.disabled = Boolean(state.emailVerificationSending || signupInFlight || cooldown > 0);
+  if (state.emailVerificationSending) {
+    button.textContent = 'Sending...';
+  } else if (cooldown > 0) {
+    button.textContent = `${cooldown}s`;
+  } else if (state.emailVerificationId) {
+    button.textContent = 'Resend code';
+  } else {
+    button.textContent = 'Send code';
+  }
+
+  if (state.emailVerificationId && state.emailVerificationEmail && expiresIn > 0) {
+    const minutes = Math.max(1, Math.ceil(expiresIn / 60));
+    setRegisterCodeStatus(`Code sent to ${state.emailVerificationEmail}. Expires in ${minutes} min.`);
+  } else if (state.emailVerificationId && state.emailVerificationEmail) {
+    setRegisterCodeStatus('Code expired. Send a new code.');
+  } else {
+    setRegisterCodeStatus('');
+  }
+
+  if ((cooldown > 0 || expiresIn > 0) && !state.emailVerificationTimer) {
+    state.emailVerificationTimer = window.setInterval(
+      renderEmailVerificationState,
+      EMAIL_VERIFICATION_COUNTDOWN_INTERVAL_MS
+    );
+  }
+  if (cooldown <= 0 && expiresIn <= 0) {
+    stopEmailVerificationTimer();
+  }
+};
+
+const clearEmailVerificationState = ({ clearCode = true } = {}) => {
+  stopEmailVerificationTimer();
+  state.emailVerificationId = '';
+  state.emailVerificationEmail = '';
+  state.emailVerificationExpiresAt = 0;
+  state.emailVerificationResendAt = 0;
+  state.emailVerificationSending = false;
+  if (clearCode && dom.registerEmailCode) {
+    dom.registerEmailCode.value = '';
+  }
+  renderEmailVerificationState();
+};
+
+const handleSendEmailVerification = async () => {
+  if (state.emailVerificationSending || signupInFlight) return;
+  const email = dom.registerEmail.value.trim();
+  showError(dom.registerError, '');
+
+  if (!email) {
+    showError(dom.registerError, 'Email is required.');
+    return;
+  }
+
+  state.emailVerificationSending = true;
+  renderEmailVerificationState();
+  try {
+    const response = await api('/api/auth/signup/email-verifications', {
+      method: 'POST',
+      body: JSON.stringify({ email }),
+    });
+    const json = await response.json();
+    state.emailVerificationId = String(json?.verification_id || '');
+    state.emailVerificationEmail = email.toLowerCase();
+    state.emailVerificationExpiresAt = Number(json?.expires_at || 0);
+    state.emailVerificationResendAt = nowSeconds() + Number(json?.resend_after || 60);
+    if (dom.registerEmailCode) {
+      dom.registerEmailCode.value = '';
+      dom.registerEmailCode.focus();
+    }
+  } catch (error) {
+    clearEmailVerificationState({ clearCode: false });
+    showError(dom.registerError, String(error.message || 'Failed to send verification code'));
+  } finally {
+    state.emailVerificationSending = false;
+    renderEmailVerificationState();
+  }
 };
 
 const stopSignupPolling = () => {
@@ -3743,10 +3855,23 @@ dom.registerForm.addEventListener('submit', async (event) => {
 
   const username = document.getElementById('register-username').value.trim();
   const displayName = document.getElementById('register-display-name').value.trim();
-  const email = document.getElementById('register-email').value.trim();
+  const email = dom.registerEmail.value.trim();
+  const emailVerificationCode = dom.registerEmailCode.value.trim();
   const password = document.getElementById('register-password').value;
   const passwordConfirm = document.getElementById('register-password-confirm').value;
 
+  if (!state.emailVerificationId || state.emailVerificationEmail !== email.toLowerCase()) {
+    showError(dom.registerError, 'Send a verification code to this email first.');
+    return;
+  }
+  if (state.emailVerificationExpiresAt && state.emailVerificationExpiresAt <= nowSeconds()) {
+    showError(dom.registerError, 'Verification code has expired. Send a new code.');
+    return;
+  }
+  if (!/^\d{6}$/.test(emailVerificationCode)) {
+    showError(dom.registerError, 'Verification code must be 6 digits.');
+    return;
+  }
   if (password !== passwordConfirm) {
     showError(dom.registerError, 'Passwords do not match.');
     return;
@@ -3761,10 +3886,13 @@ dom.registerForm.addEventListener('submit', async (event) => {
         display_name: displayName,
         email,
         password,
+        email_verification_id: state.emailVerificationId,
+        email_verification_code: emailVerificationCode,
       }),
     });
     const json = await response.json();
     state.signupJobId = json?.job_id || null;
+    clearEmailVerificationState();
     setAuthViewMode('signup-wait');
     applySignupJobState({ status: json?.status || 'pending' });
     stopSignupPolling();
@@ -3773,6 +3901,22 @@ dom.registerForm.addEventListener('submit', async (event) => {
     showError(dom.registerError, String(error.message || 'Registration failed'));
   } finally {
     setSignupPending(false);
+  }
+});
+
+dom.sendEmailCodeButton?.addEventListener('click', handleSendEmailVerification);
+
+dom.registerEmail?.addEventListener('input', () => {
+  const currentEmail = dom.registerEmail.value.trim().toLowerCase();
+  if (state.emailVerificationEmail && currentEmail !== state.emailVerificationEmail) {
+    clearEmailVerificationState();
+  }
+});
+
+dom.registerEmailCode?.addEventListener('input', () => {
+  const digits = dom.registerEmailCode.value.replace(/\D/g, '').slice(0, 6);
+  if (dom.registerEmailCode.value !== digits) {
+    dom.registerEmailCode.value = digits;
   }
 });
 
@@ -3981,4 +4125,5 @@ dom.filePathInput?.addEventListener('keydown', async (event) => {
 initResizablePanels();
 initThemeControls();
 autoResizePromptInput();
+renderEmailVerificationState();
 bootstrapSession();

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hmac
 import os
 import sqlite3
 import time
@@ -47,6 +48,8 @@ CREATE TABLE IF NOT EXISTS signup_jobs (
     display_name TEXT NOT NULL,
     status TEXT NOT NULL,
     error_message TEXT NOT NULL DEFAULT '',
+    email_verification_id TEXT,
+    email_verified_at INTEGER,
     created_at INTEGER NOT NULL,
     updated_at INTEGER NOT NULL
 );
@@ -58,11 +61,40 @@ WHERE status IN ('pending', 'provisioning');
 CREATE UNIQUE INDEX IF NOT EXISTS idx_signup_jobs_email
 ON signup_jobs(email)
 WHERE status IN ('pending', 'provisioning');
+
+CREATE TABLE IF NOT EXISTS email_verifications (
+    id TEXT PRIMARY KEY,
+    email TEXT NOT NULL,
+    purpose TEXT NOT NULL,
+    code_hash TEXT NOT NULL,
+    status TEXT NOT NULL,
+    attempt_count INTEGER NOT NULL DEFAULT 0,
+    resend_email_id TEXT NOT NULL DEFAULT '',
+    last_sent_at INTEGER NOT NULL,
+    expires_at INTEGER NOT NULL,
+    verified_at INTEGER,
+    consumed_at INTEGER,
+    client_ip_hash TEXT NOT NULL DEFAULT '',
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_email_verifications_email_purpose_status_sent
+ON email_verifications(email, purpose, status, last_sent_at);
+
+CREATE INDEX IF NOT EXISTS idx_email_verifications_client_ip_sent
+ON email_verifications(client_ip_hash, last_sent_at);
 """
 
 ACTIVE_SIGNUP_JOB_STATUSES = ("pending", "provisioning")
 TERMINAL_SIGNUP_JOB_STATUSES = ("completed", "failed")
 DEFAULT_SIGNUP_JOB_RETENTION_SECONDS = 3600
+EMAIL_VERIFICATION_PURPOSE_SIGNUP = "signup"
+EMAIL_VERIFICATION_STATUS_PENDING = "pending"
+EMAIL_VERIFICATION_STATUS_EXPIRED = "expired"
+EMAIL_VERIFICATION_STATUS_CONSUMED = "consumed"
+EMAIL_VERIFICATION_STATUS_FAILED = "failed"
+DEFAULT_EMAIL_VERIFICATION_MAX_ATTEMPTS = 5
 
 
 @dataclass(frozen=True)
@@ -76,6 +108,20 @@ class InterfaceUser:
     active: bool
     created_at: int
     updated_at: int
+
+
+@dataclass(frozen=True)
+class EmailVerificationSendStats:
+    last_email_sent_at: int | None
+    email_hourly_count: int
+    ip_hourly_count: int
+
+
+class EmailVerificationError(ValueError):
+    def __init__(self, reason: str, message: str) -> None:
+        super().__init__(message)
+        self.reason = reason
+        self.message = message
 
 
 def _row_to_user(row: sqlite3.Row | None) -> InterfaceUser | None:
@@ -94,10 +140,25 @@ def _row_to_user(row: sqlite3.Row | None) -> InterfaceUser | None:
     )
 
 
+def _table_columns(conn: sqlite3.Connection, table_name: str) -> set[str]:
+    rows = conn.execute(f"pragma table_info({table_name})").fetchall()
+    return {str(row[1]) for row in rows}
+
+
+def _add_column_if_missing(
+    conn: sqlite3.Connection, table_name: str, column_name: str, definition: str
+) -> None:
+    if column_name in _table_columns(conn, table_name):
+        return
+    conn.execute(f"alter table {table_name} add column {column_name} {definition}")
+
+
 def ensure_auth_db(db_path: Path = DEFAULT_AUTH_DB_PATH) -> Path:
     ensure_private_directory(db_path.parent, mode=DEFAULT_PRIVATE_WRITABLE_DIR_MODE)
     with sqlite3.connect(str(db_path)) as conn:
         conn.executescript(SCHEMA_SQL)
+        _add_column_if_missing(conn, "signup_jobs", "email_verification_id", "TEXT")
+        _add_column_if_missing(conn, "signup_jobs", "email_verified_at", "INTEGER")
         for index_name, column_name in (
             ("idx_signup_jobs_username", "username"),
             ("idx_signup_jobs_email", "email"),
@@ -152,6 +213,145 @@ def email_exists(email: str, db_path: Path = DEFAULT_AUTH_DB_PATH) -> bool:
             (normalized_email,),
         ).fetchone()
     return row is not None or pending is not None
+
+
+def email_verification_send_stats(
+    *,
+    email: str,
+    purpose: str = EMAIL_VERIFICATION_PURPOSE_SIGNUP,
+    client_ip_hash: str = "",
+    now: int | None = None,
+    db_path: Path = DEFAULT_AUTH_DB_PATH,
+) -> EmailVerificationSendStats:
+    normalized_email = email.strip().lower()
+    normalized_purpose = purpose.strip() or EMAIL_VERIFICATION_PURPOSE_SIGNUP
+    timestamp = int(time.time()) if now is None else int(now)
+    minute_cutoff = timestamp - 60
+    hour_cutoff = timestamp - 3600
+    with connect_auth_db(db_path) as conn:
+        last_row = conn.execute(
+            "select max(last_sent_at) as last_sent_at from email_verifications "
+            "where lower(email) = lower(?) and purpose = ? and status != ? and last_sent_at >= ?",
+            (
+                normalized_email,
+                normalized_purpose,
+                EMAIL_VERIFICATION_STATUS_FAILED,
+                minute_cutoff,
+            ),
+        ).fetchone()
+        email_row = conn.execute(
+            "select count(*) as count from email_verifications "
+            "where lower(email) = lower(?) and purpose = ? and status != ? and last_sent_at >= ?",
+            (
+                normalized_email,
+                normalized_purpose,
+                EMAIL_VERIFICATION_STATUS_FAILED,
+                hour_cutoff,
+            ),
+        ).fetchone()
+        if client_ip_hash:
+            ip_row = conn.execute(
+                "select count(*) as count from email_verifications "
+                "where client_ip_hash = ? and status != ? and last_sent_at >= ?",
+                (
+                    client_ip_hash,
+                    EMAIL_VERIFICATION_STATUS_FAILED,
+                    hour_cutoff,
+                ),
+            ).fetchone()
+        else:
+            ip_row = None
+    last_sent_at = (
+        int(last_row["last_sent_at"])
+        if last_row is not None and last_row["last_sent_at"] is not None
+        else None
+    )
+    return EmailVerificationSendStats(
+        last_email_sent_at=last_sent_at,
+        email_hourly_count=int(email_row["count"] if email_row is not None else 0),
+        ip_hourly_count=int(ip_row["count"] if ip_row is not None else 0),
+    )
+
+
+def create_pending_email_verification(
+    *,
+    email: str,
+    code_hash: str,
+    purpose: str = EMAIL_VERIFICATION_PURPOSE_SIGNUP,
+    client_ip_hash: str = "",
+    expires_at: int,
+    now: int | None = None,
+    db_path: Path = DEFAULT_AUTH_DB_PATH,
+) -> str:
+    normalized_email = email.strip().lower()
+    normalized_purpose = purpose.strip() or EMAIL_VERIFICATION_PURPOSE_SIGNUP
+    timestamp = int(time.time()) if now is None else int(now)
+    verification_id = str(uuid.uuid4())
+
+    with connect_auth_db(db_path) as conn:
+        conn.execute(
+            "update email_verifications set status = ?, updated_at = ? "
+            "where lower(email) = lower(?) and purpose = ? and status = ?",
+            (
+                EMAIL_VERIFICATION_STATUS_EXPIRED,
+                timestamp,
+                normalized_email,
+                normalized_purpose,
+                EMAIL_VERIFICATION_STATUS_PENDING,
+            ),
+        )
+        conn.execute(
+            "insert into email_verifications "
+            "(id, email, purpose, code_hash, status, attempt_count, resend_email_id, last_sent_at, expires_at, verified_at, consumed_at, client_ip_hash, created_at, updated_at) "
+            "values (?, ?, ?, ?, ?, 0, '', ?, ?, null, null, ?, ?, ?)",
+            (
+                verification_id,
+                normalized_email,
+                normalized_purpose,
+                code_hash,
+                EMAIL_VERIFICATION_STATUS_PENDING,
+                timestamp,
+                int(expires_at),
+                client_ip_hash,
+                timestamp,
+                timestamp,
+            ),
+        )
+        conn.commit()
+    return verification_id
+
+
+def record_email_verification_sent(
+    verification_id: str,
+    *,
+    resend_email_id: str = "",
+    now: int | None = None,
+    db_path: Path = DEFAULT_AUTH_DB_PATH,
+) -> bool:
+    timestamp = int(time.time()) if now is None else int(now)
+    with connect_auth_db(db_path) as conn:
+        cursor = conn.execute(
+            "update email_verifications set resend_email_id = ?, updated_at = ? where id = ?",
+            (resend_email_id, timestamp, verification_id),
+        )
+        conn.commit()
+        return cursor.rowcount > 0
+
+
+def mark_email_verification_failed(
+    verification_id: str,
+    *,
+    now: int | None = None,
+    db_path: Path = DEFAULT_AUTH_DB_PATH,
+) -> bool:
+    timestamp = int(time.time()) if now is None else int(now)
+    with connect_auth_db(db_path) as conn:
+        cursor = conn.execute(
+            "update email_verifications set status = ?, updated_at = ? where id = ?",
+            (EMAIL_VERIFICATION_STATUS_FAILED, timestamp, verification_id),
+        )
+        conn.commit()
+        return cursor.rowcount > 0
 
 
 def cleanup_terminal_signup_jobs(
@@ -300,6 +500,8 @@ def create_signup_job(
     email: str,
     password: str,
     display_name: str,
+    email_verification_id: str | None = None,
+    email_verified_at: int | None = None,
     db_path: Path = DEFAULT_AUTH_DB_PATH,
 ) -> str:
     normalized_username = username.strip()
@@ -310,15 +512,150 @@ def create_signup_job(
 
     with connect_auth_db(db_path) as conn:
         conn.execute(
-            "insert into signup_jobs (job_id, username, email, password_hash, display_name, status, error_message, created_at, updated_at) values (?, ?, ?, ?, ?, 'pending', '', ?, ?)",
+            "insert into signup_jobs "
+            "(job_id, username, email, password_hash, display_name, status, error_message, email_verification_id, email_verified_at, created_at, updated_at) "
+            "values (?, ?, ?, ?, ?, 'pending', '', ?, ?, ?, ?)",
             (
                 job_id,
                 normalized_username,
                 normalized_email,
                 password_hash,
                 display_name.strip() or normalized_username,
+                email_verification_id,
+                email_verified_at,
                 now,
                 now,
+            ),
+        )
+        conn.commit()
+    return job_id
+
+
+def create_signup_job_with_email_verification(
+    *,
+    username: str,
+    email: str,
+    password: str,
+    display_name: str,
+    email_verification_id: str,
+    email_verification_code_hash: str,
+    purpose: str = EMAIL_VERIFICATION_PURPOSE_SIGNUP,
+    max_attempts: int = DEFAULT_EMAIL_VERIFICATION_MAX_ATTEMPTS,
+    now: int | None = None,
+    db_path: Path = DEFAULT_AUTH_DB_PATH,
+) -> str:
+    normalized_username = username.strip()
+    normalized_email = email.strip().lower()
+    normalized_purpose = purpose.strip() or EMAIL_VERIFICATION_PURPOSE_SIGNUP
+    timestamp = int(time.time()) if now is None else int(now)
+    job_id = str(uuid.uuid4())
+
+    with connect_auth_db(db_path) as conn:
+        conn.execute("begin immediate")
+        row = conn.execute(
+            "select id, email, purpose, code_hash, status, attempt_count, expires_at "
+            "from email_verifications where id = ? limit 1",
+            (email_verification_id.strip(),),
+        ).fetchone()
+        if row is None:
+            raise EmailVerificationError(
+                "not_found", "Invalid or expired verification code."
+            )
+
+        status = str(row["status"])
+        if status == EMAIL_VERIFICATION_STATUS_CONSUMED:
+            raise EmailVerificationError(
+                "consumed", "This verification code has already been used."
+            )
+        if status != EMAIL_VERIFICATION_STATUS_PENDING:
+            raise EmailVerificationError(
+                status, "Invalid or expired verification code."
+            )
+        if (
+            str(row["purpose"]) != normalized_purpose
+            or str(row["email"]).lower() != normalized_email
+        ):
+            raise EmailVerificationError(
+                "email_mismatch", "Verification code does not match this email."
+            )
+
+        expires_at = int(row["expires_at"] or 0)
+        if expires_at < timestamp:
+            conn.execute(
+                "update email_verifications set status = ?, updated_at = ? where id = ?",
+                (
+                    EMAIL_VERIFICATION_STATUS_EXPIRED,
+                    timestamp,
+                    email_verification_id.strip(),
+                ),
+            )
+            conn.commit()
+            raise EmailVerificationError(
+                "expired", "Verification code has expired. Send a new code."
+            )
+
+        attempt_count = int(row["attempt_count"] or 0)
+        if attempt_count >= max_attempts:
+            conn.execute(
+                "update email_verifications set status = ?, updated_at = ? where id = ?",
+                (
+                    EMAIL_VERIFICATION_STATUS_FAILED,
+                    timestamp,
+                    email_verification_id.strip(),
+                ),
+            )
+            conn.commit()
+            raise EmailVerificationError(
+                "too_many_attempts",
+                "Too many incorrect verification attempts. Send a new code.",
+            )
+
+        if not hmac.compare_digest(
+            str(row["code_hash"]), email_verification_code_hash.strip()
+        ):
+            attempt_count += 1
+            new_status = (
+                EMAIL_VERIFICATION_STATUS_FAILED
+                if attempt_count >= max_attempts
+                else EMAIL_VERIFICATION_STATUS_PENDING
+            )
+            conn.execute(
+                "update email_verifications set attempt_count = ?, status = ?, updated_at = ? where id = ?",
+                (attempt_count, new_status, timestamp, email_verification_id.strip()),
+            )
+            conn.commit()
+            if new_status == EMAIL_VERIFICATION_STATUS_FAILED:
+                raise EmailVerificationError(
+                    "too_many_attempts",
+                    "Too many incorrect verification attempts. Send a new code.",
+            )
+            raise EmailVerificationError("invalid_code", "Invalid verification code.")
+
+        password_hash = hash_password(password)
+        conn.execute(
+            "insert into signup_jobs "
+            "(job_id, username, email, password_hash, display_name, status, error_message, email_verification_id, email_verified_at, created_at, updated_at) "
+            "values (?, ?, ?, ?, ?, 'pending', '', ?, ?, ?, ?)",
+            (
+                job_id,
+                normalized_username,
+                normalized_email,
+                password_hash,
+                display_name.strip() or normalized_username,
+                email_verification_id.strip(),
+                timestamp,
+                timestamp,
+                timestamp,
+            ),
+        )
+        conn.execute(
+            "update email_verifications set status = ?, verified_at = ?, consumed_at = ?, updated_at = ? where id = ?",
+            (
+                EMAIL_VERIFICATION_STATUS_CONSUMED,
+                timestamp,
+                timestamp,
+                timestamp,
+                email_verification_id.strip(),
             ),
         )
         conn.commit()
@@ -328,7 +665,7 @@ def create_signup_job(
 def get_signup_job(job_id: str, db_path: Path = DEFAULT_AUTH_DB_PATH) -> dict | None:
     with connect_auth_db(db_path) as conn:
         row = conn.execute(
-            "select job_id, username, email, display_name, status, error_message, created_at, updated_at from signup_jobs where job_id = ? limit 1",
+            "select job_id, username, email, display_name, status, error_message, email_verification_id, email_verified_at, created_at, updated_at from signup_jobs where job_id = ? limit 1",
             (job_id,),
         ).fetchone()
     return dict(row) if row is not None else None
@@ -337,7 +674,7 @@ def get_signup_job(job_id: str, db_path: Path = DEFAULT_AUTH_DB_PATH) -> dict | 
 def get_next_pending_signup_job(db_path: Path = DEFAULT_AUTH_DB_PATH) -> dict | None:
     with connect_auth_db(db_path) as conn:
         row = conn.execute(
-            "select job_id, username, email, password_hash, display_name, status, error_message, created_at, updated_at from signup_jobs where status = 'pending' order by created_at asc limit 1"
+            "select job_id, username, email, password_hash, display_name, status, error_message, email_verification_id, email_verified_at, created_at, updated_at from signup_jobs where status = 'pending' order by created_at asc limit 1"
         ).fetchone()
     return dict(row) if row is not None else None
 
