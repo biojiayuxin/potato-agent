@@ -1,0 +1,480 @@
+from pathlib import Path
+import os
+import shutil
+import shlex
+
+
+cfg = config
+project_cfg = cfg.get("project", {})
+raw_outdir = project_cfg.get("outdir", "hic_scaffolding")
+OUTDIR = Path(raw_outdir).expanduser()
+if not OUTDIR.is_absolute():
+    OUTDIR = (Path.cwd() / OUTDIR).resolve()
+else:
+    OUTDIR = OUTDIR.resolve()
+
+samples_cfg = cfg.get("samples", {})
+if not samples_cfg:
+    raise ValueError("config.yaml must define at least one sample under samples:")
+SAMPLES = list(samples_cfg.keys())
+
+hic_cfg = cfg.get("hic_reads", {})
+enzyme_cfg = cfg.get("enzyme", {})
+juicer_cfg = cfg.get("juicer", {})
+three_dna_cfg = cfg.get("three_d_dna", cfg.get("3d_dna", {}))
+ref_cfg = cfg.get("reference", {})
+rerun_cfg = cfg.get("rerun", {})
+
+
+def as_bool(value, default=False):
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    if isinstance(value, str):
+        return value.strip().lower() in {"1", "true", "yes", "y", "on"}
+    return bool(value)
+
+
+ENZYME = str(enzyme_cfg.get("name", "DpnII"))
+JUICER_THREADS = int(juicer_cfg.get("threads", 24))
+REWRAP_FASTA = as_bool(ref_cfg.get("rewrap_fasta", True), True)
+LINE_WIDTH = int(ref_cfg.get("line_width", 80))
+FAIL_ON_STALE = as_bool(rerun_cfg.get("fail_on_stale_intermediates", True), True)
+
+THREEDNA_ENABLED = as_bool(three_dna_cfg.get("enabled", True), True)
+THREEDNA_MODE = str(three_dna_cfg.get("mode", "haploid"))
+THREEDNA_INPUT_SIZE = int(three_dna_cfg.get("input_size", 15000))
+THREEDNA_ROUNDS = int(three_dna_cfg.get("rounds", 0))
+THREEDNA_MAPQ = int(three_dna_cfg.get("mapq", 10))
+THREEDNA_SORT_OUTPUT = as_bool(three_dna_cfg.get("sort_output", True), True)
+THREEDNA_GAP_SIZE = int(three_dna_cfg.get("gap_size", 1000))
+THREEDNA_STAGE = str(three_dna_cfg.get("stage", "") or "")
+THREEDNA_EARLY_EXIT = as_bool(three_dna_cfg.get("early_exit", False), False)
+THREEDNA_FAST_START = as_bool(three_dna_cfg.get("fast_start", False), False)
+THREEDNA_CHROMOSOME_MAP = three_dna_cfg.get("chromosome_map", None)
+THREEDNA_THREADS = int(three_dna_cfg.get("threads", 24))
+if THREEDNA_ENABLED and THREEDNA_MODE not in {"haploid", "diploid"}:
+    raise ValueError("three_d_dna.mode must be 'haploid' or 'diploid'")
+
+
+def outpath(*parts):
+    return str(OUTDIR.joinpath(*parts))
+
+
+def as_abs(path_like):
+    return str(Path(str(path_like)).expanduser().resolve())
+
+
+def first_existing(candidates, label):
+    for candidate in candidates:
+        if not candidate:
+            continue
+        p = Path(str(candidate)).expanduser()
+        if p.exists():
+            return str(p.resolve())
+    tried = "\n  - ".join(str(c) for c in candidates if c)
+    raise ValueError(
+        f"Cannot find {label}. Set it in config.yaml or export the corresponding environment variable. Tried:\n  - {tried}"
+    )
+
+
+def raw_cpu_dir():
+    return juicer_cfg.get("cpu_dir") or os.environ.get("JUICER_CPU") or os.environ.get("JUICER_DIR")
+
+
+def infer_cpu_dir_from_script(script_path):
+    p = Path(script_path).expanduser().resolve()
+    if p.parent.name == "scripts":
+        return str(p.parent.parent.resolve())
+    return str(p.parent.resolve())
+
+
+def juicer_script():
+    cpu = raw_cpu_dir()
+    candidates = [
+        juicer_cfg.get("script"),
+        os.environ.get("JUICER_SCRIPT"),
+    ]
+    if cpu:
+        cpu_path = Path(str(cpu)).expanduser()
+        candidates.extend([
+            cpu_path / "scripts" / "juicer_final.sh",
+            cpu_path / "juicer_final.sh",
+            cpu_path / "scripts" / "juicer.sh",
+            cpu_path / "juicer.sh",
+        ])
+    candidates.extend([
+        shutil.which("juicer_final.sh"),
+        shutil.which("juicer.sh"),
+    ])
+    return first_existing(candidates, "Juicer CPU script (juicer_final.sh or juicer.sh)")
+
+
+_JUICER_SCRIPT = juicer_script()
+_CPU_RAW = raw_cpu_dir()
+JUICER_CPU_DIR = as_abs(_CPU_RAW) if _CPU_RAW else infer_cpu_dir_from_script(_JUICER_SCRIPT)
+
+
+def restriction_script():
+    cpu = Path(JUICER_CPU_DIR)
+    candidates = [
+        juicer_cfg.get("restriction_script"),
+        os.environ.get("JUICER_RESTRICTION_SCRIPT"),
+        cpu / "misc" / "generate_site_positions.py",
+        cpu.parent / "misc" / "generate_site_positions.py",
+        cpu.parent.parent / "misc" / "generate_site_positions.py",
+        shutil.which("generate_site_positions.py"),
+    ]
+    return first_existing(candidates, "Juicer generate_site_positions.py")
+
+
+RESTRICTION_SCRIPT = restriction_script()
+EXTRA_ARGS = " ".join(shlex.quote(str(x)) for x in juicer_cfg.get("extra_args", []))
+ASSEMBLY_ARG = "--assembly" if as_bool(juicer_cfg.get("assembly_mode", True), True) else ""
+
+
+def raw_three_dna_dir():
+    return three_dna_cfg.get("dir") or os.environ.get("THREEDNA_DIR") or os.environ.get("THREE_D_DNA_DIR")
+
+
+def three_dna_script():
+    dna_dir = raw_three_dna_dir()
+    candidates = [
+        three_dna_cfg.get("script"),
+        os.environ.get("THREEDNA_SCRIPT"),
+        os.environ.get("THREE_D_DNA_SCRIPT"),
+    ]
+    if dna_dir:
+        dna_path = Path(str(dna_dir)).expanduser()
+        candidates.append(dna_path / "run-asm-pipeline.sh")
+    candidates.append(shutil.which("run-asm-pipeline.sh"))
+    return first_existing(candidates, "3D-DNA run-asm-pipeline.sh")
+
+
+def opt_with_value(flag, value):
+    if value is None or value == "":
+        return ""
+    return f"{flag} {shlex.quote(str(value))}"
+
+
+_THREEDNA_SCRIPT = three_dna_script() if THREEDNA_ENABLED else ""
+THREEDNA_SORT_ARG = "--sort-output" if THREEDNA_SORT_OUTPUT else ""
+THREEDNA_STAGE_ARG = opt_with_value("-s", THREEDNA_STAGE)
+THREEDNA_EARLY_ARG = "--early-exit" if THREEDNA_EARLY_EXIT else ""
+THREEDNA_FAST_ARG = "--fast-start" if THREEDNA_FAST_START else ""
+THREEDNA_CHROMOSOME_ARG = opt_with_value("-c", THREEDNA_CHROMOSOME_MAP)
+THREEDNA_EXTRA_ARGS = " ".join(shlex.quote(str(x)) for x in three_dna_cfg.get("extra_args", []))
+THREEDNA_FAIL_ON_STALE = FAIL_ON_STALE and not THREEDNA_STAGE and not THREEDNA_FAST_START
+
+
+def sample_cfg(wildcards):
+    return samples_cfg[wildcards.sample]
+
+
+def sample_assembly(wildcards):
+    assembly = sample_cfg(wildcards).get("assembly")
+    if not assembly:
+        raise ValueError(f"samples.{wildcards.sample}.assembly is required")
+    return as_abs(assembly)
+
+
+def sample_r1(wildcards):
+    value = sample_cfg(wildcards).get("r1") or hic_cfg.get("r1")
+    if not value:
+        raise ValueError(f"Hi-C R1 is required for sample {wildcards.sample}: set samples.<sample>.r1 or hic_reads.r1")
+    return as_abs(value)
+
+
+def sample_r2(wildcards):
+    value = sample_cfg(wildcards).get("r2") or hic_cfg.get("r2")
+    if not value:
+        raise ValueError(f"Hi-C R2 is required for sample {wildcards.sample}: set samples.<sample>.r2 or hic_reads.r2")
+    return as_abs(value)
+
+
+def genome_id(wildcards):
+    return str(sample_cfg(wildcards).get("genome_id") or wildcards.sample)
+
+
+JUICER_TARGETS = (
+    expand(outpath("results/juicer/{sample}/merged_nodups.txt"), sample=SAMPLES)
+    + expand(outpath("results/juicer/{sample}/juicer.done"), sample=SAMPLES)
+)
+THREEDNA_TARGETS = (
+    expand(outpath("results/3ddna/{sample}/{sample}_HiC.fasta"), sample=SAMPLES)
+    + expand(outpath("results/3ddna/{sample}/{sample}_HiC.assembly"), sample=SAMPLES)
+    + expand(outpath("results/3ddna/{sample}/3ddna.done"), sample=SAMPLES)
+)
+ALL_TARGETS = JUICER_TARGETS + (THREEDNA_TARGETS if THREEDNA_ENABLED else [])
+
+
+rule all:
+    input:
+        ALL_TARGETS
+
+
+rule stage_fastq:
+    input:
+        r1=sample_r1,
+        r2=sample_r2,
+    output:
+        r1=outpath("work/juicer/{sample}/fastq/{sample}_R1.fastq.gz"),
+        r2=outpath("work/juicer/{sample}/fastq/{sample}_R2.fastq.gz"),
+    shell:
+        r'''
+        set -euo pipefail
+        mkdir -p "$(dirname "{output.r1}")"
+        ln -sfn "$(readlink -f "{input.r1}")" "{output.r1}"
+        ln -sfn "$(readlink -f "{input.r2}")" "{output.r2}"
+        test -s "{output.r1}"
+        test -s "{output.r2}"
+        '''
+
+
+rule prepare_reference:
+    input:
+        fa=sample_assembly,
+    output:
+        ref=outpath("work/juicer/{sample}/references/{sample}.fa"),
+    run:
+        out = Path(output.ref)
+        out.parent.mkdir(parents=True, exist_ok=True)
+        src = Path(input.fa)
+        if REWRAP_FASTA:
+            width = LINE_WIDTH
+            name_seen = False
+            seq_parts = []
+            with src.open("rt", errors="replace") as fin, out.open("wt") as fout:
+                def flush():
+                    nonlocal seq_parts
+                    if not name_seen:
+                        return
+                    seq = "".join(seq_parts).replace(" ", "").replace("\t", "")
+                    for i in range(0, len(seq), width):
+                        fout.write(seq[i:i + width] + "\n")
+                    seq_parts = []
+                for raw in fin:
+                    line = raw.rstrip("\n")
+                    if not line:
+                        continue
+                    if line.startswith(">"):
+                        flush()
+                        name_seen = True
+                        fout.write(line + "\n")
+                    else:
+                        seq_parts.append(line.strip())
+                flush()
+        else:
+            if out.exists() or out.is_symlink():
+                out.unlink()
+            out.symlink_to(src.resolve())
+
+
+rule chrom_sizes:
+    input:
+        ref=rules.prepare_reference.output.ref,
+    output:
+        fai=outpath("work/juicer/{sample}/references/{sample}.fa.fai"),
+        chrom=outpath("work/juicer/{sample}/references/{sample}.chrom.sizes"),
+    log:
+        outpath("logs/juicer/{sample}.faidx.log"),
+    shell:
+        r'''
+        set -euo pipefail
+        mkdir -p "$(dirname "{log}")"
+        samtools faidx "{input.ref}" > "{log}" 2>&1
+        cut -f1,2 "{output.fai}" > "{output.chrom}"
+        test -s "{output.chrom}"
+        '''
+
+
+rule bwa_index:
+    input:
+        ref=rules.prepare_reference.output.ref,
+    output:
+        done=outpath("work/juicer/{sample}/references/{sample}.bwa_index.done"),
+    log:
+        outpath("logs/juicer/{sample}.bwa_index.log"),
+    shell:
+        r'''
+        set -euo pipefail
+        mkdir -p "$(dirname "{log}")"
+        missing=0
+        for ext in amb ann bwt pac sa; do
+          if [ ! -s "{input.ref}.${{ext}}" ]; then missing=1; fi
+        done
+        if [ "$missing" = "1" ]; then
+          rm -f "{input.ref}.amb" "{input.ref}.ann" "{input.ref}.bwt" "{input.ref}.pac" "{input.ref}.sa"
+          bwa index "{input.ref}" > "{log}" 2>&1
+        fi
+        for ext in amb ann bwt pac sa; do
+          test -s "{input.ref}.${{ext}}"
+        done
+        touch "{output.done}"
+        '''
+
+
+rule restriction_sites:
+    input:
+        ref=rules.prepare_reference.output.ref,
+    output:
+        site=outpath("work/juicer/{sample}/restriction_sites/{sample}_" + ENZYME + ".txt"),
+    params:
+        script=RESTRICTION_SCRIPT,
+        genome_id=genome_id,
+        enzyme=ENZYME,
+    log:
+        outpath("logs/juicer/{sample}.restriction_sites.log"),
+    shell:
+        r'''
+        set -euo pipefail
+        mkdir -p "$(dirname "{output.site}")" "$(dirname "{log}")"
+        cd "$(dirname "{output.site}")"
+        python3 "{params.script}" "{params.enzyme}" "{params.genome_id}" "{input.ref}" > "{log}" 2>&1
+        expected="{params.genome_id}_{params.enzyme}.txt"
+        test -s "$expected"
+        if [ "$PWD/$expected" != "{output.site}" ]; then
+          mv -f "$expected" "{output.site}"
+        fi
+        test -s "{output.site}"
+        '''
+
+
+rule run_juicer:
+    input:
+        r1=rules.stage_fastq.output.r1,
+        r2=rules.stage_fastq.output.r2,
+        ref=rules.prepare_reference.output.ref,
+        chrom=rules.chrom_sizes.output.chrom,
+        site=rules.restriction_sites.output.site,
+        bwa_done=rules.bwa_index.output.done,
+    output:
+        mnd=outpath("results/juicer/{sample}/merged_nodups.txt"),
+        done=outpath("results/juicer/{sample}/juicer.done"),
+    params:
+        juicer_top=outpath("work/juicer/{sample}"),
+        internal_mnd=outpath("work/juicer/{sample}/aligned/merged_nodups.txt"),
+        script=_JUICER_SCRIPT,
+        cpu_dir=JUICER_CPU_DIR,
+        enzyme=ENZYME,
+        assembly_arg=ASSEMBLY_ARG,
+        extra_args=EXTRA_ARGS,
+        fail_on_stale=str(FAIL_ON_STALE).lower(),
+    threads: JUICER_THREADS
+    log:
+        outpath("logs/juicer/{sample}.juicer.log"),
+    shell:
+        r'''
+        set -euo pipefail
+        mkdir -p "$(dirname "{output.mnd}")" "$(dirname "{log}")"
+
+        if [ ! -s "{params.internal_mnd}" ]; then
+          if [ "{params.fail_on_stale}" = "true" ]; then
+            if [ -d "{params.juicer_top}/aligned" ]; then
+              echo "ERROR: {params.juicer_top}/aligned exists but merged_nodups.txt is absent." >&2
+              echo "Clean failed intermediates explicitly before rerun: rm -rf '{params.juicer_top}/aligned' '{params.juicer_top}/splits'" >&2
+              exit 5
+            fi
+            if [ -d "{params.juicer_top}/splits" ]; then
+              echo "ERROR: {params.juicer_top}/splits exists before Juicer run." >&2
+              echo "Clean failed intermediates explicitly before rerun: rm -rf '{params.juicer_top}/splits'" >&2
+              exit 6
+            fi
+          fi
+
+          cd "{params.juicer_top}"
+          bash "{params.script}" \
+            -D "{params.cpu_dir}" \
+            -z "{input.ref}" \
+            -p "{input.chrom}" \
+            -y "{input.site}" \
+            -s "{params.enzyme}" \
+            -t "{threads}" \
+            {params.assembly_arg} \
+            {params.extra_args} \
+            > "{log}" 2>&1
+        fi
+
+        test -s "{params.internal_mnd}"
+        ln -sfn "$(readlink -f "{params.internal_mnd}")" "{output.mnd}"
+        touch "{output.done}"
+        '''
+
+
+rule run_3ddna:
+    input:
+        ref=rules.prepare_reference.output.ref,
+        mnd=rules.run_juicer.output.mnd,
+    output:
+        final_fasta=outpath("results/3ddna/{sample}/{sample}_HiC.fasta"),
+        final_assembly=outpath("results/3ddna/{sample}/{sample}_HiC.assembly"),
+        done=outpath("results/3ddna/{sample}/3ddna.done"),
+    params:
+        workdir=outpath("work/3ddna/{sample}"),
+        internal_fasta=outpath("work/3ddna/{sample}/{sample}_HiC.fasta"),
+        internal_assembly=outpath("work/3ddna/{sample}/{sample}_HiC.assembly"),
+        script=_THREEDNA_SCRIPT,
+        prefix=lambda wildcards: wildcards.sample,
+        mode=THREEDNA_MODE,
+        input_size=THREEDNA_INPUT_SIZE,
+        rounds=THREEDNA_ROUNDS,
+        mapq=THREEDNA_MAPQ,
+        sort_arg=THREEDNA_SORT_ARG,
+        gap_size=THREEDNA_GAP_SIZE,
+        stage_arg=THREEDNA_STAGE_ARG,
+        early_arg=THREEDNA_EARLY_ARG,
+        fast_arg=THREEDNA_FAST_ARG,
+        chromosome_arg=THREEDNA_CHROMOSOME_ARG,
+        extra_args=THREEDNA_EXTRA_ARGS,
+        fail_on_stale=str(THREEDNA_FAIL_ON_STALE).lower(),
+    threads: THREEDNA_THREADS
+    log:
+        outpath("logs/3ddna/{sample}.3ddna.log"),
+    shell:
+        r'''
+        set -euo pipefail
+        mkdir -p "{params.workdir}" "$(dirname "{output.final_fasta}")" "$(dirname "{log}")"
+
+        if [ ! -s "{params.internal_fasta}" ] || [ ! -s "{params.internal_assembly}" ]; then
+          if [ "{params.fail_on_stale}" = "true" ]; then
+            if compgen -G "{params.workdir}/{params.prefix}.*.cprops" > /dev/null || \
+               compgen -G "{params.workdir}/{params.prefix}.mnd.*.txt" > /dev/null || \
+               compgen -G "{params.workdir}/{params.prefix}.*.asm" > /dev/null || \
+               compgen -G "{params.workdir}/{params.prefix}.*.hic" > /dev/null; then
+              echo "ERROR: stale 3D-DNA intermediates found in {params.workdir} but final outputs are absent." >&2
+              echo "Clean this sample's 3D-DNA work directory explicitly before rerun, or set rerun.fail_on_stale_intermediates: false if you know the state is reusable." >&2
+              exit 7
+            fi
+          fi
+
+          cd "{params.workdir}"
+          runner_prefix=()
+          if command -v srun >/dev/null 2>&1 && [ -n "${{SLURM_JOB_ID:-}}" ]; then
+            runner_prefix=(srun --ntasks=1 --cpus-per-task="${{SLURM_CPUS_PER_TASK:-{threads}}}" --cpu-bind=cores)
+          fi
+          "${{runner_prefix[@]}}" ionice -c2 -n7 nice -n 10 bash "{params.script}" \
+            -m "{params.mode}" \
+            -i "{params.input_size}" \
+            -r "{params.rounds}" \
+            --mapq "{params.mapq}" \
+            {params.sort_arg} \
+            -g "{params.gap_size}" \
+            {params.stage_arg} \
+            {params.early_arg} \
+            {params.fast_arg} \
+            {params.chromosome_arg} \
+            {params.extra_args} \
+            "{input.ref}" \
+            "{input.mnd}" \
+            > "{log}" 2>&1
+        fi
+
+        test -s "{params.internal_fasta}"
+        test -s "{params.internal_assembly}"
+        ln -sfn "$(readlink -f "{params.internal_fasta}")" "{output.final_fasta}"
+        ln -sfn "$(readlink -f "{params.internal_assembly}")" "{output.final_assembly}"
+        touch "{output.done}"
+        '''

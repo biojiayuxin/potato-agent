@@ -29,7 +29,9 @@
 - `mapping.py`
   加载 `users_mapping.yaml` 并解析每用户 Hermes 目标
 - `hermes_service.py`
-  写入每用户 `~/.hermes/config.yaml`、`.env` 和 systemd service
+  写入每用户 `~/.hermes/config.yaml`、`.env` 和 systemd service；模型凭据写为本地 proxy token
+- `model_proxy.py`
+  root/systemd 运行的本地 OpenAI-compatible model proxy，负责校验 `{username}-local-token` 并转发到真实上游
 - `requirements.txt`
   最小运行依赖
 - `static/lite/`
@@ -38,6 +40,7 @@
 ## 依赖的数据源
 
 - `users_mapping.yaml`
+- `model_proxy.yaml`
 - `interface/data/interface.db`
 - `interface/data/archive.db`
 - 每用户 `~/.hermes/state.db`

@@ -18,7 +18,15 @@ from urllib import request as urllib_request
 import yaml
 
 from interface.mapping import HermesTarget, resolve_env_placeholders
-from interface.model_options import DEFAULT_REASONING_EFFORT
+from interface.model_options import (
+    DEFAULT_REASONING_EFFORT,
+    normalize_model_options,
+    strip_openai_api_key_env,
+)
+from interface.model_proxy_config import (
+    get_model_proxy_base_url,
+    local_model_proxy_token,
+)
 
 
 ROOT_DIR = Path(__file__).resolve().parent
@@ -35,6 +43,13 @@ DEFAULT_INACCESSIBLE_PATHS = (
     "/var/lib/potato-agent",
     "/etc/potato-agent",
     "/opt/interface-env",
+)
+AGENT_SERVICE_PRIORITY_DIRECTIVES = (
+    "CPUWeight=1000",
+    "IOWeight=10000",
+    "Nice=-5",
+    "IOSchedulingClass=best-effort",
+    "IOSchedulingPriority=0",
 )
 MANAGED_BIOINFORMATICS_SKILLS_DIR_NAME = "potato-knowledge-bioinformatics"
 DEFAULT_BIOINFORMATICS_SKILLS_PATH = (
@@ -72,11 +87,17 @@ def deep_merge(base: dict[str, Any], overlay: dict[str, Any]) -> dict[str, Any]:
     return base
 
 
-def _apply_fallback_config(data: dict[str, Any], hermes_cfg: dict[str, Any]) -> None:
-    if "fallback_providers" in hermes_cfg:
-        data["fallback_providers"] = deepcopy(hermes_cfg["fallback_providers"])
-    if "fallback_model" in hermes_cfg:
-        data["fallback_model"] = deepcopy(hermes_cfg["fallback_model"])
+def _strip_api_keys_outside_model(
+    value: Any, *, protected_model: dict[str, Any] | None = None
+) -> None:
+    if isinstance(value, dict):
+        if value is not protected_model:
+            value.pop("api_key", None)
+        for child in list(value.values()):
+            _strip_api_keys_outside_model(child, protected_model=protected_model)
+    elif isinstance(value, list):
+        for child in value:
+            _strip_api_keys_outside_model(child, protected_model=protected_model)
 
 
 def ensure_linux_user(username: str) -> None:
@@ -170,18 +191,41 @@ def build_config_data(config: dict[str, Any], user: HermesTarget) -> dict[str, A
     config = resolve_env_placeholders(deepcopy(config), "interface.hermes_config")
     hermes_cfg = config.get("hermes") or {}
     terminal_cfg = deepcopy(hermes_cfg.get("terminal") or {})
-    model_cfg = deepcopy(hermes_cfg.get("model") or {})
     global_overrides = deepcopy(hermes_cfg.get("config_overrides") or {})
 
     data: dict[str, Any] = {}
-    if model_cfg:
-        data["model"] = model_cfg
-    _apply_fallback_config(data, hermes_cfg)
+    try:
+        active_option = normalize_model_options(config).primary
+    except Exception:
+        model_cfg = deepcopy(hermes_cfg.get("model") or {})
+        active_option = None
+    if active_option is not None:
+        data["model"] = {
+            "default": active_option.name,
+            "provider": active_option.provider,
+            "base_url": get_model_proxy_base_url(config),
+            "api_key": local_model_proxy_token(user.username),
+        }
+        if active_option.api_mode:
+            data["model"]["api_mode"] = active_option.api_mode
+        if active_option.context_length is not None:
+            data["model"]["context_length"] = active_option.context_length
+    elif model_cfg:
+        data["model"] = {
+            **model_cfg,
+            "base_url": get_model_proxy_base_url(config),
+            "api_key": local_model_proxy_token(user.username),
+        }
     data["terminal"] = terminal_cfg
     data["agent"] = {"reasoning_effort": DEFAULT_REASONING_EFFORT}
 
     deep_merge(data, global_overrides)
     deep_merge(data, deepcopy(user.config_overrides))
+
+    model = data.get("model")
+    if isinstance(model, dict):
+        model["base_url"] = get_model_proxy_base_url(config)
+        model["api_key"] = local_model_proxy_token(user.username)
 
     terminal = data.setdefault("terminal", {})
     if not isinstance(terminal, dict):
@@ -192,6 +236,9 @@ def build_config_data(config: dict[str, Any], user: HermesTarget) -> dict[str, A
     terminal.setdefault("backend", "local")
     terminal.setdefault("timeout", DEFAULT_TERMINAL_TIMEOUT)
     terminal["cwd"] = str(user.workdir)
+    data.pop("fallback_providers", None)
+    data.pop("fallback_model", None)
+    _strip_api_keys_outside_model(data, protected_model=model if isinstance(model, dict) else None)
     return data
 
 
@@ -229,6 +276,7 @@ def build_systemd_unit(config: dict[str, Any], user: HermesTarget) -> str:
             f"Environment=HOME={user.home_dir}",
             f"Environment=HERMES_HOME={user.hermes_home}",
             f"ExecStart={hermes_bin} gateway run --replace",
+            *AGENT_SERVICE_PRIORITY_DIRECTIVES,
             "PrivateTmp=yes",
             "NoNewPrivileges=yes",
             *[
@@ -264,7 +312,7 @@ def install_user_runtime_files(config: dict[str, Any], user: HermesTarget) -> No
         _set_owner_and_mode(directory, pw.pw_uid, gid, 0o700)
 
     env_path = user.hermes_home / ".env"
-    env_path.write_text(build_env_content(user), encoding="utf-8")
+    env_path.write_text(strip_openai_api_key_env(build_env_content(user)), encoding="utf-8")
     _set_owner_and_mode(env_path, pw.pw_uid, gid, 0o600)
 
     config_path = user.hermes_home / "config.yaml"

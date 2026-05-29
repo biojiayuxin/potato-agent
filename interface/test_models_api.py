@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import importlib
 import os
 import sqlite3
 import sys
@@ -16,6 +15,12 @@ from fastapi.testclient import TestClient
 REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
+
+import interface.auth_db as auth_db_mod
+import interface.display_store as display_store_mod
+import interface.mapping as mapping_mod
+import interface.runtime_state as runtime_state_mod
+from interface import app as interface_app_mod
 
 
 class _DummyBridgeRegistry:
@@ -89,22 +94,43 @@ users:
 
 def _build_client_and_user(monkeypatch):
     auth_db, mapping_path, hermes_home = _make_temp_env()
-    os.environ["INTERFACE_AUTH_DB"] = auth_db
-    os.environ["POTATO_AGENT_MAPPING_PATH"] = mapping_path
-    os.environ["INTERFACE_SESSION_SECRET"] = "test-secret"
+    auth_db_path = Path(auth_db)
+    mapping_file = Path(mapping_path)
 
-    for module_name in list(sys.modules):
-        if module_name == "interface" or module_name.startswith("interface."):
-            sys.modules.pop(module_name, None)
+    monkeypatch.setenv("INTERFACE_AUTH_DB", auth_db)
+    monkeypatch.setenv("POTATO_AGENT_MAPPING_PATH", mapping_path)
+    monkeypatch.setenv("INTERFACE_SESSION_SECRET", "test-secret")
+    monkeypatch.setattr(auth_db_mod, "DEFAULT_AUTH_DB_PATH", auth_db_path)
+    monkeypatch.setattr(display_store_mod, "DEFAULT_AUTH_DB_PATH", auth_db_path)
+    monkeypatch.setattr(runtime_state_mod, "DEFAULT_AUTH_DB_PATH", auth_db_path)
+    monkeypatch.setattr(mapping_mod, "DEFAULT_MAPPING_PATH", mapping_file)
+    monkeypatch.setattr(interface_app_mod, "DEFAULT_MAPPING_PATH", mapping_file)
+    interface_app_mod.mapping_store = mapping_mod.MappingStore(mapping_file)
+    monkeypatch.setattr(
+        interface_app_mod,
+        "get_user_by_id",
+        lambda user_id: auth_db_mod.get_user_by_id(user_id, db_path=auth_db_path),
+    )
+    monkeypatch.setattr(
+        interface_app_mod,
+        "get_runtime_state",
+        lambda user_id: runtime_state_mod.get_runtime_state(user_id, db_path=auth_db_path),
+    )
+    monkeypatch.setattr(
+        interface_app_mod,
+        "mark_foreground_activity",
+        lambda user_id: runtime_state_mod.mark_foreground_activity(user_id, db_path=auth_db_path),
+    )
+    monkeypatch.setattr(
+        interface_app_mod,
+        "list_live_session_states",
+        lambda user_id: display_store_mod.list_live_session_states(user_id, db_path=auth_db_path),
+    )
+    monkeypatch.setattr(interface_app_mod.os, "geteuid", lambda: 0)
+    interface_app_mod.privileged_client.force_helper = False
 
-    import interface.auth_db as auth_db_mod
-    from interface import app as interface_app_mod
-
-    importlib.reload(auth_db_mod)
-    importlib.reload(interface_app_mod)
-
-    interface_app_mod.ensure_auth_db()
-    interface_app_mod.ensure_display_store()
+    auth_db_mod.ensure_auth_db(auth_db_path)
+    display_store_mod.ensure_display_store(auth_db_path)
     interface_app_mod.app.state.tui_gateway_bridges = _DummyBridgeRegistry()
     user = auth_db_mod.upsert_user(
         username="alice",
@@ -112,6 +138,7 @@ def _build_client_and_user(monkeypatch):
         password="password123",
         mapping_username="alice",
         name="Alice",
+        db_path=auth_db_path,
     )
 
     monkeypatch.setattr(
@@ -138,8 +165,8 @@ def test_get_models_returns_whitelist_without_api_keys(monkeypatch) -> None:
 model:
   default: gpt-5.4-mini
   provider: custom
-  base_url: https://fast.example/v1
-  api_key: sk-fast
+  base_url: http://127.0.0.1:8765/v1
+  api_key: alice-local-token
   context_length: 500000
   api_mode: codex_responses
 """.lstrip(),
@@ -302,16 +329,14 @@ def test_put_active_model_updates_user_config(monkeypatch) -> None:
 
         config = yaml.safe_load((hermes_home / "config.yaml").read_text(encoding="utf-8"))
         assert config["model"] == {
-            "default": "gpt-5.4-mini",
+            "default": "Fast",
             "provider": "custom",
-            "base_url": "https://fast.example/v1",
-            "api_key": "sk-fast",
+            "base_url": "http://127.0.0.1:8765/v1",
+            "api_key": "alice-local-token",
             "context_length": 500000,
             "api_mode": "codex_responses",
         }
         assert config["agent"] == {"reasoning_effort": "xhigh"}
-        assert (hermes_home / ".env").read_text(encoding="utf-8") == (
-            "OPENAI_API_KEY=sk-fast\n"
-        )
+        assert (hermes_home / ".env").read_text(encoding="utf-8") == ""
     finally:
         client.close()

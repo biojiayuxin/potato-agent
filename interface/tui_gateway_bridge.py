@@ -479,6 +479,8 @@ class TuiGatewayBridge:
         self._loop.call_soon_threadsafe(asyncio.create_task, self._handle_exit())
 
     async def _handle_exit(self) -> None:
+        with contextlib.suppress(Exception):
+            await self._release_all_foreground_leases()
         with self._pending_lock:
             pending = list(self._pending.values())
             self._pending.clear()
@@ -545,7 +547,7 @@ class TuiGatewayBridgeRegistry:
             bridge = self._bridges.get(user_id)
             if bridge is None:
                 return True
-            if bridge.has_inflight_activity():
+            if bridge.has_pending_requests():
                 return False
             self._bridges.pop(user_id, None)
             close_task = self._close_tasks.pop(user_id, None)

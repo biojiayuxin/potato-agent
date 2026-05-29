@@ -27,6 +27,7 @@ from interface.model_options import (
     normalize_model_options,
     patch_user_active_model,
 )
+from interface.model_proxy_config import get_model_proxy_base_url
 from interface.runtime_state import (
     cleanup_expired_runtime_leases,
     has_active_runtime_leases,
@@ -232,11 +233,14 @@ class PrivilegedClient:
             target = MappingStore(DEFAULT_MAPPING_PATH).get_target_by_username(username)
             if target is None:
                 raise PrivilegedClientError(f"Unknown mapping user: {username}")
-            options = normalize_model_options(load_mapping(DEFAULT_MAPPING_PATH, resolve_env=True))
+            config = load_mapping(DEFAULT_MAPPING_PATH, resolve_env=True)
+            options = normalize_model_options(config)
             option = options.get(model_id)
             if option is None:
                 raise PrivilegedClientError("Model is not allowed")
-            patch_user_active_model(target, option)
+            patch_user_active_model(
+                target, option, proxy_base_url=get_model_proxy_base_url(config)
+            )
             return
         self._call_helper(["patch-active-model", "--username", username, "--model-id", model_id])
 
@@ -245,8 +249,11 @@ class PrivilegedClient:
             target = MappingStore(DEFAULT_MAPPING_PATH).get_target_by_username(username)
             if target is None:
                 raise PrivilegedClientError(f"Unknown mapping user: {username}")
-            options = normalize_model_options(load_mapping(DEFAULT_MAPPING_PATH, resolve_env=True))
-            return get_active_model_option_id(target, options)
+            config = load_mapping(DEFAULT_MAPPING_PATH, resolve_env=True)
+            options = normalize_model_options(config)
+            return get_active_model_option_id(
+                target, options, proxy_base_url=get_model_proxy_base_url(config)
+            )
 
         payload = self._call_helper(["get-active-model", "--username", username])
         active_id = str(payload.get("active_id") or "").strip()

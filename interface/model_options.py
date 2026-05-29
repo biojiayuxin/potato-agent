@@ -13,6 +13,10 @@ from typing import Any
 import yaml
 
 from interface.mapping import HermesTarget
+from interface.model_proxy_config import (
+    get_model_proxy_base_url,
+    local_model_proxy_token,
+)
 
 try:
     from utils import atomic_yaml_write
@@ -31,9 +35,7 @@ VALID_API_MODES = {
     "chat_completions",
     "codex_responses",
 }
-OPENAI_API_KEY_LINE_RE = re.compile(
-    r"^(?P<prefix>\s*)(?:export\s+)?OPENAI_API_KEY\s*=.*$"
-)
+OPENAI_API_KEY_LINE_RE = re.compile(r"^\s*(?:export\s+)?OPENAI_API_KEY\s*=.*$")
 
 
 class ModelOptionsError(RuntimeError):
@@ -46,21 +48,23 @@ class ModelOption:
     name: str
     provider: str
     model: str
-    base_url: str
-    api_key: str
+    base_url: str = ""
+    api_key: str = ""
     context_length: int | None = None
     api_mode: str = DEFAULT_MODEL_API_MODE
     reasoning_effort: str = DEFAULT_REASONING_EFFORT
 
-    def to_config(self) -> dict[str, Any]:
+    def to_config(self, *, include_private: bool = True) -> dict[str, Any]:
         data: dict[str, Any] = {
             "id": self.id,
             "name": self.name,
             "provider": self.provider,
             "model": self.model,
-            "base_url": self.base_url,
-            "api_key": self.api_key,
         }
+        if include_private and self.base_url:
+            data["base_url"] = self.base_url
+        if include_private and self.api_key:
+            data["api_key"] = self.api_key
         if self.context_length is not None:
             data["context_length"] = self.context_length
         if self.api_mode:
@@ -84,7 +88,9 @@ class ModelOption:
             data["api_mode"] = self.api_mode
         return data
 
-    def matches_model_config(self, model_config: dict[str, Any]) -> bool:
+    def matches_model_config(
+        self, model_config: dict[str, Any], *, proxy_base_url: str | None = None
+    ) -> bool:
         configured_model = str(
             model_config.get("default") or model_config.get("model") or ""
         ).strip()
@@ -93,10 +99,12 @@ class ModelOption:
         ).strip()
         configured_base_url = _normalize_base_url(model_config.get("base_url"))
         configured_api_mode = _normalize_api_mode(model_config.get("api_mode"))
+        expected_base_urls = {self.base_url, proxy_base_url or get_model_proxy_base_url()}
+        expected_base_urls.discard("")
         return (
-            configured_model == self.model
+            configured_model in {self.name, self.model}
             and configured_provider == self.provider
-            and configured_base_url == self.base_url
+            and (not expected_base_urls or configured_base_url in expected_base_urls)
             and configured_api_mode == self.api_mode
         )
 
@@ -197,8 +205,6 @@ def model_option_from_mapping(entry: dict[str, Any], *, path: str) -> ModelOptio
         for field, value in (
             ("id", option_id),
             ("model", model_name),
-            ("base_url", base_url),
-            ("api_key", api_key),
         )
         if not value
     ]
@@ -309,7 +315,12 @@ def normalize_model_options(config: dict[str, Any]) -> ModelOptions:
     return ModelOptions(primary_id=primary_id, options=tuple(options))
 
 
-def get_active_model_option_id(target: HermesTarget, model_options: ModelOptions) -> str:
+def get_active_model_option_id(
+    target: HermesTarget,
+    model_options: ModelOptions,
+    *,
+    proxy_base_url: str | None = None,
+) -> str:
     config_path = target.hermes_home / "config.yaml"
     try:
         user_config = _load_yaml_mapping(config_path)
@@ -321,7 +332,9 @@ def get_active_model_option_id(target: HermesTarget, model_options: ModelOptions
         return model_options.primary_id
     for option in model_options.options:
         with contextlib.suppress(ModelOptionsError):
-            if option.matches_model_config(model_config):
+            if option.matches_model_config(
+                model_config, proxy_base_url=proxy_base_url
+            ):
                 return option.id
     return model_options.primary_id
 
@@ -348,15 +361,32 @@ def _load_yaml_mapping(path: Path) -> dict[str, Any]:
     return data
 
 
+def _strip_api_keys_outside_model(
+    value: Any, *, protected_model: dict[str, Any] | None = None
+) -> None:
+    if isinstance(value, dict):
+        if value is not protected_model:
+            value.pop("api_key", None)
+        for child in list(value.values()):
+            _strip_api_keys_outside_model(child, protected_model=protected_model)
+    elif isinstance(value, list):
+        for child in value:
+            _strip_api_keys_outside_model(child, protected_model=protected_model)
+
+
 def _patch_user_hermes_config(
-    existing: dict[str, Any], option: ModelOption
+    existing: dict[str, Any],
+    target: HermesTarget,
+    option: ModelOption,
+    *,
+    proxy_base_url: str | None = None,
 ) -> dict[str, Any]:
     patched = deepcopy(existing)
     model = _ensure_mapping(patched, "model", "model")
-    model["default"] = option.model
+    model["default"] = option.name
     model["provider"] = option.provider
-    model["base_url"] = option.base_url
-    model["api_key"] = option.api_key
+    model["base_url"] = (proxy_base_url or get_model_proxy_base_url()).rstrip("/")
+    model["api_key"] = local_model_proxy_token(target.username)
 
     if option.api_mode:
         model["api_mode"] = option.api_mode
@@ -384,33 +414,22 @@ def _patch_user_hermes_config(
     agent = _ensure_mapping(patched, "agent", "agent")
     agent["reasoning_effort"] = option.reasoning_effort
 
+    patched.pop("fallback_providers", None)
+    patched.pop("fallback_model", None)
+    _strip_api_keys_outside_model(patched, protected_model=model)
     return patched
 
 
-def _quote_env_value(value: str) -> str:
-    allowed = set("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_/-.:")
-    if value and all(char in allowed for char in value):
-        return value
-    return repr(value)
-
-
-def _patch_env_content(existing: str | None, api_key: str) -> str:
-    rendered = f"OPENAI_API_KEY={_quote_env_value(api_key)}"
+def strip_openai_api_key_env(existing: str | None) -> str:
     if existing is None:
-        return f"{rendered}\n"
+        return ""
 
-    lines = existing.splitlines(keepends=True)
-    for index, line in enumerate(lines):
-        body = line[:-1] if line.endswith("\n") else line
-        newline = "\n" if line.endswith("\n") else ""
-        match = OPENAI_API_KEY_LINE_RE.match(body)
-        if match:
-            prefix = match.group("prefix") or ""
-            lines[index] = f"{prefix}{rendered}{newline}"
-            return "".join(lines)
-
-    separator = "" if existing.endswith("\n") or not existing else "\n"
-    return f"{existing}{separator}{rendered}\n"
+    lines = [
+        line
+        for line in existing.splitlines(keepends=True)
+        if not OPENAI_API_KEY_LINE_RE.match(line[:-1] if line.endswith("\n") else line)
+    ]
+    return "".join(lines)
 
 
 def _set_owner_and_mode(path: Path, uid: int, gid: int, mode: int) -> None:
@@ -454,7 +473,12 @@ def _write_yaml_atomic(
     )
 
 
-def patch_user_active_model(target: HermesTarget, option: ModelOption) -> None:
+def patch_user_active_model(
+    target: HermesTarget,
+    option: ModelOption,
+    *,
+    proxy_base_url: str | None = None,
+) -> None:
     try:
         pw = pwd.getpwnam(target.linux_user)
     except KeyError as exc:
@@ -472,7 +496,12 @@ def patch_user_active_model(target: HermesTarget, option: ModelOption) -> None:
         _set_owner_and_mode(directory, pw.pw_uid, pw.pw_gid, 0o700)
 
     config_path = target.hermes_home / "config.yaml"
-    patched_config = _patch_user_hermes_config(_load_yaml_mapping(config_path), option)
+    patched_config = _patch_user_hermes_config(
+        _load_yaml_mapping(config_path),
+        target,
+        option,
+        proxy_base_url=proxy_base_url,
+    )
     _write_yaml_atomic(
         config_path,
         patched_config,
@@ -485,7 +514,7 @@ def patch_user_active_model(target: HermesTarget, option: ModelOption) -> None:
     existing_env = env_path.read_text(encoding="utf-8") if env_path.exists() else None
     _write_text_atomic(
         env_path,
-        _patch_env_content(existing_env, option.api_key),
+        strip_openai_api_key_env(existing_env),
         uid=pw.pw_uid,
         gid=pw.pw_gid,
         mode=0o600,

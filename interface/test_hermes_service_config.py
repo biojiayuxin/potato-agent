@@ -3,6 +3,8 @@ from __future__ import annotations
 from pathlib import Path
 from types import SimpleNamespace
 
+import yaml
+
 from interface.hermes_service import (
     build_config_data,
     build_systemd_unit,
@@ -44,7 +46,7 @@ def _target() -> HermesTarget:
     )
 
 
-def test_build_config_data_emits_single_fallback_model_at_top_level() -> None:
+def legacy_test_build_config_data_emits_single_fallback_model_at_top_level() -> None:
     fallback = {
         "provider": "openrouter",
         "model": "anthropic/claude-sonnet-4",
@@ -57,7 +59,7 @@ def test_build_config_data_emits_single_fallback_model_at_top_level() -> None:
     assert "fallback_providers" not in data
 
 
-def test_build_config_data_passes_standard_fallback_providers() -> None:
+def legacy_test_build_config_data_passes_standard_fallback_providers() -> None:
     fallbacks = [
         {
             "provider": "custom",
@@ -73,7 +75,7 @@ def test_build_config_data_passes_standard_fallback_providers() -> None:
     assert "fallback_model" not in data
 
 
-def test_build_config_data_does_not_normalize_legacy_fallback_model_list() -> None:
+def legacy_test_build_config_data_does_not_normalize_legacy_fallback_model_list() -> None:
     fallbacks = [
         {
             "provider": "custom",
@@ -88,7 +90,7 @@ def test_build_config_data_does_not_normalize_legacy_fallback_model_list() -> No
     assert "fallback_providers" not in data
 
 
-def test_build_config_data_passes_both_standard_fallback_fields() -> None:
+def legacy_test_build_config_data_passes_both_standard_fallback_fields() -> None:
     fallback_model = {
         "provider": "openrouter",
         "model": "anthropic/claude-sonnet-4",
@@ -115,6 +117,41 @@ def test_build_config_data_passes_both_standard_fallback_fields() -> None:
     assert data["fallback_model"] == fallback_model
 
 
+
+
+def test_build_config_data_disables_fallbacks_and_uses_proxy_credentials() -> None:
+    data = build_config_data(
+        {
+            "hermes": {
+                "model": {
+                    "default": "gpt-5.4",
+                    "provider": "custom",
+                    "base_url": "https://primary.example/v1",
+                    "api_key": "sk-primary",
+                },
+                "fallback_providers": [
+                    {
+                        "provider": "custom",
+                        "model": "gpt-5.4-mini",
+                        "base_url": "https://fallback.example/v1",
+                        "api_key": "sk-fallback",
+                    }
+                ],
+            }
+        },
+        _target(),
+    )
+
+    assert data["model"] == {
+        "default": "gpt-5.4",
+        "provider": "custom",
+        "base_url": "http://127.0.0.1:8765/v1",
+        "api_key": "alice-local-token",
+        "api_mode": "codex_responses",
+    }
+    assert "fallback_providers" not in data
+    assert "fallback_model" not in data
+
 def test_build_systemd_unit_hides_interface_paths() -> None:
     unit = build_systemd_unit({"hermes": {}}, _target())
 
@@ -123,6 +160,16 @@ def test_build_systemd_unit_hides_interface_paths() -> None:
     assert "InaccessiblePaths=-/srv/potato_agent" in unit
     assert "InaccessiblePaths=-/var/lib/potato-agent" in unit
     assert "InaccessiblePaths=-/opt/interface-env" in unit
+
+
+def test_build_systemd_unit_prioritizes_agent_runtime() -> None:
+    unit = build_systemd_unit({"hermes": {}}, _target())
+
+    assert "CPUWeight=1000" in unit
+    assert "IOWeight=10000" in unit
+    assert "Nice=-5" in unit
+    assert "IOSchedulingClass=best-effort" in unit
+    assert "IOSchedulingPriority=0" in unit
 
 
 def test_install_user_runtime_files_writes_only_user_runtime_paths(
@@ -184,8 +231,15 @@ def test_install_user_runtime_files_writes_only_user_runtime_paths(
         user,
     )
 
-    assert (user.hermes_home / ".env").read_text(encoding="utf-8")
-    assert (user.hermes_home / "config.yaml").read_text(encoding="utf-8")
+    env_body = (user.hermes_home / ".env").read_text(encoding="utf-8")
+    config_body = (user.hermes_home / "config.yaml").read_text(encoding="utf-8")
+    config_data = yaml.safe_load(config_body)
+    assert config_data["model"]["default"] == "gpt-5.5"
+    assert "OPENAI_API_KEY" not in env_body
+    assert "sk-user" not in env_body
+    assert config_data["model"]["base_url"] == "http://127.0.0.1:8765/v1"
+    assert config_data["model"]["api_key"] == "alice-local-token"
+    assert "sk-user" not in config_body
     assert (
         user.hermes_home / "SOUL.md"
     ).read_text(encoding="utf-8") == "Template soul\n"

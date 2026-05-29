@@ -305,7 +305,12 @@ const syncActiveSessionUiState = () => {
   state.isSending = isSessionBusy(getActivePersistentSessionId());
 };
 
-const isAnySessionBusy = () => busySessionIds.size > 0 || pendingApprovalsBySessionId.size > 0;
+const isActiveSessionBlockingModelSwitch = () => {
+  const activeSessionId = getActivePersistentSessionId();
+  return Boolean(activeSessionId) && (
+    isSessionBusy(activeSessionId) || sessionNeedsApproval(activeSessionId)
+  );
+};
 
 const getModelDisplayName = (model) => {
   if (!model) return '';
@@ -384,6 +389,7 @@ const applySessionSnapshot = (session) => {
   if (state.activeSessionId === normalizedSession.id) {
     state.activeSession = normalizedSession;
   }
+  applyLiveStateToSession(normalizedSession.id, normalizedSession.live || null);
   return normalizedSession;
 };
 
@@ -1278,7 +1284,7 @@ const refreshComposerBusyState = () => {
     dom.sendButtonIcon.src = busy ? ICON_STOP_PATH : ICON_SEND_PATH;
   }
   if (dom.modelSelect) {
-    dom.modelSelect.disabled = isAnySessionBusy() || state.models.length <= 1;
+    dom.modelSelect.disabled = isActiveSessionBlockingModelSwitch() || state.models.length <= 1;
   }
 };
 
@@ -2893,7 +2899,7 @@ const renderWorkspaceHeader = () => {
     }
   }
   dom.modelSelect.value = selectedId;
-  dom.modelSelect.disabled = isAnySessionBusy() || state.models.length <= 1;
+  dom.modelSelect.disabled = isActiveSessionBlockingModelSwitch() || state.models.length <= 1;
 };
 
 const renderFileBrowserControls = () => {
@@ -3145,7 +3151,7 @@ const switchActiveModel = async (modelId) => {
     renderWorkspaceHeader();
     return;
   }
-  if (isAnySessionBusy()) {
+  if (isActiveSessionBlockingModelSwitch()) {
     showChatError('Cannot switch models while a response or approval is active.');
     renderWorkspaceHeader();
     return;

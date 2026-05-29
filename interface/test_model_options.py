@@ -130,10 +130,10 @@ def test_normalize_rejects_invalid_model_options() -> None:
     with pytest.raises(ModelOptionsError, match="at most 3"):
         normalize_model_options(too_many)
 
-    missing = yaml.safe_load(yaml.safe_dump(base))
-    missing["hermes"]["model_options"]["options"][0].pop("api_key")
-    with pytest.raises(ModelOptionsError, match="api_key"):
-        normalize_model_options(missing)
+    public = yaml.safe_load(yaml.safe_dump(base))
+    public["hermes"]["model_options"]["options"][0].pop("api_key")
+    public["hermes"]["model_options"]["options"][0].pop("base_url")
+    assert normalize_model_options(public).primary.model == "gpt-5.4"
 
     duplicate = yaml.safe_load(yaml.safe_dump(base))
     duplicate["hermes"]["model_options"]["options"].append(
@@ -148,7 +148,7 @@ def test_normalize_rejects_invalid_model_options() -> None:
         normalize_model_options(duplicate)
 
 
-def test_patch_user_active_model_updates_model_and_env(monkeypatch, tmp_path) -> None:
+def test_patch_user_active_model_updates_model_to_proxy_and_scrubs_env(monkeypatch, tmp_path) -> None:
     target = _target(tmp_path)
     target.hermes_home.mkdir(parents=True)
     config_path = target.hermes_home / "config.yaml"
@@ -218,10 +218,10 @@ fallback_providers:
 
     data = yaml.safe_load(config_path.read_text(encoding="utf-8"))
     assert data["model"] == {
-        "default": "gpt-5.4-mini",
+        "default": "Fast",
         "provider": "custom",
-        "base_url": "https://fast.example/v1",
-        "api_key": "sk-fast",
+        "base_url": "http://127.0.0.1:8765/v1",
+        "api_key": "alice-local-token",
         "api_mode": "chat_completions",
         "context_length": 500000,
     }
@@ -229,10 +229,8 @@ fallback_providers:
     assert data["terminal"] == {"backend": "local"}
     assert data["agent"] == {"reasoning_effort": "xhigh"}
     assert data["display"] == {"compact": True}
-    assert data["fallback_providers"][0]["model"] == "keep-fallback"
-    assert (target.hermes_home / ".env").read_text(encoding="utf-8") == (
-        "FOO=bar\nOPENAI_API_KEY=sk-fast\n"
-    )
+    assert "fallback_providers" not in data
+    assert (target.hermes_home / ".env").read_text(encoding="utf-8") == "FOO=bar\n"
 
 
 def test_patch_user_active_model_clears_stale_context_length(
@@ -288,8 +286,51 @@ auxiliary:
     patch_user_active_model(target, options.primary)
 
     data = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    assert data["model"]["base_url"] == "http://127.0.0.1:8765/v1"
+    assert data["model"]["api_key"] == "alice-local-token"
     assert data["model"]["api_mode"] == "codex_responses"
     assert "context_length" not in data["model"]
     assert "context_length" not in data["auxiliary"]["compression"]
     assert data["auxiliary"]["summarizer"] == {"model": "summary"}
     assert data["agent"] == {"reasoning_effort": "xhigh"}
+
+
+def test_active_model_matching_accepts_proxy_route_name(tmp_path) -> None:
+    target = _target(tmp_path)
+    target.hermes_home.mkdir(parents=True)
+    (target.hermes_home / "config.yaml").write_text(
+        """
+model:
+  default: Alt
+  provider: custom
+  base_url: http://127.0.0.1:8765/v1
+  api_key: alice-local-token
+  api_mode: codex_responses
+""".lstrip(),
+        encoding="utf-8",
+    )
+    options = normalize_model_options(
+        {
+            "hermes": {
+                "model_options": {
+                    "primary": "primary",
+                    "options": [
+                        {
+                            "id": "primary",
+                            "name": "Main",
+                            "model": "gpt-5.4",
+                        },
+                        {
+                            "id": "alt",
+                            "name": "Alt",
+                            "model": "gpt-5.4",
+                        },
+                    ],
+                }
+            }
+        }
+    )
+
+    from interface.model_options import get_active_model_option_id
+
+    assert get_active_model_option_id(target, options) == "alt"

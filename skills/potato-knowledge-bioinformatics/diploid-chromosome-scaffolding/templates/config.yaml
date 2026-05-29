@@ -1,0 +1,52 @@
+project:
+  outdir: "hic_scaffolding_results"
+
+samples:
+  hap1:
+    assembly: "data/assembly/hap1.fa"
+    genome_id: "hap1"
+  hap2:
+    assembly: "data/assembly/hap2.fa"
+    genome_id: "hap2"
+    # r1: "data/hic/hap2_R1.fastq.gz"
+    # r2: "data/hic/hap2_R2.fastq.gz"
+
+hic_reads:
+  r1: "data/hic/HiC_R1.fastq.gz"
+  r2: "data/hic/HiC_R2.fastq.gz"
+
+enzyme:
+  name: "DpnII"
+  motif: "GATC"
+
+juicer:
+  cpu_dir: "../envs/juicer-3ddna/share/juicer/CPU"
+  script: "../envs/juicer-3ddna/share/juicer/CPU/juicer_final.sh"
+  restriction_script: "../envs/juicer-3ddna/share/juicer/misc/generate_site_positions.py"
+  threads: 24
+  assembly_mode: true
+  extra_args: []
+
+three_d_dna:
+  enabled: true
+  dir: "../envs/juicer-3ddna/share/3d-dna"
+  script: "../envs/juicer-3ddna/share/3d-dna/run-asm-pipeline.sh"
+  mode: "haploid"
+  input_size: 15000
+  rounds: 0
+  mapq: 10
+  threads: 24   # Used by Snakemake and srun --cpus-per-task when running 3D-DNA inside Slurm.
+  sort_output: true
+  gap_size: 1000
+  stage: ""
+  early_exit: false
+  fast_start: false
+  chromosome_map: null
+  extra_args: []
+
+reference:
+  rewrap_fasta: true
+  line_width: 80
+
+rerun:
+  fail_on_stale_intermediates: true
