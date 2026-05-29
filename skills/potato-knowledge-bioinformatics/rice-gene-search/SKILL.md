@@ -20,9 +20,9 @@ metadata:
 ## 适用输入
 
 - 基因符号/基因名：如 `Xa21`、`pi21`、`OsRLK8`、`D14`。
-- RAP locus：如 `Os11g0559200`。
-- MSU/RGAP locus：如 `LOC_Os11g35500`。
-- NCBI locus、cDNA、RefSeq、UniProt 登录号。
+- RAP 基因号/locus：如 `Os11g0559200`。不要用 RAP 转录本号（如 `Os11t0559200-01`）直接查询 RiceData URL，通常查不到结果。
+- MSU/RGAP 基因号/locus：如 `LOC_Os11g35500`。不要用带转录本/模型后缀的编号（如 `LOC_Os11g35500.1`）直接查询 RiceData URL，通常查不到结果。
+- NCBI 基因号及其它基因级登录号。
 - 注释关键词：如 `Cytochrome P450`、`细胞色素P450`。
 
 ## 核心流程
@@ -35,7 +35,7 @@ metadata:
 https://www.ricedata.cn/gene/accessions_switch.aspx
 ```
 
-默认把用户输入作为 `para` 查询：
+默认把用户输入作为 `para` 查询。注意：RiceData 这个 URL 查询应使用**基因级编号**，不要直接使用转录本号；转录本号通常查不到结果。若用户给的是明显的转录本号，先还原/替换为对应的基因号后再查询，例如 `Os11t0559200-01` 应改为 `Os11g0559200`，`LOC_Os11g35500.1` 应改为 `LOC_Os11g35500`。
 
 ```bash
 curl -L 'https://www.ricedata.cn/gene/accessions_switch.aspx?para=Xa21&genenm=&cloned=false&located=false&chro='

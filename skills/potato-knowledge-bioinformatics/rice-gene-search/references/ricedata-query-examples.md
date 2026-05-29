@@ -16,21 +16,21 @@ curl -L 'https://www.ricedata.cn/gene/accessions_switch.aspx?para=Xa21&genenm=&c
 
 预期可得到 `Xa21` 的 RiceData GeneID、RAP_Locus、MSU_Locus、NCBI_Locus 和注释。
 
-## 2. 按 RAP locus 查询
+## 2. 按 RAP 基因号/locus 查询
 
 ```bash
 curl -L 'https://www.ricedata.cn/gene/accessions_switch.aspx?para=Os11g0559200&genenm=&cloned=false&located=false&chro='
 ```
 
-适合用户输入 `OsXXgXXXXXXX` 形式的 RAP/IRGSP 基因号。
+适合用户输入 `OsXXgXXXXXXX` 形式的 RAP/IRGSP **基因号**。不要把 RAP 转录本号（如 `Os11t0559200-01`）直接放入 URL 查询；转录本号通常查不到结果，应先改为对应基因号（如 `Os11g0559200`）。
 
-## 3. 按 MSU/RGAP locus 查询
+## 3. 按 MSU/RGAP 基因号/locus 查询
 
 ```bash
 curl -L 'https://www.ricedata.cn/gene/accessions_switch.aspx?para=LOC_Os11g35500&genenm=&cloned=false&located=false&chro='
 ```
 
-适合用户输入 `LOC_OsXXgXXXXX` 形式的 MSU/RGAP 基因号。
+适合用户输入 `LOC_OsXXgXXXXX` 形式的 MSU/RGAP **基因号**。不要把带转录本/模型后缀的编号（如 `LOC_Os11g35500.1`）直接放入 URL 查询；通常查不到结果，应先去掉后缀改为基因号（如 `LOC_Os11g35500`）。
 
 ## 4. 按注释关键词查询
 
@@ -50,7 +50,7 @@ curl -L 'https://www.ricedata.cn/gene/accessions_switch.aspx?para=Xa21&genenm=&c
 
 | 参数 | 示例 | 含义 |
 |---|---|---|
-| `para` | `Xa21` | 基因名、符号或登录号 |
+| `para` | `Xa21` / `Os11g0559200` / `LOC_Os11g35500` | 基因名、符号或**基因级**登录号；不要用转录本号 |
 | `genenm` | `Cytochrome P450` | 基因名称或注释关键词 |
 | `cloned` | `true` / `false` | 是否只查已克隆基因 |
 | `located` | `true` / `false` | 是否只查已定位基因 |
