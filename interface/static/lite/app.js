@@ -567,7 +567,7 @@ const applyLiveStateToSession = (sessionId, live) => {
     setSessionPendingApproval(persistentSessionId, {
       approvalId: '',
       command: String(pendingApproval.command || ''),
-      description: String(pendingApproval.description || 'Hermes needs approval to continue.'),
+      description: String(pendingApproval.description || 'Potato Agent needs approval to continue.'),
       patternKey: '',
       patternKeys: [],
       options: [],
@@ -1007,7 +1007,7 @@ const handleTuiBridgeEvent = (message) => {
     setSessionPendingApproval(persistentSessionId, {
       approvalId: '',
       command: String(message?.payload?.command || ''),
-      description: String(message?.payload?.description || 'Hermes needs approval to continue.'),
+      description: String(message?.payload?.description || 'Potato Agent needs approval to continue.'),
       patternKey: '',
       patternKeys: [],
       options: [],
@@ -1511,7 +1511,7 @@ const renderApprovalModal = () => {
     dom.approvalModal.hidden = false;
   }
   if (dom.approvalDescription) {
-    dom.approvalDescription.textContent = approval.description || 'Hermes marked this command as dangerous and is waiting for your decision.';
+    dom.approvalDescription.textContent = approval.description || 'Potato Agent marked this command as dangerous and is waiting for your decision.';
   }
   if (dom.approvalCommand) {
     dom.approvalCommand.textContent = approval.command || '';
@@ -2901,7 +2901,7 @@ const renderMessages = () => {
     const isStreaming = message.role === 'assistant' && state.streamingMessageIds.has(message.id);
 
     article.classList.add(message.role === 'user' ? 'user' : 'assistant');
-    role.textContent = message.role === 'user' ? 'You' : 'Hermes';
+    role.textContent = message.role === 'user' ? 'You' : 'Potato Agent';
     renderMessageMetaSections(metaSections, message);
     renderMessageFiles(fileSection, message);
     const timestampText = !isStreaming ? formatMessageTimestamp(message.timestamp) : '';

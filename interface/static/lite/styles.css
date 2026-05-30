@@ -2040,7 +2040,7 @@ button.stretch {
   height: 68px;
   min-height: 68px;
   flex: 0 0 68px;
-  padding: 14px 16px;
+  padding: 12px 16px;
   border-bottom: 1px solid rgba(226, 232, 240, 0.72);
   gap: 12px;
 }
@@ -2053,15 +2053,15 @@ button.stretch {
 }
 
 .workspace-logo {
-  width: 36px;
-  height: 36px;
-  flex: 0 0 36px;
+  width: 44px;
+  height: 44px;
+  flex: 0 0 44px;
   display: inline-flex;
   align-items: center;
   justify-content: center;
   border-radius: 10px;
-  background: #eff6ff;
-  border: 1px solid #dbeafe;
+  background: transparent;
+  border: 0;
   overflow: hidden;
 }
 
@@ -2418,14 +2418,9 @@ button.stretch {
 
 .workspace-view .messages > .empty-state::before {
   content: '';
-  width: 64px;
-  height: 64px;
-  border-radius: 18px;
-  border: 1px solid var(--border);
-  background:
-    linear-gradient(180deg, rgba(37, 99, 235, 0.14), rgba(37, 99, 235, 0.04)),
-    url('../LOGO.png') center / 72% no-repeat;
-  box-shadow: 0 14px 32px rgba(15, 23, 42, 0.08);
+  width: 138px;
+  height: 138px;
+  background: url('./icons/potato-agent-icon.png') center / contain no-repeat;
 }
 
 .workspace-view .message {
@@ -2447,40 +2442,6 @@ button.stretch {
   display: flex;
   align-items: center;
   gap: 8px;
-}
-
-.message-avatar {
-  width: 26px;
-  height: 26px;
-  flex: 0 0 26px;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  border-radius: 9px;
-  font-size: 10px;
-  line-height: 1;
-  font-weight: 800;
-}
-
-.message.assistant .message-avatar {
-  border: 1px solid #bfdbfe;
-  background: #eff6ff;
-  color: #1d4ed8;
-}
-
-.message.assistant .message-avatar::before {
-  content: 'PA';
-}
-
-.message.user .message-avatar {
-  border: 1px solid #c7d2fe;
-  background: #eef2ff;
-  color: #4338ca;
-}
-
-.message.user .message-avatar::before {
-  content: 'You';
-  font-size: 9px;
 }
 
 .workspace-view .message.user .message-head {
