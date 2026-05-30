@@ -100,6 +100,10 @@ const dom = {
   logoutButton: document.getElementById('logout-button'),
   userName: document.getElementById('user-name'),
   userEmail: document.getElementById('user-email'),
+  sidebarSettingsButton: document.querySelector('.sidebar-settings-button'),
+  sidebarSettingsMenu: document.getElementById('sidebar-settings-menu'),
+  sidebarChangePasswordButton: document.getElementById('sidebar-change-password-button'),
+  sidebarSignOutButton: document.getElementById('sidebar-sign-out-button'),
   fileTree: document.getElementById('file-tree'),
   cwdLabel: document.getElementById('cwd-label'),
   refreshFilesButton: document.getElementById('refresh-files-button'),
@@ -1607,6 +1611,43 @@ const closePasswordModal = () => {
   if (state.passwordChangeSubmitting || !dom.passwordModal) return;
   dom.passwordModal.hidden = true;
   clearPasswordForm();
+};
+
+const closeSidebarSettingsMenu = () => {
+  if (!dom.sidebarSettingsMenu) return;
+  dom.sidebarSettingsMenu.hidden = true;
+  dom.sidebarSettingsButton?.setAttribute('aria-expanded', 'false');
+};
+
+const toggleSidebarSettingsMenu = () => {
+  if (!dom.sidebarSettingsMenu) return;
+  const shouldOpen = dom.sidebarSettingsMenu.hidden;
+  dom.sidebarSettingsMenu.hidden = !shouldOpen;
+  dom.sidebarSettingsButton?.setAttribute('aria-expanded', shouldOpen ? 'true' : 'false');
+};
+
+const performSignOut = async () => {
+  state.pendingAttachments = [];
+  stopAuthPolling();
+  resetTuiBridgeReconnectState();
+  closeTuiBridge();
+  activeTuiSessionId = '';
+  activePersistentSessionId = '';
+  if (state.chatErrorTimer) {
+    window.clearTimeout(state.chatErrorTimer);
+    state.chatErrorTimer = null;
+  }
+  showChatError('');
+  try {
+    await api('/api/auth/signout', { method: 'POST' });
+  } catch {
+    // Ignore logout transport failures and still clear the UI state.
+  }
+  state.user = null;
+  state.pendingWorkspaceUser = null;
+  resetWorkspaceState();
+  closeSidebarSettingsMenu();
+  showLogin();
 };
 
 const handlePasswordChangeSubmit = async (event) => {
@@ -4076,34 +4117,41 @@ dom.signupBackButton.addEventListener('click', () => {
 
 dom.changePasswordButton?.addEventListener('click', openPasswordModal);
 
+dom.sidebarSettingsButton?.addEventListener('click', (event) => {
+  event.stopPropagation();
+  toggleSidebarSettingsMenu();
+});
+
+dom.sidebarSettingsMenu?.addEventListener('click', (event) => {
+  event.stopPropagation();
+});
+
+dom.sidebarChangePasswordButton?.addEventListener('click', () => {
+  closeSidebarSettingsMenu();
+  openPasswordModal();
+});
+
+dom.sidebarSignOutButton?.addEventListener('click', () => {
+  performSignOut();
+});
+
+document.addEventListener('click', () => {
+  closeSidebarSettingsMenu();
+});
+
+document.addEventListener('keydown', (event) => {
+  if (event.key === 'Escape') {
+    closeSidebarSettingsMenu();
+  }
+});
+
 dom.passwordForm?.addEventListener('submit', handlePasswordChangeSubmit);
 
 dom.passwordCancelButton?.addEventListener('click', closePasswordModal);
 
 dom.passwordBackdrop?.addEventListener('click', closePasswordModal);
 
-dom.logoutButton.addEventListener('click', async () => {
-  state.pendingAttachments = [];
-  stopAuthPolling();
-  resetTuiBridgeReconnectState();
-  closeTuiBridge();
-  activeTuiSessionId = '';
-  activePersistentSessionId = '';
-  if (state.chatErrorTimer) {
-    window.clearTimeout(state.chatErrorTimer);
-    state.chatErrorTimer = null;
-  }
-  showChatError('');
-  try {
-    await api('/api/auth/signout', { method: 'POST' });
-  } catch {
-    // Ignore logout transport failures and still clear the UI state.
-  }
-  state.user = null;
-  state.pendingWorkspaceUser = null;
-  resetWorkspaceState();
-  showLogin();
-});
+dom.logoutButton.addEventListener('click', performSignOut);
 
 dom.approvalAllowOnce?.addEventListener('click', () => {
   submitApprovalDecision('once');

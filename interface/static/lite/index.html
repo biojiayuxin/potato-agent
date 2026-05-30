@@ -156,12 +156,31 @@
                 <div id="user-name" class="sidebar-user-name">Potato workspace</div>
                 <div id="user-email" class="muted tiny"></div>
               </div>
-              <button class="sidebar-settings-button" type="button" aria-label="Settings" title="Settings">
+              <button class="sidebar-settings-button" type="button" aria-label="Settings" aria-haspopup="menu" aria-expanded="false" title="Settings">
                 <svg class="sidebar-settings-icon" viewBox="0 0 24 24" aria-hidden="true">
                   <path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z"></path>
                   <circle cx="12" cy="12" r="3"></circle>
                 </svg>
               </button>
+              <div id="sidebar-settings-menu" class="sidebar-settings-menu" role="menu" hidden>
+                <button id="sidebar-change-password-button" class="sidebar-settings-menu-item" type="button" role="menuitem">
+                  <svg class="sidebar-settings-menu-icon" viewBox="0 0 24 24" aria-hidden="true">
+                    <circle cx="7.5" cy="15.5" r="5.5"></circle>
+                    <path d="m12 12 8-8"></path>
+                    <path d="m16 8 3 3"></path>
+                    <path d="m18 6 2 2"></path>
+                  </svg>
+                  <span>Change password</span>
+                </button>
+                <button id="sidebar-sign-out-button" class="sidebar-settings-menu-item" type="button" role="menuitem">
+                  <svg class="sidebar-settings-menu-icon" viewBox="0 0 24 24" aria-hidden="true">
+                    <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"></path>
+                    <path d="M16 17l5-5-5-5"></path>
+                    <path d="M21 12H9"></path>
+                  </svg>
+                  <span>Sign out</span>
+                </button>
+              </div>
             </div>
           </div>
         </aside>
