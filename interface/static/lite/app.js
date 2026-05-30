@@ -98,6 +98,7 @@ const dom = {
   newChatButton: document.getElementById('new-chat-button'),
   changePasswordButton: document.getElementById('change-password-button'),
   logoutButton: document.getElementById('logout-button'),
+  userName: document.getElementById('user-name'),
   userEmail: document.getElementById('user-email'),
   fileTree: document.getElementById('file-tree'),
   cwdLabel: document.getElementById('cwd-label'),
@@ -171,42 +172,14 @@ const MESSAGE_AUTO_SCROLL_THRESHOLD_PX = 48;
 const TUI_DEBUG_STATUS_STORAGE_KEY = 'lite_tui_bridge_debug';
 const EMAIL_VERIFICATION_COUNTDOWN_INTERVAL_MS = 1000;
 
-const getSystemTheme = () =>
-  window.matchMedia?.('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
-
-const applyThemeMode = (mode) => {
-  const normalizedMode = ['light', 'dark', 'system'].includes(mode) ? mode : 'system';
-  const resolvedTheme = normalizedMode === 'system' ? getSystemTheme() : normalizedMode;
-  document.documentElement.dataset.themeMode = normalizedMode;
-  document.documentElement.dataset.theme = resolvedTheme;
-
-  const themeSelect = document.getElementById('theme-select');
-  if (themeSelect) {
-    themeSelect.value = normalizedMode;
-  }
+const applyThemeMode = () => {
+  document.documentElement.dataset.themeMode = 'light';
+  document.documentElement.dataset.theme = 'light';
 };
 
 const initThemeControls = () => {
-  const themeSelect = document.getElementById('theme-select');
-  const saved = localStorage.getItem(THEME_MODE_KEY) || 'system';
-  applyThemeMode(saved);
-
-  if (themeSelect) {
-    themeSelect.addEventListener('change', (event) => {
-      const mode = event.target.value;
-      localStorage.setItem(THEME_MODE_KEY, mode);
-      applyThemeMode(mode);
-    });
-  }
-
-  const media = window.matchMedia?.('(prefers-color-scheme: dark)');
-  if (!media) return;
-  media.addEventListener('change', () => {
-    const mode = document.documentElement.dataset.themeMode || 'system';
-    if (mode === 'system') {
-      applyThemeMode('system');
-    }
-  });
+  localStorage.removeItem(THEME_MODE_KEY);
+  applyThemeMode();
 };
 
 const setCssSize = (name, value) => {
@@ -3102,7 +3075,40 @@ const renderChatList = () => {
   }
 };
 
+const updateModelSelectWidth = () => {
+  if (!dom.modelSelect) return;
+  const labels = Array.from(dom.modelSelect.options)
+    .map((option) => String(option.textContent || '').trim())
+    .filter(Boolean);
+  if (labels.length === 0) {
+    dom.modelSelect.style.removeProperty('--model-select-width');
+    return;
+  }
+
+  const probe = document.createElement('span');
+  const computed = window.getComputedStyle(dom.modelSelect);
+  probe.style.position = 'fixed';
+  probe.style.visibility = 'hidden';
+  probe.style.whiteSpace = 'nowrap';
+  probe.style.pointerEvents = 'none';
+  probe.style.font = computed.font;
+  document.body.append(probe);
+
+  let maxTextWidth = 0;
+  for (const label of labels) {
+    probe.textContent = label;
+    maxTextWidth = Math.max(maxTextWidth, probe.getBoundingClientRect().width);
+  }
+  probe.remove();
+
+  const selectChromeWidth = 34;
+  dom.modelSelect.style.setProperty('--model-select-width', `${Math.ceil(maxTextWidth + selectChromeWidth)}px`);
+};
+
 const renderWorkspaceHeader = () => {
+  if (dom.userName) {
+    dom.userName.textContent = state.user?.username || state.user?.name || state.user?.email || 'Potato workspace';
+  }
   dom.userEmail.textContent = state.user?.email || '';
   dom.chatTitle.textContent = getActiveChatTitle();
   if (!dom.modelSelect) return;
@@ -3123,6 +3129,7 @@ const renderWorkspaceHeader = () => {
   }
   dom.modelSelect.value = selectedId;
   dom.modelSelect.disabled = isActiveSessionBlockingModelSwitch() || state.models.length <= 1;
+  updateModelSelectWidth();
 };
 
 const renderFileBrowserControls = () => {
