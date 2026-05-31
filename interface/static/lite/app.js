@@ -28,6 +28,13 @@ const state = {
   emailVerificationResendAt: 0,
   emailVerificationTimer: null,
   emailVerificationSending: false,
+  passwordResetVerificationId: '',
+  passwordResetEmail: '',
+  passwordResetExpiresAt: 0,
+  passwordResetResendAt: 0,
+  passwordResetTimer: null,
+  passwordResetSending: false,
+  passwordResetSubmitting: false,
   pendingApproval: null,
   approvalSubmitting: false,
   pendingSessionPromise: null,
@@ -54,6 +61,19 @@ const dom = {
   authCardLabel: document.getElementById('auth-card-label'),
   authCardTitle: document.getElementById('auth-card-title'),
   authCardCopy: document.getElementById('auth-card-copy'),
+  forgotPasswordButton: document.getElementById('forgot-password-button'),
+  passwordResetForm: document.getElementById('password-reset-form'),
+  passwordResetEmail: document.getElementById('password-reset-email'),
+  passwordResetEmailCode: document.getElementById('password-reset-email-code'),
+  sendPasswordResetCodeButton: document.getElementById('send-password-reset-code-button'),
+  passwordResetCodeStatus: document.getElementById('password-reset-code-status'),
+  passwordResetNewPassword: document.getElementById('password-reset-new-password'),
+  passwordResetConfirmPassword: document.getElementById('password-reset-confirm-password'),
+  passwordResetSuccess: document.getElementById('password-reset-success'),
+  passwordResetError: document.getElementById('password-reset-error'),
+  passwordResetNavActions: document.getElementById('password-reset-nav-actions'),
+  passwordResetBackButton: document.getElementById('password-reset-back-button'),
+  passwordResetLoginButton: document.getElementById('password-reset-login-button'),
   registerForm: document.getElementById('register-form'),
   registerError: document.getElementById('register-error'),
   registerEmail: document.getElementById('register-email'),
@@ -108,8 +128,10 @@ const dom = {
   cwdLabel: document.getElementById('cwd-label'),
   refreshFilesButton: document.getElementById('refresh-files-button'),
   fileOpenControls: document.getElementById('file-open-controls'),
+  filePathDisplay: document.getElementById('file-path-display'),
+  filePathPrefix: document.getElementById('file-path-prefix'),
+  filePathTail: document.getElementById('file-path-tail'),
   filePathInput: document.getElementById('file-path-input'),
-  fileOpenButton: document.getElementById('file-open-button'),
   fileHomeButton: document.getElementById('file-home-button'),
   sidebarResizer: document.getElementById('sidebar-resizer'),
   filesResizer: document.getElementById('files-resizer'),
@@ -1798,6 +1820,194 @@ const handleSendEmailVerification = async () => {
   }
 };
 
+const stopPasswordResetTimer = () => {
+  if (state.passwordResetTimer) {
+    window.clearInterval(state.passwordResetTimer);
+    state.passwordResetTimer = null;
+  }
+};
+
+const setPasswordResetCodeStatus = (message) => {
+  if (!dom.passwordResetCodeStatus) return;
+  dom.passwordResetCodeStatus.hidden = !message;
+  dom.passwordResetCodeStatus.textContent = message || '';
+};
+
+const renderPasswordResetState = () => {
+  const button = dom.sendPasswordResetCodeButton;
+  if (!button) return;
+
+  const now = nowSeconds();
+  const cooldown = Math.max(0, Number(state.passwordResetResendAt || 0) - now);
+  const expiresIn = Math.max(0, Number(state.passwordResetExpiresAt || 0) - now);
+
+  button.disabled = Boolean(
+    state.passwordResetSending
+    || state.passwordResetSubmitting
+    || cooldown > 0
+  );
+  if (state.passwordResetSending) {
+    button.textContent = 'Sending...';
+  } else if (cooldown > 0) {
+    button.textContent = `${cooldown}s`;
+  } else if (state.passwordResetVerificationId) {
+    button.textContent = 'Resend code';
+  } else {
+    button.textContent = 'Send code';
+  }
+
+  if (state.passwordResetVerificationId && expiresIn > 0) {
+    const minutes = Math.max(1, Math.ceil(expiresIn / 60));
+    setPasswordResetCodeStatus(`If this email belongs to an active account, a code was sent. Expires in ${minutes} min.`);
+  } else if (state.passwordResetVerificationId) {
+    setPasswordResetCodeStatus('Code expired. Send a new code.');
+  } else {
+    setPasswordResetCodeStatus('');
+  }
+
+  if ((cooldown > 0 || expiresIn > 0) && !state.passwordResetTimer) {
+    state.passwordResetTimer = window.setInterval(
+      renderPasswordResetState,
+      EMAIL_VERIFICATION_COUNTDOWN_INTERVAL_MS
+    );
+  }
+  if (cooldown <= 0 && expiresIn <= 0) {
+    stopPasswordResetTimer();
+  }
+};
+
+const clearPasswordResetState = ({ clearCode = true, clearMessages = true } = {}) => {
+  stopPasswordResetTimer();
+  state.passwordResetVerificationId = '';
+  state.passwordResetEmail = '';
+  state.passwordResetExpiresAt = 0;
+  state.passwordResetResendAt = 0;
+  state.passwordResetSending = false;
+  if (clearCode && dom.passwordResetEmailCode) {
+    dom.passwordResetEmailCode.value = '';
+  }
+  if (clearMessages) {
+    showError(dom.passwordResetError, '');
+    showError(dom.passwordResetSuccess, '');
+  }
+  renderPasswordResetState();
+};
+
+const setPasswordResetSubmitting = (submitting) => {
+  state.passwordResetSubmitting = submitting;
+  const submitButton = dom.passwordResetForm?.querySelector('button[type="submit"]');
+  if (submitButton) {
+    submitButton.disabled = submitting;
+    submitButton.textContent = submitting ? 'Resetting...' : 'Reset password';
+  }
+  for (const input of [
+    dom.passwordResetEmail,
+    dom.passwordResetEmailCode,
+    dom.passwordResetNewPassword,
+    dom.passwordResetConfirmPassword,
+  ]) {
+    if (input) input.disabled = submitting;
+  }
+  if (dom.passwordResetBackButton) dom.passwordResetBackButton.disabled = submitting;
+  if (dom.passwordResetLoginButton) dom.passwordResetLoginButton.disabled = submitting;
+  renderPasswordResetState();
+};
+
+const handleSendPasswordResetVerification = async () => {
+  if (state.passwordResetSending || state.passwordResetSubmitting) return;
+  const email = dom.passwordResetEmail?.value.trim() || '';
+  showError(dom.passwordResetError, '');
+  showError(dom.passwordResetSuccess, '');
+
+  if (!email) {
+    showError(dom.passwordResetError, 'Email is required.');
+    return;
+  }
+
+  state.passwordResetSending = true;
+  renderPasswordResetState();
+  try {
+    const response = await api('/api/auth/password-reset/email-verifications', {
+      method: 'POST',
+      body: JSON.stringify({ email }),
+    });
+    const json = await response.json();
+    state.passwordResetVerificationId = String(json?.verification_id || '');
+    state.passwordResetEmail = email.toLowerCase();
+    state.passwordResetExpiresAt = Number(json?.expires_at || 0);
+    state.passwordResetResendAt = nowSeconds() + Number(json?.resend_after || 60);
+    if (dom.passwordResetEmailCode) {
+      dom.passwordResetEmailCode.value = '';
+      dom.passwordResetEmailCode.focus();
+    }
+  } catch (error) {
+    clearPasswordResetState({ clearCode: false, clearMessages: false });
+    showError(dom.passwordResetError, String(error.message || 'Failed to send reset code'));
+  } finally {
+    state.passwordResetSending = false;
+    renderPasswordResetState();
+  }
+};
+
+const handlePasswordResetSubmit = async (event) => {
+  event.preventDefault();
+  if (state.passwordResetSubmitting) return;
+
+  const email = dom.passwordResetEmail?.value.trim() || '';
+  const emailVerificationCode = dom.passwordResetEmailCode?.value.trim() || '';
+  const newPassword = dom.passwordResetNewPassword?.value || '';
+  const confirmPassword = dom.passwordResetConfirmPassword?.value || '';
+  showError(dom.passwordResetError, '');
+  showError(dom.passwordResetSuccess, '');
+
+  if (!state.passwordResetVerificationId || state.passwordResetEmail !== email.toLowerCase()) {
+    showError(dom.passwordResetError, 'Send a reset code to this email first.');
+    return;
+  }
+  if (state.passwordResetExpiresAt && state.passwordResetExpiresAt <= nowSeconds()) {
+    showError(dom.passwordResetError, 'Verification code has expired. Send a new code.');
+    return;
+  }
+  if (!/^\d{6}$/.test(emailVerificationCode)) {
+    showError(dom.passwordResetError, 'Verification code must be 6 digits.');
+    return;
+  }
+  if (newPassword.length < 8) {
+    showError(dom.passwordResetError, 'Password must be at least 8 characters.');
+    return;
+  }
+  if (newPassword !== confirmPassword) {
+    showError(dom.passwordResetError, 'Passwords do not match.');
+    return;
+  }
+
+  try {
+    setPasswordResetSubmitting(true);
+    await api('/api/auth/password-reset', {
+      method: 'POST',
+      body: JSON.stringify({
+        email,
+        new_password: newPassword,
+        email_verification_id: state.passwordResetVerificationId,
+        email_verification_code: emailVerificationCode,
+      }),
+    });
+    if (dom.passwordResetForm) {
+      dom.passwordResetForm.reset();
+    }
+    const loginEmail = document.getElementById('email');
+    if (loginEmail) {
+      loginEmail.value = email;
+    }
+    clearPasswordResetState({ clearMessages: false });
+    showError(dom.passwordResetSuccess, 'Password reset. Sign in with your new password.');
+  } catch (error) {
+    showError(dom.passwordResetError, String(error.message || 'Failed to reset password'));
+  } finally {
+    setPasswordResetSubmitting(false);
+  }
+};
+
 const stopSignupPolling = () => {
   if (state.signupPollTimer) {
     window.clearTimeout(state.signupPollTimer);
@@ -1808,6 +2018,7 @@ const stopSignupPolling = () => {
 const setAuthViewMode = (mode) => {
   const showHome = mode === 'home';
   const showSignin = mode === 'signin';
+  const showPasswordReset = mode === 'password-reset';
   const showRegister = mode === 'register';
   const showWait = mode === 'signup-wait';
   const showRuntimeStart = mode === 'runtime-start';
@@ -1819,12 +2030,20 @@ const setAuthViewMode = (mode) => {
   if (showHome) {
     showError(dom.loginError, '');
     showError(dom.registerError, '');
+    showError(dom.passwordResetError, '');
+    showError(dom.passwordResetSuccess, '');
   }
 
   if (showSignin) {
     dom.authCardLabel.textContent = 'Sign in';
     dom.authCardTitle.textContent = 'Enter Potato Agent';
     dom.authCardCopy.textContent = 'Use your account to open the isolated Potato Agent workspace assigned to you.';
+  }
+
+  if (showPasswordReset) {
+    dom.authCardLabel.textContent = 'Password reset';
+    dom.authCardTitle.textContent = 'Reset your password';
+    dom.authCardCopy.textContent = 'Verify your email address, then choose a new password.';
   }
 
   if (showRegister) {
@@ -1849,12 +2068,19 @@ const setAuthViewMode = (mode) => {
   dom.authPanelHeader.hidden = showHome;
   dom.loginForm.hidden = !showSignin;
   dom.signinNavActions.hidden = !showSignin;
+  dom.passwordResetForm.hidden = !showPasswordReset;
+  dom.passwordResetNavActions.hidden = !showPasswordReset;
   dom.registerForm.hidden = !showRegister;
   dom.registerNavActions.hidden = !showRegister;
   dom.signupWaitView.hidden = !showWait;
   dom.runtimeStartView.hidden = !showRuntimeStart;
   if (showSignin) {
     showError(dom.loginError, '');
+  }
+  if (showPasswordReset) {
+    showError(dom.passwordResetError, '');
+    showError(dom.passwordResetSuccess, '');
+    renderPasswordResetState();
   }
   if (showRegister) {
     showError(dom.registerError, '');
@@ -1899,10 +2125,12 @@ const resetWorkspaceState = () => {
   state.pendingApproval = null;
   state.approvalSubmitting = false;
   state.passwordChangeSubmitting = false;
+  state.passwordResetSubmitting = false;
   if (dom.passwordModal) {
     dom.passwordModal.hidden = true;
   }
   clearPasswordForm();
+  clearPasswordResetState();
   renderApprovalModal();
 };
 
@@ -3175,10 +3403,18 @@ const renderWorkspaceHeader = () => {
 
 const renderFileBrowserControls = () => {
   if (!dom.fileOpenControls) return;
-  dom.fileOpenControls.hidden = state.fileBrowserMode !== 'user_readable';
-  if (state.fileBrowserMode === 'user_readable' && dom.filePathInput && !dom.filePathInput.value.trim()) {
+  const isUserReadable = state.fileBrowserMode === 'user_readable';
+  dom.fileOpenControls.hidden = false;
+  if (dom.filePathDisplay) {
+    dom.filePathDisplay.hidden = isUserReadable;
+  }
+  if (dom.filePathInput) {
+    dom.filePathInput.hidden = !isUserReadable;
+  }
+  if (isUserReadable && dom.filePathInput && !dom.filePathInput.value.trim()) {
     dom.filePathInput.value = state.homePath || state.workspaceRoot || state.user?.workspace_root || '~';
   }
+  renderFilePathDisplay();
 };
 
 const renderWorkspace = () => {
@@ -3202,7 +3438,48 @@ const getDisplayDirectoryPath = () => {
   if (!workspaceRoot) {
     return state.rootPath || state.currentPath || '/';
   }
-  return workspaceRoot;
+  const relativePath = normalizeDirectory(state.currentPath || state.rootPath || '/').replace(/^\/+|\/+$/g, '');
+  const root = workspaceRoot === '/' ? '/' : workspaceRoot.replace(/\/+$/g, '');
+  if (!relativePath) return root || '/';
+  if (root === '/') return `/${relativePath}`;
+  return `${root}/${relativePath}`;
+};
+
+const splitDisplayPath = (path) => {
+  const rawPath = String(path || '~').trim() || '~';
+  if (rawPath === '/' || rawPath === '~') {
+    return { prefix: '', tail: rawPath };
+  }
+  const normalizedPath = rawPath.length > 1 ? rawPath.replace(/\/+$/g, '') : rawPath;
+  const separatorIndex = normalizedPath.lastIndexOf('/');
+  if (separatorIndex < 0) {
+    return { prefix: '', tail: normalizedPath };
+  }
+  if (separatorIndex === 0) {
+    return { prefix: '/', tail: normalizedPath.slice(1) || '' };
+  }
+  return {
+    prefix: `${normalizedPath.slice(0, separatorIndex)}/`,
+    tail: normalizedPath.slice(separatorIndex + 1),
+  };
+};
+
+const renderFilePathDisplay = () => {
+  const displayPath = getDisplayDirectoryPath();
+  const { prefix, tail } = splitDisplayPath(displayPath);
+  if (dom.filePathDisplay) {
+    dom.filePathDisplay.title = displayPath;
+  }
+  if (dom.filePathPrefix) {
+    dom.filePathPrefix.textContent = prefix;
+    dom.filePathPrefix.hidden = !prefix;
+  }
+  if (dom.filePathTail) {
+    dom.filePathTail.textContent = tail || displayPath;
+  }
+  if (dom.cwdLabel) {
+    dom.cwdLabel.textContent = displayPath;
+  }
 };
 
 const setFileTreeRoot = async ({ root, path = '', entries = null }) => {
@@ -3354,11 +3631,14 @@ const renderFileTree = async () => {
   dom.fileTree.innerHTML = '';
   if (!state.currentPath) {
     dom.fileTree.innerHTML = '<div class="empty-state">No workspace directory is available for this user.</div>';
-    dom.cwdLabel.textContent = '';
+    if (dom.cwdLabel) {
+      dom.cwdLabel.textContent = '';
+    }
+    renderFilePathDisplay();
     return;
   }
 
-  dom.cwdLabel.textContent = getDisplayDirectoryPath();
+  renderFilePathDisplay();
   const root = normalizeDirectory(state.rootPath || state.currentPath);
   try {
     const tree = await renderTreeNode(root);
@@ -3377,7 +3657,9 @@ const fetchWorkspaceFiles = async () => {
     api('/api/files/config', { method: 'GET' }).then((res) => res.json()),
     api('/api/files/tree', { method: 'GET' }).then((res) => res.json()),
   ]);
-  state.fileBrowserMode = String(configJson?.mode || 'home_only');
+  state.fileBrowserMode = String(configJson?.mode || 'home_only') === 'user_readable'
+    ? 'user_readable'
+    : 'home_only';
   state.homePath = String(configJson?.home || treeJson?.root || state.user?.workspace_root || '').trim();
   renderFileBrowserControls();
   await setFileTreeRoot({
@@ -3402,6 +3684,7 @@ const openDirectory = async (rawPath) => {
   if (dom.filePathInput) {
     dom.filePathInput.value = String(json?.opened_path || requestedPath);
   }
+  renderFilePathDisplay();
 };
 
 const fetchModels = async () => {
@@ -4065,10 +4348,19 @@ dom.registerForm.addEventListener('submit', async (event) => {
 
 dom.sendEmailCodeButton?.addEventListener('click', handleSendEmailVerification);
 
+dom.sendPasswordResetCodeButton?.addEventListener('click', handleSendPasswordResetVerification);
+
 dom.registerEmail?.addEventListener('input', () => {
   const currentEmail = dom.registerEmail.value.trim().toLowerCase();
   if (state.emailVerificationEmail && currentEmail !== state.emailVerificationEmail) {
     clearEmailVerificationState();
+  }
+});
+
+dom.passwordResetEmail?.addEventListener('input', () => {
+  const currentEmail = dom.passwordResetEmail.value.trim().toLowerCase();
+  if (state.passwordResetEmail && currentEmail !== state.passwordResetEmail) {
+    clearPasswordResetState();
   }
 });
 
@@ -4079,12 +4371,28 @@ dom.registerEmailCode?.addEventListener('input', () => {
   }
 });
 
+dom.passwordResetEmailCode?.addEventListener('input', () => {
+  const digits = dom.passwordResetEmailCode.value.replace(/\D/g, '').slice(0, 6);
+  if (dom.passwordResetEmailCode.value !== digits) {
+    dom.passwordResetEmailCode.value = digits;
+  }
+});
+
 dom.showRegisterButton.addEventListener('click', () => {
   setAuthViewMode('register');
 });
 
 dom.showLoginButton.addEventListener('click', () => {
   setAuthViewMode('signin');
+});
+
+dom.forgotPasswordButton?.addEventListener('click', () => {
+  const loginEmail = document.getElementById('email')?.value.trim() || '';
+  if (dom.passwordResetEmail && !dom.passwordResetEmail.value.trim()) {
+    dom.passwordResetEmail.value = loginEmail;
+  }
+  setAuthViewMode('password-reset');
+  window.requestAnimationFrame(() => dom.passwordResetEmail?.focus());
 });
 
 dom.authBackButton?.addEventListener('click', () => {
@@ -4100,6 +4408,16 @@ dom.registerBackButton?.addEventListener('click', () => {
 });
 
 dom.switchLoginButton?.addEventListener('click', () => {
+  setAuthViewMode('signin');
+});
+
+dom.passwordResetBackButton?.addEventListener('click', () => {
+  if (state.passwordResetSubmitting) return;
+  setAuthViewMode('signin');
+});
+
+dom.passwordResetLoginButton?.addEventListener('click', () => {
+  if (state.passwordResetSubmitting) return;
   setAuthViewMode('signin');
 });
 
@@ -4146,6 +4464,8 @@ document.addEventListener('keydown', (event) => {
 });
 
 dom.passwordForm?.addEventListener('submit', handlePasswordChangeSubmit);
+
+dom.passwordResetForm?.addEventListener('submit', handlePasswordResetSubmit);
 
 dom.passwordCancelButton?.addEventListener('click', closePasswordModal);
 
@@ -4281,10 +4601,6 @@ dom.refreshFilesButton.addEventListener('click', async () => {
   await fetchWorkspaceFiles().catch((error) => showChatError(error.message));
 });
 
-dom.fileOpenButton?.addEventListener('click', async () => {
-  await openDirectory(dom.filePathInput?.value || '').catch((error) => showChatError(error.message));
-});
-
 dom.fileHomeButton?.addEventListener('click', async () => {
   const homePath = state.homePath || state.user?.workspace_root || '~';
   await openDirectory(homePath).catch((error) => showChatError(error.message));
@@ -4300,4 +4616,5 @@ initResizablePanels();
 initThemeControls();
 autoResizePromptInput();
 renderEmailVerificationState();
+renderPasswordResetState();
 bootstrapSession();

@@ -397,6 +397,27 @@ button {
   margin-top: 4px;
 }
 
+.login-inline-action {
+  display: flex;
+  justify-content: flex-end;
+  margin-top: -4px;
+}
+
+.login-link-button {
+  border: 0;
+  background: transparent;
+  color: #1d2d50;
+  padding: 0;
+  font-size: 13px;
+  font-weight: 700;
+  line-height: 1.4;
+}
+
+.login-link-button:hover {
+  color: var(--primary);
+  text-decoration: underline;
+}
+
 .email-verification-row {
   display: grid;
   grid-template-columns: minmax(0, 1fr) 118px;
@@ -1596,6 +1617,27 @@ button.stretch {
   min-width: 0;
 }
 
+.file-path-display {
+  width: 100%;
+  max-width: 100%;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  overflow: hidden;
+  white-space: nowrap;
+}
+
+.file-path-prefix {
+  flex: 0 0 auto;
+}
+
+.file-path-tail {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .file-open-buttons .ghost.small {
   flex: 0 0 auto;
 }
@@ -2730,6 +2772,27 @@ button.stretch {
   border-radius: 10px;
   background: var(--panel-soft);
   font-size: 13px;
+}
+
+.workspace-view .file-path-display {
+  min-height: 30px;
+  padding: 6px 10px;
+  border: 1px solid #e2e8f0;
+  border-radius: 6px;
+  background: #f8fafc;
+  color: var(--muted);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+  font-size: 12px;
+  line-height: 1.35;
+}
+
+.workspace-view .file-path-prefix {
+  color: var(--primary);
+  font-weight: 650;
+}
+
+.workspace-view .file-path-tail {
+  color: #334155;
 }
 
 .workspace-view .file-open-buttons {

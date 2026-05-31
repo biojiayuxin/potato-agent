@@ -77,6 +77,29 @@ def _signup_verification_html(code: str) -> str:
     )
 
 
+def _password_reset_text(code: str) -> str:
+    return (
+        "Your Potato Agent password reset code is:\n\n"
+        f"{code}\n\n"
+        "This code expires in 10 minutes. If you did not request a password reset, you can ignore this email."
+    )
+
+
+def _password_reset_html(code: str) -> str:
+    escaped_code = html.escape(code)
+    return (
+        "<div style=\"font-family:Arial,sans-serif;line-height:1.5;color:#14213d\">"
+        "<h2>Reset your Potato Agent password</h2>"
+        "<p>Your password reset code is:</p>"
+        "<p style=\"font-size:28px;font-weight:700;letter-spacing:4px\">"
+        f"{escaped_code}"
+        "</p>"
+        "<p>This code expires in 10 minutes.</p>"
+        "<p>If you did not request a password reset, you can ignore this email.</p>"
+        "</div>"
+    )
+
+
 def _resend_error_details(response: httpx.Response) -> tuple[str, str]:
     try:
         payload = response.json()
@@ -153,6 +176,70 @@ async def send_signup_verification_email(
     email_id = str(data.get("id") or "") if isinstance(data, dict) else ""
     LOGGER.info(
         "Resend accepted signup verification email: status=%s email_id=%s",
+        response.status_code,
+        email_id,
+    )
+    return ResendEmailResult(email_id=email_id, status_code=response.status_code)
+
+
+async def send_password_reset_email(
+    *,
+    email: str,
+    code: str,
+    verification_id: str,
+    expires_at: int,
+    settings: ResendSettings | None = None,
+) -> ResendEmailResult:
+    resend_settings = settings or get_resend_settings()
+    payload: dict[str, object] = {
+        "from": resend_settings.mail_from,
+        "to": [email],
+        "subject": "Your Potato Agent password reset code",
+        "text": _password_reset_text(code),
+        "html": _password_reset_html(code),
+    }
+    if resend_settings.reply_to:
+        payload["reply_to"] = resend_settings.reply_to
+
+    headers = {
+        "Authorization": f"Bearer {resend_settings.api_key}",
+        "User-Agent": USER_AGENT,
+        "Idempotency-Key": verification_id,
+    }
+    timeout = httpx.Timeout(15.0, connect=5.0)
+
+    try:
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            response = await client.post(
+                f"{RESEND_API_BASE_URL}/emails",
+                headers=headers,
+                json=payload,
+            )
+    except httpx.HTTPError as exc:
+        raise MailerDeliveryError(
+            "Resend request failed", error_type=type(exc).__name__
+        ) from exc
+
+    if response.status_code < 200 or response.status_code >= 300:
+        error_type, message = _resend_error_details(response)
+        LOGGER.warning(
+            "Resend rejected password reset email: status=%s error_type=%s",
+            response.status_code,
+            error_type,
+        )
+        raise MailerDeliveryError(
+            message or "Resend rejected email",
+            status_code=response.status_code,
+            error_type=error_type,
+        )
+
+    try:
+        data = response.json()
+    except Exception:
+        data = {}
+    email_id = str(data.get("id") or "") if isinstance(data, dict) else ""
+    LOGGER.info(
+        "Resend accepted password reset email: status=%s email_id=%s",
         response.status_code,
         email_id,
     )

@@ -40,6 +40,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from interface.auth_db import (
+    EMAIL_VERIFICATION_PURPOSE_PASSWORD_RESET,
     EMAIL_VERIFICATION_PURPOSE_SIGNUP,
     EmailVerificationError,
     activate_signup_user,
@@ -51,12 +52,14 @@ from interface.auth_db import (
     email_verification_send_stats,
     get_next_pending_signup_job,
     get_signup_job,
+    get_user_by_email,
     get_user_by_id,
     get_user_with_password_by_id,
     get_user_with_password_by_login,
     list_users,
     mark_email_verification_failed,
     record_email_verification_sent,
+    reset_user_password_with_email_verification,
     set_signup_job_status,
     update_user_password,
     username_exists,
@@ -88,6 +91,7 @@ from interface.mapping import DEFAULT_MAPPING_PATH, HermesTarget, MappingStore
 from interface.mailer import (
     MailerConfigurationError,
     MailerDeliveryError,
+    send_password_reset_email,
     send_signup_verification_email,
 )
 from interface.hermes_service import (
@@ -155,6 +159,8 @@ ACTIVITY_REFRESH_EXCLUDED_PATHS = {
     "/api/auth/session",
     "/api/auth/signin",
     "/api/auth/signout",
+    "/api/auth/password-reset",
+    "/api/auth/password-reset/email-verifications",
 }
 EMAIL_VERIFICATION_TTL_SECONDS = 10 * 60
 EMAIL_VERIFICATION_RESEND_COOLDOWN_SECONDS = 60
@@ -239,6 +245,13 @@ class PasswordChangeRequest(BaseModel):
     new_password: str
 
 
+class PasswordResetRequest(BaseModel):
+    email: str
+    email_verification_id: str = ""
+    email_verification_code: str = ""
+    new_password: str
+
+
 class EmailVerificationRequest(BaseModel):
     email: str
 
@@ -287,10 +300,16 @@ def _validate_signup_email(email: str) -> str:
     return normalized_email
 
 
-def _hash_email_verification_code(email: str, code: str) -> str:
+def _hash_email_verification_code(
+    email: str,
+    code: str,
+    *,
+    purpose: str = EMAIL_VERIFICATION_PURPOSE_SIGNUP,
+) -> str:
     normalized_email = email.strip().lower()
     normalized_code = code.strip()
-    message = f"{EMAIL_VERIFICATION_PURPOSE_SIGNUP}:{normalized_email}:{normalized_code}"
+    normalized_purpose = purpose.strip() or EMAIL_VERIFICATION_PURPOSE_SIGNUP
+    message = f"{normalized_purpose}:{normalized_email}:{normalized_code}"
     return hmac.new(
         SESSION_SECRET.encode("utf-8"),
         message.encode("utf-8"),
@@ -2148,6 +2167,161 @@ async def create_signup_email_verification(
         "expires_at": expires_at,
         "resend_after": EMAIL_VERIFICATION_RESEND_COOLDOWN_SECONDS,
     }
+
+
+@app.post("/api/auth/password-reset/email-verifications")
+async def create_password_reset_email_verification(
+    payload: EmailVerificationRequest, request: Request
+) -> dict[str, Any]:
+    email = _validate_signup_email(payload.email)
+    now = _now_seconds()
+    client_ip_hash = _hash_client_ip(_client_ip_for_request(request))
+    stats = email_verification_send_stats(
+        email=email,
+        purpose=EMAIL_VERIFICATION_PURPOSE_PASSWORD_RESET,
+        client_ip_hash=client_ip_hash,
+        now=now,
+    )
+    if stats.last_email_sent_at is not None:
+        resend_after = max(
+            EMAIL_VERIFICATION_RESEND_COOLDOWN_SECONDS
+            - (now - stats.last_email_sent_at),
+            1,
+        )
+        raise HTTPException(
+            status_code=429,
+            detail={
+                "message": "Password reset code was sent recently. Please wait before requesting another code.",
+                "resend_after": resend_after,
+            },
+        )
+    if stats.email_hourly_count >= EMAIL_VERIFICATION_EMAIL_HOURLY_LIMIT:
+        raise HTTPException(
+            status_code=429,
+            detail="Too many password reset emails sent to this address. Please try again later.",
+        )
+    if stats.ip_hourly_count >= EMAIL_VERIFICATION_IP_HOURLY_LIMIT:
+        raise HTTPException(
+            status_code=429,
+            detail="Too many password reset email requests. Please try again later.",
+        )
+
+    code = f"{secrets.randbelow(1_000_000):06d}"
+    expires_at = now + EMAIL_VERIFICATION_TTL_SECONDS
+    verification_id = create_pending_email_verification(
+        email=email,
+        code_hash=_hash_email_verification_code(
+            email,
+            code,
+            purpose=EMAIL_VERIFICATION_PURPOSE_PASSWORD_RESET,
+        ),
+        purpose=EMAIL_VERIFICATION_PURPOSE_PASSWORD_RESET,
+        client_ip_hash=client_ip_hash,
+        expires_at=expires_at,
+        now=now,
+    )
+
+    record = get_user_by_email(email)
+    if record is not None and record.active:
+        try:
+            result = await send_password_reset_email(
+                email=email,
+                code=code,
+                verification_id=verification_id,
+                expires_at=expires_at,
+            )
+        except MailerConfigurationError as exc:
+            mark_email_verification_failed(verification_id)
+            LOGGER.warning(
+                "Password reset email is not configured: error_type=%s",
+                type(exc).__name__,
+            )
+            raise HTTPException(
+                status_code=503,
+                detail="Password reset email could not be sent. Please try again later.",
+            ) from exc
+        except MailerDeliveryError as exc:
+            mark_email_verification_failed(verification_id)
+            LOGGER.warning(
+                "Password reset email send failed: status=%s error_type=%s",
+                exc.status_code,
+                exc.error_type,
+            )
+            raise HTTPException(
+                status_code=503,
+                detail="Password reset email could not be sent. Please try again later.",
+            ) from exc
+        except Exception as exc:
+            mark_email_verification_failed(verification_id)
+            LOGGER.warning(
+                "Password reset email send failed: error_type=%s",
+                type(exc).__name__,
+            )
+            raise HTTPException(
+                status_code=503,
+                detail="Password reset email could not be sent. Please try again later.",
+            ) from exc
+
+        record_email_verification_sent(
+            verification_id,
+            resend_email_id=result.email_id,
+            now=_now_seconds(),
+        )
+        LOGGER.info(
+            "Password reset email sent: status=%s email_id=%s",
+            result.status_code,
+            result.email_id,
+        )
+    else:
+        LOGGER.info("Password reset requested for non-active account email.")
+
+    return {
+        "ok": True,
+        "verification_id": verification_id,
+        "expires_at": expires_at,
+        "resend_after": EMAIL_VERIFICATION_RESEND_COOLDOWN_SECONDS,
+    }
+
+
+@app.post("/api/auth/password-reset")
+async def reset_password(
+    payload: PasswordResetRequest,
+    response: Response,
+) -> dict[str, Any]:
+    email = _validate_signup_email(payload.email)
+    verification_id = payload.email_verification_id.strip()
+    verification_code = payload.email_verification_code.strip()
+    new_password = payload.new_password
+
+    if len(new_password) < 8:
+        raise HTTPException(
+            status_code=400, detail="Password must be at least 8 characters."
+        )
+    if not verification_id:
+        raise HTTPException(status_code=400, detail="Email verification is required.")
+    if not re.fullmatch(r"\d{6}", verification_code):
+        raise HTTPException(
+            status_code=400, detail="Verification code must be 6 digits."
+        )
+
+    try:
+        reset_user_password_with_email_verification(
+            email=email,
+            new_password=new_password,
+            email_verification_id=verification_id,
+            email_verification_code_hash=_hash_email_verification_code(
+                email,
+                verification_code,
+                purpose=EMAIL_VERIFICATION_PURPOSE_PASSWORD_RESET,
+            ),
+            purpose=EMAIL_VERIFICATION_PURPOSE_PASSWORD_RESET,
+        )
+    except EmailVerificationError as exc:
+        status_code = 429 if exc.reason == "too_many_attempts" else 400
+        raise HTTPException(status_code=status_code, detail=exc.message) from exc
+
+    _clear_session_cookie(response)
+    return {"ok": True}
 
 
 @app.post("/api/auth/signup")

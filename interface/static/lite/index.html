@@ -41,6 +41,9 @@
                   <span>Password</span>
                   <input id="password" name="password" type="password" autocomplete="current-password" required />
                 </label>
+                <div class="login-inline-action">
+                  <button id="forgot-password-button" type="button" class="login-link-button">Forgot password?</button>
+                </div>
                 <button type="submit" class="primary login-submit">Sign in</button>
                 <div id="login-error" class="error" hidden></div>
               </form>
@@ -48,6 +51,37 @@
               <div id="signin-nav-actions" class="login-secondary-actions" hidden>
                 <button id="auth-back-button" type="button" class="ghost login-secondary-button">Back</button>
                 <button id="switch-register-button" type="button" class="ghost login-secondary-button">Register instead</button>
+              </div>
+
+              <form id="password-reset-form" class="stack gap-12" hidden>
+                <label class="stack gap-6">
+                  <span>Email</span>
+                  <div class="email-verification-row">
+                    <input id="password-reset-email" name="password-reset-email" type="email" autocomplete="email" />
+                    <button id="send-password-reset-code-button" type="button" class="ghost email-code-button">Send code</button>
+                  </div>
+                </label>
+                <label class="stack gap-6">
+                  <span>Verification code</span>
+                  <input id="password-reset-email-code" name="password-reset-email-code" type="text" inputmode="numeric" maxlength="6" autocomplete="one-time-code" />
+                </label>
+                <div id="password-reset-code-status" class="code-status" hidden></div>
+                <label class="stack gap-6">
+                  <span>New password</span>
+                  <input id="password-reset-new-password" name="password-reset-new-password" type="password" autocomplete="new-password" />
+                </label>
+                <label class="stack gap-6">
+                  <span>Confirm new password</span>
+                  <input id="password-reset-confirm-password" name="password-reset-confirm-password" type="password" autocomplete="new-password" />
+                </label>
+                <button type="submit" class="primary login-submit">Reset password</button>
+                <div id="password-reset-success" class="success" hidden></div>
+                <div id="password-reset-error" class="error" hidden></div>
+              </form>
+
+              <div id="password-reset-nav-actions" class="login-secondary-actions" hidden>
+                <button id="password-reset-back-button" type="button" class="ghost login-secondary-button">Back</button>
+                <button id="password-reset-login-button" type="button" class="ghost login-secondary-button">Sign in instead</button>
               </div>
 
               <form id="register-form" class="stack gap-12" hidden>
@@ -261,8 +295,12 @@
                   </button>
                 </div>
               </div>
-              <div id="file-open-controls" class="file-open-controls" hidden>
-                <input id="file-path-input" type="text" class="file-path-input" placeholder="Open path and press Enter" />
+              <div id="file-open-controls" class="file-open-controls">
+                <div id="file-path-display" class="file-path-display" title="" hidden>
+                  <span id="file-path-prefix" class="file-path-prefix"></span>
+                  <span id="file-path-tail" class="file-path-tail"></span>
+                </div>
+                <input id="file-path-input" type="text" class="file-path-input" placeholder="Open path and press Enter" hidden />
               </div>
               <div id="file-tree" class="file-tree"></div>
             </aside>

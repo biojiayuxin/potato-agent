@@ -91,6 +91,7 @@ ACTIVE_SIGNUP_JOB_STATUSES = ("pending", "provisioning")
 TERMINAL_SIGNUP_JOB_STATUSES = ("completed", "failed")
 DEFAULT_SIGNUP_JOB_RETENTION_SECONDS = 3600
 EMAIL_VERIFICATION_PURPOSE_SIGNUP = "signup"
+EMAIL_VERIFICATION_PURPOSE_PASSWORD_RESET = "password_reset"
 EMAIL_VERIFICATION_STATUS_PENDING = "pending"
 EMAIL_VERIFICATION_STATUS_EXPIRED = "expired"
 EMAIL_VERIFICATION_STATUS_CONSUMED = "consumed"
@@ -406,6 +407,19 @@ def get_user_by_login(
     return _row_to_user(row)
 
 
+def get_user_by_email(
+    email: str, db_path: Path = DEFAULT_AUTH_DB_PATH
+) -> InterfaceUser | None:
+    normalized_email = email.strip().lower()
+    query = (
+        "select id, username, email, name, role, mapping_username, active, auth_session_version, created_at, updated_at "
+        "from users where lower(email) = lower(?) limit 1"
+    )
+    with connect_auth_db(db_path) as conn:
+        row = conn.execute(query, (normalized_email,)).fetchone()
+    return _row_to_user(row)
+
+
 def get_user_with_password_by_login(
     login: str, db_path: Path = DEFAULT_AUTH_DB_PATH
 ) -> tuple[InterfaceUser | None, str | None]:
@@ -541,6 +555,151 @@ def update_user_password(
     return get_user_by_id(normalized_user_id, db_path)
 
 
+def _consume_email_verification_in_conn(
+    conn: sqlite3.Connection,
+    *,
+    email: str,
+    email_verification_id: str,
+    email_verification_code_hash: str,
+    purpose: str,
+    max_attempts: int,
+    timestamp: int,
+) -> int:
+    normalized_email = email.strip().lower()
+    normalized_purpose = purpose.strip() or EMAIL_VERIFICATION_PURPOSE_SIGNUP
+    verification_id = email_verification_id.strip()
+    row = conn.execute(
+        "select id, email, purpose, code_hash, status, attempt_count, expires_at "
+        "from email_verifications where id = ? limit 1",
+        (verification_id,),
+    ).fetchone()
+    if row is None:
+        raise EmailVerificationError(
+            "not_found", "Invalid or expired verification code."
+        )
+
+    status = str(row["status"])
+    if status == EMAIL_VERIFICATION_STATUS_CONSUMED:
+        raise EmailVerificationError(
+            "consumed", "This verification code has already been used."
+        )
+    if status != EMAIL_VERIFICATION_STATUS_PENDING:
+        raise EmailVerificationError(status, "Invalid or expired verification code.")
+    if (
+        str(row["purpose"]) != normalized_purpose
+        or str(row["email"]).lower() != normalized_email
+    ):
+        raise EmailVerificationError(
+            "email_mismatch", "Verification code does not match this email."
+        )
+
+    expires_at = int(row["expires_at"] or 0)
+    if expires_at < timestamp:
+        conn.execute(
+            "update email_verifications set status = ?, updated_at = ? where id = ?",
+            (EMAIL_VERIFICATION_STATUS_EXPIRED, timestamp, verification_id),
+        )
+        conn.commit()
+        raise EmailVerificationError(
+            "expired", "Verification code has expired. Send a new code."
+        )
+
+    attempt_count = int(row["attempt_count"] or 0)
+    if attempt_count >= max_attempts:
+        conn.execute(
+            "update email_verifications set status = ?, updated_at = ? where id = ?",
+            (EMAIL_VERIFICATION_STATUS_FAILED, timestamp, verification_id),
+        )
+        conn.commit()
+        raise EmailVerificationError(
+            "too_many_attempts",
+            "Too many incorrect verification attempts. Send a new code.",
+        )
+
+    if not hmac.compare_digest(
+        str(row["code_hash"]), email_verification_code_hash.strip()
+    ):
+        attempt_count += 1
+        new_status = (
+            EMAIL_VERIFICATION_STATUS_FAILED
+            if attempt_count >= max_attempts
+            else EMAIL_VERIFICATION_STATUS_PENDING
+        )
+        conn.execute(
+            "update email_verifications set attempt_count = ?, status = ?, updated_at = ? where id = ?",
+            (attempt_count, new_status, timestamp, verification_id),
+        )
+        conn.commit()
+        if new_status == EMAIL_VERIFICATION_STATUS_FAILED:
+            raise EmailVerificationError(
+                "too_many_attempts",
+                "Too many incorrect verification attempts. Send a new code.",
+            )
+        raise EmailVerificationError("invalid_code", "Invalid verification code.")
+
+    conn.execute(
+        "update email_verifications set status = ?, verified_at = ?, consumed_at = ?, updated_at = ? where id = ?",
+        (
+            EMAIL_VERIFICATION_STATUS_CONSUMED,
+            timestamp,
+            timestamp,
+            timestamp,
+            verification_id,
+        ),
+    )
+    return timestamp
+
+
+def reset_user_password_with_email_verification(
+    *,
+    email: str,
+    new_password: str,
+    email_verification_id: str,
+    email_verification_code_hash: str,
+    purpose: str = EMAIL_VERIFICATION_PURPOSE_PASSWORD_RESET,
+    max_attempts: int = DEFAULT_EMAIL_VERIFICATION_MAX_ATTEMPTS,
+    now: int | None = None,
+    db_path: Path = DEFAULT_AUTH_DB_PATH,
+) -> InterfaceUser:
+    normalized_email = email.strip().lower()
+    normalized_purpose = purpose.strip() or EMAIL_VERIFICATION_PURPOSE_PASSWORD_RESET
+    timestamp = int(time.time()) if now is None else int(now)
+
+    with connect_auth_db(db_path) as conn:
+        conn.execute("begin immediate")
+        row = conn.execute(
+            "select id from users where lower(email) = lower(?) and active = 1 limit 1",
+            (normalized_email,),
+        ).fetchone()
+        if row is None:
+            raise EmailVerificationError(
+                "not_found", "Invalid or expired verification code."
+            )
+
+        user_id = str(row["id"])
+        _consume_email_verification_in_conn(
+            conn,
+            email=normalized_email,
+            email_verification_id=email_verification_id,
+            email_verification_code_hash=email_verification_code_hash,
+            purpose=normalized_purpose,
+            max_attempts=max_attempts,
+            timestamp=timestamp,
+        )
+        password_hash = hash_password(new_password)
+        conn.execute(
+            "update users set password_hash = ?, auth_session_version = coalesce(auth_session_version, 0) + 1, updated_at = ? "
+            "where id = ?",
+            (password_hash, timestamp, user_id),
+        )
+        conn.commit()
+
+    user = get_user_by_id(user_id, db_path)
+    if user is None:
+        raise RuntimeError("Failed to load interface user after password reset")
+    return user
+
+
 def create_signup_job(
     *,
     username: str,
@@ -599,85 +758,15 @@ def create_signup_job_with_email_verification(
 
     with connect_auth_db(db_path) as conn:
         conn.execute("begin immediate")
-        row = conn.execute(
-            "select id, email, purpose, code_hash, status, attempt_count, expires_at "
-            "from email_verifications where id = ? limit 1",
-            (email_verification_id.strip(),),
-        ).fetchone()
-        if row is None:
-            raise EmailVerificationError(
-                "not_found", "Invalid or expired verification code."
-            )
-
-        status = str(row["status"])
-        if status == EMAIL_VERIFICATION_STATUS_CONSUMED:
-            raise EmailVerificationError(
-                "consumed", "This verification code has already been used."
-            )
-        if status != EMAIL_VERIFICATION_STATUS_PENDING:
-            raise EmailVerificationError(
-                status, "Invalid or expired verification code."
-            )
-        if (
-            str(row["purpose"]) != normalized_purpose
-            or str(row["email"]).lower() != normalized_email
-        ):
-            raise EmailVerificationError(
-                "email_mismatch", "Verification code does not match this email."
-            )
-
-        expires_at = int(row["expires_at"] or 0)
-        if expires_at < timestamp:
-            conn.execute(
-                "update email_verifications set status = ?, updated_at = ? where id = ?",
-                (
-                    EMAIL_VERIFICATION_STATUS_EXPIRED,
-                    timestamp,
-                    email_verification_id.strip(),
-                ),
-            )
-            conn.commit()
-            raise EmailVerificationError(
-                "expired", "Verification code has expired. Send a new code."
-            )
-
-        attempt_count = int(row["attempt_count"] or 0)
-        if attempt_count >= max_attempts:
-            conn.execute(
-                "update email_verifications set status = ?, updated_at = ? where id = ?",
-                (
-                    EMAIL_VERIFICATION_STATUS_FAILED,
-                    timestamp,
-                    email_verification_id.strip(),
-                ),
-            )
-            conn.commit()
-            raise EmailVerificationError(
-                "too_many_attempts",
-                "Too many incorrect verification attempts. Send a new code.",
-            )
-
-        if not hmac.compare_digest(
-            str(row["code_hash"]), email_verification_code_hash.strip()
-        ):
-            attempt_count += 1
-            new_status = (
-                EMAIL_VERIFICATION_STATUS_FAILED
-                if attempt_count >= max_attempts
-                else EMAIL_VERIFICATION_STATUS_PENDING
-            )
-            conn.execute(
-                "update email_verifications set attempt_count = ?, status = ?, updated_at = ? where id = ?",
-                (attempt_count, new_status, timestamp, email_verification_id.strip()),
-            )
-            conn.commit()
-            if new_status == EMAIL_VERIFICATION_STATUS_FAILED:
-                raise EmailVerificationError(
-                    "too_many_attempts",
-                    "Too many incorrect verification attempts. Send a new code.",
-            )
-            raise EmailVerificationError("invalid_code", "Invalid verification code.")
-
+        _consume_email_verification_in_conn(
+            conn,
+            email=normalized_email,
+            email_verification_id=email_verification_id,
+            email_verification_code_hash=email_verification_code_hash,
+            purpose=normalized_purpose,
+            max_attempts=max_attempts,
+            timestamp=timestamp,
+        )
         password_hash = hash_password(password)
         conn.execute(
             "insert into signup_jobs "
@@ -693,16 +782,6 @@ def create_signup_job_with_email_verification(
                 timestamp,
                 timestamp,
                 timestamp,
-            ),
-        )
-        conn.execute(
-            "update email_verifications set status = ?, verified_at = ?, consumed_at = ?, updated_at = ? where id = ?",
-            (
-                EMAIL_VERIFICATION_STATUS_CONSUMED,
-                timestamp,
-                timestamp,
-                timestamp,
-                email_verification_id.strip(),
             ),
         )
         conn.commit()

@@ -282,7 +282,12 @@ def _load_app(tmp_path, monkeypatch):
     monkeypatch.setenv("INTERFACE_SESSION_SECRET", "test-secret")
     monkeypatch.delenv("INTERFACE_RESEND_API_KEY", raising=False)
     monkeypatch.delenv("INTERFACE_MAIL_FROM", raising=False)
-    for module_name in ("interface.auth_db", "interface.mailer", "interface.app"):
+    for module_name in (
+        "interface.auth_db",
+        "interface.runtime_state",
+        "interface.mailer",
+        "interface.app",
+    ):
         sys.modules.pop(module_name, None)
     auth_db_mod = importlib.import_module("interface.auth_db")
     mailer_mod = importlib.import_module("interface.mailer")
