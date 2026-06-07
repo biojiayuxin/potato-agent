@@ -70,6 +70,7 @@ chmod 0600 /var/lib/potato-agent/data/*.db 2>/dev/null || true
 - `sudo`
 - `systemctl`
 - `micromamba`，用于生信技能按用户隔离安装工具环境
+- 系统默认 Python 可直接导入 GO/KEGG 分析依赖
 - Hermes Python 依赖需要的编译工具
 
 Debian 或 Ubuntu 可先安装基础包：
@@ -169,7 +170,46 @@ su -s /bin/bash -c 'source /etc/profile.d/micromamba.sh && command -v micromamba
 source /etc/profile.d/micromamba.sh
 ```
 
-### 4. 安装 Hermes 运行时
+### 4. 安装系统 Python GO/KEGG 分析依赖
+
+GO 富集和 KEGG 分析脚本会从用户 shell、Slurm 作业或 skill 脚本里直接调用系统默认
+`python3`。新部署不能只把这些包安装到 `/opt/interface-env` 或 `/opt/hermes-agent-venv`，必须保证
+普通 Linux 用户运行 `/usr/bin/python3` 时可以直接 `import`。
+
+在 Ubuntu 24.04 上，下面的 pip 安装会写入系统 Python 可见的
+`/usr/local/lib/python3.12/dist-packages`。该路径默认在 `/usr/bin/python3` 的 `sys.path` 中，
+所有普通用户都能读取：
+
+```bash
+python3 -m pip install --only-binary=:all: --break-system-packages --root-user-action=ignore \
+  numpy==1.26.4 \
+  pandas==2.2.3 \
+  matplotlib==3.10.9 \
+  scipy==1.17.1 \
+  statsmodels==0.14.6 \
+  goatools==1.6.5
+```
+
+版本固定如下，保证 GO/KEGG 分析结果环境可复现：
+
+- `numpy==1.26.4`
+- `pandas==2.2.3`
+- `matplotlib==3.10.9`
+- `scipy==1.17.1`
+- `statsmodels==0.14.6`
+- `goatools==1.6.5`
+
+验证默认 Python 和普通用户都能导入这些包：
+
+```bash
+python3 -c "import numpy, pandas, matplotlib, scipy, statsmodels, goatools; print('system python GO/KEGG deps ok')"
+sudo -u potato-interface /usr/bin/python3 -c "import numpy, pandas, matplotlib, scipy, statsmodels, goatools; print('shared users can import GO/KEGG deps')"
+```
+
+如果分析脚本在没有可写 home 的 service 用户下使用 Matplotlib，需要给该进程设置可写的
+`MPLCONFIGDIR`。普通 Hermes Linux 用户有自己的 home 目录，通常不需要额外设置。
+
+### 5. 安装 Hermes 运行时
 
 ```bash
 mkdir -p /opt/hermes-agent-src
@@ -185,7 +225,7 @@ ln -sf /opt/hermes-agent-venv/bin/hermes /usr/local/bin/hermes
 
 每用户 Hermes service 默认使用 `/usr/local/bin/hermes`。
 
-### 5. 安装 interface 运行时
+### 6. 安装 interface 运行时
 
 ```bash
 python3 -m venv /opt/interface-env
@@ -193,7 +233,7 @@ python3 -m venv /opt/interface-env
 /opt/interface-env/bin/pip install -r /srv/potato_agent/interface/requirements.txt
 ```
 
-### 6. 配置本地模型代理
+### 7. 配置本地模型代理
 
 上游模型网关需要兼容 OpenAI API。真实上游 API key 只写入 root-owned
 `/var/lib/potato-agent/config/model_proxy.yaml`；每个用户的 Hermes 配置只会包含
@@ -256,7 +296,7 @@ systemctl enable --now potato-model-proxy.service
 配置并重启当前正在运行的 Hermes service。升级旧部署后可以运行
 `cleanup_hermes_user_keys.py --dry-run` 检查历史 key，再去掉 `--dry-run` 执行清理。
 
-### 7. 安装 privileged helper
+### 8. 安装 privileged helper
 
 ```bash
 mkdir -p /usr/local/libexec
@@ -280,7 +320,7 @@ visudo -cf /etc/sudoers.d/potato-agent-interface
 
 helper 只暴露 `interface.privileged_helper` 中实现的固定命令集。
 
-### 8. 安装 systemd service
+### 9. 安装 systemd service
 
 生成固定的 session secret：
 
@@ -361,7 +401,7 @@ systemctl status potato-interface.service
 http://<server>:3000/lite
 ```
 
-### 9. 创建用户
+### 10. 创建用户
 
 创建系统托管的 Linux 用户和网页账号：
 
@@ -445,6 +485,7 @@ chmod 0600 /var/lib/potato-agent/data/*.db 2>/dev/null || true
 
 - 同步代码到 `/srv/potato_agent`
 - 安装 micromamba
+- 安装系统 Python GO/KEGG 分析依赖
 - 安装 Hermes 运行时
 - 安装 interface 运行时
 - 安装 privileged helper
