@@ -66,10 +66,11 @@ chmod 0600 /var/lib/potato-agent/data/*.db 2>/dev/null || true
 
 - Python 3 和 `venv`
 - `git`
+- `curl`
 - `rsync`
 - `sudo`
 - `systemctl`
-- `micromamba`，用于生信技能按用户隔离安装工具环境
+- `micromamba`，用于生信技能共享环境和按用户隔离安装工具环境
 - 系统默认 Python 可直接导入 GO/KEGG 分析依赖
 - Hermes Python 依赖需要的编译工具
 
@@ -77,7 +78,7 @@ Debian 或 Ubuntu 可先安装基础包：
 
 ```bash
 apt-get update
-apt-get install -y python3 python3-venv python3-pip git rsync sudo build-essential
+apt-get install -y python3 python3-venv python3-pip git curl rsync sudo build-essential
 ```
 
 `micromamba` 推荐系统级安装到 `/opt/micromamba/bin/micromamba`，但环境根目录使用每个
@@ -209,7 +210,144 @@ sudo -u potato-interface /usr/bin/python3 -c "import numpy, pandas, matplotlib, 
 如果分析脚本在没有可写 home 的 service 用户下使用 Matplotlib，需要给该进程设置可写的
 `MPLCONFIGDIR`。普通 Hermes Linux 用户有自己的 home 目录，通常不需要额外设置。
 
-### 5. 安装 Hermes 运行时
+### 5. 安装 sgRNA Design 共享依赖
+
+`skills/potato-knowledge-bioinformatics/sgrna-design` 默认调用系统 PATH 中的
+`crispor`、`crispor-add-genome`、`flashfry` 和 `samtools`。这些工具必须作为共享依赖安装到
+`/opt` 和 `/usr/local/bin`，不要让每个 Hermes Linux 用户在自己的 home 下重复安装。
+
+约定路径：
+
+```text
+CRISPOR source: /opt/crispr_design/crisporWebsite
+CRISPOR env:    /opt/crispor_py39
+FlashFry jar:   /opt/crispr_design/flashfry/FlashFry.jar
+tool env:       /opt/crispr_tools
+global PATH:    /usr/local/bin
+```
+
+安装 CRISPOR 源码和 Python 3.9 环境。这里固定 `scikit-learn==1.0.2`，用于兼容 CRISPOR
+自带的 Azimuth/Doench 模型 pickle；`rs3` 用于 Rule Set 3 评分：
+
+```bash
+mkdir -p /opt/crispr_design
+if [ ! -d /opt/crispr_design/crisporWebsite ]; then
+  git clone https://github.com/maximilianh/crisporWebsite.git /opt/crispr_design/crisporWebsite
+fi
+mkdir -p /opt/crispr_design/crisporWebsite/genomes
+
+/opt/micromamba/bin/micromamba create -y -p /opt/crispor_py39 \
+  -c conda-forge -c bioconda \
+  python=3.9 \
+  bwa=0.7.19 \
+  biopython=1.85 \
+  numpy=1.26.4 \
+  scipy=1.13.1 \
+  pandas=2.3.1 \
+  matplotlib=3.9.4 \
+  scikit-learn=1.0.2 \
+  rs3=0.0.18 \
+  pytabix=0.1 \
+  twobitreader=3.1.7 \
+  lmdbm=0.0.6 \
+  xlwt=1.3.0
+```
+
+安装 FlashFry、Java 和 `samtools`。FlashFry 官方 quickstart 使用
+`FlashFry-assembly-1.15.jar`：
+
+```bash
+mkdir -p /opt/crispr_design/flashfry
+curl -L \
+  -o /opt/crispr_design/flashfry/FlashFry-assembly-1.15.jar \
+  https://github.com/mckennalab/FlashFry/releases/download/1.15/FlashFry-assembly-1.15.jar
+ln -sf FlashFry-assembly-1.15.jar /opt/crispr_design/flashfry/FlashFry.jar
+
+/opt/micromamba/bin/micromamba create -y -p /opt/crispr_tools \
+  -c conda-forge -c bioconda \
+  openjdk=11 \
+  samtools=1.23.1 \
+  htslib=1.23.1
+```
+
+创建全局 wrapper。`crispor` wrapper 使用每用户独立的 Matplotlib cache，避免多个普通用户共享
+`/tmp/matplotlib-cache` 造成权限冲突：
+
+```bash
+cat >/usr/local/bin/crispor <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+
+ENV=/opt/crispor_py39
+CRISPOR_DIR=/opt/crispr_design/crisporWebsite
+
+if [[ -z "${MPLCONFIGDIR:-}" ]]; then
+  export MPLCONFIGDIR="/tmp/matplotlib-cache-${UID}"
+  mkdir -p "$MPLCONFIGDIR"
+  chmod 700 "$MPLCONFIGDIR" 2>/dev/null || true
+fi
+
+exec /opt/micromamba/bin/micromamba run -p "$ENV" python "$CRISPOR_DIR/crispor.py" "$@"
+EOF
+
+cat >/usr/local/bin/crispor-add-genome <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+
+ENV=/opt/crispor_py39
+CRISPOR_DIR=/opt/crispr_design/crisporWebsite
+
+exec /opt/micromamba/bin/micromamba run -p "$ENV" python "$CRISPOR_DIR/tools/crisporAddGenome" --baseDir "$CRISPOR_DIR/genomes" "$@"
+EOF
+
+cat >/usr/local/bin/flashfry <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+
+ENV=/opt/crispr_tools
+JAR=/opt/crispr_design/flashfry/FlashFry.jar
+
+exec /opt/micromamba/bin/micromamba run -p "$ENV" java -jar "$JAR" "$@"
+EOF
+
+ln -sf /opt/crispr_tools/bin/samtools /usr/local/bin/samtools
+
+chown root:root /usr/local/bin/crispor /usr/local/bin/crispor-add-genome /usr/local/bin/flashfry
+chown -h root:root /usr/local/bin/samtools
+chmod 0755 /usr/local/bin/crispor /usr/local/bin/crispor-add-genome /usr/local/bin/flashfry
+chmod -R a+rX /opt/crispr_design /opt/crispor_py39 /opt/crispr_tools
+```
+
+验证共享安装在干净 PATH 下可用：
+
+```bash
+env -i PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
+  bash -lc 'command -v crispor crispor-add-genome flashfry samtools'
+
+env -i PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
+  crispor --help >/dev/null
+env -i PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
+  flashfry >/dev/null
+env -i PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
+  samtools --version | sed -n '1p'
+
+/opt/crispor_py39/bin/python -c "import Bio, lmdbm, matplotlib, numpy, pandas, rs3, scipy, sklearn, tabix, twobitreader, xlwt; print('CRISPOR Python deps ok')"
+sudo -u potato-interface env -i PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
+  bash -lc 'crispor --help >/dev/null && flashfry >/dev/null && samtools --version >/dev/null'
+```
+
+不要在共享部署时给普通 Hermes 用户开放 `/opt/crispr_design/crisporWebsite/genomes` 写权限。用户需要
+自定义基因组时，在自己的 home 或任务目录中建 index，并在运行时显式传同一个目录：
+
+```bash
+mkdir -p "$HOME/crispor_genomes"
+crispor-add-genome --baseDir "$HOME/crispor_genomes" fasta genome.fa \
+  --desc "genomeId|Scientific name|Common name|Version" \
+  --gff annotation.gff3
+crispor --genomeDir "$HOME/crispor_genomes" genomeId targets.fa guides.tsv -o offs.tsv -p NGG --mm 4
+```
+
+### 6. 安装 Hermes 运行时
 
 ```bash
 mkdir -p /opt/hermes-agent-src
@@ -225,7 +363,7 @@ ln -sf /opt/hermes-agent-venv/bin/hermes /usr/local/bin/hermes
 
 每用户 Hermes service 默认使用 `/usr/local/bin/hermes`。
 
-### 6. 安装 interface 运行时
+### 7. 安装 interface 运行时
 
 ```bash
 python3 -m venv /opt/interface-env
@@ -233,7 +371,7 @@ python3 -m venv /opt/interface-env
 /opt/interface-env/bin/pip install -r /srv/potato_agent/interface/requirements.txt
 ```
 
-### 7. 配置本地模型代理
+### 8. 配置本地模型代理
 
 上游模型网关需要兼容 OpenAI API。真实上游 API key 只写入 root-owned
 `/var/lib/potato-agent/config/model_proxy.yaml`；每个用户的 Hermes 配置只会包含
@@ -296,7 +434,7 @@ systemctl enable --now potato-model-proxy.service
 配置并重启当前正在运行的 Hermes service。升级旧部署后可以运行
 `cleanup_hermes_user_keys.py --dry-run` 检查历史 key，再去掉 `--dry-run` 执行清理。
 
-### 8. 安装 privileged helper
+### 9. 安装 privileged helper
 
 ```bash
 mkdir -p /usr/local/libexec
@@ -320,7 +458,7 @@ visudo -cf /etc/sudoers.d/potato-agent-interface
 
 helper 只暴露 `interface.privileged_helper` 中实现的固定命令集。
 
-### 9. 安装 systemd service
+### 10. 安装 systemd service
 
 生成固定的 session secret：
 
@@ -401,7 +539,7 @@ systemctl status potato-interface.service
 http://<server>:3000/lite
 ```
 
-### 10. 创建用户
+### 11. 创建用户
 
 创建系统托管的 Linux 用户和网页账号：
 
@@ -488,6 +626,7 @@ chmod 0600 /var/lib/potato-agent/data/*.db 2>/dev/null || true
 - 同步代码到 `/srv/potato_agent`
 - 安装 micromamba
 - 安装系统 Python GO/KEGG 分析依赖
+- 安装 sgRNA Design 共享依赖
 - 安装 Hermes 运行时
 - 安装 interface 运行时
 - 安装 privileged helper
