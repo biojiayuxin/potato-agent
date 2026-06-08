@@ -329,7 +329,7 @@ def test_signup_email_verification_api_sends_and_signup_consumes_code(
             json={
                 "username": "alice",
                 "email": "alice@example.com",
-                "password": "password123",
+                "password": "Password123",
                 "display_name": "Alice",
                 "email_verification_id": payload["verification_id"],
                 "email_verification_code": sent["code"],
@@ -344,6 +344,52 @@ def test_signup_email_verification_api_sends_and_signup_consumes_code(
         assert job["status"] == "pending"
         assert job["email_verification_id"] == payload["verification_id"]
         assert _verification_row(db_path, payload["verification_id"])["status"] == "consumed"
+    finally:
+        client.close()
+
+
+def test_signup_api_rejects_password_without_mixed_case_and_number(
+    tmp_path, monkeypatch
+) -> None:
+    client, app_mod, _, mailer_mod, db_path = _load_app(tmp_path, monkeypatch)
+    sent: dict[str, object] = {}
+
+    async def fake_send_signup_verification_email(**kwargs):
+        sent.update(kwargs)
+        return mailer_mod.ResendEmailResult(email_id="email_123", status_code=200)
+
+    monkeypatch.setattr(
+        app_mod, "send_signup_verification_email", fake_send_signup_verification_email
+    )
+    try:
+        response = client.post(
+            "/api/auth/signup/email-verifications",
+            json={"email": "weak@example.com"},
+        )
+        assert response.status_code == 200, response.text
+        payload = response.json()
+
+        signup_response = client.post(
+            "/api/auth/signup",
+            json={
+                "username": "weakuser",
+                "email": "weak@example.com",
+                "password": "password123",
+                "display_name": "Weak User",
+                "email_verification_id": payload["verification_id"],
+                "email_verification_code": sent["code"],
+            },
+        )
+
+        assert signup_response.status_code == 400, signup_response.text
+        assert (
+            signup_response.json()["detail"]
+            == "Password must be at least 8 characters and include uppercase letters, lowercase letters, and numbers."
+        )
+        assert (
+            _verification_row(db_path, payload["verification_id"])["status"]
+            == "pending"
+        )
     finally:
         client.close()
 

@@ -166,6 +166,10 @@ EMAIL_VERIFICATION_TTL_SECONDS = 10 * 60
 EMAIL_VERIFICATION_RESEND_COOLDOWN_SECONDS = 60
 EMAIL_VERIFICATION_EMAIL_HOURLY_LIMIT = 5
 EMAIL_VERIFICATION_IP_HOURLY_LIMIT = 20
+PASSWORD_COMPLEXITY_DETAIL = (
+    "Password must be at least 8 characters and include uppercase letters, "
+    "lowercase letters, and numbers."
+)
 
 HERMES_SRC = REPO_ROOT / "hermes-agent"
 if str(HERMES_SRC) not in sys.path:
@@ -300,6 +304,16 @@ def _validate_signup_email(email: str) -> str:
     return normalized_email
 
 
+def _validate_password_complexity(password: str) -> None:
+    if (
+        len(password) < 8
+        or re.search(r"[a-z]", password) is None
+        or re.search(r"[A-Z]", password) is None
+        or re.search(r"[0-9]", password) is None
+    ):
+        raise HTTPException(status_code=400, detail=PASSWORD_COMPLEXITY_DETAIL)
+
+
 def _hash_email_verification_code(
     email: str,
     code: str,
@@ -350,10 +364,7 @@ def _validate_signup_payload(
             status_code=400,
             detail="Username must be 3-32 characters and contain only letters, numbers, or underscores.",
         )
-    if len(password) < 8:
-        raise HTTPException(
-            status_code=400, detail="Password must be at least 8 characters."
-        )
+    _validate_password_complexity(password)
     if not verification_id:
         raise HTTPException(
             status_code=400, detail="Email verification is required."
@@ -2293,10 +2304,7 @@ async def reset_password(
     verification_code = payload.email_verification_code.strip()
     new_password = payload.new_password
 
-    if len(new_password) < 8:
-        raise HTTPException(
-            status_code=400, detail="Password must be at least 8 characters."
-        )
+    _validate_password_complexity(new_password)
     if not verification_id:
         raise HTTPException(status_code=400, detail="Email verification is required.")
     if not re.fullmatch(r"\d{6}", verification_code):
@@ -2388,10 +2396,7 @@ async def change_password(
         raise HTTPException(
             status_code=400, detail="Current password and new password are required."
         )
-    if len(new_password) < 8:
-        raise HTTPException(
-            status_code=400, detail="Password must be at least 8 characters."
-        )
+    _validate_password_complexity(new_password)
 
     record, password_hash = get_user_with_password_by_id(user.id)
     if record is None or record.id != user.id or not verify_password(

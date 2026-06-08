@@ -198,10 +198,45 @@ def test_change_password_rejects_wrong_current_password_without_update(
             "/api/auth/password",
             json={
                 "current_password": "wrongpassword",
-                "new_password": "newpassword",
+                "new_password": "Newpassword1",
             },
         )
         assert response.status_code == 401, response.text
+        reloaded = auth_db_mod.get_user_by_id(user.id, db_path=db_path)
+        assert reloaded is not None
+        assert reloaded.auth_session_version == user.auth_session_version
+        assert _password_hash_for_user(db_path, user.id) == old_hash
+    finally:
+        client.close()
+
+
+def test_change_password_rejects_weak_new_password_without_update(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    client, app_mod, auth_db_mod, db_path = _load_app(tmp_path, monkeypatch)
+    user = auth_db_mod.upsert_user(
+        username="alice",
+        email="alice@example.com",
+        password="oldpassword",
+        mapping_username="alice",
+        name="Alice",
+        db_path=db_path,
+    )
+    old_hash = _password_hash_for_user(db_path, user.id)
+    token = app_mod._create_session_token(user.id, user.auth_session_version)
+    client.cookies.set(app_mod.SESSION_COOKIE_NAME, token)
+
+    try:
+        response = client.post(
+            "/api/auth/password",
+            json={
+                "current_password": "oldpassword",
+                "new_password": "newpassword",
+            },
+        )
+        assert response.status_code == 400, response.text
+        assert response.json()["detail"] == app_mod.PASSWORD_COMPLEXITY_DETAIL
         reloaded = auth_db_mod.get_user_by_id(user.id, db_path=db_path)
         assert reloaded is not None
         assert reloaded.auth_session_version == user.auth_session_version
@@ -231,7 +266,7 @@ def test_change_password_keeps_current_client_authenticated_and_revokes_old_toke
             "/api/auth/password",
             json={
                 "current_password": "oldpassword",
-                "new_password": "newpassword",
+                "new_password": "Newpassword1",
             },
         )
         assert change_response.status_code == 200, change_response.text
@@ -258,7 +293,7 @@ def test_change_password_keeps_current_client_authenticated_and_revokes_old_toke
             "alice",
             db_path=db_path,
         )
-        assert auth_db_mod.verify_password("newpassword", password_hash)
+        assert auth_db_mod.verify_password("Newpassword1", password_hash)
         assert not auth_db_mod.verify_password("oldpassword", password_hash)
     finally:
         client.close()
@@ -309,7 +344,7 @@ def test_password_reset_api_sends_code_resets_password_and_revokes_old_token(
             "/api/auth/password-reset",
             json={
                 "email": "alice@example.com",
-                "new_password": "newpassword",
+                "new_password": "Newpassword1",
                 "email_verification_id": payload["verification_id"],
                 "email_verification_code": sent["code"],
             },
@@ -322,7 +357,7 @@ def test_password_reset_api_sends_code_resets_password_and_revokes_old_token(
             "alice@example.com",
             db_path=db_path,
         )
-        assert auth_db_mod.verify_password("newpassword", password_hash)
+        assert auth_db_mod.verify_password("Newpassword1", password_hash)
         assert not auth_db_mod.verify_password("oldpassword", password_hash)
 
         old_client = TestClient(app_mod.app)
@@ -337,6 +372,59 @@ def test_password_reset_api_sends_code_resets_password_and_revokes_old_token(
             }
         finally:
             old_client.close()
+    finally:
+        client.close()
+
+
+def test_password_reset_rejects_weak_new_password_without_consuming_code(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    client, app_mod, auth_db_mod, db_path = _load_app(tmp_path, monkeypatch)
+    user = auth_db_mod.upsert_user(
+        username="alice",
+        email="alice@example.com",
+        password="oldpassword",
+        mapping_username="alice",
+        name="Alice",
+        db_path=db_path,
+    )
+    old_hash = _password_hash_for_user(db_path, user.id)
+    sent: dict[str, object] = {}
+
+    async def fake_send_password_reset_email(**kwargs):
+        sent.update(kwargs)
+        return SimpleNamespace(email_id="email_reset_1", status_code=200)
+
+    monkeypatch.setattr(
+        app_mod, "send_password_reset_email", fake_send_password_reset_email
+    )
+
+    try:
+        send_response = client.post(
+            "/api/auth/password-reset/email-verifications",
+            json={"email": "alice@example.com"},
+        )
+        assert send_response.status_code == 200, send_response.text
+        payload = send_response.json()
+
+        reset_response = client.post(
+            "/api/auth/password-reset",
+            json={
+                "email": "alice@example.com",
+                "new_password": "newpassword",
+                "email_verification_id": payload["verification_id"],
+                "email_verification_code": sent["code"],
+            },
+        )
+
+        assert reset_response.status_code == 400, reset_response.text
+        assert reset_response.json()["detail"] == app_mod.PASSWORD_COMPLEXITY_DETAIL
+        assert (
+            _verification_row(db_path, payload["verification_id"])["status"]
+            == "pending"
+        )
+        assert _password_hash_for_user(db_path, user.id) == old_hash
     finally:
         client.close()
 

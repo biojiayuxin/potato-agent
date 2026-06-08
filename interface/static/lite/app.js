@@ -49,6 +49,9 @@ const state = {
 
 const MODEL_RESPONSE_ERROR_MESSAGE = '模型响应失败，请稍后重试。';
 const SESSION_EXPIRED_MESSAGE = 'Workspace slept after inactivity. Please sign in again.';
+const PASSWORD_COMPLEXITY_MESSAGE = (
+  'Password must be at least 8 characters and include uppercase letters, lowercase letters, and numbers.'
+);
 
 const dom = {
   loginView: document.getElementById('login-view'),
@@ -302,6 +305,18 @@ const validateSessionTitleDraft = (value) => {
   }
   if (trimmed.length > 100) {
     return 'Title must be 100 characters or fewer.';
+  }
+  return '';
+};
+
+const validatePasswordComplexity = (password) => {
+  if (
+    String(password || '').length < 8
+    || !/[a-z]/.test(password)
+    || !/[A-Z]/.test(password)
+    || !/[0-9]/.test(password)
+  ) {
+    return PASSWORD_COMPLEXITY_MESSAGE;
   }
   return '';
 };
@@ -1686,8 +1701,9 @@ const handlePasswordChangeSubmit = async (event) => {
     showError(dom.passwordError, 'Current password and new password are required.');
     return;
   }
-  if (newPassword.length < 8) {
-    showError(dom.passwordError, 'Password must be at least 8 characters.');
+  const passwordValidationMessage = validatePasswordComplexity(newPassword);
+  if (passwordValidationMessage) {
+    showError(dom.passwordError, passwordValidationMessage);
     return;
   }
   if (newPassword !== confirmNewPassword) {
@@ -1972,8 +1988,9 @@ const handlePasswordResetSubmit = async (event) => {
     showError(dom.passwordResetError, 'Verification code must be 6 digits.');
     return;
   }
-  if (newPassword.length < 8) {
-    showError(dom.passwordResetError, 'Password must be at least 8 characters.');
+  const passwordValidationMessage = validatePasswordComplexity(newPassword);
+  if (passwordValidationMessage) {
+    showError(dom.passwordResetError, passwordValidationMessage);
     return;
   }
   if (newPassword !== confirmPassword) {
@@ -4312,6 +4329,11 @@ dom.registerForm.addEventListener('submit', async (event) => {
   }
   if (!/^\d{6}$/.test(emailVerificationCode)) {
     showError(dom.registerError, 'Verification code must be 6 digits.');
+    return;
+  }
+  const passwordValidationMessage = validatePasswordComplexity(password);
+  if (passwordValidationMessage) {
+    showError(dom.registerError, passwordValidationMessage);
     return;
   }
   if (password !== passwordConfirm) {
