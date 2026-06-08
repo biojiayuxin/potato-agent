@@ -3,11 +3,13 @@ from __future__ import annotations
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
 import yaml
 
 from interface.hermes_service import (
     build_config_data,
     build_systemd_unit,
+    install_public_data_link,
     install_user_runtime_files,
 )
 from interface.mapping import HermesTarget
@@ -25,6 +27,13 @@ def _write_bioinformatics_skills_template(tmp_path: Path) -> Path:
     script.write_text("#!/usr/bin/env python3\nprint('gene')\n", encoding="utf-8")
     script.chmod(0o755)
     return source
+
+
+def _write_public_data_template(tmp_path: Path) -> Path:
+    public_data = tmp_path / "public_data_source"
+    public_data.mkdir()
+    (public_data / "README.txt").write_text("public\n", encoding="utf-8")
+    return public_data
 
 
 def _target() -> HermesTarget:
@@ -195,6 +204,7 @@ def test_install_user_runtime_files_writes_only_user_runtime_paths(
     soul_template = tmp_path / "SOUL.template.md"
     soul_template.write_text("Template soul\n", encoding="utf-8")
     skills_template = _write_bioinformatics_skills_template(tmp_path)
+    public_data = _write_public_data_template(tmp_path)
 
     monkeypatch.setattr(
         "interface.hermes_service.pwd.getpwnam",
@@ -215,6 +225,10 @@ def test_install_user_runtime_files_writes_only_user_runtime_paths(
     monkeypatch.setattr(
         "interface.hermes_service.DEFAULT_BIOINFORMATICS_SKILLS_PATH",
         skills_template,
+    )
+    monkeypatch.setattr(
+        "interface.hermes_service.DEFAULT_PUBLIC_DATA_PATH",
+        public_data,
     )
 
     install_user_runtime_files(
@@ -250,6 +264,9 @@ def test_install_user_runtime_files_writes_only_user_runtime_paths(
         / "potato-gene-search"
         / "SKILL.md"
     ).read_text(encoding="utf-8") == "Gene search\n"
+    public_data_link = user.home_dir / "public_data"
+    assert public_data_link.is_symlink()
+    assert public_data_link.resolve() == public_data
     assert touched_paths
     assert all(tmp_path in path.parents or path == tmp_path for path in touched_paths)
 
@@ -276,6 +293,7 @@ def test_install_user_runtime_files_overwrites_soul_file_with_template(
     soul_template = tmp_path / "SOUL.template.md"
     soul_template.write_text("Current template\n", encoding="utf-8")
     skills_template = _write_bioinformatics_skills_template(tmp_path)
+    public_data = _write_public_data_template(tmp_path)
     user.hermes_home.mkdir(parents=True)
     (user.hermes_home / "SOUL.md").write_text("Old user soul\n", encoding="utf-8")
     touched_modes: dict[Path, int] = {}
@@ -295,6 +313,10 @@ def test_install_user_runtime_files_overwrites_soul_file_with_template(
     monkeypatch.setattr(
         "interface.hermes_service.DEFAULT_BIOINFORMATICS_SKILLS_PATH",
         skills_template,
+    )
+    monkeypatch.setattr(
+        "interface.hermes_service.DEFAULT_PUBLIC_DATA_PATH",
+        public_data,
     )
 
     install_user_runtime_files({"hermes": {}}, user)
@@ -326,6 +348,7 @@ def test_install_user_runtime_files_replaces_managed_bioinformatics_skills(
     soul_template = tmp_path / "SOUL.template.md"
     soul_template.write_text("Template soul\n", encoding="utf-8")
     skills_template = _write_bioinformatics_skills_template(tmp_path)
+    public_data = _write_public_data_template(tmp_path)
     old_skill_dir = user.hermes_home / "skills" / "potato-knowledge-bioinformatics"
     old_skill_dir.mkdir(parents=True)
     (old_skill_dir / "old.txt").write_text("stale\n", encoding="utf-8")
@@ -347,6 +370,10 @@ def test_install_user_runtime_files_replaces_managed_bioinformatics_skills(
         "interface.hermes_service.DEFAULT_BIOINFORMATICS_SKILLS_PATH",
         skills_template,
     )
+    monkeypatch.setattr(
+        "interface.hermes_service.DEFAULT_PUBLIC_DATA_PATH",
+        public_data,
+    )
 
     install_user_runtime_files({"hermes": {}}, user)
 
@@ -361,3 +388,68 @@ def test_install_user_runtime_files_replaces_managed_bioinformatics_skills(
     assert target_script.read_text(encoding="utf-8").startswith("#!/usr/bin/env python3")
     assert touched_modes[user.hermes_home / "skills"] == 0o700
     assert touched_modes[target_script] == 0o755
+
+
+def test_install_public_data_link_creates_home_symlink(monkeypatch, tmp_path) -> None:
+    user = HermesTarget(
+        username="alice",
+        email="alice@example.com",
+        display_name="Alice",
+        linux_user="hmx_alice",
+        home_dir=tmp_path / "home",
+        hermes_home=tmp_path / "home" / ".hermes",
+        workdir=tmp_path / "home" / "work",
+        api_server_host="127.0.0.1",
+        api_port=8655,
+        api_key="sk-user",
+        api_server_model_name="Hermes",
+        systemd_service="hermes-runtime-only-test.service",
+        extra_env={},
+        config_overrides={},
+    )
+    public_data = _write_public_data_template(tmp_path)
+    user.home_dir.mkdir(parents=True)
+
+    monkeypatch.setattr(
+        "interface.hermes_service.DEFAULT_PUBLIC_DATA_PATH",
+        public_data,
+    )
+    monkeypatch.setattr("interface.hermes_service.os.lchown", lambda path, uid, gid: None)
+
+    install_public_data_link(user, uid=123, gid=456)
+
+    link_path = user.home_dir / "public_data"
+    assert link_path.is_symlink()
+    assert link_path.resolve() == public_data
+
+
+def test_install_public_data_link_does_not_overwrite_existing_path(
+    monkeypatch, tmp_path
+) -> None:
+    user = HermesTarget(
+        username="alice",
+        email="alice@example.com",
+        display_name="Alice",
+        linux_user="hmx_alice",
+        home_dir=tmp_path / "home",
+        hermes_home=tmp_path / "home" / ".hermes",
+        workdir=tmp_path / "home" / "work",
+        api_server_host="127.0.0.1",
+        api_port=8655,
+        api_key="sk-user",
+        api_server_model_name="Hermes",
+        systemd_service="hermes-runtime-only-test.service",
+        extra_env={},
+        config_overrides={},
+    )
+    public_data = _write_public_data_template(tmp_path)
+    user.home_dir.mkdir(parents=True)
+    (user.home_dir / "public_data").write_text("user file\n", encoding="utf-8")
+
+    monkeypatch.setattr(
+        "interface.hermes_service.DEFAULT_PUBLIC_DATA_PATH",
+        public_data,
+    )
+
+    with pytest.raises(RuntimeError, match="path already exists"):
+        install_public_data_link(user, uid=123, gid=456)

@@ -419,7 +419,9 @@ http://<server>:3000/lite
 ```
 
 创建或绑定用户会写入映射、创建网页登录记录、安装该用户的 Hermes runtime 文件，并创建该用户的
-systemd unit。Hermes service 默认保持 disabled，用户进入 workspace 时再按需启动。
+systemd unit。安装 runtime 文件时会在用户 home 下创建 `public_data` 软链接，指向
+`/mnt/data/public_data`；共享数据目录的读写权限由该目录自身权限控制，开通流程不会修改它。
+Hermes service 默认保持 disabled，用户进入 workspace 时再按需启动。
 
 ## 从旧部署升级
 

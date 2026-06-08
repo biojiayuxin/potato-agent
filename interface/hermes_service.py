@@ -55,6 +55,8 @@ MANAGED_BIOINFORMATICS_SKILLS_DIR_NAME = "potato-knowledge-bioinformatics"
 DEFAULT_BIOINFORMATICS_SKILLS_PATH = (
     REPO_ROOT / "skills" / MANAGED_BIOINFORMATICS_SKILLS_DIR_NAME
 )
+PUBLIC_DATA_LINK_NAME = "public_data"
+DEFAULT_PUBLIC_DATA_PATH = Path("/mnt/data/public_data")
 
 
 def _run_command(command: list[str]) -> str:
@@ -165,6 +167,34 @@ def install_bioinformatics_skills(user: HermesTarget, *, uid: int, gid: int) -> 
 
     shutil.copytree(DEFAULT_BIOINFORMATICS_SKILLS_PATH, target_path)
     _set_owner_recursive(target_path, uid, gid)
+
+
+def install_public_data_link(user: HermesTarget, *, uid: int, gid: int) -> None:
+    if not DEFAULT_PUBLIC_DATA_PATH.exists():
+        raise RuntimeError(f"Public data path not found: {DEFAULT_PUBLIC_DATA_PATH}")
+    if not DEFAULT_PUBLIC_DATA_PATH.is_dir():
+        raise RuntimeError(
+            f"Public data path is not a directory: {DEFAULT_PUBLIC_DATA_PATH}"
+        )
+
+    link_path = user.home_dir / PUBLIC_DATA_LINK_NAME
+    expected_target = DEFAULT_PUBLIC_DATA_PATH.resolve()
+    if link_path.is_symlink():
+        if link_path.resolve() != expected_target:
+            raise RuntimeError(
+                f"Public data link already exists but points elsewhere: {link_path}"
+            )
+    elif link_path.exists():
+        raise RuntimeError(
+            f"Cannot create public data link because path already exists: {link_path}"
+        )
+    else:
+        link_path.symlink_to(DEFAULT_PUBLIC_DATA_PATH)
+
+    try:
+        os.lchown(link_path, uid, gid)
+    except OSError:
+        pass
 
 
 def build_env_content(user: HermesTarget) -> str:
@@ -325,6 +355,7 @@ def install_user_runtime_files(config: dict[str, Any], user: HermesTarget) -> No
     _set_owner_and_mode(config_path, pw.pw_uid, gid, 0o600)
     install_soul_file(user, uid=pw.pw_uid, gid=gid)
     install_bioinformatics_skills(user, uid=pw.pw_uid, gid=gid)
+    install_public_data_link(user, uid=pw.pw_uid, gid=gid)
 
 
 def install_user_files(config: dict[str, Any], user: HermesTarget) -> None:
