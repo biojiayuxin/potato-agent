@@ -36,6 +36,8 @@ DEFAULT_SERVICE_RESTART = "always"
 DEFAULT_SERVICE_RESTART_SEC = 3
 DEFAULT_TERMINAL_TIMEOUT = 180
 DEFAULT_RUNTIME_READY_TIMEOUT = 45
+DEFAULT_GATEWAY_RESTART_DRAIN_TIMEOUT = 180
+DEFAULT_GATEWAY_STOP_GRACE_SECONDS = 30
 DEFAULT_RUNTIME_LOCK_DIR = Path("/run/potato-agent/runtime-start")
 DEFAULT_SOUL_TEMPLATE_PATH = REPO_ROOT / "soul_settings" / "SOUL.md"
 DEFAULT_INACCESSIBLE_PATHS = (
@@ -280,6 +282,7 @@ def build_systemd_unit(config: dict[str, Any], user: HermesTarget) -> str:
     )
     restart = str(service_cfg.get("restart") or DEFAULT_SERVICE_RESTART)
     restart_sec = int(service_cfg.get("restart_sec") or DEFAULT_SERVICE_RESTART_SEC)
+    timeout_stop_sec = _systemd_timeout_stop_sec(config, user)
     hermes_bin = str(hermes_cfg.get("executable") or DEFAULT_HERMES_BIN)
     inaccessible_paths = service_cfg.get("inaccessible_paths")
     if inaccessible_paths is None:
@@ -316,12 +319,49 @@ def build_systemd_unit(config: dict[str, Any], user: HermesTarget) -> str:
             ],
             f"Restart={restart}",
             f"RestartSec={restart_sec}",
+            f"TimeoutStopSec={timeout_stop_sec}",
             "",
             "[Install]",
             "WantedBy=multi-user.target",
             "",
         ]
     )
+
+
+def _positive_int(value: Any, default: int) -> int:
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return default
+    return parsed if parsed > 0 else default
+
+
+def _configured_restart_drain_timeout(config: dict[str, Any], user: HermesTarget) -> int:
+    hermes_cfg = config.get("hermes") or {}
+    result = DEFAULT_GATEWAY_RESTART_DRAIN_TIMEOUT
+    for overrides in (hermes_cfg.get("config_overrides"), user.config_overrides):
+        if not isinstance(overrides, dict):
+            continue
+        agent_cfg = overrides.get("agent")
+        if not isinstance(agent_cfg, dict):
+            continue
+        if "restart_drain_timeout" in agent_cfg:
+            result = _positive_int(
+                agent_cfg.get("restart_drain_timeout"),
+                DEFAULT_GATEWAY_RESTART_DRAIN_TIMEOUT,
+            )
+    return result
+
+
+def _systemd_timeout_stop_sec(config: dict[str, Any], user: HermesTarget) -> int:
+    hermes_cfg = config.get("hermes") or {}
+    service_cfg = hermes_cfg.get("service") or {}
+    explicit = service_cfg.get("timeout_stop_sec") if isinstance(service_cfg, dict) else None
+    if explicit is not None:
+        return _positive_int(explicit, DEFAULT_GATEWAY_RESTART_DRAIN_TIMEOUT)
+    return _configured_restart_drain_timeout(
+        config, user
+    ) + DEFAULT_GATEWAY_STOP_GRACE_SECONDS
 
 
 def install_user_runtime_files(config: dict[str, Any], user: HermesTarget) -> None:

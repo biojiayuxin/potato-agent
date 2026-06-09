@@ -358,10 +358,16 @@ python3 -m venv /opt/hermes-agent-venv
 /opt/hermes-agent-venv/bin/pip install -e "/opt/hermes-agent-src[all]"
 
 ln -sf /opt/hermes-agent-venv/bin/hermes /usr/local/bin/hermes
-/usr/local/bin/hermes --help >/dev/null
+/usr/local/bin/hermes --version
 ```
 
 每用户 Hermes service 默认使用 `/usr/local/bin/hermes`。
+
+Hermes 0.16.0 的 gateway 重启流程默认会等待 `agent.restart_drain_timeout=180` 秒完成
+drain。Potato Agent 生成的每用户 systemd unit 默认写入 `TimeoutStopSec=210`，也就是
+`restart_drain_timeout + 30` 秒。若在全局 `hermes.config_overrides.agent.restart_drain_timeout`
+或用户 `config_overrides.agent.restart_drain_timeout` 中覆盖该值，生成的 unit 会按覆盖值加
+30 秒计算；只有显式设置 `hermes.service.timeout_stop_sec` 时才使用手写值。
 
 ### 7. 安装 interface 运行时
 
@@ -632,19 +638,53 @@ chmod 0600 /var/lib/potato-agent/data/*.db 2>/dev/null || true
 - 安装 privileged helper
 - 安装 `potato-interface.service`
 
-然后重启 interface：
+然后重载 systemd 并重启 interface：
 
 ```bash
 systemctl daemon-reload
 systemctl restart potato-interface.service
 ```
 
-已有映射用户不需要重新创建。如果每用户 systemd unit 模板发生变化，可以对每个 mapped username
-重新安装 runtime 文件和 unit：
+如果 Hermes 运行时或每用户 systemd unit 模板发生变化，正在运行的 Hermes gateway 也需要在合适
+窗口重启：
+
+```bash
+systemctl restart hermes-alice.service
+```
+
+已有映射用户不需要重新创建。如果允许重写该用户的 Hermes runtime 文件和 unit，可以对每个 mapped
+username 执行：
 
 ```bash
 /usr/local/libexec/potato-agent-privileged-helper provision-user --username alice
 ```
+
+`provision-user` 会按当前 mapping 重写该用户的 `.hermes/config.yaml`、`.hermes/.env`、技能文件和
+systemd unit；如果只需要刷新 unit 模板，不要用它。只重写每用户 systemd unit 时，用仓库代码生成
+unit，然后再重启需要继续在线的 Hermes service：
+
+```bash
+PYTHONPATH=/srv/potato_agent \
+POTATO_AGENT_MAPPING_PATH=/var/lib/potato-agent/config/users_mapping.yaml \
+/opt/interface-env/bin/python - <<'PY'
+from pathlib import Path
+
+from interface.hermes_service import build_systemd_unit
+from interface.mapping import DEFAULT_MAPPING_PATH, MappingStore, load_mapping
+
+config = load_mapping(DEFAULT_MAPPING_PATH, resolve_env=True)
+for target in MappingStore(DEFAULT_MAPPING_PATH).load_targets():
+    unit_path = Path("/etc/systemd/system") / target.systemd_service
+    unit_path.write_text(build_systemd_unit(config, target), encoding="utf-8")
+    unit_path.chmod(0o644)
+    print(unit_path)
+PY
+systemctl daemon-reload
+systemctl restart hermes-alice.service
+```
+
+升级到 Hermes 0.16.0 时需要刷新每用户 unit，确保 gateway unit 至少有
+`TimeoutStopSec=restart_drain_timeout + 30`；默认部署应显示为 `TimeoutStopSec=210`。
 
 ## 日常运维
 

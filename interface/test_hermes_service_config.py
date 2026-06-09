@@ -181,6 +181,30 @@ def test_build_systemd_unit_prioritizes_agent_runtime() -> None:
     assert "IOSchedulingPriority=0" in unit
 
 
+def test_build_systemd_unit_allows_gateway_drain_before_stop_timeout() -> None:
+    unit = build_systemd_unit({"hermes": {}}, _target())
+
+    assert "TimeoutStopSec=210" in unit
+
+
+def test_build_systemd_unit_uses_configured_gateway_drain_timeout() -> None:
+    target = _target()
+    unit = build_systemd_unit(
+        {
+            "hermes": {
+                "config_overrides": {
+                    "agent": {
+                        "restart_drain_timeout": 45,
+                    },
+                },
+            },
+        },
+        target,
+    )
+
+    assert "TimeoutStopSec=75" in unit
+
+
 def test_install_user_runtime_files_writes_only_user_runtime_paths(
     monkeypatch, tmp_path
 ) -> None:
