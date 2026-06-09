@@ -168,7 +168,42 @@
                 <img src="./static/favicon.png" alt="" />
               </div>
               <div class="sidebar-account">
-                <div class="brand small">Potato Agent</div>
+                <div class="sidebar-brand-row">
+                  <div class="brand small">Potato Agent</div>
+                  <button
+                    id="update-notes-button"
+                    class="update-notes-button"
+                    type="button"
+                    aria-label="Workspace updates"
+                    aria-haspopup="dialog"
+                    aria-expanded="false"
+                    aria-controls="update-notes-panel"
+                    title="Workspace updates"
+                  >
+                    <svg class="update-notes-icon" viewBox="0 0 24 24" aria-hidden="true">
+                      <path d="M6 8a6 6 0 0 1 12 0c0 7 3 9 3 9H3s3-2 3-9"></path>
+                      <path d="M10.3 21a1.94 1.94 0 0 0 3.4 0"></path>
+                    </svg>
+                    <span id="update-notes-badge" class="update-notes-badge" aria-hidden="true" hidden></span>
+                  </button>
+                </div>
+                <div id="update-notes-backdrop" class="update-notes-backdrop" hidden></div>
+                <section id="update-notes-panel" class="update-notes-panel" role="dialog" aria-modal="true" aria-labelledby="update-notes-title" hidden>
+                  <div class="update-notes-heading">
+                    <div>
+                      <div id="update-notes-title" class="update-notes-title"></div>
+                      <div id="update-notes-date" class="update-notes-date"></div>
+                    </div>
+                    <button id="update-notes-close" class="update-notes-close" type="button" aria-label="Close updates" title="Close">
+                      <svg class="update-notes-close-icon" viewBox="0 0 24 24" aria-hidden="true">
+                        <path d="M18 6 6 18"></path>
+                        <path d="m6 6 12 12"></path>
+                      </svg>
+                    </button>
+                  </div>
+                  <p id="update-notes-summary" class="update-notes-summary"></p>
+                  <ul id="update-notes-list" class="update-notes-list"></ul>
+                </section>
               </div>
             </div>
             <button id="logout-button" class="ghost small" type="button" hidden>Sign out</button>

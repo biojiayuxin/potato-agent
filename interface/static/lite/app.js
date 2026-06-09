@@ -37,6 +37,7 @@ const state = {
   passwordResetSubmitting: false,
   pendingApproval: null,
   approvalSubmitting: false,
+  updateNotes: null,
   pendingSessionPromise: null,
   shouldAutoScrollMessages: true,
   liveSessionMessages: new Map(),
@@ -123,6 +124,15 @@ const dom = {
   logoutButton: document.getElementById('logout-button'),
   userName: document.getElementById('user-name'),
   userEmail: document.getElementById('user-email'),
+  updateNotesButton: document.getElementById('update-notes-button'),
+  updateNotesBadge: document.getElementById('update-notes-badge'),
+  updateNotesBackdrop: document.getElementById('update-notes-backdrop'),
+  updateNotesPanel: document.getElementById('update-notes-panel'),
+  updateNotesTitle: document.getElementById('update-notes-title'),
+  updateNotesDate: document.getElementById('update-notes-date'),
+  updateNotesSummary: document.getElementById('update-notes-summary'),
+  updateNotesList: document.getElementById('update-notes-list'),
+  updateNotesClose: document.getElementById('update-notes-close'),
   sidebarSettingsButton: document.querySelector('.sidebar-settings-button'),
   sidebarSettingsMenu: document.getElementById('sidebar-settings-menu'),
   sidebarChangePasswordButton: document.getElementById('sidebar-change-password-button'),
@@ -186,6 +196,8 @@ const intentionallyClosedTuiBridges = new WeakSet();
 const SIDEBAR_WIDTH_KEY = 'lite_sidebar_width';
 const FILES_WIDTH_KEY = 'lite_files_width';
 const THEME_MODE_KEY = 'lite_theme_mode';
+const UPDATE_NOTES_PATH = './static/lite/update-notes.json';
+const UPDATE_NOTES_SEEN_KEY = 'lite_update_notes_seen_version';
 const MAX_ATTACHMENT_SIZE_BYTES = 20 * 1024 * 1024;
 const AUTH_POLL_INTERVAL_MS = 60 * 1000;
 const TUI_BRIDGE_RECONNECT_BASE_DELAY_MS = 1000;
@@ -1650,6 +1662,144 @@ const closePasswordModal = () => {
   clearPasswordForm();
 };
 
+const getUpdateNotesSeenKey = () => {
+  const accountId = String(
+    state.user?.email || state.user?.username || state.user?.name || 'anonymous'
+  ).trim().toLowerCase() || 'anonymous';
+  return `${UPDATE_NOTES_SEEN_KEY}:${encodeURIComponent(accountId)}`;
+};
+
+const getSeenUpdateNotesVersion = () => {
+  try {
+    return localStorage.getItem(getUpdateNotesSeenKey()) || '';
+  } catch {
+    return '';
+  }
+};
+
+const markUpdateNotesSeen = () => {
+  const version = String(state.updateNotes?.version || '').trim();
+  if (!version) return;
+  try {
+    localStorage.setItem(getUpdateNotesSeenKey(), version);
+  } catch {
+    // Ignore localStorage failures; the badge can reappear in storage-restricted browsers.
+  }
+  renderUpdateNotesUnreadState();
+};
+
+const normalizeUpdateNotesPayload = (payload) => {
+  const updates = Array.isArray(payload?.updates) ? payload.updates : [];
+  const latest = updates[0];
+  const version = String(latest?.version || '').trim();
+  if (!latest || !version) return null;
+  const items = Array.isArray(latest.items)
+    ? latest.items.map((item) => String(item || '').trim()).filter(Boolean)
+    : [];
+  return {
+    version,
+    title: String(latest.title || 'Workspace updates').trim() || 'Workspace updates',
+    date: String(latest.date || '').trim(),
+    summary: String(latest.summary || '').trim(),
+    items,
+  };
+};
+
+const renderUpdateNotesContent = () => {
+  if (!dom.updateNotesPanel || !state.updateNotes) return;
+  if (dom.updateNotesTitle) dom.updateNotesTitle.textContent = state.updateNotes.title;
+  if (dom.updateNotesDate) {
+    dom.updateNotesDate.textContent = state.updateNotes.date;
+    dom.updateNotesDate.hidden = !state.updateNotes.date;
+  }
+  if (dom.updateNotesSummary) {
+    dom.updateNotesSummary.textContent = state.updateNotes.summary;
+    dom.updateNotesSummary.hidden = !state.updateNotes.summary;
+  }
+  if (!dom.updateNotesList) return;
+  dom.updateNotesList.innerHTML = '';
+  dom.updateNotesList.hidden = state.updateNotes.items.length === 0;
+  for (const item of state.updateNotes.items) {
+    const element = document.createElement('li');
+    element.textContent = item;
+    dom.updateNotesList.append(element);
+  }
+};
+
+const renderUpdateNotesUnreadState = () => {
+  const version = String(state.updateNotes?.version || '').trim();
+  const unread = Boolean(version) && getSeenUpdateNotesVersion() !== version;
+  if (dom.updateNotesButton) {
+    dom.updateNotesButton.hidden = !version;
+  }
+  if (dom.updateNotesBadge) {
+    dom.updateNotesBadge.hidden = !unread;
+  }
+  dom.updateNotesButton?.classList.toggle('has-unread', unread);
+};
+
+const openUpdateNotesPanel = () => {
+  if (!dom.updateNotesPanel) return;
+  renderUpdateNotesContent();
+  closeSidebarSettingsMenu();
+  if (dom.updateNotesBackdrop) {
+    dom.updateNotesBackdrop.hidden = false;
+  }
+  dom.updateNotesPanel.hidden = false;
+  dom.updateNotesButton?.setAttribute('aria-expanded', 'true');
+  window.requestAnimationFrame(() => dom.updateNotesClose?.focus());
+};
+
+const closeUpdateNotesPanel = ({ markSeen = true } = {}) => {
+  if (!dom.updateNotesPanel || dom.updateNotesPanel.hidden) return;
+  dom.updateNotesPanel.hidden = true;
+  if (dom.updateNotesBackdrop) {
+    dom.updateNotesBackdrop.hidden = true;
+  }
+  dom.updateNotesButton?.setAttribute('aria-expanded', 'false');
+  if (markSeen) {
+    markUpdateNotesSeen();
+  }
+};
+
+const toggleUpdateNotesPanel = () => {
+  if (!dom.updateNotesPanel) return;
+  if (dom.updateNotesPanel.hidden) {
+    openUpdateNotesPanel();
+    return;
+  }
+  closeUpdateNotesPanel();
+};
+
+const loadUpdateNotes = async () => {
+  try {
+    const response = await fetch(UPDATE_NOTES_PATH, {
+      method: 'GET',
+      cache: 'no-store',
+      credentials: 'same-origin',
+    });
+    if (!response.ok) {
+      throw new Error(`Failed to load update notes (${response.status})`);
+    }
+    state.updateNotes = normalizeUpdateNotesPayload(await response.json());
+  } catch {
+    state.updateNotes = null;
+  }
+  renderUpdateNotesContent();
+  renderUpdateNotesUnreadState();
+};
+
+const initUpdateNotes = () => {
+  if (dom.updateNotesButton) {
+    dom.updateNotesButton.hidden = true;
+  }
+  renderUpdateNotesUnreadState();
+  dom.updateNotesBackdrop?.setAttribute('hidden', '');
+  dom.updateNotesPanel?.setAttribute('hidden', '');
+  dom.updateNotesButton?.setAttribute('aria-expanded', 'false');
+  loadUpdateNotes();
+};
+
 const closeSidebarSettingsMenu = () => {
   if (!dom.sidebarSettingsMenu) return;
   dom.sidebarSettingsMenu.hidden = true;
@@ -1659,6 +1809,9 @@ const closeSidebarSettingsMenu = () => {
 const toggleSidebarSettingsMenu = () => {
   if (!dom.sidebarSettingsMenu) return;
   const shouldOpen = dom.sidebarSettingsMenu.hidden;
+  if (shouldOpen) {
+    closeUpdateNotesPanel();
+  }
   dom.sidebarSettingsMenu.hidden = !shouldOpen;
   dom.sidebarSettingsButton?.setAttribute('aria-expanded', shouldOpen ? 'true' : 'false');
 };
@@ -3396,6 +3549,7 @@ const renderWorkspaceHeader = () => {
     dom.userName.textContent = state.user?.username || state.user?.name || state.user?.email || 'Potato workspace';
   }
   dom.userEmail.textContent = state.user?.email || '';
+  renderUpdateNotesUnreadState();
   dom.chatTitle.textContent = getActiveChatTitle();
   if (!dom.modelSelect) return;
   const selectedId = String(state.selectedModel?.id || '').trim();
@@ -4194,6 +4348,7 @@ const showWorkspace = () => {
 };
 
 const showLogin = () => {
+  closeUpdateNotesPanel({ markSeen: false });
   dom.workspaceView.hidden = true;
   dom.workspaceView.style.display = 'none';
   dom.loginView.hidden = false;
@@ -4457,6 +4612,24 @@ dom.signupBackButton.addEventListener('click', () => {
 
 dom.changePasswordButton?.addEventListener('click', openPasswordModal);
 
+dom.updateNotesButton?.addEventListener('click', (event) => {
+  event.stopPropagation();
+  toggleUpdateNotesPanel();
+});
+
+dom.updateNotesPanel?.addEventListener('click', (event) => {
+  event.stopPropagation();
+});
+
+dom.updateNotesBackdrop?.addEventListener('click', () => {
+  closeUpdateNotesPanel();
+});
+
+dom.updateNotesClose?.addEventListener('click', (event) => {
+  event.stopPropagation();
+  closeUpdateNotesPanel();
+});
+
 dom.sidebarSettingsButton?.addEventListener('click', (event) => {
   event.stopPropagation();
   toggleSidebarSettingsMenu();
@@ -4477,11 +4650,13 @@ dom.sidebarSignOutButton?.addEventListener('click', () => {
 
 document.addEventListener('click', () => {
   closeSidebarSettingsMenu();
+  closeUpdateNotesPanel();
 });
 
 document.addEventListener('keydown', (event) => {
   if (event.key === 'Escape') {
     closeSidebarSettingsMenu();
+    closeUpdateNotesPanel();
   }
 });
 
@@ -4636,6 +4811,7 @@ dom.filePathInput?.addEventListener('keydown', async (event) => {
 
 initResizablePanels();
 initThemeControls();
+initUpdateNotes();
 autoResizePromptInput();
 renderEmailVerificationState();
 renderPasswordResetState();

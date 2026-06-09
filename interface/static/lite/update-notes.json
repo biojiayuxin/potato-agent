@@ -1,0 +1,24 @@
+{
+  "updates": [
+    {
+      "version": "2026-06-09-003",
+      "title": "Hermes Agent 0.16.0",
+      "date": "June 9, 2026",
+      "summary": "Hermes Agent has been upgraded with new functional analysis support.",
+      "items": [
+        "Upgraded Hermes Agent to version 0.16.0.",
+        "Added a GO/KEGG analysis skill for enrichment and pathway analysis workflows.",
+        "Added the supporting GO/KEGG database for the new analysis skill."
+      ]
+    },
+    {
+      "version": "2026-06-09-002",
+      "title": "Workspace updates",
+      "date": "June 9, 2026",
+      "summary": "本次更新用于验证更新提示功能。",
+      "items": [
+        "测试更新提示"
+      ]
+    }
+  ]
+}
