@@ -118,6 +118,10 @@ from interface.model_options import (
     patch_user_active_model,
 )
 from interface.model_proxy_config import get_model_proxy_base_url
+from interface.password_policy import (
+    PASSWORD_COMPLEXITY_DETAIL,
+    password_complexity_error,
+)
 from interface.privileged_client import PrivilegedClientError, privileged_client
 from interface.tui_gateway_bridge import (
     TuiGatewayBridge,
@@ -166,11 +170,6 @@ EMAIL_VERIFICATION_TTL_SECONDS = 10 * 60
 EMAIL_VERIFICATION_RESEND_COOLDOWN_SECONDS = 60
 EMAIL_VERIFICATION_EMAIL_HOURLY_LIMIT = 5
 EMAIL_VERIFICATION_IP_HOURLY_LIMIT = 20
-PASSWORD_COMPLEXITY_DETAIL = (
-    "Password must be at least 8 characters and include uppercase letters, "
-    "lowercase letters, and numbers."
-)
-
 HERMES_SRC = REPO_ROOT / "hermes-agent"
 if str(HERMES_SRC) not in sys.path:
     sys.path.insert(0, str(HERMES_SRC))
@@ -305,13 +304,9 @@ def _validate_signup_email(email: str) -> str:
 
 
 def _validate_password_complexity(password: str) -> None:
-    if (
-        len(password) < 8
-        or re.search(r"[a-z]", password) is None
-        or re.search(r"[A-Z]", password) is None
-        or re.search(r"[0-9]", password) is None
-    ):
-        raise HTTPException(status_code=400, detail=PASSWORD_COMPLEXITY_DETAIL)
+    error = password_complexity_error(password)
+    if error is not None:
+        raise HTTPException(status_code=400, detail=error)
 
 
 def _hash_email_verification_code(

@@ -329,7 +329,7 @@ def test_signup_email_verification_api_sends_and_signup_consumes_code(
             json={
                 "username": "alice",
                 "email": "alice@example.com",
-                "password": "Password123",
+                "password": "Password123!",
                 "display_name": "Alice",
                 "email_verification_id": payload["verification_id"],
                 "email_verification_code": sent["code"],
@@ -348,7 +348,7 @@ def test_signup_email_verification_api_sends_and_signup_consumes_code(
         client.close()
 
 
-def test_signup_api_rejects_password_without_mixed_case_and_number(
+def test_signup_api_rejects_password_without_mixed_case_number_and_symbol(
     tmp_path, monkeypatch
 ) -> None:
     client, app_mod, _, mailer_mod, db_path = _load_app(tmp_path, monkeypatch)
@@ -384,7 +384,7 @@ def test_signup_api_rejects_password_without_mixed_case_and_number(
         assert signup_response.status_code == 400, signup_response.text
         assert (
             signup_response.json()["detail"]
-            == "Password must be at least 8 characters and include uppercase letters, lowercase letters, and numbers."
+            == "Password must be at least 8 characters and include uppercase letters, lowercase letters, numbers, and common symbols."
         )
         assert (
             _verification_row(db_path, payload["verification_id"])["status"]

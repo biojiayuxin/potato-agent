@@ -198,7 +198,7 @@ def test_change_password_rejects_wrong_current_password_without_update(
             "/api/auth/password",
             json={
                 "current_password": "wrongpassword",
-                "new_password": "Newpassword1",
+                "new_password": "Newpassword1!",
             },
         )
         assert response.status_code == 401, response.text
@@ -266,7 +266,7 @@ def test_change_password_keeps_current_client_authenticated_and_revokes_old_toke
             "/api/auth/password",
             json={
                 "current_password": "oldpassword",
-                "new_password": "Newpassword1",
+                "new_password": "Newpassword1!",
             },
         )
         assert change_response.status_code == 200, change_response.text
@@ -293,7 +293,7 @@ def test_change_password_keeps_current_client_authenticated_and_revokes_old_toke
             "alice",
             db_path=db_path,
         )
-        assert auth_db_mod.verify_password("Newpassword1", password_hash)
+        assert auth_db_mod.verify_password("Newpassword1!", password_hash)
         assert not auth_db_mod.verify_password("oldpassword", password_hash)
     finally:
         client.close()
@@ -344,7 +344,7 @@ def test_password_reset_api_sends_code_resets_password_and_revokes_old_token(
             "/api/auth/password-reset",
             json={
                 "email": "alice@example.com",
-                "new_password": "Newpassword1",
+                "new_password": "Newpassword1!",
                 "email_verification_id": payload["verification_id"],
                 "email_verification_code": sent["code"],
             },
@@ -357,7 +357,7 @@ def test_password_reset_api_sends_code_resets_password_and_revokes_old_token(
             "alice@example.com",
             db_path=db_path,
         )
-        assert auth_db_mod.verify_password("Newpassword1", password_hash)
+        assert auth_db_mod.verify_password("Newpassword1!", password_hash)
         assert not auth_db_mod.verify_password("oldpassword", password_hash)
 
         old_client = TestClient(app_mod.app)

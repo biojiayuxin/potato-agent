@@ -50,8 +50,9 @@ const state = {
 
 const MODEL_RESPONSE_ERROR_MESSAGE = '模型响应失败，请稍后重试。';
 const SESSION_EXPIRED_MESSAGE = 'Workspace slept after inactivity. Please sign in again.';
+const COMMON_PASSWORD_SYMBOLS = '!"#$%&\'()*+,-./:;<=>?@[\\]^_`{|}~';
 const PASSWORD_COMPLEXITY_MESSAGE = (
-  'Password must be at least 8 characters and include uppercase letters, lowercase letters, and numbers.'
+  'Password must be at least 8 characters and include uppercase letters, lowercase letters, numbers, and common symbols.'
 );
 
 const dom = {
@@ -322,11 +323,13 @@ const validateSessionTitleDraft = (value) => {
 };
 
 const validatePasswordComplexity = (password) => {
+  const candidate = String(password || '');
   if (
-    String(password || '').length < 8
-    || !/[a-z]/.test(password)
-    || !/[A-Z]/.test(password)
-    || !/[0-9]/.test(password)
+    candidate.length < 8
+    || !/[a-z]/.test(candidate)
+    || !/[A-Z]/.test(candidate)
+    || !/[0-9]/.test(candidate)
+    || !Array.from(COMMON_PASSWORD_SYMBOLS).some((symbol) => candidate.includes(symbol))
   ) {
     return PASSWORD_COMPLEXITY_MESSAGE;
   }

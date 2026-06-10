@@ -19,6 +19,7 @@ from interface.mapping import (
     upsert_user_mapping_entry,
     write_mapping,
 )
+from interface.password_policy import validate_password_complexity
 
 
 class ProvisionError(RuntimeError):
@@ -57,6 +58,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main() -> int:
     args = build_parser().parse_args()
+    validate_password_complexity(args.password)
     require_root()
     require_binary("systemctl")
     require_binary("useradd")
