@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -18,7 +20,10 @@ from interface.model_proxy_config import (
     load_model_proxy_config,
     username_from_local_token,
 )
+from interface import token_usage_store
 
+
+logger = logging.getLogger(__name__)
 
 DEFAULT_UPSTREAM_TIMEOUT_SECONDS = float(
     os.getenv("POTATO_MODEL_PROXY_UPSTREAM_TIMEOUT_SECONDS") or "600"
@@ -63,6 +68,20 @@ class ProxyModel:
 
 class ModelProxyError(RuntimeError):
     pass
+
+
+@dataclass
+class UsageTelemetry:
+    mapping_username: str
+    endpoint: str
+    route_model: str
+    upstream_model: str
+    provider: str
+    api_mode: str
+    status_code: int
+    streaming: bool
+    started_at: float
+    raw_usage: dict[str, Any] | None = None
 
 
 def _config_path() -> Path:
@@ -384,7 +403,56 @@ def _normalize_sse_frame(frame: bytes, state: dict[str, Any]) -> bytes:
     return "\n".join(rebuilt).encode("utf-8")
 
 
-async def _iter_response_sse_bytes(response: httpx.Response):
+def _sse_frame_payload(frame: bytes) -> Any | None:
+    if not frame.strip():
+        return None
+    try:
+        text = frame.decode("utf-8")
+    except UnicodeDecodeError:
+        return None
+
+    data_lines: list[str] = []
+    for line in text.splitlines():
+        if line.startswith("data:"):
+            data_lines.append(line[5:].lstrip(" "))
+    if not data_lines:
+        return None
+
+    data = "\n".join(data_lines)
+    if data.strip() == "[DONE]":
+        return None
+    try:
+        return json.loads(data)
+    except json.JSONDecodeError:
+        return None
+
+
+def _capture_usage_from_payload(
+    payload: Any, telemetry: UsageTelemetry | None
+) -> None:
+    if telemetry is None or not isinstance(payload, dict):
+        return
+    usage = payload.get("usage")
+    if isinstance(usage, dict):
+        telemetry.raw_usage = usage
+        return
+    response = payload.get("response")
+    if isinstance(response, dict) and isinstance(response.get("usage"), dict):
+        telemetry.raw_usage = response["usage"]
+
+
+def _capture_usage_from_sse_frame(
+    frame: bytes, telemetry: UsageTelemetry | None
+) -> None:
+    _capture_usage_from_payload(_sse_frame_payload(frame), telemetry)
+
+
+async def _iter_response_sse_bytes(
+    response: httpx.Response,
+    *,
+    normalize_responses: bool = True,
+    telemetry: UsageTelemetry | None = None,
+):
     buffer = b""
     state: dict[str, Any] = {}
     async for chunk in response.aiter_bytes():
@@ -399,9 +467,170 @@ async def _iter_response_sse_bytes(response: httpx.Response):
             sep_len = 4 if pos == crlf_pos else 2
             frame = buffer[:pos]
             buffer = buffer[pos + sep_len :]
-            yield _normalize_sse_frame(frame, state) + b"\n\n"
+            _capture_usage_from_sse_frame(frame, telemetry)
+            if normalize_responses:
+                frame = _normalize_sse_frame(frame, state)
+            yield frame + b"\n\n"
     if buffer:
-        yield _normalize_sse_frame(buffer, state)
+        _capture_usage_from_sse_frame(buffer, telemetry)
+        if normalize_responses:
+            buffer = _normalize_sse_frame(buffer, state)
+        yield buffer
+
+
+def _json_body_usage(body: bytes) -> dict[str, Any] | None:
+    try:
+        payload = json.loads(body.decode("utf-8") or "{}")
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        return None
+    if not isinstance(payload, dict):
+        return None
+    usage = payload.get("usage")
+    return usage if isinstance(usage, dict) else None
+
+
+def _to_non_negative_int(value: Any) -> int:
+    if isinstance(value, bool):
+        return 0
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return 0
+    return max(0, parsed)
+
+
+def _dict_field_int(mapping: dict[str, Any] | None, *names: str) -> int:
+    if not isinstance(mapping, dict):
+        return 0
+    for name in names:
+        if name in mapping:
+            value = _to_non_negative_int(mapping.get(name))
+            if value:
+                return value
+    return 0
+
+
+def _normalize_usage_tokens(
+    raw_usage: dict[str, Any] | None,
+    *,
+    provider: str,
+    api_mode: str,
+) -> dict[str, int]:
+    tokens = {
+        "input_tokens": 0,
+        "output_tokens": 0,
+        "cache_read_tokens": 0,
+        "cache_write_tokens": 0,
+    }
+    if not isinstance(raw_usage, dict):
+        return tokens
+
+    provider_name = provider.strip().lower()
+    mode = api_mode.strip().lower()
+    if "prompt_tokens" in raw_usage or "completion_tokens" in raw_usage:
+        prompt_total = _dict_field_int(raw_usage, "prompt_tokens", "input_tokens")
+        output_tokens = _dict_field_int(
+            raw_usage, "completion_tokens", "output_tokens"
+        )
+        details = raw_usage.get("prompt_tokens_details")
+        details_dict = details if isinstance(details, dict) else None
+        cache_read_tokens = _dict_field_int(
+            details_dict, "cached_tokens", "cache_read_tokens"
+        ) or _dict_field_int(raw_usage, "cache_read_input_tokens", "cache_read_tokens")
+        cache_write_tokens = _dict_field_int(
+            details_dict,
+            "cache_write_tokens",
+            "cache_creation_tokens",
+            "cache_creation_input_tokens",
+        ) or _dict_field_int(
+            raw_usage,
+            "cache_creation_input_tokens",
+            "cache_creation_tokens",
+            "cache_write_tokens",
+        )
+        tokens["input_tokens"] = max(
+            0, prompt_total - cache_read_tokens - cache_write_tokens
+        )
+        tokens["output_tokens"] = output_tokens
+        tokens["cache_read_tokens"] = cache_read_tokens
+        tokens["cache_write_tokens"] = cache_write_tokens
+        return tokens
+
+    if "input_tokens" in raw_usage or "output_tokens" in raw_usage:
+        output_tokens = _dict_field_int(
+            raw_usage, "output_tokens", "completion_tokens"
+        )
+        if mode == "anthropic_messages" or provider_name == "anthropic":
+            tokens["input_tokens"] = _dict_field_int(raw_usage, "input_tokens")
+            tokens["output_tokens"] = output_tokens
+            tokens["cache_read_tokens"] = _dict_field_int(
+                raw_usage, "cache_read_input_tokens", "cache_read_tokens"
+            )
+            tokens["cache_write_tokens"] = _dict_field_int(
+                raw_usage,
+                "cache_creation_input_tokens",
+                "cache_creation_tokens",
+                "cache_write_tokens",
+            )
+            return tokens
+
+        input_total = _dict_field_int(raw_usage, "input_tokens", "prompt_tokens")
+        details = raw_usage.get("input_tokens_details")
+        details_dict = details if isinstance(details, dict) else None
+        cache_read_tokens = _dict_field_int(
+            details_dict, "cached_tokens", "cache_read_tokens"
+        ) or _dict_field_int(raw_usage, "cache_read_input_tokens", "cache_read_tokens")
+        cache_write_tokens = _dict_field_int(
+            details_dict,
+            "cache_creation_tokens",
+            "cache_write_tokens",
+            "cache_creation_input_tokens",
+        ) or _dict_field_int(
+            raw_usage,
+            "cache_creation_input_tokens",
+            "cache_creation_tokens",
+            "cache_write_tokens",
+        )
+        tokens["input_tokens"] = max(
+            0, input_total - cache_read_tokens - cache_write_tokens
+        )
+        tokens["output_tokens"] = output_tokens
+        tokens["cache_read_tokens"] = cache_read_tokens
+        tokens["cache_write_tokens"] = cache_write_tokens
+    return tokens
+
+
+def _record_completed_usage(telemetry: UsageTelemetry) -> None:
+    if not (200 <= telemetry.status_code < 300):
+        return
+    completed_at = time.time()
+    raw_usage = telemetry.raw_usage if isinstance(telemetry.raw_usage, dict) else None
+    usage_status = "present" if raw_usage is not None else "missing"
+    tokens = _normalize_usage_tokens(
+        raw_usage, provider=telemetry.provider, api_mode=telemetry.api_mode
+    )
+    try:
+        token_usage_store.record_usage_request(
+            mapping_username=telemetry.mapping_username,
+            endpoint=telemetry.endpoint,
+            route_model=telemetry.route_model,
+            upstream_model=telemetry.upstream_model,
+            provider=telemetry.provider,
+            api_mode=telemetry.api_mode,
+            status_code=telemetry.status_code,
+            streaming=telemetry.streaming,
+            started_at=telemetry.started_at,
+            completed_at=completed_at,
+            duration_ms=max(0, int((completed_at - telemetry.started_at) * 1000)),
+            input_tokens=tokens["input_tokens"],
+            output_tokens=tokens["output_tokens"],
+            cache_read_tokens=tokens["cache_read_tokens"],
+            cache_write_tokens=tokens["cache_write_tokens"],
+            usage_status=usage_status,
+            raw_usage=raw_usage,
+        )
+    except Exception:
+        logger.warning("Failed to record model proxy usage", exc_info=True)
 
 
 def _select_model_for_body(username: str, body: bytes) -> tuple[ProxyModel, Any]:
@@ -453,6 +682,7 @@ async def _forward_model_request(request: Request, endpoint: str) -> Response:
     username = _require_username(request)
     body = await request.body()
     model, payload = _select_model_for_body(username, body)
+    route_model = str(payload.get("model") or model.name).strip()
     sanitized_payload, payload_changed = _sanitize_outbound_model_payload(payload)
     if str(sanitized_payload.get("model") or "").strip() != model.model:
         sanitized_payload = dict(sanitized_payload)
@@ -474,21 +704,48 @@ async def _forward_model_request(request: Request, endpoint: str) -> Response:
         headers=headers,
         params=request.query_params,
     )
-    response = await client.send(req, stream=True)
+    started_at = time.time()
+    try:
+        response = await client.send(req, stream=True)
+    except Exception:
+        await client.aclose()
+        raise
+    response_content_type = str(response.headers.get("content-type") or "").lower()
+    is_sse = "text/event-stream" in response_content_type
     should_normalize_sse = (
         endpoint.strip("/") == "responses"
-        and "text/event-stream" in str(response.headers.get("content-type") or "").lower()
+        and is_sse
+    )
+    telemetry = UsageTelemetry(
+        mapping_username=username,
+        endpoint=endpoint.strip("/"),
+        route_model=route_model,
+        upstream_model=model.model,
+        provider=model.provider,
+        api_mode=model.api_mode or "",
+        status_code=response.status_code,
+        streaming=is_sse,
+        started_at=started_at,
     )
 
     async def body_iter():
+        body_chunks: list[bytes] = []
         try:
-            body_source = (
-                _iter_response_sse_bytes(response)
-                if should_normalize_sse
-                else response.aiter_bytes()
-            )
-            async for chunk in body_source:
-                yield chunk
+            if is_sse:
+                async for chunk in _iter_response_sse_bytes(
+                    response,
+                    normalize_responses=should_normalize_sse,
+                    telemetry=telemetry,
+                ):
+                    yield chunk
+            else:
+                async for chunk in response.aiter_bytes():
+                    if 200 <= response.status_code < 300:
+                        body_chunks.append(chunk)
+                    yield chunk
+                if 200 <= response.status_code < 300:
+                    telemetry.raw_usage = _json_body_usage(b"".join(body_chunks))
+            _record_completed_usage(telemetry)
         finally:
             await response.aclose()
             await client.aclose()
