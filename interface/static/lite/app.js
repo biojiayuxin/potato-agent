@@ -201,6 +201,7 @@ const FILES_WIDTH_KEY = 'lite_files_width';
 const THEME_MODE_KEY = 'lite_theme_mode';
 const UPDATE_NOTES_PATH = './static/lite/update-notes.json';
 const UPDATE_NOTES_SEEN_KEY = 'lite_update_notes_seen_version';
+const UPDATE_NOTES_VISIBLE_LIMIT = 5;
 const MAX_ATTACHMENT_SIZE_BYTES = 20 * 1024 * 1024;
 const AUTH_POLL_INTERVAL_MS = 60 * 1000;
 const TUI_BRIDGE_RECONNECT_BASE_DELAY_MS = 1000;
@@ -1768,20 +1769,57 @@ const markUpdateNotesSeen = () => {
   renderUpdateNotesUnreadState();
 };
 
+const getUpdateNotesSortValue = (update, index) => {
+  const version = String(update?.version || '').trim();
+  const versionMatch = version.match(/^(\d{4})-(\d{2})-(\d{2})(?:-(\d+))?/);
+  if (versionMatch) {
+    const [, year, month, day, sequence] = versionMatch;
+    const timestamp = Date.UTC(Number(year), Number(month) - 1, Number(day));
+    const numericSequence = Number(sequence || 0);
+    if (Number.isFinite(timestamp) && Number.isFinite(numericSequence)) {
+      return timestamp * 1000 + numericSequence;
+    }
+  }
+
+  const parsedDate = Date.parse(String(update?.date || '').trim());
+  if (Number.isFinite(parsedDate)) {
+    return parsedDate * 1000;
+  }
+
+  return -index;
+};
+
 const normalizeUpdateNotesPayload = (payload) => {
   const updates = Array.isArray(payload?.updates) ? payload.updates : [];
-  const latest = updates[0];
-  const version = String(latest?.version || '').trim();
-  if (!latest || !version) return null;
-  const items = Array.isArray(latest.items)
-    ? latest.items.map((item) => String(item || '').trim()).filter(Boolean)
-    : [];
+  const normalizedUpdates = updates
+    .map((update, index) => {
+      const version = String(update?.version || '').trim();
+      if (!update || !version) return null;
+      const items = Array.isArray(update.items)
+        ? update.items.map((item) => String(item || '').trim()).filter(Boolean)
+        : [];
+      return {
+        version,
+        title: String(update.title || 'Workspace updates').trim() || 'Workspace updates',
+        date: String(update.date || '').trim(),
+        summary: String(update.summary || '').trim(),
+        items,
+        sortValue: getUpdateNotesSortValue(update, index),
+      };
+    })
+    .filter(Boolean)
+    .sort((a, b) => b.sortValue - a.sortValue)
+    .slice(0, UPDATE_NOTES_VISIBLE_LIMIT)
+    .map(({ sortValue, ...update }) => update);
+
+  const latest = normalizedUpdates[0];
+  if (!latest) return null;
   return {
-    version,
-    title: String(latest.title || 'Workspace updates').trim() || 'Workspace updates',
-    date: String(latest.date || '').trim(),
-    summary: String(latest.summary || '').trim(),
-    items,
+    version: latest.version,
+    title: 'Workspace updates',
+    date: '',
+    summary: '',
+    updates: normalizedUpdates,
   };
 };
 
@@ -1798,11 +1836,48 @@ const renderUpdateNotesContent = () => {
   }
   if (!dom.updateNotesList) return;
   dom.updateNotesList.innerHTML = '';
-  dom.updateNotesList.hidden = state.updateNotes.items.length === 0;
-  for (const item of state.updateNotes.items) {
-    const element = document.createElement('li');
-    element.textContent = item;
-    dom.updateNotesList.append(element);
+  const updates = Array.isArray(state.updateNotes.updates) ? state.updateNotes.updates : [];
+  dom.updateNotesList.hidden = updates.length === 0;
+  for (const update of updates) {
+    const section = document.createElement('li');
+    section.className = 'update-notes-entry';
+
+    const heading = document.createElement('div');
+    heading.className = 'update-notes-entry-heading';
+
+    const title = document.createElement('div');
+    title.className = 'update-notes-entry-title';
+    title.textContent = update.title;
+    heading.append(title);
+
+    if (update.date) {
+      const date = document.createElement('div');
+      date.className = 'update-notes-entry-date';
+      date.textContent = update.date;
+      heading.append(date);
+    }
+
+    section.append(heading);
+
+    if (update.summary) {
+      const summary = document.createElement('p');
+      summary.className = 'update-notes-entry-summary';
+      summary.textContent = update.summary;
+      section.append(summary);
+    }
+
+    if (update.items.length > 0) {
+      const itemList = document.createElement('ul');
+      itemList.className = 'update-notes-entry-items';
+      for (const item of update.items) {
+        const element = document.createElement('li');
+        element.textContent = item;
+        itemList.append(element);
+      }
+      section.append(itemList);
+    }
+
+    dom.updateNotesList.append(section);
   }
 };
 

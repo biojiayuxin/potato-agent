@@ -1,6 +1,16 @@
 {
   "updates": [
     {
+      "version": "2026-06-12-001",
+      "title": "Workspace updates",
+      "date": "June 12, 2026",
+      "summary": "This update fixes bugs and improves page scrolling behavior.",
+      "items": [
+        "Fixed bugs.",
+        "Improved page scrolling logic."
+      ]
+    },
+    {
       "version": "2026-06-09-003",
       "title": "Hermes Agent 0.16.0",
       "date": "June 9, 2026",
