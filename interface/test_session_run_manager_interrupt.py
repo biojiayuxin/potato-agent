@@ -362,12 +362,107 @@ def test_error_complete_without_text_persists_user_visible_failure() -> None:
     assert assistant["content"] == MODEL_RESPONSE_ERROR_MESSAGE
 
 
+def test_tool_start_and_complete_are_persisted_as_progress() -> None:
+    db_path = Path(tempfile.mkdtemp(prefix="potato-run-manager-tool-progress-")) / "interface.db"
+    os.environ["INTERFACE_AUTH_DB"] = str(db_path)
+
+    from interface.display_store import (
+        get_display_messages,
+        get_live_session_state,
+        save_display_messages,
+        save_live_session_state,
+    )
+    from interface.session_run_manager import SessionRunManager
+
+    save_display_messages(
+        "user-1",
+        "session-1",
+        [
+            {"id": "user-msg", "role": "user", "content": "hello", "done": True},
+            {
+                "id": "assistant-1",
+                "role": "assistant",
+                "content": "",
+                "progressLines": [],
+                "done": False,
+            },
+        ],
+        db_path=db_path,
+    )
+    save_live_session_state(
+        "user-1",
+        "session-1",
+        run_id="run-1",
+        live_session_id="live-1",
+        assistant_message_id="assistant-1",
+        status="running",
+        pending_approval=None,
+        last_error="",
+        last_event_seq=1,
+        db_path=db_path,
+    )
+
+    async def scenario() -> None:
+        manager = SessionRunManager(db_path=db_path)
+        bridge = _Bridge()
+        await manager.handle_bridge_event(
+            bridge,  # type: ignore[arg-type]
+            {
+                "type": "tool.start",
+                "session_id": "live-1",
+                "persistent_session_id": "session-1",
+                "run_id": "run-1",
+                "seq": 2,
+                "payload": {"context": "`🛠️ list_directory test_dir`"},
+            },
+        )
+        await manager.handle_bridge_event(
+            bridge,  # type: ignore[arg-type]
+            {
+                "type": "tool.complete",
+                "session_id": "live-1",
+                "persistent_session_id": "session-1",
+                "run_id": "run-1",
+                "seq": 3,
+                "payload": {"summary": "`🛠️ list_directory completed`"},
+            },
+        )
+        await manager.handle_bridge_event(
+            bridge,  # type: ignore[arg-type]
+            {
+                "type": "message.complete",
+                "session_id": "live-1",
+                "persistent_session_id": "session-1",
+                "run_id": "run-1",
+                "seq": 4,
+                "payload": {"text": "done", "status": "complete"},
+            },
+        )
+
+    _run(scenario())
+
+    live_state = get_live_session_state("user-1", "session-1", db_path=db_path)
+    assert live_state is not None
+    assert live_state["status"] == "completed"
+
+    messages = get_display_messages("user-1", "session-1", db_path=db_path)
+    assert messages is not None
+    assistant = next(message for message in messages if message["id"] == "assistant-1")
+    assert assistant["progressLines"] == [
+        "`🛠️ list_directory test_dir`",
+        "`🛠️ list_directory completed`",
+    ]
+    assert assistant["content"] == "done"
+    assert assistant["done"] is True
+
+
 def run() -> None:
     test_interrupt_marks_live_state_final_and_done()
     test_late_delta_after_interrupt_does_not_reopen_live_state()
     test_late_complete_from_interrupted_run_does_not_finish_new_turn()
     test_interrupt_marks_missing_gateway_session_failed()
     test_error_complete_without_text_persists_user_visible_failure()
+    test_tool_start_and_complete_are_persisted_as_progress()
 
 
 if __name__ == "__main__":

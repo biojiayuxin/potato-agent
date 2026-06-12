@@ -86,6 +86,26 @@ def _normalize_messages(messages: list[dict[str, Any]] | None) -> list[dict[str,
     ]
 
 
+def _tool_progress_preview(event_type: str, payload: dict[str, Any]) -> str:
+    if event_type == "tool.start":
+        preview = (
+            payload.get("context")
+            or payload.get("preview")
+            or payload.get("name")
+            or "tool"
+        )
+    elif event_type == "tool.complete":
+        preview = (
+            payload.get("summary")
+            or payload.get("preview")
+            or payload.get("name")
+            or "tool completed"
+        )
+    else:
+        preview = payload.get("preview") or payload.get("name") or ""
+    return str(preview or "").strip()
+
+
 def _serialize_attachments_for_hermes(attachments: list[dict[str, Any]]) -> list[dict[str, Any]]:
     serialized: list[dict[str, Any]] = []
     for attachment in attachments:
@@ -560,8 +580,14 @@ class SessionRunManager:
             await self._append_delta(context, payload, seq, state_live_session_id)
             return
 
-        if event_type == "tool.progress":
-            await self._append_progress(context, payload, seq, state_live_session_id)
+        if event_type in {"tool.progress", "tool.start", "tool.complete"}:
+            await self._append_progress(
+                context,
+                payload,
+                seq,
+                state_live_session_id,
+                event_type=event_type,
+            )
             return
 
         if event_type == "approval.request":
@@ -779,8 +805,10 @@ class SessionRunManager:
         payload: dict[str, Any],
         seq: int,
         live_session_id: str,
+        *,
+        event_type: str = "tool.progress",
     ) -> None:
-        preview = str(payload.get("preview") or payload.get("name") or "").strip()
+        preview = _tool_progress_preview(event_type, payload)
         if not preview:
             return
         messages = _normalize_messages(self._get_display_messages(context.user_id, context.session_id))

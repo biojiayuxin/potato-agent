@@ -3164,6 +3164,50 @@ const appendProgressEntries = (message, entries) => {
   message.progressLines = nextEntries;
 };
 
+const mergeSnapshotMessagesWithLocalProgress = (snapshotMessages, localMessages) => {
+  const normalizedSnapshot = Array.isArray(snapshotMessages) ? snapshotMessages : [];
+  const normalizedLocal = Array.isArray(localMessages) ? localMessages : [];
+  if (normalizedSnapshot.length === 0 || normalizedLocal.length === 0) {
+    return normalizedSnapshot;
+  }
+
+  const localById = new Map();
+  const localAssistantsByIndex = [];
+  for (const message of normalizedLocal) {
+    const messageId = String(message?.id || '').trim();
+    if (messageId) {
+      localById.set(messageId, message);
+    }
+    if (String(message?.role || '') === 'assistant') {
+      localAssistantsByIndex.push(message);
+    }
+  }
+
+  let assistantIndex = 0;
+  return normalizedSnapshot.map((message) => {
+    if (String(message?.role || '') !== 'assistant') {
+      return message;
+    }
+
+    const messageId = String(message?.id || '').trim();
+    const localMessage = localById.get(messageId) || localAssistantsByIndex[assistantIndex] || null;
+    assistantIndex += 1;
+    if (!localMessage || !Array.isArray(localMessage.progressLines) || localMessage.progressLines.length === 0) {
+      return message;
+    }
+
+    const mergedMessage = {
+      ...message,
+      progressLines: Array.isArray(localMessage.progressLines) ? [...localMessage.progressLines] : [],
+    };
+    appendProgressEntries(
+      mergedMessage,
+      Array.isArray(message.progressLines) ? message.progressLines : []
+    );
+    return mergedMessage;
+  });
+};
+
 const createMetaSection = (title, bodyHtml, className = '', open = true) => {
   const section = document.createElement('details');
   section.className = `message-meta ${className}`.trim();
@@ -3995,11 +4039,12 @@ const openSession = async (sessionId) => {
   try {
     const response = await api(`/api/sessions/${encodeURIComponent(sessionId)}`, { method: 'GET' });
     const json = await response.json();
-    const normalizedMessages = Array.isArray(json?.messages)
+    const serverMessages = Array.isArray(json?.messages)
       ? json.messages.map(normalizeMessageForDisplay)
       : [];
     const liveState = json?.live || json?.session?.live || null;
     const previousMessages = getCachedSessionMessages(sessionId) || state.messages;
+    const normalizedMessages = mergeSnapshotMessagesWithLocalProgress(serverMessages, previousMessages);
     setLiveSessionMessages(sessionId, normalizedMessages);
     state.activeSession = normalizeSessionSnapshot(
       json?.session
@@ -4089,11 +4134,14 @@ const updateSessionSnapshot = async (
   const response = await api(`/api/sessions/${encodeURIComponent(sessionId)}`, { method: 'GET' });
   const json = await response.json();
   const session = normalizeSessionSnapshot(json?.session || null);
-  const normalizedMessages = Array.isArray(json?.messages)
+  const serverMessages = Array.isArray(json?.messages)
     ? json.messages.map(normalizeMessageForDisplay)
     : null;
   const liveState = json?.live || json?.session?.live || null;
   const previousMessages = getCachedSessionMessages(sessionId);
+  const normalizedMessages = Array.isArray(serverMessages)
+    ? mergeSnapshotMessagesWithLocalProgress(serverMessages, previousMessages)
+    : null;
   if (!session?.id) {
     return null;
   }
