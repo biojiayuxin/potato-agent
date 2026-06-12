@@ -41,6 +41,8 @@ const state = {
   pendingSessionPromise: null,
   shouldAutoScrollMessages: true,
   liveSessionMessages: new Map(),
+  sessionScrollPositions: new Map(),
+  pendingMessageScrollRestore: null,
   sessionHistoryLoading: false,
   renamingSessionId: null,
   renamingTitleDraft: '',
@@ -642,6 +644,77 @@ const getCachedSessionMessages = (sessionId) => {
   const normalizedSessionId = String(sessionId || '').trim();
   if (!normalizedSessionId) return null;
   return getLiveSessionMessages(normalizedSessionId);
+};
+
+const getClampedMessageScrollTop = (position) => {
+  const scrollTop = Number(position?.scrollTop || 0);
+  const scrollHeight = Number(position?.scrollHeight || 0);
+  const clientHeight = Number(position?.clientHeight || 0);
+  const maxScrollTop = Math.max(0, scrollHeight - clientHeight);
+  return Math.max(0, Math.min(scrollTop, maxScrollTop));
+};
+
+const saveSessionScrollPosition = (sessionId) => {
+  const normalizedSessionId = String(sessionId || '').trim();
+  if (!normalizedSessionId || !dom.messages) return;
+  state.sessionScrollPositions.set(normalizedSessionId, {
+    scrollTop: dom.messages.scrollTop,
+    scrollHeight: dom.messages.scrollHeight,
+    clientHeight: dom.messages.clientHeight,
+    atBottom: isScrolledNearBottom(dom.messages),
+  });
+};
+
+const saveActiveSessionScrollPosition = () => {
+  saveSessionScrollPosition(getActivePersistentSessionId());
+};
+
+const forgetSessionScrollPosition = (sessionId) => {
+  const normalizedSessionId = String(sessionId || '').trim();
+  if (!normalizedSessionId) return;
+  state.sessionScrollPositions.delete(normalizedSessionId);
+};
+
+const moveSessionScrollPosition = (fromSessionId, toSessionId) => {
+  const fromId = String(fromSessionId || '').trim();
+  const toId = String(toSessionId || '').trim();
+  if (!fromId || !toId || fromId === toId) return;
+  const position = state.sessionScrollPositions.get(fromId);
+  if (position) {
+    state.sessionScrollPositions.set(toId, position);
+    state.sessionScrollPositions.delete(fromId);
+  }
+};
+
+const queueMessageScrollRestore = (sessionId) => {
+  const normalizedSessionId = String(sessionId || '').trim();
+  state.pendingMessageScrollRestore = normalizedSessionId || null;
+};
+
+const restorePendingMessageScrollPosition = () => {
+  const sessionId = String(state.pendingMessageScrollRestore || '').trim();
+  state.pendingMessageScrollRestore = null;
+  if (!sessionId || !dom.messages || getActivePersistentSessionId() !== sessionId) return;
+
+  const position = state.sessionScrollPositions.get(sessionId);
+  if (!position) return;
+
+  const atBottom = Boolean(position.atBottom);
+  const nextScrollTop = atBottom
+    ? dom.messages.scrollHeight
+    : getClampedMessageScrollTop({
+        ...position,
+        scrollHeight: dom.messages.scrollHeight,
+        clientHeight: dom.messages.clientHeight,
+      });
+
+  dom.messages.classList.add('restoring-scroll');
+  dom.messages.scrollTop = nextScrollTop;
+  state.shouldAutoScrollMessages = atBottom || isScrolledNearBottom(dom.messages);
+  saveSessionScrollPosition(sessionId);
+  window.requestAnimationFrame(() => {
+    dom.messages?.classList.remove('restoring-scroll');
+  });
 };
 
 const setSessionMessagesBuffer = (persistentSessionId, messages) => {
@@ -1429,9 +1502,12 @@ const activatePersistedSession = (session, { clearMessages = true } = {}) => {
     throw new Error('Failed to activate session');
   }
 
+  const previousSessionId = String(state.activeSessionId || '').trim();
+  saveSessionScrollPosition(previousSessionId);
   state.draftSession = null;
   state.activeSession = normalizedSession;
   state.activeSessionId = normalizedSession.id;
+  moveSessionScrollPosition(previousSessionId, normalizedSession.id);
   state.sessions = [
     normalizedSession,
     ...state.sessions.filter((chat) => chat.id !== normalizedSession.id),
@@ -1443,6 +1519,7 @@ const activatePersistedSession = (session, { clearMessages = true } = {}) => {
 
 const showDraftChat = () => {
   resetSessionRenameState();
+  saveActiveSessionScrollPosition();
   activeTuiSessionId = '';
   activePersistentSessionId = '';
   state.sessionHistoryLoading = false;
@@ -2277,6 +2354,8 @@ const resetWorkspaceState = () => {
   state.pendingSessionPromise = null;
   state.shouldAutoScrollMessages = true;
   state.liveSessionMessages.clear();
+  state.sessionScrollPositions.clear();
+  state.pendingMessageScrollRestore = null;
   state.messages = [];
   state.models = [];
   state.selectedModel = null;
@@ -3311,11 +3390,20 @@ const copyTextToClipboard = async (text) => {
 const getRenderableMessages = () => state.messages.filter((message) => message.role !== 'tool');
 
 const renderMessages = () => {
-  const shouldStickToBottom = state.shouldAutoScrollMessages || isScrolledNearBottom(dom.messages);
+  const pendingScrollRestoreSessionId = String(state.pendingMessageScrollRestore || '').trim();
+  const activeScrollSessionId = getActivePersistentSessionId();
+  const shouldRestoreScroll = Boolean(
+    pendingScrollRestoreSessionId
+    && pendingScrollRestoreSessionId === activeScrollSessionId
+    && state.sessionScrollPositions.has(pendingScrollRestoreSessionId)
+  );
+  const shouldStickToBottom = !shouldRestoreScroll
+    && (state.shouldAutoScrollMessages || isScrolledNearBottom(dom.messages));
   dom.messages.innerHTML = '';
   const visibleMessages = getRenderableMessages();
 
   if (state.sessionHistoryLoading) {
+    state.pendingMessageScrollRestore = null;
     const empty = document.createElement('div');
     empty.className = 'empty-state loading-history';
     empty.textContent = 'Loading chat history...';
@@ -3328,6 +3416,7 @@ const renderMessages = () => {
     empty.className = 'empty-state';
     empty.textContent = 'Start a new conversation.';
     dom.messages.append(empty);
+    restorePendingMessageScrollPosition();
     return;
   }
 
@@ -3396,6 +3485,7 @@ const renderMessages = () => {
   if (shouldStickToBottom) {
     dom.messages.scrollTop = dom.messages.scrollHeight;
   }
+  restorePendingMessageScrollPosition();
 };
 
 const getChatDisplayTitle = (chat) => {
@@ -3516,6 +3606,7 @@ const renderChatList = () => {
 
     if (!isRenaming) {
       button.addEventListener('click', () => {
+        saveActiveSessionScrollPosition();
         if (chat.isDraft) {
           state.activeSession = chat;
           state.activeSessionId = chat.id;
@@ -3990,6 +4081,7 @@ const refreshSessions = async () => {
 
 const openSession = async (sessionId) => {
   resetSessionRenameState();
+  saveActiveSessionScrollPosition();
   if (!sessionId) {
     state.activeSession = state.draftSession;
     state.activeSessionId = state.draftSession?.id || null;
@@ -4028,7 +4120,8 @@ const openSession = async (sessionId) => {
     });
     state.sessionHistoryLoading = false;
     state.messages = cachedMessages;
-    state.shouldAutoScrollMessages = true;
+    state.shouldAutoScrollMessages = !state.sessionScrollPositions.has(sessionId);
+    queueMessageScrollRestore(sessionId);
     renderWorkspace();
     if (ACTIVE_LIVE_SESSION_STATUSES.has(String(liveState?.status || ''))) {
       recoverTuiBridgeAfterDisconnect(sessionId).catch(() => {});
@@ -4177,6 +4270,7 @@ const isViewingSession = (sessionId) => Boolean(sessionId) && state.activeSessio
 
 const deleteChat = async (chatId, isDraft = false) => {
   if (isDraft) {
+    forgetSessionScrollPosition(chatId);
     state.draftSession = null;
     state.activeSession = null;
     state.activeSessionId = null;
@@ -4195,6 +4289,7 @@ const deleteChat = async (chatId, isDraft = false) => {
 
   await api(`/api/sessions/${encodeURIComponent(chatId)}`, { method: 'DELETE' });
   clearLiveSessionMessages(chatId);
+  forgetSessionScrollPosition(chatId);
   state.sessions = state.sessions.filter((chat) => chat.id !== chatId);
 
   if (chatId !== state.activeSessionId) {
@@ -4344,6 +4439,8 @@ const submitPromptViaTuiBridge = async (prompt) => {
 
     persistentSessionId = String(nextSession.id || '').trim();
     if (draftSessionId && persistentSessionId && draftSessionId !== persistentSessionId) {
+      saveSessionScrollPosition(draftSessionId);
+      moveSessionScrollPosition(draftSessionId, persistentSessionId);
       clearLiveSessionMessages(draftSessionId);
       sessionAbortControllersById.delete(draftSessionId);
       sessionRunTransportById.delete(draftSessionId);
@@ -4822,6 +4919,7 @@ dom.promptInput.addEventListener('paste', async (event) => {
 
 dom.messages?.addEventListener('scroll', () => {
   state.shouldAutoScrollMessages = isScrolledNearBottom(dom.messages);
+  saveActiveSessionScrollPosition();
 });
 
 dom.sendButton.addEventListener('click', async (event) => {

@@ -2606,6 +2606,10 @@ button.stretch {
   scroll-behavior: smooth;
 }
 
+.workspace-view .messages.restoring-scroll {
+  scroll-behavior: auto;
+}
+
 .workspace-view .messages > .empty-state {
   min-height: 100%;
   display: flex;
