@@ -502,6 +502,25 @@ RestartSec=3
 WantedBy=multi-user.target
 ```
 
+会话归档由 `potato-interface.service` 进程内的后台任务执行，默认每天 03:00 归档超过 7 天未活跃的
+interface 会话。需要保留更久或实际关闭归档时，设置 `INTERFACE_ARCHIVE_RETENTION_DAYS`；例如当前
+生产部署用 365000 天等效关闭自动归档：
+
+```bash
+install -d -o root -g root -m 0755 /etc/systemd/system/potato-interface.service.d
+cat >/etc/systemd/system/potato-interface.service.d/30-archive-retention.conf <<'EOF'
+[Service]
+Environment=INTERFACE_ARCHIVE_RETENTION_DAYS=365000
+EOF
+chown root:root /etc/systemd/system/potato-interface.service.d/30-archive-retention.conf
+chmod 0644 /etc/systemd/system/potato-interface.service.d/30-archive-retention.conf
+systemctl daemon-reload
+systemctl restart potato-interface.service
+```
+
+需要恢复 7 天归档时，把该值改回 `7` 后重载并重启服务。不要设为 `0`；当前实现中 `0` 会让几乎所有
+旧会话都满足归档条件。
+
 注册流程会通过 Resend HTTPS API 发送邮箱验证码，不使用 SMTP 端口。部署前需要在 Resend 中完成
 发件域名验证，并创建 API key。`INTERFACE_MAIL_FROM` 必须使用已验证域名下的地址；如果验证的是
 `mail.example.com`，发件地址应类似 `noreply@mail.example.com`。可选设置
