@@ -19,6 +19,10 @@ TISSUE_COLUMN = "celltype"
 TISSUES_TABLE = "tissues"
 TISSUE_ASSIGNMENTS_TABLE = "tissue_cell_assignments"
 DATA_PREFIX = "/api/spatial/data"
+DEFAULT_CLUSTER_NAME_PATH = STATIC_ROOT / "cluster_name.txt"
+CLUSTER_NAME_PATH = Path(
+    os.getenv("SPATIAL_CLUSTER_NAME_PATH") or DEFAULT_CLUSTER_NAME_PATH
+)
 
 router = APIRouter()
 
@@ -207,6 +211,60 @@ def normalize_hex_color(value: str) -> str | None:
     return None
 
 
+def load_cluster_name_groups(path: Path | None = None) -> dict[str, dict[str, str]]:
+    selected_path = path or CLUSTER_NAME_PATH
+    if not selected_path.is_file():
+        return {}
+
+    groups: dict[str, dict[str, str]] = {}
+    current_group = ""
+    try:
+        lines = selected_path.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return {}
+
+    for raw_line in lines:
+        line = raw_line.strip()
+        if not line:
+            continue
+        if line.startswith("###"):
+            current_group = line.lstrip("#").strip()
+            if current_group:
+                groups.setdefault(current_group, {})
+            continue
+        if line.startswith("#") or not current_group:
+            continue
+
+        parts = line.split(None, 1)
+        if len(parts) != 2:
+            continue
+        cluster_id, cluster_name = parts[0].strip(), parts[1].strip()
+        if cluster_id and cluster_name:
+            groups.setdefault(current_group, {})[cluster_id] = cluster_name
+
+    return groups
+
+
+def cluster_names_for_dataset(dataset: dict[str, Any]) -> dict[str, str]:
+    groups = load_cluster_name_groups()
+    if not groups:
+        return {}
+
+    candidates = [
+        str(dataset.get("id") or "").strip(),
+        str(dataset.get("label") or "").strip(),
+    ]
+    sample_ids = [str(sample_id) for sample_id in dataset.get("sample_ids", [])]
+    if sample_ids:
+        candidates.append(" + ".join(sample_ids))
+
+    normalized_groups = {group.casefold(): names for group, names in groups.items()}
+    for candidate in candidates:
+        if candidate and candidate.casefold() in normalized_groups:
+            return normalized_groups[candidate.casefold()]
+    return {}
+
+
 def load_category_colors(dataset: dict[str, Any]) -> dict[str, Any]:
     payload = {"formatVersion": 1, "clusters": {}, "tissues": {}}
     colors_path = dataset["colors_path"]
@@ -382,6 +440,7 @@ def load_dotplot_from_db(dataset: dict[str, Any], gene: str) -> dict[str, Any]:
         max(-2.5, min(2.5, (value - mean_logged) / sd_logged)) if sd_logged > 0 else 0.0
         for value in logged_avg
     ]
+    cluster_names = cluster_names_for_dataset(dataset)
 
     return {
         "gene": gene,
@@ -390,6 +449,7 @@ def load_dotplot_from_db(dataset: dict[str, Any], gene: str) -> dict[str, Any]:
             {
                 "id": str(cluster_id),
                 "label": str(cluster_id),
+                "name": cluster_names.get(str(cluster_id), ""),
                 "order": int(cluster_order),
                 "cellCount": int(cell_count),
                 "avgExpr": float(avg_expr),
@@ -518,6 +578,15 @@ async def api_genes(dataset: str = "") -> dict[str, Any]:
 async def api_colors(dataset: str = "") -> dict[str, Any]:
     selected = get_dataset(dataset.strip() or None)
     return load_category_colors(selected)
+
+
+@router.get("/api/spatial/cluster-names")
+async def api_cluster_names(dataset: str = "") -> dict[str, Any]:
+    selected = get_dataset(dataset.strip() or None)
+    return {
+        "dataset": selected["id"],
+        "names": cluster_names_for_dataset(selected),
+    }
 
 
 @router.get("/api/spatial/replicates")

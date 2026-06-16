@@ -28,7 +28,7 @@ const state = {
   currentDataset: null,
   samples: {},
   expressions: {},
-  clusterMeta: { clusters: [], maps: {} },
+  clusterMeta: { clusters: [], maps: {}, names: new Map() },
   tissueMeta: { tissues: [], maps: {}, error: "" },
   categoryColors: { clusters: new Map(), tissues: new Map() },
   displayMode: "gene",
@@ -44,6 +44,7 @@ const state = {
   drawPending: false,
   dotplot: { payload: null, error: "", loading: false },
   dotplotDrawPending: false,
+  dotplotPoints: [],
 };
 
 const els = {
@@ -57,6 +58,7 @@ const els = {
   viewer: document.querySelector(".viewer"),
   clusterSelect: document.getElementById("clusterSelect"),
   tissueSelect: document.getElementById("tissueSelect"),
+  dotplotTooltip: document.getElementById("dotplotTooltip"),
   legend: document.querySelector(".legend"),
   legendMax: document.getElementById("legendMax"),
   legendMin: document.getElementById("legendMin"),
@@ -99,12 +101,18 @@ const FALLBACK_CATEGORY_COLORS = [
   [156, 117, 95],
   [186, 176, 172],
 ];
-const TISSUE_MENU_ORDER = [
+const DEFAULT_TISSUE_MENU_ORDER = [
   "epidermis/periderm",
   "cortex",
   "perimedullary region",
   "pith",
   "others",
+  "unknown",
+];
+const STEM_TISSUE_MENU_ORDER = [
+  "epidermis",
+  "vascular tissue",
+  "ground tissue",
   "unknown",
 ];
 
@@ -114,6 +122,18 @@ function formatNumber(value, digits = 3) {
   if (!Number.isFinite(value)) return "-";
   if (Math.abs(value) >= 1000) return value.toLocaleString();
   return Number(value.toFixed(digits)).toString();
+}
+
+function escapeHtml(value) {
+  return String(value).replace(/[&<>"']/g, (char) => (
+    {
+      "&": "&amp;",
+      "<": "&lt;",
+      ">": "&gt;",
+      "\"": "&quot;",
+      "'": "&#039;",
+    }[char]
+  ));
 }
 
 function tileKey(x, y) {
@@ -790,10 +810,26 @@ function drawDotplotLegend(colorRange, pctRange, right, centerY) {
   }
 }
 
+function clusterDisplayName(cluster) {
+  const name = String(cluster.name || "").trim();
+  return name || `Cluster ${cluster.label || cluster.id}`;
+}
+
+function clusterNameForId(clusterId) {
+  return state.clusterMeta.names.get(String(clusterId)) || "";
+}
+
+function clusterOptionLabel(cluster) {
+  const id = String(cluster.label || cluster.id);
+  const name = clusterNameForId(cluster.id);
+  return name ? `${id} - ${name}` : id;
+}
+
 function drawDotplot() {
   const rect = dotplotCanvas.getBoundingClientRect();
   dotCtx.setTransform(state.devicePixelRatio, 0, 0, state.devicePixelRatio, 0, 0);
   dotCtx.clearRect(0, 0, rect.width, rect.height);
+  state.dotplotPoints = [];
 
   if (state.displayMode !== "gene") {
     return;
@@ -870,6 +906,14 @@ function drawDotplot() {
     dotCtx.strokeStyle = "#7a1c16";
     dotCtx.lineWidth = 0.8;
     dotCtx.stroke();
+    state.dotplotPoints.push({
+      x,
+      y: centerY,
+      radius: Math.max(radius, 8),
+      cluster,
+      avgExpr,
+      pctExpr,
+    });
 
     if (!compact) {
       dotCtx.fillStyle = "#415064";
@@ -900,6 +944,53 @@ function drawDotplot() {
   }
 }
 
+function hideDotplotTooltip() {
+  if (!els.dotplotTooltip) return;
+  els.dotplotTooltip.style.display = "none";
+}
+
+function showDotplotTooltip(point, clientX, clientY) {
+  if (!els.dotplotTooltip) return;
+  const stageRect = dotplotCanvas.parentElement.getBoundingClientRect();
+  const clusterId = String(point.cluster.label || point.cluster.id);
+  els.dotplotTooltip.innerHTML = (
+    `<strong>Cluster ${escapeHtml(clusterId)}</strong>` +
+    `${escapeHtml(clusterDisplayName(point.cluster))}<br>` +
+    `Avg expr: ${escapeHtml(formatNumber(point.avgExpr, 3))}<br>` +
+    `% cells: ${escapeHtml(formatNumber(point.pctExpr, 1))}`
+  );
+  els.dotplotTooltip.style.display = "block";
+  const tooltipRect = els.dotplotTooltip.getBoundingClientRect();
+  const rawLeft = clientX - stageRect.left + 12;
+  const rawTop = clientY - stageRect.top - tooltipRect.height - 10;
+  const left = Math.max(8, Math.min(stageRect.width - tooltipRect.width - 8, rawLeft));
+  const top = rawTop >= 8 ? rawTop : clientY - stageRect.top + 12;
+  els.dotplotTooltip.style.left = `${left}px`;
+  els.dotplotTooltip.style.top = `${Math.min(stageRect.height - tooltipRect.height - 8, top)}px`;
+}
+
+function handleDotplotPointerMove(event) {
+  if (state.displayMode !== "gene" || !state.dotplotPoints.length) {
+    hideDotplotTooltip();
+    return;
+  }
+  const rect = dotplotCanvas.getBoundingClientRect();
+  const x = event.clientX - rect.left;
+  const y = event.clientY - rect.top;
+  const hit = state.dotplotPoints.find((point) => {
+    const dx = x - point.x;
+    const dy = y - point.y;
+    return dx * dx + dy * dy <= point.radius * point.radius;
+  });
+  if (hit) {
+    dotplotCanvas.style.cursor = "default";
+    showDotplotTooltip(hit, event.clientX, event.clientY);
+  } else {
+    dotplotCanvas.style.cursor = "";
+    hideDotplotTooltip();
+  }
+}
+
 async function loadSpatial() {
   if (typeof Path2D === "undefined") {
     throw new Error("This browser does not support Path2D, so cell contours cannot be rendered");
@@ -920,13 +1011,17 @@ async function loadSpatial() {
     if (!response.ok) return { clusters: {}, tissues: {} };
     return response.json();
   }).catch(() => ({ clusters: {}, tissues: {} }));
+  const clusterNamesRequest = fetch(apiUrl("/api/cluster-names")).then(async (response) => {
+    if (!response.ok) return { names: {} };
+    return response.json();
+  }).catch(() => ({ names: {} }));
   const manifestRequests = (dataset.samples || []).map((sample) => (
     fetch(`${(sample.contoursPath || `${dataset.dataPath}/contours/${sample.id}`).replace(/\/$/, "")}/manifest.json`).then(async (response) => {
       if (!response.ok) throw new Error(`Missing ${sampleDisplayLabel(sample)} contour data; run web_viewer/export_contours.py first`);
       return normalizeManifestUrls(await response.json(), dataset.id);
     })
   ));
-  const [manifests, replicates, clusters, tissues, colors] = await Promise.all([
+  const [manifests, replicates, clusters, tissues, colors, clusterNames] = await Promise.all([
     Promise.all(manifestRequests),
     fetch(apiUrl("/api/replicates")).then((response) => {
       if (!response.ok) throw new Error("Missing replicate data; run web_viewer/export_replicates.py first");
@@ -938,6 +1033,7 @@ async function loadSpatial() {
     }),
     tissueRequest,
     colorsRequest,
+    clusterNamesRequest,
   ]);
 
   state.samples = {};
@@ -951,7 +1047,7 @@ async function loadSpatial() {
     state.samples[sampleId] = prepareSpatial(manifest, replicatePayload);
   }
   loadCategoryColors(colors);
-  loadClusterMeta(clusters);
+  loadClusterMeta(clusters, clusterNames);
   loadTissueMeta(tissues);
   fitView();
   updateStats();
@@ -972,17 +1068,28 @@ function loadCategoryColors(payload) {
   state.categoryColors = { clusters, tissues };
 }
 
-function tissueMenuRank(tissue) {
-  const id = String(tissue.id || "").toLowerCase();
-  const label = String(tissue.label || "").toLowerCase();
-  const idIndex = TISSUE_MENU_ORDER.indexOf(id);
-  if (idIndex >= 0) return idIndex;
-  const labelIndex = TISSUE_MENU_ORDER.indexOf(label);
-  if (labelIndex >= 0) return labelIndex;
-  return TISSUE_MENU_ORDER.length;
+function tissueMenuOrder() {
+  const dataset = state.currentDataset;
+  const datasetId = String(dataset ? dataset.id : "").toLowerCase();
+  const datasetLabel = String(dataset ? dataset.label : "").toLowerCase();
+  if (datasetId === "s1_stem" || datasetLabel === "s1 + stem") {
+    return STEM_TISSUE_MENU_ORDER;
+  }
+  return DEFAULT_TISSUE_MENU_ORDER;
 }
 
-function loadClusterMeta(payload) {
+function tissueMenuRank(tissue) {
+  const order = tissueMenuOrder();
+  const id = String(tissue.id || "").toLowerCase();
+  const label = String(tissue.label || "").toLowerCase();
+  const idIndex = order.indexOf(id);
+  if (idIndex >= 0) return idIndex;
+  const labelIndex = order.indexOf(label);
+  if (labelIndex >= 0) return labelIndex;
+  return order.length;
+}
+
+function loadClusterMeta(payload, namesPayload = {}) {
   const maps = {};
   for (const [sample, samplePayload] of Object.entries(payload.samples || {})) {
     const map = new Map();
@@ -992,9 +1099,15 @@ function loadClusterMeta(payload) {
     maps[sample] = map;
   }
 
+  const names = new Map();
+  for (const [clusterId, name] of Object.entries(namesPayload.names || {})) {
+    names.set(String(clusterId), String(name));
+  }
+
   state.clusterMeta = {
     clusters: payload.clusters || [],
     maps,
+    names,
   };
 
   els.clusterSelect.innerHTML = "";
@@ -1005,7 +1118,7 @@ function loadClusterMeta(payload) {
   for (const cluster of state.clusterMeta.clusters) {
     const option = document.createElement("option");
     option.value = String(cluster.id);
-    option.textContent = `Cluster ${cluster.label || cluster.id}`;
+    option.textContent = clusterOptionLabel(cluster);
     els.clusterSelect.appendChild(option);
   }
 
@@ -1099,7 +1212,7 @@ function setDataset(datasetId, options = {}) {
   state.currentDataset = dataset;
   state.samples = {};
   state.expressions = {};
-  state.clusterMeta = { clusters: [], maps: {} };
+  state.clusterMeta = { clusters: [], maps: {}, names: new Map() };
   state.tissueMeta = { tissues: [], maps: {}, error: "" };
   state.selectedCluster = "";
   state.selectedTissue = "";
@@ -1250,6 +1363,7 @@ function setSample(sample) {
 
 function setDisplayMode(mode) {
   state.displayMode = ["gene", "cluster", "tissue"].includes(mode) ? mode : "gene";
+  hideDotplotTooltip();
   updateModeControls();
   resizeCanvas();
   fitView();
@@ -1341,7 +1455,14 @@ canvas.addEventListener("pointerup", (event) => {
   canvas.releasePointerCapture(event.pointerId);
 });
 
+dotplotCanvas.addEventListener("pointermove", handleDotplotPointerMove);
+dotplotCanvas.addEventListener("pointerleave", () => {
+  dotplotCanvas.style.cursor = "";
+  hideDotplotTooltip();
+});
+
 window.addEventListener("resize", () => {
+  hideDotplotTooltip();
   resizeCanvas();
   fitView();
   requestDraw();

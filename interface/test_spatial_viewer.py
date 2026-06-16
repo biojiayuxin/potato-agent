@@ -13,6 +13,7 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from interface import app as interface_app_mod
+from interface import spatial_viewer as spatial_viewer_mod
 
 
 def _write_json(path: Path, payload: object) -> None:
@@ -118,6 +119,12 @@ def _build_spatial_fixture(root: Path) -> None:
 def test_spatial_viewer_is_public_and_reads_fixture(monkeypatch, tmp_path) -> None:
     _build_spatial_fixture(tmp_path)
     monkeypatch.setenv("SPATIAL_VIEWER_DATA_ROOT", str(tmp_path))
+    cluster_names_path = tmp_path / "cluster_name.txt"
+    cluster_names_path.write_text(
+        "### Toy Dataset\n#ClusterID\tClusterName\n0\tToy cluster cells\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(spatial_viewer_mod, "CLUSTER_NAME_PATH", cluster_names_path)
 
     client = TestClient(interface_app_mod.app)
     try:
@@ -141,6 +148,7 @@ def test_spatial_viewer_is_public_and_reads_fixture(monkeypatch, tmp_path) -> No
         dotplot = client.get("/api/spatial/dotplot", params={"dataset": "toy", "gene": "GeneA"})
         assert dotplot.status_code == 200, dotplot.text
         assert dotplot.json()["clusters"][0]["pctExpr"] == 100.0
+        assert dotplot.json()["clusters"][0]["name"] == "Toy cluster cells"
 
         tissues = client.get("/api/spatial/tissues", params={"dataset": "toy"})
         assert tissues.status_code == 200, tissues.text
@@ -149,6 +157,10 @@ def test_spatial_viewer_is_public_and_reads_fixture(monkeypatch, tmp_path) -> No
         colors = client.get("/api/spatial/colors", params={"dataset": "toy"})
         assert colors.status_code == 200, colors.text
         assert colors.json()["clusters"]["0"] == "#FF0000"
+
+        cluster_names = client.get("/api/spatial/cluster-names", params={"dataset": "toy"})
+        assert cluster_names.status_code == 200, cluster_names.text
+        assert cluster_names.json()["names"] == {"0": "Toy cluster cells"}
     finally:
         client.close()
 
@@ -188,6 +200,7 @@ def test_spatial_entry_and_static_paths_are_prefixed() -> None:
     spatial_index = (REPO_ROOT / "interface/static/spatial/index.html").read_text(encoding="utf-8")
     assert 'href="/static/spatial/style.css"' in spatial_index
     assert 'class="agent-return" href="/"' in spatial_index
+    assert 'id="dotplotTooltip"' in spatial_index
     assert 'src="/static/spatial/app.js"' in spatial_index
     assert 'href="/style.css"' not in spatial_index
     assert 'src="/app.js"' not in spatial_index

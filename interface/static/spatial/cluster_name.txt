@@ -1,0 +1,44 @@
+### S1 + S2
+#ClusterID	ClusterName
+0	Perimedullary margin cells
+1	Cambium surrounding cells
+2	Outer cortex
+3	Inner cortex
+4	Young cortex and epidermis
+5	Pith
+6	Outer perimedullary cells
+7	Inner perimedullary cells
+8	Young pith
+9	Outer cortex
+10	Outer perimedullary cells
+11	Epidermis/Periderm
+12	Xylem
+13	Inner cortex
+14	Unknown
+15	Proliferating cells
+16	Phloem
+17	Epidermis (eye bud)
+18	Eye bud related cells
+19	Companion cells
+20	Cambium cells
+21	Unknown
+22	Unknown
+
+### S1 + Stem
+#ClusterID	ClusterName
+0	Ground tissue (stem)
+1	Phloem-associated cells
+2	Epidermis (stolon)
+3	Phloem (CC/PP)
+4	Cambium and xylem
+5	Ground tissue (stem)
+6	Ground tissue (stolon)
+7	Ground tissue (stolon)
+8	Ground tissue (stolon)
+9	Epidermis (stem)
+10	Phloem (SE)
+11	Ground tissue (stolon)
+12	Unknown
+13	Ground tissue (stolon)
+14	Unknown
+15	Unknown

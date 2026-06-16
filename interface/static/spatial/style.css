@@ -249,9 +249,33 @@ button:hover {
 }
 
 .dotplot-stage {
+  position: relative;
   min-height: 0;
   border-top: 1px solid var(--line);
   background: #fff;
+}
+
+.dotplot-tooltip {
+  position: absolute;
+  z-index: 3;
+  display: none;
+  max-width: 260px;
+  padding: 8px 10px;
+  border: 1px solid rgba(16, 24, 40, 0.16);
+  border-radius: 6px;
+  color: #fff;
+  background: rgba(29, 36, 48, 0.94);
+  box-shadow: 0 6px 18px rgba(16, 24, 40, 0.18);
+  font-size: 14px;
+  line-height: 1.4;
+  pointer-events: none;
+  white-space: normal;
+}
+
+.dotplot-tooltip strong {
+  display: block;
+  margin-bottom: 2px;
+  font-size: 15px;
 }
 
 canvas {
