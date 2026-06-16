@@ -195,6 +195,12 @@ const recoveringTuiSessionIds = new Set();
 const tuiBridgeReconnectTimersBySessionId = new Map();
 const tuiBridgeReconnectAttemptsBySessionId = new Map();
 const intentionallyClosedTuiBridges = new WeakSet();
+const liveSessionPollingSessionIds = new Set();
+const liveSessionPollTimersBySessionId = new Map();
+const liveSessionPollInFlightBySessionId = new Set();
+const liveSessionPollFailuresBySessionId = new Map();
+const liveSessionPollGenerationBySessionId = new Map();
+let liveSessionPollGenerationCounter = 0;
 
 const SIDEBAR_WIDTH_KEY = 'lite_sidebar_width';
 const FILES_WIDTH_KEY = 'lite_files_width';
@@ -206,6 +212,8 @@ const MAX_ATTACHMENT_SIZE_BYTES = 20 * 1024 * 1024;
 const AUTH_POLL_INTERVAL_MS = 60 * 1000;
 const TUI_BRIDGE_RECONNECT_BASE_DELAY_MS = 1000;
 const TUI_BRIDGE_RECONNECT_MAX_DELAY_MS = 15000;
+const LIVE_SESSION_POLL_INTERVAL_MS = 2000;
+const LIVE_SESSION_POLL_FAILURE_DELAY_MS = 5000;
 const ATTACHMENT_BLOCK_START = '<potato-files>';
 const ATTACHMENT_BLOCK_END = '</potato-files>';
 const ATTACHMENT_HINT_LINE = 'Use the attachment local paths above if you need to inspect the files.';
@@ -503,6 +511,7 @@ const normalizeDisplayMessageId = (messageId) => {
 const forgetLiveTuiSession = (persistentSessionId) => {
   const persistentId = String(persistentSessionId || '').trim();
   if (!persistentId) return;
+  stopLiveSessionPolling(persistentId);
   const liveIds = new Set(liveTuiSessionAliasesByPersistentId.get(persistentId) || []);
   const primaryLiveId = liveTuiSessionsByPersistentId.get(persistentId) || '';
   if (primaryLiveId) {
@@ -563,7 +572,7 @@ const syncStreamingAssistantStateForSession = (
   }
 };
 
-const applyLiveStateToSession = (sessionId, live) => {
+const applyLiveStateToSession = (sessionId, live, { managePolling = true } = {}) => {
   const persistentSessionId = String(sessionId || '').trim();
   if (!persistentSessionId) return;
 
@@ -603,8 +612,14 @@ const applyLiveStateToSession = (sessionId, live) => {
   }
 
   if (ACTIVE_LIVE_SESSION_STATUSES.has(status)) {
+    if (managePolling) {
+      startLiveSessionPolling(persistentSessionId);
+    }
     setSessionBusy(persistentSessionId, true, { transport: 'tui' });
   } else {
+    if (managePolling) {
+      stopLiveSessionPolling(persistentSessionId);
+    }
     resetTuiBridgeReconnectState(persistentSessionId);
     recoveringTuiSessionIds.delete(persistentSessionId);
     const targetMessages = getSessionMessagesBuffer(persistentSessionId) || [];
@@ -2413,6 +2428,7 @@ const setAuthViewMode = (mode) => {
 };
 
 const resetWorkspaceState = () => {
+  stopAllLiveSessionPolling();
   resetTuiBridgeReconnectState();
   closeTuiBridge();
   recoveringTuiSessionIds.clear();
@@ -4295,7 +4311,12 @@ const createSessionForCurrentMode = async () => {
 
 const updateSessionSnapshot = async (
   sessionId,
-  { preserveLiveMessages = false, forceReplaceLiveMessages = false } = {},
+  {
+    preserveLiveMessages = false,
+    forceReplaceLiveMessages = false,
+    managePolling = true,
+    shouldApplySnapshot = null,
+  } = {},
 ) => {
   if (!sessionId) return null;
 
@@ -4313,13 +4334,16 @@ const updateSessionSnapshot = async (
   if (!session?.id) {
     return null;
   }
+  if (typeof shouldApplySnapshot === 'function' && !shouldApplySnapshot(session.id)) {
+    return null;
+  }
 
   const sessionWithLive = {
     ...session,
     live: liveState,
   };
   state.sessions = [sessionWithLive, ...state.sessions.filter((chat) => chat.id !== session.id)];
-  applyLiveStateToSession(session.id, liveState);
+  applyLiveStateToSession(session.id, liveState, { managePolling });
   const shouldReplaceMessages = forceReplaceLiveMessages
     || !preserveLiveMessages
     || !sessionHasStreamingMessages(sessionId);
@@ -4333,7 +4357,7 @@ const updateSessionSnapshot = async (
   }
   if (state.activeSessionId === session.id) {
     state.activeSession = sessionWithLive;
-    applyLiveStateToSession(session.id, liveState);
+    applyLiveStateToSession(session.id, liveState, { managePolling });
     if (Array.isArray(normalizedMessages) && shouldReplaceMessages) {
       state.messages = normalizedMessages;
     }
@@ -4341,10 +4365,139 @@ const updateSessionSnapshot = async (
   return state.sessions.find((chat) => chat.id === session.id) || sessionWithLive;
 };
 
+function stopLiveSessionPolling(sessionId) {
+  const persistentSessionId = String(sessionId || '').trim();
+  if (!persistentSessionId) return;
+  liveSessionPollingSessionIds.delete(persistentSessionId);
+  bumpLiveSessionPollingGeneration(persistentSessionId);
+  const timer = liveSessionPollTimersBySessionId.get(persistentSessionId);
+  if (timer) {
+    window.clearTimeout(timer);
+  }
+  liveSessionPollTimersBySessionId.delete(persistentSessionId);
+  liveSessionPollInFlightBySessionId.delete(persistentSessionId);
+  liveSessionPollFailuresBySessionId.delete(persistentSessionId);
+}
+
+function stopAllLiveSessionPolling() {
+  for (const sessionId of liveSessionPollingSessionIds) {
+    bumpLiveSessionPollingGeneration(sessionId);
+  }
+  for (const timer of liveSessionPollTimersBySessionId.values()) {
+    window.clearTimeout(timer);
+  }
+  liveSessionPollingSessionIds.clear();
+  liveSessionPollTimersBySessionId.clear();
+  liveSessionPollInFlightBySessionId.clear();
+  liveSessionPollFailuresBySessionId.clear();
+  liveSessionPollGenerationBySessionId.clear();
+}
+
+function bumpLiveSessionPollingGeneration(sessionId) {
+  const persistentSessionId = String(sessionId || '').trim();
+  if (!persistentSessionId) return 0;
+  liveSessionPollGenerationCounter += 1;
+  liveSessionPollGenerationBySessionId.set(persistentSessionId, liveSessionPollGenerationCounter);
+  return liveSessionPollGenerationCounter;
+}
+
+function getLiveSessionPollingGeneration(sessionId) {
+  const persistentSessionId = String(sessionId || '').trim();
+  if (!persistentSessionId) return 0;
+  return liveSessionPollGenerationBySessionId.get(persistentSessionId) || 0;
+}
+
+function isCurrentLiveSessionPoll(sessionId, generation) {
+  const persistentSessionId = String(sessionId || '').trim();
+  return Boolean(
+    persistentSessionId
+    && liveSessionPollingSessionIds.has(persistentSessionId)
+    && getLiveSessionPollingGeneration(persistentSessionId) === generation
+  );
+}
+
+function scheduleLiveSessionPoll(sessionId, delayMs = LIVE_SESSION_POLL_INTERVAL_MS) {
+  const persistentSessionId = String(sessionId || '').trim();
+  if (!persistentSessionId || !state.user) return;
+  if (!liveSessionPollingSessionIds.has(persistentSessionId)) return;
+  if (liveSessionPollTimersBySessionId.has(persistentSessionId)) return;
+  const generation = getLiveSessionPollingGeneration(persistentSessionId);
+  const timer = window.setTimeout(() => {
+    liveSessionPollTimersBySessionId.delete(persistentSessionId);
+    pollLiveSessionSnapshot(persistentSessionId, generation).catch(() => {});
+  }, delayMs);
+  liveSessionPollTimersBySessionId.set(persistentSessionId, timer);
+}
+
+function startLiveSessionPolling(sessionId) {
+  const persistentSessionId = String(sessionId || '').trim();
+  if (!persistentSessionId || !state.user) return;
+  if (!liveSessionPollingSessionIds.has(persistentSessionId)) {
+    liveSessionPollingSessionIds.add(persistentSessionId);
+    bumpLiveSessionPollingGeneration(persistentSessionId);
+  }
+  scheduleLiveSessionPoll(persistentSessionId, LIVE_SESSION_POLL_INTERVAL_MS);
+}
+
+async function pollLiveSessionSnapshot(sessionId, generation = getLiveSessionPollingGeneration(sessionId)) {
+  const persistentSessionId = String(sessionId || '').trim();
+  if (!persistentSessionId || !state.user) return;
+  if (!isCurrentLiveSessionPoll(persistentSessionId, generation)) return;
+
+  if (liveSessionPollInFlightBySessionId.has(persistentSessionId)) {
+    scheduleLiveSessionPoll(persistentSessionId, LIVE_SESSION_POLL_INTERVAL_MS);
+    return;
+  }
+
+  liveSessionPollInFlightBySessionId.add(persistentSessionId);
+  try {
+    const session = await updateSessionSnapshot(persistentSessionId, {
+      forceReplaceLiveMessages: true,
+      managePolling: false,
+      shouldApplySnapshot: (resolvedSessionId) => (
+        resolvedSessionId === persistentSessionId
+        && isCurrentLiveSessionPoll(persistentSessionId, generation)
+      ),
+    });
+    liveSessionPollFailuresBySessionId.delete(persistentSessionId);
+    if (!session) return;
+
+    const liveState = session?.live || (isViewingSession(persistentSessionId) ? state.activeSession?.live : null);
+    const status = String(liveState?.status || '').trim();
+    if (!ACTIVE_LIVE_SESSION_STATUSES.has(status)) {
+      stopLiveSessionPolling(persistentSessionId);
+      if (isViewingSession(persistentSessionId)) {
+        renderWorkspace();
+      } else {
+        renderChatList();
+      }
+      return;
+    }
+
+    if (isViewingSession(persistentSessionId)) {
+      renderWorkspace();
+    } else {
+      renderChatList();
+    }
+    scheduleLiveSessionPoll(persistentSessionId, LIVE_SESSION_POLL_INTERVAL_MS);
+  } catch {
+    if (!isCurrentLiveSessionPoll(persistentSessionId, generation)) return;
+    const failures = (liveSessionPollFailuresBySessionId.get(persistentSessionId) || 0) + 1;
+    liveSessionPollFailuresBySessionId.set(persistentSessionId, failures);
+    scheduleLiveSessionPoll(
+      persistentSessionId,
+      failures > 1 ? LIVE_SESSION_POLL_FAILURE_DELAY_MS : LIVE_SESSION_POLL_INTERVAL_MS
+    );
+  } finally {
+    liveSessionPollInFlightBySessionId.delete(persistentSessionId);
+  }
+}
+
 const isViewingSession = (sessionId) => Boolean(sessionId) && state.activeSessionId === sessionId;
 
 const deleteChat = async (chatId, isDraft = false) => {
   if (isDraft) {
+    stopLiveSessionPolling(chatId);
     forgetSessionScrollPosition(chatId);
     state.draftSession = null;
     state.activeSession = null;
@@ -4361,6 +4514,7 @@ const deleteChat = async (chatId, isDraft = false) => {
   }
 
   forgetLiveTuiSession(chatId);
+  stopLiveSessionPolling(chatId);
 
   await api(`/api/sessions/${encodeURIComponent(chatId)}`, { method: 'DELETE' });
   clearLiveSessionMessages(chatId);
