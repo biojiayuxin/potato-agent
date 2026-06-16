@@ -15,6 +15,8 @@ Git checkout 里。
 - 用户运行时：每个网页用户对应一个 Linux 用户和一个 `hermes-<username>.service`。
 - 代码目录：`/srv/potato_agent`。
 - interface 状态目录：`/var/lib/potato-agent`。
+- 空间转录组查看器数据目录：`/srv/spatial_data`，运行时默认读取
+  `/srv/spatial_data/current`。
 - Hermes 源码安装目录：`/opt/hermes-agent-src`。
 - Hermes Python 环境：`/opt/hermes-agent-venv`。
 - interface Python 环境：`/opt/interface-env`。
@@ -28,12 +30,14 @@ interface 进程不应该以 root 运行。需要 root 的动作由 privileged h
 
 ## 安全边界
 
-当前安全部署依赖三层边界：
+当前安全部署依赖四层边界：
 
 1. `/srv/potato_agent` 只允许 `root` 和 `potato-interface` 组读取，普通 Hermes 用户不能读源码。
 2. `/var/lib/potato-agent/data` 由 `potato-interface` 独占，普通 Hermes 用户不能读
    interface 用户数据库和归档数据库。
-3. 每用户 Hermes service 以各自 Linux 用户运行，并在 systemd unit 中隐藏
+3. `/srv/spatial_data` 由 `root:potato-interface` 只读维护，空间转录组页面可公开访问，但底层
+   SQLite 和轮廓数据不暴露给普通 Linux 用户直接读取。
+4. 每用户 Hermes service 以各自 Linux 用户运行，并在 systemd unit 中隐藏
    `/srv/potato_agent`、`/var/lib/potato-agent`、`/etc/potato-agent` 和
    `/opt/interface-env`。
 
@@ -53,6 +57,10 @@ chown root:potato-interface /var/lib/potato-agent/config/users_mapping.yaml
 chmod 0640 /var/lib/potato-agent/config/users_mapping.yaml
 chown potato-interface:potato-interface /var/lib/potato-agent/data/*.db 2>/dev/null || true
 chmod 0600 /var/lib/potato-agent/data/*.db 2>/dev/null || true
+
+chown -R root:potato-interface /srv/spatial_data 2>/dev/null || true
+find /srv/spatial_data -type d -exec chmod 0750 {} + 2>/dev/null || true
+find /srv/spatial_data -type f -exec chmod 0640 {} + 2>/dev/null || true
 ```
 
 共享服务器或公网部署应使用 `INTERFACE_FILE_BROWSER_MODE=home_only`。只有在可信内网机器上，
@@ -369,7 +377,65 @@ drain。Potato Agent 生成的每用户 systemd unit 默认写入 `TimeoutStopSe
 或用户 `config_overrides.agent.restart_drain_timeout` 中覆盖该值，生成的 unit 会按覆盖值加
 30 秒计算；只有显式设置 `hermes.service.timeout_stop_sec` 时才使用手写值。
 
-### 7. 安装 interface 运行时
+### 7. 部署空间转录组查看器数据
+
+空间转录组查看器代码随 `potato-agent` 仓库部署，运行数据不放入 Git checkout。默认数据根目录是
+`/srv/spatial_data/current`；该路径通常是指向某个 release 目录的软链接。
+
+数据目录需要包含 `datasets.json`，以及其中 `dataRoot` 指向的数据目录。例如当前数据集布局：
+
+```text
+/srv/spatial_data/
+  current -> releases/2026-06-16
+  releases/
+    2026-06-16/
+      colors.txt
+      datasets.json
+      data/
+        expression.sqlite
+        genes.json
+        replicates.json
+        clusters.json
+        contours/
+      datasets/
+        s1_stem/
+          expression.sqlite
+          replicates.json
+          clusters.json
+          colors.txt
+          contours/
+```
+
+从已有 `web_viewer` 数据目录部署当前数据：
+
+```bash
+release=/srv/spatial_data/releases/2026-06-16
+mkdir -p "$release"
+
+rsync -a --delete \
+  /path/to/web_viewer/datasets.json \
+  /path/to/colors.txt \
+  /path/to/web_viewer/data \
+  /path/to/web_viewer/datasets \
+  "$release/"
+
+chown -R root:potato-interface /srv/spatial_data
+find /srv/spatial_data -type d -exec chmod 0750 {} +
+find /srv/spatial_data -type f -exec chmod 0640 {} +
+ln -sfn "$release" /srv/spatial_data/current
+chown -h root:potato-interface /srv/spatial_data/current
+```
+
+如果不使用默认路径，在 `potato-interface.service` 中设置：
+
+```ini
+Environment=SPATIAL_VIEWER_DATA_ROOT=/srv/spatial_data/current
+```
+
+查看器入口是 `/spatial`，API 前缀是 `/api/spatial/`。这些接口不要求网页登录态，但文件系统权限仍
+只允许 `potato-interface` 读取数据目录；不要把 `expression.sqlite` 放到可被普通用户直接读取的目录。
+
+### 8. 安装 interface 运行时
 
 ```bash
 python3 -m venv /opt/interface-env
@@ -377,7 +443,7 @@ python3 -m venv /opt/interface-env
 /opt/interface-env/bin/pip install -r /srv/potato_agent/interface/requirements.txt
 ```
 
-### 8. 配置本地模型代理
+### 9. 配置本地模型代理
 
 上游模型网关需要兼容 OpenAI API。真实上游 API key 只写入 root-owned
 `/var/lib/potato-agent/config/model_proxy.yaml`；每个用户的 Hermes 配置只会包含
@@ -440,7 +506,7 @@ systemctl enable --now potato-model-proxy.service
 配置并重启当前正在运行的 Hermes service。升级旧部署后可以运行
 `cleanup_hermes_user_keys.py --dry-run` 检查历史 key，再去掉 `--dry-run` 执行清理。
 
-### 9. 安装 privileged helper
+### 10. 安装 privileged helper
 
 ```bash
 mkdir -p /usr/local/libexec
@@ -464,7 +530,7 @@ visudo -cf /etc/sudoers.d/potato-agent-interface
 
 helper 只暴露 `interface.privileged_helper` 中实现的固定命令集。
 
-### 10. 安装 systemd service
+### 11. 安装 systemd service
 
 生成固定的 session secret：
 
@@ -492,6 +558,7 @@ Environment=INTERFACE_AUTH_DB=/var/lib/potato-agent/data/interface.db
 Environment=INTERFACE_ARCHIVE_DB=/var/lib/potato-agent/data/archive.db
 Environment=INTERFACE_PRIVILEGED_HELPER=/usr/local/libexec/potato-agent-privileged-helper
 Environment=INTERFACE_TUI_GATEWAY_PYTHON=/opt/hermes-agent-venv/bin/python3
+Environment=SPATIAL_VIEWER_DATA_ROOT=/srv/spatial_data/current
 Environment=INTERFACE_RESEND_API_KEY=replace-with-resend-api-key
 Environment="INTERFACE_MAIL_FROM=Potato Agent <noreply@mail.example.com>"
 ExecStart=/opt/interface-env/bin/python -m uvicorn interface.app:app --host 0.0.0.0 --port 3000
@@ -564,7 +631,7 @@ systemctl status potato-interface.service
 http://<server>:3000/lite
 ```
 
-### 11. 创建用户
+### 12. 创建用户
 
 创建系统托管的 Linux 用户和网页账号：
 
@@ -764,7 +831,17 @@ cd /srv/potato_agent
 
 ```bash
 curl -fsS http://127.0.0.1:3000/lite >/dev/null
+curl -fsS http://127.0.0.1:3000/spatial >/dev/null
+curl -fsS http://127.0.0.1:3000/api/spatial/datasets | python3 -m json.tool >/dev/null
 systemctl is-active potato-interface.service
+```
+
+检查空间转录组数据对 interface 服务可读：
+
+```bash
+sudo -u potato-interface test -r /srv/spatial_data/current/datasets.json
+sudo -u potato-interface test -r /srv/spatial_data/current/data/expression.sqlite
+sudo -u potato-interface test -r /srv/spatial_data/current/datasets/s1_stem/expression.sqlite
 ```
 
 检查普通 Hermes 用户不能读取源码和 interface 状态。把 `hmx_user_test` 换成实际 mapped Linux
@@ -775,6 +852,7 @@ sudo -u hmx_user_test test ! -r /srv/potato_agent/interface/app.py
 sudo -u hmx_user_test test ! -r /var/lib/potato-agent/config/users_mapping.yaml
 sudo -u hmx_user_test test ! -r /var/lib/potato-agent/data/interface.db
 sudo -u hmx_user_test test ! -r /var/lib/potato-agent/data/archive.db
+sudo -u hmx_user_test test ! -r /srv/spatial_data/current/data/expression.sqlite
 ```
 
 检查生成的 Hermes unit hardening：

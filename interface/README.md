@@ -13,6 +13,7 @@
 - 展示态消息：把页面展示用 transcript 持久化到 `interface.db`
 - 会话归档：后台定时把旧会话归档到 `archive.db`
 - 前端：Lite 页面位于 `interface/static/lite/`
+- 空间转录组查看器：公开页面 `/spatial`，数据从 `/srv/spatial_data/current` 只读加载
 
 ## 目录
 
@@ -32,10 +33,14 @@
   写入每用户 `~/.hermes/config.yaml`、`.env` 和 systemd service；模型凭据写为本地 proxy token
 - `model_proxy.py`
   root/systemd 运行的本地 OpenAI-compatible model proxy，负责校验 `{username}-local-token` 并转发到真实上游
+- `spatial_viewer.py`
+  空间转录组查看器的公开 FastAPI router；只读查询外部数据目录
 - `requirements.txt`
   最小运行依赖
 - `static/lite/`
   Lite 前端页面、样式、脚本、图标
+- `static/spatial/`
+  空间转录组查看器前端页面、样式、脚本、图标
 
 ## 依赖的数据源
 
@@ -44,6 +49,7 @@
 - `interface/data/interface.db`
 - `interface/data/archive.db`
 - 每用户 `~/.hermes/state.db`
+- 空间转录组数据目录，默认 `/srv/spatial_data/current`
 
 ## 关键环境变量
 
@@ -56,6 +62,7 @@
 - `INTERFACE_UPLOAD_DIR_NAME`
 - `INTERFACE_ARCHIVE_RETENTION_DAYS`
 - `INTERFACE_ARCHIVE_SCHEDULE_HOUR`
+- `SPATIAL_VIEWER_DATA_ROOT`
 
 说明：
 
@@ -64,6 +71,7 @@
   - `home_only`：Files 面板只显示 `~/`，不显示目录输入框
   - `user_readable`：显示目录输入框，允许打开任意当前 Linux 用户有权限读取的目录
 - 上传文件会保存到每用户工作区下的 `.<INTERFACE_UPLOAD_DIR_NAME>` 目录，默认是 `.potato-interface-uploads/`
+- `SPATIAL_VIEWER_DATA_ROOT` 默认 `/srv/spatial_data/current`；建议目录 owner 为 `root`、group 为 `potato-interface`，目录 `0750`、文件 `0640`
 
 ## 当前边界
 

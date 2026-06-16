@@ -1,0 +1,101 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Spatial Gene Expression Viewer</title>
+  <link rel="stylesheet" href="/static/spatial/style.css">
+</head>
+<body>
+  <div class="app">
+    <aside class="sidebar">
+      <div class="brand">
+        <img class="brand-mark" src="/static/spatial/assets/potato_icon.png" alt="" aria-hidden="true">
+        <div>
+          <h1>Spatial Expression</h1>
+        </div>
+      </div>
+
+      <div class="dataset-control">
+        <label for="datasetSelect">Dataset</label>
+        <select id="datasetSelect">
+          <option value="">Loading...</option>
+        </select>
+      </div>
+
+      <div class="sample-toggle" role="group" aria-label="Sample">
+        <button type="button" disabled>Loading...</button>
+      </div>
+
+      <div class="mode-control">
+        <label for="modeSelect">Display Mode</label>
+        <select id="modeSelect">
+          <option value="gene">Gene ID</option>
+          <option value="cluster">Clusters</option>
+          <option value="tissue">Tissues</option>
+        </select>
+      </div>
+
+      <form id="geneForm" class="search mode-panel" data-mode-panel="gene">
+        <label for="geneInput">Gene ID</label>
+        <div class="search-row">
+          <input id="geneInput" name="gene" type="search" value="Soltu.DM.03G024100" autocomplete="off" list="geneList">
+          <button type="submit">Search</button>
+        </div>
+        <datalist id="geneList"></datalist>
+      </form>
+
+      <div id="clusterPanel" class="cluster-control mode-panel is-hidden" data-mode-panel="cluster">
+        <label for="clusterSelect">Cluster</label>
+        <select id="clusterSelect" disabled>
+          <option value="">Loading...</option>
+        </select>
+      </div>
+
+      <div id="tissuePanel" class="tissue-control mode-panel is-hidden" data-mode-panel="tissue">
+        <label for="tissueSelect">Tissue</label>
+        <select id="tissueSelect" disabled>
+          <option value="">Loading...</option>
+        </select>
+      </div>
+
+      <div class="stats">
+        <div>
+          <span>Sample</span>
+          <strong id="currentSample">-</strong>
+        </div>
+        <div>
+          <span>Cells</span>
+          <strong id="cellCount">-</strong>
+        </div>
+      </div>
+
+      <div id="status" class="status">Loading spatial coordinates...</div>
+    </aside>
+
+    <main class="viewer">
+      <section class="spatial-stage" aria-label="Spatial expression plot">
+        <div class="toolbar">
+          <button type="button" id="zoomIn" title="Zoom in">+</button>
+          <button type="button" id="zoomOut" title="Zoom out">-</button>
+          <button type="button" id="resetView" title="Reset view">Reset</button>
+          <span id="scaleText">100%</span>
+        </div>
+        <div class="legend">
+          <div class="legend-labels">
+            <span id="legendMin">0</span>
+            <span id="legendMax">max</span>
+          </div>
+          <div class="legend-bar"></div>
+        </div>
+        <canvas id="plot"></canvas>
+      </section>
+      <section class="dotplot-stage" aria-label="Cluster dotplot">
+        <canvas id="dotplot"></canvas>
+      </section>
+    </main>
+  </div>
+
+  <script src="/static/spatial/app.js"></script>
+</body>
+</html>

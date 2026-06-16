@@ -110,6 +110,32 @@ button {
   filter: blur(10px);
 }
 
+.spatial-entry-button {
+  position: absolute;
+  top: 24px;
+  right: 24px;
+  z-index: 3;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 40px;
+  padding: 0 16px;
+  border: 1px solid rgba(255, 255, 255, 0.42);
+  border-radius: 8px;
+  color: #ffffff;
+  background: rgba(18, 32, 59, 0.42);
+  box-shadow: 0 14px 32px rgba(8, 15, 30, 0.18);
+  font-size: 14px;
+  font-weight: 800;
+  letter-spacing: 0;
+  text-decoration: none;
+  backdrop-filter: blur(14px);
+}
+
+.spatial-entry-button:hover {
+  background: rgba(18, 32, 59, 0.58);
+}
+
 .login-stage {
   width: 100%;
   min-height: calc(100vh - 48px);
@@ -1884,6 +1910,14 @@ button.stretch {
   .login-view,
   :root[data-theme='light'] .login-view {
     padding: 16px;
+  }
+
+  .spatial-entry-button {
+    top: 16px;
+    right: 16px;
+    min-height: 36px;
+    padding: 0 12px;
+    font-size: 13px;
   }
 
   .login-stage {

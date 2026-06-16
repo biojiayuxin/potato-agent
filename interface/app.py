@@ -129,6 +129,7 @@ from interface.tui_gateway_bridge import (
     TuiGatewayBridgeRegistry,
 )
 from interface.session_run_manager import ACTIVE_LIVE_STATUSES, SessionRunManager
+from interface.spatial_viewer import router as spatial_viewer_router
 
 
 LOGGER = logging.getLogger("potato_interface")
@@ -136,6 +137,7 @@ ROOT_DIR = Path(__file__).resolve().parent
 REPO_ROOT = ROOT_DIR.parent
 STATIC_DIR = ROOT_DIR / "static"
 LITE_DIR = STATIC_DIR / "lite"
+SPATIAL_STATIC_DIR = STATIC_DIR / "spatial"
 FAVICON_PATH = STATIC_DIR / "favicon.png"
 SESSION_COOKIE_NAME = "potato_interface_token"
 SESSION_SECRET = os.getenv("INTERFACE_SESSION_SECRET") or secrets.token_urlsafe(32)
@@ -1805,12 +1807,20 @@ def _get_active_model_id_for_user(
 
 
 app = FastAPI(title="Potato Interface")
+app.mount(
+    "/static/spatial",
+    StaticFiles(directory=SPATIAL_STATIC_DIR),
+    name="spatial-static",
+)
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
+app.include_router(spatial_viewer_router)
 
 
 def _should_refresh_activity_for_request(request: Request) -> bool:
     path = request.url.path
     if not path.startswith("/api/"):
+        return False
+    if path.startswith("/api/spatial/"):
         return False
     if path in ACTIVITY_REFRESH_EXCLUDED_PATHS:
         return False
