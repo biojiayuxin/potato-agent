@@ -50,7 +50,6 @@ const els = {
   form: document.getElementById("geneForm"),
   input: document.getElementById("geneInput"),
   geneList: document.getElementById("geneList"),
-  status: document.getElementById("status"),
   modeSelect: document.getElementById("modeSelect"),
   datasetSelect: document.getElementById("datasetSelect"),
   sampleToggle: document.querySelector(".sample-toggle"),
@@ -109,9 +108,7 @@ const TISSUE_MENU_ORDER = [
   "unknown",
 ];
 
-function setStatus(message) {
-  els.status.textContent = message;
-}
+function setStatus(_message) {}
 
 function formatNumber(value, digits = 3) {
   if (!Number.isFinite(value)) return "-";

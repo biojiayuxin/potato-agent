@@ -187,6 +187,7 @@ def test_spatial_entry_and_static_paths_are_prefixed() -> None:
 
     spatial_index = (REPO_ROOT / "interface/static/spatial/index.html").read_text(encoding="utf-8")
     assert 'href="/static/spatial/style.css"' in spatial_index
+    assert 'class="agent-return" href="/"' in spatial_index
     assert 'src="/static/spatial/app.js"' in spatial_index
     assert 'href="/style.css"' not in spatial_index
     assert 'src="/app.js"' not in spatial_index
