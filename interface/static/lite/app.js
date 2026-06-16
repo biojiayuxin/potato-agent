@@ -611,9 +611,14 @@ const applyLiveStateToSession = (sessionId, live, { managePolling = true } = {})
     state.activeSession = applyLiveSnapshot(state.activeSession);
   }
 
+  const shouldPausePollingForApproval = status === 'awaiting_approval' && Boolean(pendingApproval);
   if (ACTIVE_LIVE_SESSION_STATUSES.has(status)) {
     if (managePolling) {
-      startLiveSessionPolling(persistentSessionId);
+      if (shouldPausePollingForApproval) {
+        stopLiveSessionPolling(persistentSessionId);
+      } else {
+        startLiveSessionPolling(persistentSessionId);
+      }
     }
     setSessionBusy(persistentSessionId, true, { transport: 'tui' });
   } else {
@@ -642,7 +647,7 @@ const applyLiveStateToSession = (sessionId, live, { managePolling = true } = {})
       patternKeys: [],
       options: [],
     });
-  } else {
+  } else if (status !== 'awaiting_approval') {
     clearSessionPendingApproval(persistentSessionId);
   }
 };
@@ -1153,6 +1158,7 @@ const handleTuiBridgeEvent = (message) => {
       patternKeys: [],
       options: [],
     });
+    stopLiveSessionPolling(persistentSessionId);
     setTuiBridgeStatus('TUI gateway requested approval');
     return;
   }
@@ -3325,10 +3331,16 @@ const mergeToolCallDelta = (existingToolCalls, deltaToolCalls) => {
 };
 
 const appendProgressEntries = (message, entries) => {
-  const nextEntries = Array.isArray(message.progressLines) ? [...message.progressLines] : [];
-  for (const entry of entries || []) {
+  const nextEntries = [];
+  const seen = new Set();
+  const candidateEntries = [
+    ...(Array.isArray(message.progressLines) ? message.progressLines : []),
+    ...(Array.isArray(entries) ? entries : []),
+  ];
+  for (const entry of candidateEntries) {
     if (!entry) continue;
-    if (nextEntries[nextEntries.length - 1] === entry) continue;
+    if (seen.has(entry)) continue;
+    seen.add(entry);
     nextEntries.push(entry);
   }
   message.progressLines = nextEntries;
@@ -4464,7 +4476,18 @@ async function pollLiveSessionSnapshot(sessionId, generation = getLiveSessionPol
 
     const liveState = session?.live || (isViewingSession(persistentSessionId) ? state.activeSession?.live : null);
     const status = String(liveState?.status || '').trim();
+    const pendingApproval = liveState?.pending_approval || liveState?.pendingApproval || null;
     if (!ACTIVE_LIVE_SESSION_STATUSES.has(status)) {
+      stopLiveSessionPolling(persistentSessionId);
+      if (isViewingSession(persistentSessionId)) {
+        renderWorkspace();
+      } else {
+        renderChatList();
+      }
+      return;
+    }
+
+    if (status === 'awaiting_approval' && pendingApproval) {
       stopLiveSessionPolling(persistentSessionId);
       if (isViewingSession(persistentSessionId)) {
         renderWorkspace();

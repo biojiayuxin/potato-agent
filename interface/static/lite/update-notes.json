@@ -1,6 +1,15 @@
 {
   "updates": [
     {
+      "version": "2026-06-17-001",
+      "title": "Workspace updates",
+      "date": "June 17, 2026",
+      "summary": "This update improves response reliability.",
+      "items": [
+        "Fixed response stream dropouts."
+      ]
+    },
+    {
       "version": "2026-06-12-001",
       "title": "Workspace updates",
       "date": "June 12, 2026",
