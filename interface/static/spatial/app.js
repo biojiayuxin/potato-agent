@@ -14,6 +14,14 @@ const OUTLINE_MAX_SCREEN_PX = 1.25;
 const OUTLINE_BASE_SCREEN_PX = 0.22;
 const API_BASE = "/api/spatial";
 const DATA_BASE = `${API_BASE}/data`;
+const DATASET_LABEL_OVERRIDES = new Map([
+  ["S1 + S2", "Stolon and tuber"],
+  ["S1 + Stem", "Stolon and Stem"],
+]);
+const SAMPLE_LABEL_OVERRIDES = new Map([
+  ["S1", "Stolon (S1)"],
+  ["S2", "Early Swelling Tuber (S2)"],
+]);
 
 const state = {
   datasetCatalog: [],
@@ -48,8 +56,6 @@ const els = {
   sampleToggle: document.querySelector(".sample-toggle"),
   modePanels: document.querySelectorAll("[data-mode-panel]"),
   viewer: document.querySelector(".viewer"),
-  currentSample: document.getElementById("currentSample"),
-  cellCount: document.getElementById("cellCount"),
   clusterSelect: document.getElementById("clusterSelect"),
   tissueSelect: document.getElementById("tissueSelect"),
   legend: document.querySelector(".legend"),
@@ -57,6 +63,17 @@ const els = {
   legendMin: document.getElementById("legendMin"),
   scaleText: document.getElementById("scaleText"),
 };
+
+function datasetDisplayLabel(dataset) {
+  const label = dataset.label || dataset.id;
+  return DATASET_LABEL_OVERRIDES.get(label) || label;
+}
+
+function sampleDisplayLabel(sample) {
+  const id = String(sample.id || "");
+  const label = sample.label || id;
+  return SAMPLE_LABEL_OVERRIDES.get(id) || SAMPLE_LABEL_OVERRIDES.get(label) || label;
+}
 
 const REDS = [
   [255, 245, 240],
@@ -129,7 +146,7 @@ function sampleConfig(sampleId) {
 
 function sampleLabel(sampleId) {
   const sample = sampleConfig(sampleId);
-  return sample ? sample.label || sample.id : sampleId;
+  return sample ? sampleDisplayLabel(sample) : sampleId;
 }
 
 function datasetParam() {
@@ -893,7 +910,7 @@ async function loadSpatial() {
   const dataset = state.currentDataset;
   if (!dataset) throw new Error("No dataset selected");
 
-  const sampleLabels = (dataset.samples || []).map((sample) => sample.label || sample.id).join("/");
+  const sampleLabels = (dataset.samples || []).map(sampleDisplayLabel).join("/");
   setStatus(`Loading ${sampleLabels} contours, replicate indexes, cluster data, and tissue data...`);
   const tissueRequest = fetch(apiUrl("/api/tissues")).then(async (response) => {
     const payload = await response.json().catch(() => ({}));
@@ -908,7 +925,7 @@ async function loadSpatial() {
   }).catch(() => ({ clusters: {}, tissues: {} }));
   const manifestRequests = (dataset.samples || []).map((sample) => (
     fetch(`${(sample.contoursPath || `${dataset.dataPath}/contours/${sample.id}`).replace(/\/$/, "")}/manifest.json`).then(async (response) => {
-      if (!response.ok) throw new Error(`Missing ${sample.label || sample.id} contour data; run web_viewer/export_contours.py first`);
+      if (!response.ok) throw new Error(`Missing ${sampleDisplayLabel(sample)} contour data; run web_viewer/export_contours.py first`);
       return normalizeManifestUrls(await response.json(), dataset.id);
     })
   ));
@@ -1066,7 +1083,7 @@ async function loadDatasetCatalog() {
   for (const dataset of state.datasetCatalog) {
     const option = document.createElement("option");
     option.value = dataset.id;
-    option.textContent = dataset.label || dataset.id;
+    option.textContent = datasetDisplayLabel(dataset);
     els.datasetSelect.appendChild(option);
   }
 
@@ -1114,7 +1131,7 @@ function renderSampleButtons() {
     const button = document.createElement("button");
     button.type = "button";
     button.dataset.sample = sample.id;
-    button.textContent = sample.label || sample.id;
+    button.textContent = sampleDisplayLabel(sample);
     button.classList.toggle("active", sample.id === state.currentSample);
     button.addEventListener("click", () => setSample(sample.id));
     els.sampleToggle.appendChild(button);
@@ -1208,13 +1225,8 @@ async function queryGene(gene) {
 }
 
 function updateStats() {
-  const spatial = currentSpatial();
   const { vmin, vmax } = state.expressionRange;
   const highlightMode = activeHighlightMode();
-  els.currentSample.textContent = spatial
-    ? `${sampleLabel(state.currentSample)} (${spatial.panels.length} reps)`
-    : sampleLabel(state.currentSample);
-  els.cellCount.textContent = spatial ? spatial.assignedCellCount.toLocaleString() : "-";
   els.legend.classList.toggle("is-hidden", highlightMode !== "expression");
   els.legendMax.textContent = vmax ? formatNumber(vmax) : "max";
   els.legendMin.textContent = Number.isFinite(vmin) ? formatNumber(vmin) : "0";
