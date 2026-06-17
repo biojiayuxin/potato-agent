@@ -19,6 +19,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path, PurePosixPath
 from typing import Any, Iterator
+from urllib.parse import quote
 
 import jwt
 from fastapi import (
@@ -1753,6 +1754,14 @@ def _sanitize_filename(filename: str) -> str:
     return cleaned or "upload.bin"
 
 
+def _attachment_content_disposition(filename: str) -> str:
+    base = Path(filename or "download.bin").name or "download.bin"
+    quoted = quote(base, safe="")
+    if quoted != base:
+        return f"attachment; filename*=utf-8''{quoted}"
+    return f'attachment; filename="{base}"'
+
+
 def _apply_file_permissions(path: Path, *, linux_user: str, is_dir: bool) -> None:
     try:
         pw = pwd.getpwnam(linux_user)
@@ -3104,7 +3113,7 @@ async def files_download(
         except PrivilegedClientError as exc:
             raise HTTPException(status_code=403, detail=str(exc)) from exc
         filename = Path(str(info.get("filename") or path or "download.bin")).name
-        headers = {"Content-Disposition": f'attachment; filename="{filename}"'}
+        headers = {"Content-Disposition": _attachment_content_disposition(filename)}
         size = info.get("size")
         if isinstance(size, int) and size >= 0:
             headers["Content-Length"] = str(size)
