@@ -146,7 +146,7 @@ SESSION_TTL_SECONDS = int(
     os.getenv("INTERFACE_SESSION_TTL_SECONDS", str(7 * 24 * 3600))
 )
 MAX_UPLOAD_SIZE_BYTES = int(
-    os.getenv("INTERFACE_MAX_UPLOAD_BYTES", str(20 * 1024 * 1024))
+    os.getenv("INTERFACE_MAX_UPLOAD_BYTES", str(200 * 1024 * 1024))
 )
 FILE_BROWSER_MODE = (
     os.getenv("INTERFACE_FILE_BROWSER_MODE", "home_only").strip().lower()
@@ -283,6 +283,29 @@ class SessionApprovalRequest(BaseModel):
 
 class ActiveModelUpdateRequest(BaseModel):
     id: str = ""
+
+
+def _max_upload_size_mb() -> int:
+    return MAX_UPLOAD_SIZE_BYTES // (1024 * 1024)
+
+
+def _upload_file_too_large_detail() -> str:
+    return f"Upload file too large (> {_max_upload_size_mb()} MB)."
+
+
+def _attachment_total_too_large_detail() -> str:
+    return f"Total attachment size too large (> {_max_upload_size_mb()} MB)."
+
+
+def _attachment_total_size_bytes(attachments: list[dict[str, Any]]) -> int:
+    total_size = 0
+    for attachment in attachments:
+        try:
+            size = int(attachment.get("size") or 0)
+        except (TypeError, ValueError):
+            size = 0
+        total_size += max(0, size)
+    return total_size
 
 
 def _normalized_file_browser_mode() -> str:
@@ -2820,6 +2843,11 @@ async def submit_session_turn(
     )
     if not prompt and not attachments:
         raise HTTPException(status_code=400, detail="Prompt or attachments are required")
+    if _attachment_total_size_bytes(attachments) > MAX_UPLOAD_SIZE_BYTES:
+        raise HTTPException(
+            status_code=413,
+            detail=_attachment_total_too_large_detail(),
+        )
 
     bridge: TuiGatewayBridge | None = None
     logical_session_id = ""
@@ -3182,7 +3210,7 @@ async def upload_file(
                 if total_size > MAX_UPLOAD_SIZE_BYTES:
                     raise HTTPException(
                         status_code=413,
-                        detail=f"Upload file too large (> {MAX_UPLOAD_SIZE_BYTES // (1024 * 1024)} MB).",
+                        detail=_upload_file_too_large_detail(),
                     )
                 chunks.append(chunk)
         finally:
@@ -3223,7 +3251,7 @@ async def upload_file(
                 if total_size > MAX_UPLOAD_SIZE_BYTES:
                     raise HTTPException(
                         status_code=413,
-                        detail=f"Upload file too large (> {MAX_UPLOAD_SIZE_BYTES // (1024 * 1024)} MB).",
+                        detail=_upload_file_too_large_detail(),
                     )
                 handle.write(chunk)
     except HTTPException:

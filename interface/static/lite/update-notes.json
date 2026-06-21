@@ -1,6 +1,15 @@
 {
   "updates": [
     {
+      "version": "2026-06-21-001",
+      "title": "Workspace updates",
+      "date": "June 21, 2026",
+      "summary": "This update increases the file upload size limit.",
+      "items": [
+        "Increased the file upload size limit to 200 MB."
+      ]
+    },
+    {
       "version": "2026-06-17-001",
       "title": "Workspace updates",
       "date": "June 17, 2026",

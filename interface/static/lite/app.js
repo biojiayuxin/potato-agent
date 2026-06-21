@@ -208,7 +208,7 @@ const THEME_MODE_KEY = 'lite_theme_mode';
 const UPDATE_NOTES_PATH = './static/lite/update-notes.json';
 const UPDATE_NOTES_SEEN_KEY = 'lite_update_notes_seen_version';
 const UPDATE_NOTES_VISIBLE_LIMIT = 5;
-const MAX_ATTACHMENT_SIZE_BYTES = 20 * 1024 * 1024;
+const MAX_TOTAL_ATTACHMENT_SIZE_BYTES = 200 * 1024 * 1024;
 const AUTH_POLL_INTERVAL_MS = 60 * 1000;
 const TUI_BRIDGE_RECONNECT_BASE_DELAY_MS = 1000;
 const TUI_BRIDGE_RECONNECT_MAX_DELAY_MS = 15000;
@@ -1595,7 +1595,7 @@ const formatFileSize = (size) => {
   return `${value.toFixed(digits)} ${units[unitIndex]}`;
 };
 
-const getAttachmentTooLargeMessage = () => 'Upload file too large (> 20 MB).';
+const getAttachmentTooLargeMessage = () => 'Total attachment size too large (> 200 MB).';
 
 const escapeHtml = (text) =>
   String(text ?? '')
@@ -2835,6 +2835,9 @@ const getAttachmentStatusLabel = (item) => {
   return formatFileSize(item.size);
 };
 
+const getTotalAttachmentSize = (attachments) =>
+  (attachments || []).reduce((total, item) => total + Math.max(0, Number(item?.size || 0)), 0);
+
 const renderAttachments = () => {
   if (!dom.attachmentList) return;
   dom.attachmentList.innerHTML = '';
@@ -2893,21 +2896,31 @@ const handleSelectedFiles = async (files) => {
   const incoming = Array.from(files || []);
   if (!incoming.length) return;
 
+  let nextTotalSize = getTotalAttachmentSize(state.pendingAttachments);
+  const acceptedAttachments = [];
   for (const file of incoming) {
     if (!file || !file.size) {
       showChatError('Cannot upload an empty file.');
       continue;
     }
 
-    if (file.size > MAX_ATTACHMENT_SIZE_BYTES) {
-      showChatError(getAttachmentTooLargeMessage(file));
+    const fileSize = Math.max(0, Number(file.size || 0));
+    if (nextTotalSize + fileSize > MAX_TOTAL_ATTACHMENT_SIZE_BYTES) {
+      showChatError(getAttachmentTooLargeMessage());
       continue;
     }
 
     const attachment = createAttachmentItem(file);
     state.pendingAttachments = [...state.pendingAttachments, attachment];
-    renderAttachments();
+    acceptedAttachments.push({ file, attachment });
+    nextTotalSize += fileSize;
+  }
 
+  if (acceptedAttachments.length) {
+    renderAttachments();
+  }
+
+  for (const { file, attachment } of acceptedAttachments) {
     try {
       const uploadedJson = await uploadAttachment(file);
       const uploaded = normalizeUploadResult(uploadedJson, file);
@@ -4570,7 +4583,7 @@ const submitPromptViaTuiBridge = async (prompt) => {
   const uploadedAttachments = state.pendingAttachments.filter((item) => item.status === 'uploaded' && item.id);
   const hasFailedUploads = state.pendingAttachments.some((item) => item.status === 'error');
   const hasUploadingFiles = state.pendingAttachments.some((item) => item.status === 'uploading');
-  const oversizedAttachment = state.pendingAttachments.find((item) => Number(item?.size || 0) > MAX_ATTACHMENT_SIZE_BYTES);
+  const attachmentsTooLarge = getTotalAttachmentSize(state.pendingAttachments) > MAX_TOTAL_ATTACHMENT_SIZE_BYTES;
 
   if (!trimmedPrompt && uploadedAttachments.length === 0) return;
   if (!state.selectedModel) {
@@ -4593,8 +4606,8 @@ const submitPromptViaTuiBridge = async (prompt) => {
     showChatError('Some attachments failed to upload. Remove them and try again.');
     return;
   }
-  if (oversizedAttachment) {
-    showChatError(getAttachmentTooLargeMessage(oversizedAttachment));
+  if (attachmentsTooLarge) {
+    showChatError(getAttachmentTooLargeMessage());
     return;
   }
 
