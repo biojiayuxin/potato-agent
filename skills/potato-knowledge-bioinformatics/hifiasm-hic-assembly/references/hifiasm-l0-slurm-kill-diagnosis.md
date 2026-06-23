@@ -39,8 +39,8 @@ There was no `task/cgroup` and no cgroup memory enforcement evidence. `--mem=40G
 
 1. Inspect Slurm job status via the wrapper while active:
    ```bash
-   SKILL_DIR=/mnt/data/potato_agent/.hermes/skills/potato-knowledge-bioinformatics/slurm-for-long-running-tasks
-   bash "${SKILL_DIR}/scripts/job-status.sh" JOBID || true
+   SLURM_SKILL_DIR="${SLURM_SKILL_DIR:?set SLURM_SKILL_DIR to the slurm-for-long-running-tasks skill directory}"
+   bash "${SLURM_SKILL_DIR}/scripts/job-status.sh" JOBID || true
    ```
 2. Inspect stdout/stderr and hifiasm log:
    ```bash

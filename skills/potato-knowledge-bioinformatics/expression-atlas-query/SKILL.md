@@ -47,7 +47,7 @@ prerequisites:
 技能脚本路径：
 
 ```bash
-SKILL_DIR=/mnt/data/potato_agent/.hermes/skills/potato-knowledge-bioinformatics/expression-atlas-query
+SKILL_DIR="${SKILL_DIR:?set SKILL_DIR to the expression-atlas-query skill directory}"
 python3 "$SKILL_DIR/scripts/query_expression_atlas.py" --help
 ```
 

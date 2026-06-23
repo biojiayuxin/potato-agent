@@ -39,8 +39,8 @@ templates/fasta_to_order.py    ← 独立脚本，可单独调用
 复制模板到工作目录：
 
 ```bash
-SKILL_DIR=/mnt/data/potato_agent/.hermes/skills/potato-knowledge-bioinformatics/genome-compare-dotplot
-WORK=/mnt/data/potato_agent/Work/genome_compare_dotplot_<ref>_vs_<qry>
+SKILL_DIR="${SKILL_DIR:?set SKILL_DIR to the genome-compare-dotplot skill directory}"
+WORK="${WORK:-$HOME/work/genome_compare_dotplot_ref_vs_qry}"
 mkdir -p "$WORK/config" "$WORK/scripts"
 cp "$SKILL_DIR/templates/config.yaml"    "$WORK/config/config.yaml"
 cp "$SKILL_DIR/templates/Snakefile"      "$WORK/Snakefile"

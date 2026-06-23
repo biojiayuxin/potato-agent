@@ -37,10 +37,10 @@ prerequisites:
 
 ## 推荐脚本调用
 
-加载技能后，优先使用 `skill_view` 返回的 `skill_dir`，或使用本地默认路径：
+加载技能后，优先使用运行环境返回的 `skill_dir`。不要写死部署账号下的技能安装路径；如果需要在 shell 中调用脚本，先把 `SKILL_DIR` 设为当前技能目录：
 
 ```bash
-SKILL_DIR=/mnt/data/potato_agent/.hermes/skills/potato-knowledge-bioinformatics/potato-gene-search
+SKILL_DIR="${SKILL_DIR:?set SKILL_DIR to the potato-gene-search skill directory}"
 ```
 
 ### 模糊检索 / symbol 检索
@@ -158,14 +158,15 @@ python3 "$SKILL_DIR/scripts/query_potato_gene.py" details DM8C06G10190 --include
 
 ## 本地数据库降级方案（API 502/不可用时）
 
-如果 `https://www.potato-ai.top/api/gene_search` 或 `gene_details` 返回 502、超时或暂时不可用，但任务只需要 **symbol → DMv8 gene ID / reported ID** 映射，可在本服务器读取 Potato Knowledge Hub 的本地 SQLite 备份作为降级来源：
+如果 `https://www.potato-ai.top/api/gene_search` 或 `gene_details` 返回 502、超时或暂时不可用，但任务只需要 **symbol → DMv8 gene ID / reported ID** 映射，可在本服务器读取 Potato Knowledge Hub 的本地 SQLite 备份作为降级来源。不要把个人目录写成通用默认值；通过 `POTATO_GENE_DB` 显式提供数据库路径：
 
 ```bash
-DB=/mnt/data/jiayuxin/potato_knowledge_hub/260330-add_visit_map/scripts/search_genes/genes.db
+export POTATO_GENE_DB="${POTATO_GENE_DB:?set POTATO_GENE_DB to the local genes.db path}"
 python3 - <<'PY'
+import os
 import sqlite3
-p='/mnt/data/jiayuxin/potato_knowledge_hub/260330-add_visit_map/scripts/search_genes/genes.db'
-cur=sqlite3.connect(p).cursor()
+p = os.environ["POTATO_GENE_DB"]
+cur = sqlite3.connect(p).cursor()
 for q in ['BEL5','POTH1','FDL1','SP6A','ABL1','AST1']:
     print('\n###', q)
     rows=cur.execute("""

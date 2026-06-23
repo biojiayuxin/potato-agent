@@ -1,7 +1,8 @@
 # Reproducible ortholog-finder config
 # Goal: generate results/<speciesA>.<speciesB>.last.filtered.one_to_one.best.tsv
 
-env_prefix: "/mnt/data/potato_agent/.hermes/home/.micromamba/envs/mcscan_jcvi"
+# Optional. Leave empty to use tools already on PATH, or set to a local mcscan_jcvi env.
+env_prefix: ""
 
 workdir: "."
 

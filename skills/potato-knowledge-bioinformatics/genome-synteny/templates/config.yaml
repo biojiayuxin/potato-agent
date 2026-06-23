@@ -1,6 +1,7 @@
 # Reproducible MCScan/jcvi macrosynteny config
 
-env_prefix: "/mnt/data/potato_agent/.hermes/home/.micromamba/envs/mcscan_jcvi"
+# Optional. Leave empty to use tools already on PATH, or set to a local mcscan_jcvi env.
+env_prefix: ""
 
 workdir: "."
 

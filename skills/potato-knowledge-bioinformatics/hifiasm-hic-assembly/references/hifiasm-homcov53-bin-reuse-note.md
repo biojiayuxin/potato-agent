@@ -6,7 +6,7 @@
 
 ## 已验证模式
 
-工作目录示例：`/mnt/data/potato_agent/work/58_assm`
+工作目录示例：`/path/to/58_assm`
 
 前一轮缓存前缀：
 
@@ -73,15 +73,17 @@ STATS=qc/58.hifiasm.homcov53.seqkit_stats.txt
 用户明确要求资源时照做，不要擅自提高资源：
 
 ```bash
-bash "${SKILL_DIR}/scripts/submit-job.sh" \
+WORKDIR=/path/to/58_assm
+SLURM_SKILL_DIR="${SLURM_SKILL_DIR:?set SLURM_SKILL_DIR to the slurm-for-long-running-tasks skill directory}"
+bash "${SLURM_SKILL_DIR}/scripts/submit-job.sh" \
   --job-name hifiasm_58_homcov53 \
   --cpus 80 \
   --mem-gb 40 \
   --time 2-00:00:00 \
-  --workdir /mnt/data/potato_agent/work/58_assm \
-  --output /mnt/data/potato_agent/work/58_assm/logs/hifiasm_58_homcov53.%j.out \
-  --error /mnt/data/potato_agent/work/58_assm/logs/hifiasm_58_homcov53.%j.err \
-  --script /mnt/data/potato_agent/work/58_assm/scripts/run_58_hifiasm_hic_homcov53_reuse_bins.sh
+  --workdir "$WORKDIR" \
+  --output "$WORKDIR/logs/hifiasm_58_homcov53.%j.out" \
+  --error "$WORKDIR/logs/hifiasm_58_homcov53.%j.err" \
+  --script "$WORKDIR/scripts/run_58_hifiasm_hic_homcov53_reuse_bins.sh"
 ```
 
 提交后记录 job ID、stdout/stderr、hifiasm 主日志到方案文档。
@@ -99,7 +101,8 @@ bash "${SKILL_DIR}/scripts/submit-job.sh" \
 
 ```bash
 # Slurm 仍在运行
-bash "${SKILL_DIR}/scripts/job-status.sh" JOBID
+SLURM_SKILL_DIR="${SLURM_SKILL_DIR:?set SLURM_SKILL_DIR to the slurm-for-long-running-tasks skill directory}"
+bash "${SLURM_SKILL_DIR}/scripts/job-status.sh" JOBID
 
 # 查看 stdout 停在哪个缓存文件
  tail -n 50 logs/hifiasm_58_homcov53.JOBID.out

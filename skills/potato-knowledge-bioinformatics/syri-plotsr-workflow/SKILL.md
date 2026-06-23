@@ -145,7 +145,7 @@ Below is the recommended **one-shot complete workflow** template.
 #!/usr/bin/env bash
 set -euo pipefail
 
-source /home/admin/miniconda3/etc/profile.d/conda.sh
+source "${CONDA_SH:-$HOME/miniconda3/etc/profile.d/conda.sh}"
 conda activate syri_env
 
 WORKDIR="/path/to/project_dir"
@@ -356,10 +356,10 @@ But when the user asks for a workflow, **prefer generating the master script too
 #!/usr/bin/env bash
 set -euo pipefail
 
-source /home/admin/miniconda3/etc/profile.d/conda.sh
+source "${CONDA_SH:-$HOME/miniconda3/etc/profile.d/conda.sh}"
 conda activate syri_env
 
-WORKDIR="/home/data/admin/potato_agent/Work/01-DM8.1_8.2_align"
+WORKDIR="/path/to/DM8.1_8.2_align"
 REF="$WORKDIR/DM8.1.no_contig.fa"
 QRY="$WORKDIR/DM8.2.fa"
 PREFIX="DM8.1_vs_DM8.2"

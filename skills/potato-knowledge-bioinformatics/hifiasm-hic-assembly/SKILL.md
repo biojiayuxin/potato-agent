@@ -46,10 +46,10 @@ description: "HiFi + Hi-C 数据的 hifiasm 分型基因组组装执行方案；
    ln -sf /abs/path/to/hic_R1.fq.gz data/sample_HiC_R1.fq.gz
    ln -sf /abs/path/to/hic_R2.fq.gz data/sample_HiC_R2.fq.gz
    ```
-6. 若缺少软件，优先安装到用户/共享 micromamba 环境目录，**不要默认装到项目工作目录**，避免项目目录膨胀和后续混淆。先确认用户指定的环境位置；若无特别指定，在本服务器优先使用 `/mnt/data/potato_agent/.micromamba/envs/hifiasm` 这类 micromamba envs 目录：
+6. 若缺少软件，优先安装到用户/共享 micromamba 环境目录，**不要默认装到项目工作目录**，避免项目目录膨胀和后续混淆。先确认用户指定的环境位置；若无特别指定，可使用 `$HOME/.micromamba/envs/hifiasm` 这类 micromamba envs 目录：
    ```bash
    MAMBA=/opt/micromamba/bin/micromamba
-   ROOT=/mnt/data/potato_agent/.micromamba
+   ROOT="${MAMBA_ROOT_PREFIX:-$HOME/.micromamba}"
    ENV=${ROOT}/envs/hifiasm
    MAMBA_ROOT_PREFIX="${ROOT}" ${MAMBA} create -y -p "${ENV}" \
      -c bioconda -c conda-forge hifiasm seqkit gfatools
@@ -66,7 +66,7 @@ description: "HiFi + Hi-C 数据的 hifiasm 分型基因组组装执行方案；
 set -euo pipefail
 
 WORKDIR=/path/to/workdir
-ENV=/mnt/data/potato_agent/.micromamba/envs/hifiasm  # 或用户指定的 micromamba envs 目录
+ENV="${HIFIASM_ENV:-$HOME/.micromamba/envs/hifiasm}"  # 或用户指定的 micromamba envs 目录
 export PATH="${ENV}/bin:${PATH}"
 
 cd "${WORKDIR}"
@@ -153,8 +153,8 @@ fi
 hifiasm 属于长时间高内存任务，优先用 Slurm 后台提交。本服务器单任务上限约 100G，避免写 `--mem=120G`。建议先 dry-run。
 
 ```bash
-SKILL_DIR=/mnt/data/potato_agent/.hermes/skills/potato-knowledge-bioinformatics/slurm-for-long-running-tasks
-bash "${SKILL_DIR}/scripts/submit-job.sh" \
+SLURM_SKILL_DIR="${SLURM_SKILL_DIR:?set SLURM_SKILL_DIR to the slurm-for-long-running-tasks skill directory}"
+bash "${SLURM_SKILL_DIR}/scripts/submit-job.sh" \
   --print-only \
   --job-name hifiasm_SAMPLE \
   --cpus 48 \
@@ -202,6 +202,6 @@ bash "${SKILL_DIR}/scripts/submit-job.sh" \
 ## 注意事项
 
 - 大 FASTQ 不要复制，除非用户明确要求；用软链接更安全。
-- 软件环境不要默认放进项目目录；优先放到用户/共享 micromamba envs 目录（如 `/mnt/data/potato_agent/.micromamba/envs/hifiasm`），并同步更新运行脚本和方案中的 `ENV`。
+- 软件环境不要默认放进项目目录；优先放到用户/共享 micromamba envs 目录（如 `$HOME/.micromamba/envs/hifiasm`），并同步更新运行脚本和方案中的 `ENV`。
 - 不要把 Slurm 脚本中的内存写超过当前集群上限。
 - 如果只写执行方案，可同时保存 Markdown 方案和可运行 shell 脚本，并用 `bash -n` 验证脚本语法、用 submit wrapper `--print-only` 验证提交命令。

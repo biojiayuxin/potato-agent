@@ -6,17 +6,18 @@
 
 1. **环境位置优先级**
    - 用户明确纠正：hifiasm/seqkit/gfatools 环境不要安装到项目工作目录 `WORKDIR/envs/hifiasm`。
-   - 本服务器应优先使用用户 micromamba 环境目录，例如：
+   - 优先使用用户 micromamba 环境目录，例如：
      ```bash
-     /mnt/data/potato_agent/.micromamba/envs/hifiasm
+     ${HIFIASM_ENV:-$HOME/.micromamba/envs/hifiasm}
      ```
    - 如果旧脚本写死 `ENV=/path/to/workdir/envs/hifiasm`，先改脚本和方案，再安装/验证环境；不要为了匹配旧脚本把新环境建到项目目录。
 
 2. **提交前最小复核**
    ```bash
-   cd /mnt/data/potato_agent/work/58_assm
+   WORKDIR=/path/to/58_assm
+   cd "$WORKDIR"
    SCRIPT=scripts/run_58_hifiasm_hic_homcov26.sh
-   ENV=/mnt/data/potato_agent/.micromamba/envs/hifiasm
+   ENV="${HIFIASM_ENV:-$HOME/.micromamba/envs/hifiasm}"
    PREFIX=hifiasm_out/58.hifiasm.homcov26
    LOG=logs/58.hifiasm.homcov26.log
    STATS=qc/58.hifiasm.homcov26.seqkit_stats.txt
@@ -43,16 +44,17 @@
 ## 示例提交
 
 ```bash
-SKILL_DIR=/mnt/data/potato_agent/.hermes/skills/potato-knowledge-bioinformatics/slurm-for-long-running-tasks
-bash "${SKILL_DIR}/scripts/submit-job.sh" \
+WORKDIR=/path/to/58_assm
+SLURM_SKILL_DIR="${SLURM_SKILL_DIR:?set SLURM_SKILL_DIR to the slurm-for-long-running-tasks skill directory}"
+bash "${SLURM_SKILL_DIR}/scripts/submit-job.sh" \
   --job-name hifiasm_58_homcov26 \
   --cpus 80 \
   --mem-gb 40 \
   --time 4-00:00:00 \
-  --workdir /mnt/data/potato_agent/work/58_assm \
-  --output /mnt/data/potato_agent/work/58_assm/logs/hifiasm_58_homcov26.%j.out \
-  --error /mnt/data/potato_agent/work/58_assm/logs/hifiasm_58_homcov26.%j.err \
-  --script /mnt/data/potato_agent/work/58_assm/scripts/run_58_hifiasm_hic_homcov26.sh
+  --workdir "$WORKDIR" \
+  --output "$WORKDIR/logs/hifiasm_58_homcov26.%j.out" \
+  --error "$WORKDIR/logs/hifiasm_58_homcov26.%j.err" \
+  --script "$WORKDIR/scripts/run_58_hifiasm_hic_homcov26.sh"
 ```
 
 ## 运行后检查模板
@@ -60,9 +62,9 @@ bash "${SKILL_DIR}/scripts/submit-job.sh" \
 Slurm accounting 未启用时，作业离开 active queue 后不能用 `sacct` 判定最终状态。按以下顺序检查：
 
 ```bash
-SKILL_DIR=/mnt/data/potato_agent/.hermes/skills/potato-knowledge-bioinformatics/slurm-for-long-running-tasks
-bash "${SKILL_DIR}/scripts/job-status.sh" JOBID || true
-bash "${SKILL_DIR}/scripts/list-jobs.sh" || true
+SLURM_SKILL_DIR="${SLURM_SKILL_DIR:?set SLURM_SKILL_DIR to the slurm-for-long-running-tasks skill directory}"
+bash "${SLURM_SKILL_DIR}/scripts/job-status.sh" JOBID || true
+bash "${SLURM_SKILL_DIR}/scripts/list-jobs.sh" || true
 
 # 检查 stdout/stderr 是否出现 Done 或错误
 cat logs/hifiasm_58_homcov26.JOBID.out

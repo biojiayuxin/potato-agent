@@ -232,8 +232,8 @@ done
 总量较大或网络不稳定时，写成脚本后提交 Slurm：
 
 ```bash
-SKILL_DIR=/mnt/data/potato_agent/.hermes/skills/potato-knowledge-bioinformatics/slurm-for-long-running-tasks
-bash "$SKILL_DIR/scripts/submit-job.sh" \
+SLURM_SKILL_DIR="${SLURM_SKILL_DIR:?set SLURM_SKILL_DIR to the slurm-for-long-running-tasks skill directory}"
+bash "$SLURM_SKILL_DIR/scripts/submit-job.sh" \
   --job-name figshare_download \
   --time 8:00:00 \
   --mem-gb 2 \

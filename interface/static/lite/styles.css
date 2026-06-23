@@ -3053,11 +3053,13 @@ button.stretch {
   min-height: 0;
   padding: 10px 8px 16px;
   overflow: auto;
+  overflow-x: auto;
+  overflow-y: auto;
 }
 
 .workspace-view .tree-list,
 .workspace-view .tree-children {
-  min-width: 0;
+  min-width: max-content;
 }
 
 .workspace-view .tree-children {
@@ -3072,8 +3074,8 @@ button.stretch {
 
 .workspace-view .tree-row {
   min-height: 32px;
-  width: 100%;
-  min-width: 0;
+  width: max-content;
+  min-width: 100%;
   gap: 4px;
   border-radius: 9px;
 }
@@ -3092,11 +3094,11 @@ button.stretch {
 }
 
 .workspace-view .tree-label {
-  min-width: 0;
-  flex: 1 1 auto;
+  min-width: max-content;
+  flex: 0 0 auto;
   padding: 6px 8px;
-  overflow: hidden;
-  text-overflow: ellipsis;
+  overflow: visible;
+  text-overflow: clip;
   white-space: nowrap;
   color: var(--text);
   font-size: 13px;

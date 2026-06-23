@@ -396,7 +396,8 @@ export PATH="$PWD/envs/dapseq/bin:$PATH"
 使用 slurm 技能的 `submit-job.sh`，例如：
 
 ```bash
-bash /mnt/data/potato_agent/.hermes/skills/potato-knowledge-bioinformatics/slurm-for-long-running-tasks/scripts/submit-job.sh \
+SLURM_SKILL_DIR="${SLURM_SKILL_DIR:?set SLURM_SKILL_DIR to the slurm-for-long-running-tasks skill directory}"
+bash "$SLURM_SKILL_DIR/scripts/submit-job.sh" \
   --job-name dapseq_<job_id> \
   --cpus <CPUS> \
   --mem-gb <MEM_GB> \
@@ -414,8 +415,8 @@ bash /mnt/data/potato_agent/.hermes/skills/potato-knowledge-bioinformatics/slurm
 提交后立即检查：
 
 ```bash
-bash /mnt/data/potato_agent/.hermes/skills/potato-knowledge-bioinformatics/slurm-for-long-running-tasks/scripts/list-jobs.sh
-bash /mnt/data/potato_agent/.hermes/skills/potato-knowledge-bioinformatics/slurm-for-long-running-tasks/scripts/job-status.sh <JOBID>
+bash "$SLURM_SKILL_DIR/scripts/list-jobs.sh"
+bash "$SLURM_SKILL_DIR/scripts/job-status.sh" <JOBID>
 ```
 
 向用户返回：
@@ -464,10 +465,10 @@ HOMER motif 分析需要 softmask genome 或 HOMER 支持的 genome key。本技
 
 ## 12. 当前参考实现
 
-本技能的模板来自以下工作目录的整理版本：
+本技能的模板来自一次历史运行的整理版本。该路径仅用于溯源，不是可复用默认工作目录：
 
 ```text
-/mnt/data/potato_agent/work/DAP-Seq.202605091116
+<historical local DAP-Seq workdir>
 ```
 
 该参考实现已完成：

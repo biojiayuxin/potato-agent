@@ -30,7 +30,10 @@ FINAL_OUTPUTS += [f"results/{PAIR}.macrosynteny.{fmt}" for fmt in FORMATS]
 if P.get("line_pdf", True):
     FINAL_OUTPUTS.append(f"results/{PAIR}.macrosynteny.line.pdf")
 
-shell.prefix(f"export PATH={ENV_PREFIX}/bin:$PATH; export MPLBACKEND=Agg; set -euo pipefail; ")
+if ENV_PREFIX:
+    shell.prefix(f"export PATH={ENV_PREFIX}/bin:$PATH; export MPLBACKEND=Agg; set -euo pipefail; ")
+else:
+    shell.prefix("export MPLBACKEND=Agg; set -euo pipefail; ")
 
 rule all:
     input:

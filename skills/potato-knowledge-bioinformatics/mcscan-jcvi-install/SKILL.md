@@ -60,7 +60,7 @@ If the environment was already created without `ete4`, add it:
 Use direct environment paths for verification to avoid `micromamba run` overhead or timeouts on large environments:
 
 ```bash
-ENV=/mnt/data/potato_agent/.hermes/home/.micromamba/envs/mcscan_jcvi
+ENV="${MCSCAN_JCVI_ENV:-$HOME/.micromamba/envs/mcscan_jcvi}"
 export PATH="$ENV/bin:$PATH"
 
 python - <<'PY'

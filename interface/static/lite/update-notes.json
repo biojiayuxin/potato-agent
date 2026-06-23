@@ -1,6 +1,17 @@
 {
   "updates": [
     {
+      "version": "2026-06-23-001",
+      "title": "Workspace updates",
+      "date": "June 23, 2026",
+      "summary": "This update expands potato knowledge retrieval capabilities.",
+      "items": [
+        "Added a potato spatial transcriptomics information query skill.",
+        "Integrated the PlantScience.ai knowledge graph into potato information retrieval.",
+        "Improved potato information query logic."
+      ]
+    },
+    {
       "version": "2026-06-21-001",
       "title": "Workspace updates",
       "date": "June 21, 2026",

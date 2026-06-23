@@ -1,10 +1,10 @@
 # Juicer/3D-DNA lessons from 58 Luo-Jilin-style run
 
-Context: 58 material hap1/hap2 were scaffolded with Juicer CPU outputs under `/mnt/data/potato_agent/work/58_assm/hic_based_on_luojilin`, using shared env `/mnt/data/potato_agent/envs/juicer-3ddna` and reference scripts in `ref_scripts/`.
+Context: 58 material hap1/hap2 were scaffolded in a historical local work directory, using a shared `juicer-3ddna` environment and reference scripts in `ref_scripts/`.
 
 ## User workflow corrections
 
-- Install Juicer/3D-DNA in a shared micromamba-style env (e.g. `/mnt/data/potato_agent/envs/juicer-3ddna`), not under the project work directory.
+- Install Juicer/3D-DNA in a shared micromamba-style env (e.g. `$HOME/envs/juicer-3ddna` or another user-approved shared env), not under the project work directory.
 - When the user provides reference scripts, preserve their parameter set exactly unless explicitly asked to improve/extend it. Do not add convenience flags such as Juicer `-d/-g/-b/-S early` just because they seem useful.
 - For long jobs, submit with the exact user-requested resources when provided; do not silently change CPU/memory/time.
 

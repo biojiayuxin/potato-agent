@@ -44,8 +44,8 @@ work/
 从模板初始化：
 
 ```bash
-SKILL_DIR=/mnt/data/potato_agent/.hermes/skills/potato-knowledge-bioinformatics/ortholog-finder
-WORK=/mnt/data/potato_agent/work/ortholog_<speciesA>_<speciesB>
+SKILL_DIR="${SKILL_DIR:?set SKILL_DIR to the ortholog-finder skill directory}"
+WORK="${WORK:-$HOME/work/ortholog_speciesA_speciesB}"
 mkdir -p "$WORK"
 cp "$SKILL_DIR/templates/config.yaml" "$WORK/config.yaml"
 cp "$SKILL_DIR/templates/Snakefile" "$WORK/Snakefile"
@@ -77,7 +77,7 @@ test -s "$SKILL_DIR/templates/Snakefile"
 若 `config.yaml` 中的 `env_prefix` 未设置，默认使用：
 
 ```bash
-ENV=/mnt/data/potato_agent/.hermes/home/.micromamba/envs/mcscan_jcvi
+ENV="${MCSCAN_JCVI_ENV:-$HOME/.micromamba/envs/mcscan_jcvi}"
 ```
 
 检查运行环境；Snakemake 使用系统命令，若缺少 diamond 则优先补装到该环境：
@@ -86,7 +86,7 @@ ENV=/mnt/data/potato_agent/.hermes/home/.micromamba/envs/mcscan_jcvi
 ENV="$(python3 - <<'PY'
 from pathlib import Path
 import yaml
-fallback = '/mnt/data/potato_agent/.hermes/home/.micromamba/envs/mcscan_jcvi'
+fallback = str(Path.home() / '.micromamba/envs/mcscan_jcvi')
 cfg = Path('config.yaml')
 if cfg.exists():
     data = yaml.safe_load(cfg.read_text()) or {}

@@ -36,7 +36,7 @@ metadata:
 运行前先检查 `mcscan_jcvi` 环境或 `config.yaml` 中的 `env_prefix` 是否可用。至少确认：
 
 ```bash
-ENV=/mnt/data/potato_agent/.hermes/home/.micromamba/envs/mcscan_jcvi
+ENV="${MCSCAN_JCVI_ENV:-$HOME/.micromamba/envs/mcscan_jcvi}"
 export PATH="$ENV/bin:$PATH"
 
 python --version
@@ -126,8 +126,8 @@ work/
 推荐从模板复制：
 
 ```bash
-SKILL_DIR=/mnt/data/potato_agent/.hermes/skills/potato-knowledge-bioinformatics/genome-synteny
-WORK=/mnt/data/potato_agent/work/mcscan_<speciesA>_<speciesB>
+SKILL_DIR="${SKILL_DIR:?set SKILL_DIR to the genome-synteny skill directory}"
+WORK="${WORK:-$HOME/work/mcscan_speciesA_speciesB}"
 mkdir -p "$WORK"
 cp "$SKILL_DIR/templates/config.yaml" "$WORK/config.yaml"
 cp "$SKILL_DIR/templates/Snakefile" "$WORK/Snakefile"
@@ -162,7 +162,7 @@ test -s "$SKILL_DIR/templates/Snakefile"
 若 `config.yaml` 中的 `env_prefix` 未设置，默认使用：
 
 ```bash
-ENV=/mnt/data/potato_agent/.hermes/home/.micromamba/envs/mcscan_jcvi
+ENV="${MCSCAN_JCVI_ENV:-$HOME/.micromamba/envs/mcscan_jcvi}"
 ```
 
 检查 Snakemake；Snakemake 使用系统命令，若环境中缺少绘图或比对依赖则补装到该环境：
@@ -170,13 +170,15 @@ ENV=/mnt/data/potato_agent/.hermes/home/.micromamba/envs/mcscan_jcvi
 ```bash
 ENV="$(python3 - <<'PY'
 import yaml
+import os
 from pathlib import Path
 cfg = Path('config.yaml')
+default_env = os.path.expanduser('~/.micromamba/envs/mcscan_jcvi')
 if cfg.exists():
     data = yaml.safe_load(cfg.read_text()) or {}
-    print(data.get('env_prefix') or '/mnt/data/potato_agent/.hermes/home/.micromamba/envs/mcscan_jcvi')
+    print(data.get('env_prefix') or default_env)
 else:
-    print('/mnt/data/potato_agent/.hermes/home/.micromamba/envs/mcscan_jcvi')
+    print(default_env)
 PY
 )"
 SNAKEMAKE_BIN="$(command -v snakemake)"

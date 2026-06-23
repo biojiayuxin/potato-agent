@@ -1,6 +1,6 @@
 # 3D-DNA LIGer I/O throttling note
 
-Context: diagnosing `/mnt/data/potato_agent/work/58_assm/hic_based_on_luojilin` after a hap1 3D-DNA run saturated system I/O and was cancelled. The reference examples used Juicer CPU followed by 3D-DNA `run-asm-pipeline.sh -m haploid -i 15000 -r 0 --mapq 10 --sort-output -g 1000`.
+Context: diagnosing a historical local `58_assm/hic_based_on_luojilin` run after a hap1 3D-DNA run saturated system I/O and was cancelled. The reference examples used Juicer CPU followed by 3D-DNA `run-asm-pipeline.sh -m haploid -i 15000 -r 0 --mapq 10 --sort-output -g 1000`.
 
 ## Observed symptom
 

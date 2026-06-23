@@ -4,6 +4,7 @@ import json
 import math
 import os
 import sqlite3
+from collections.abc import Iterable
 from pathlib import Path, PurePosixPath
 from typing import Any
 
@@ -535,6 +536,384 @@ def load_tissues_from_db(dataset: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _coerce_cell_id(value: Any) -> int | None:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _group_sort_key(value: str) -> tuple[int, int | str]:
+    try:
+        return (0, int(value))
+    except ValueError:
+        return (1, value)
+
+
+def _assignment_pairs_from_payload(payload: Any) -> list[tuple[int, str]]:
+    if isinstance(payload, dict):
+        if "cells" in payload:
+            raw_cells = payload.get("cells") or []
+            items: Iterable[Any]
+            items = raw_cells.items() if isinstance(raw_cells, dict) else raw_cells
+        else:
+            items = payload.items()
+    elif isinstance(payload, list):
+        items = payload
+    else:
+        return []
+
+    cells: list[tuple[int, str]] = []
+    for item in items:
+        if isinstance(item, dict):
+            cell_raw = (
+                item.get("cell_id")
+                if "cell_id" in item
+                else item.get("cellId", item.get("id"))
+            )
+            group_raw = (
+                item.get("cluster_id")
+                if "cluster_id" in item
+                else item.get(
+                    "clusterId",
+                    item.get("tissue_id", item.get("tissueId", item.get("groupId"))),
+                )
+            )
+        else:
+            try:
+                cell_raw, group_raw = item[0], item[1]
+            except (TypeError, IndexError):
+                continue
+
+        cell_id = _coerce_cell_id(cell_raw)
+        if cell_id is None or group_raw is None:
+            continue
+        cells.append((cell_id, str(group_raw)))
+    return cells
+
+
+def _append_group_definition(
+    groups: list[dict[str, Any]],
+    seen: set[str],
+    group_id: str,
+    label: str | None = None,
+    order: int | None = None,
+) -> None:
+    if group_id in seen:
+        return
+    seen.add(group_id)
+    groups.append(
+        {
+            "id": group_id,
+            "label": label or group_id,
+            "order": int(order) if order is not None else len(groups),
+        }
+    )
+
+
+def _cluster_group_definitions(
+    dataset: dict[str, Any],
+    payload: dict[str, Any],
+    assignments: dict[str, list[tuple[int, str]]],
+) -> list[dict[str, Any]]:
+    cluster_names = cluster_names_for_dataset(dataset)
+    groups: list[dict[str, Any]] = []
+    seen: set[str] = set()
+
+    raw_clusters = payload.get("clusters") or []
+    if isinstance(raw_clusters, list):
+        for index, raw_cluster in enumerate(raw_clusters):
+            if isinstance(raw_cluster, dict):
+                raw_id = raw_cluster.get(
+                    "id",
+                    raw_cluster.get("cluster_id", raw_cluster.get("clusterId")),
+                )
+                if raw_id is None:
+                    continue
+                group_id = str(raw_id)
+                label = (
+                    cluster_names.get(group_id)
+                    or raw_cluster.get("name")
+                    or raw_cluster.get("label")
+                    or group_id
+                )
+                raw_order = raw_cluster.get(
+                    "order",
+                    raw_cluster.get("cluster_order", raw_cluster.get("clusterOrder", index)),
+                )
+                try:
+                    order = int(raw_order)
+                except (TypeError, ValueError):
+                    order = index
+            else:
+                group_id = str(raw_cluster)
+                label = cluster_names.get(group_id) or group_id
+                order = index
+            _append_group_definition(groups, seen, group_id, str(label), order)
+
+    assigned_group_ids = {
+        group_id for cells in assignments.values() for _, group_id in cells if group_id
+    }
+    for group_id in sorted(assigned_group_ids - seen, key=_group_sort_key):
+        _append_group_definition(groups, seen, group_id, cluster_names.get(group_id) or group_id)
+
+    return sorted(groups, key=lambda group: (int(group["order"]), _group_sort_key(group["id"])))
+
+
+def load_cluster_assignment_data(dataset: dict[str, Any]) -> dict[str, Any]:
+    payload = get_json_document(
+        dataset,
+        "clusters",
+        dataset["data_root"] / "clusters.json",
+    )
+    if payload is None:
+        raise HTTPException(
+            status_code=503,
+            detail="cluster assignments not found; run web_viewer/export_clusters.py",
+        )
+    if not isinstance(payload, dict):
+        raise HTTPException(status_code=500, detail="cluster assignment JSON is not an object")
+
+    raw_samples = payload.get("samples") or {}
+    assignments = {sample: [] for sample in dataset["sample_ids"]}
+    if isinstance(raw_samples, dict):
+        for sample, sample_payload in raw_samples.items():
+            assignments[str(sample)] = _assignment_pairs_from_payload(sample_payload)
+
+    return {
+        "groups": _cluster_group_definitions(dataset, payload, assignments),
+        "assignments": assignments,
+    }
+
+
+def load_tissue_assignment_data(
+    conn: sqlite3.Connection,
+    dataset: dict[str, Any],
+) -> dict[str, Any]:
+    if not (
+        db_table_exists(conn, TISSUES_TABLE)
+        and db_table_exists(conn, TISSUE_ASSIGNMENTS_TABLE)
+    ):
+        raise HTTPException(
+            status_code=503,
+            detail="tissue tables not found; run web_viewer/import_tissues.py",
+        )
+
+    tissue_column = get_metadata_value(conn, "tissue_column", TISSUE_COLUMN)
+    tissue_rows = conn.execute(
+        f"""
+        SELECT
+          tissue_id,
+          tissue_label,
+          tissue_order
+        FROM {TISSUES_TABLE}
+        ORDER BY tissue_order, tissue_label
+        """
+    ).fetchall()
+    assignment_rows = conn.execute(
+        f"""
+        SELECT sample, cell_id, tissue_id
+        FROM {TISSUE_ASSIGNMENTS_TABLE}
+        ORDER BY sample, cell_id
+        """
+    ).fetchall()
+
+    groups: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for tissue_id, tissue_label, tissue_order in tissue_rows:
+        _append_group_definition(
+            groups,
+            seen,
+            str(tissue_id),
+            str(tissue_label or tissue_id),
+            int(tissue_order),
+        )
+
+    assignments = {sample: [] for sample in dataset["sample_ids"]}
+    for sample, cell_id, tissue_id in assignment_rows:
+        sample_id = str(sample)
+        group_id = str(tissue_id)
+        assignments.setdefault(sample_id, []).append((int(cell_id), group_id))
+        if group_id not in seen:
+            _append_group_definition(groups, seen, group_id, group_id)
+
+    return {
+        "column": tissue_column,
+        "groups": sorted(groups, key=lambda group: (int(group["order"]), _group_sort_key(group["id"]))),
+        "assignments": assignments,
+    }
+
+
+def load_gene_expression_lookup(
+    conn: sqlite3.Connection,
+    dataset: dict[str, Any],
+    gene: str,
+) -> dict[str, Any]:
+    gene_row = conn.execute("SELECT gene_id FROM genes WHERE gene = ?", (gene,)).fetchone()
+    if gene_row is None:
+        raise ValueError(f"{gene} not found")
+
+    gene_id = int(gene_row[0])
+    sample_ids = list(dataset["sample_ids"])
+    expression_by_sample: dict[str, dict[int, float]] = {sample: {} for sample in sample_ids}
+    range_values = [0.0]
+
+    if sample_ids:
+        placeholders = ",".join("?" for _ in sample_ids)
+        stats_rows = conn.execute(
+            f"""
+            SELECT sample, vmin, vmax
+            FROM sample_genes
+            WHERE gene_id = ? AND sample IN ({placeholders})
+            """,
+            (gene_id, *sample_ids),
+        ).fetchall()
+        for _, vmin, vmax in stats_rows:
+            range_values.extend([float(vmin), float(vmax)])
+
+        value_rows = conn.execute(
+            f"""
+            SELECT sample, cell_id, value
+            FROM expression_values
+            WHERE gene_id = ? AND sample IN ({placeholders})
+            ORDER BY sample, cell_id
+            """,
+            (gene_id, *sample_ids),
+        ).fetchall()
+    else:
+        value_rows = []
+
+    for sample, cell_id, value in value_rows:
+        expression_by_sample.setdefault(str(sample), {})[int(cell_id)] = float(value)
+        range_values.append(float(value))
+
+    return {
+        "geneId": gene_id,
+        "range": {"vmin": min(range_values), "vmax": max(range_values)},
+        "values": expression_by_sample,
+    }
+
+
+def _empty_expression_accumulator(
+    scope: str,
+    sample: str | None,
+    group: dict[str, Any],
+) -> dict[str, Any]:
+    return {
+        "scope": scope,
+        "sample": sample,
+        "groupId": str(group["id"]),
+        "groupLabel": str(group["label"]),
+        "cellCount": 0,
+        "expressingCount": 0,
+        "sumExpr": 0.0,
+        "maxExpr": 0.0,
+    }
+
+
+def _add_expression_value(accumulator: dict[str, Any], value: float) -> None:
+    accumulator["cellCount"] += 1
+    accumulator["sumExpr"] += value
+    accumulator["maxExpr"] = max(float(accumulator["maxExpr"]), value)
+    if value > 0:
+        accumulator["expressingCount"] += 1
+
+
+def _finalize_expression_accumulator(accumulator: dict[str, Any]) -> dict[str, Any]:
+    cell_count = int(accumulator["cellCount"])
+    expressing_count = int(accumulator["expressingCount"])
+    sum_expr = float(accumulator["sumExpr"])
+    return {
+        "scope": accumulator["scope"],
+        "sample": accumulator["sample"],
+        "groupId": accumulator["groupId"],
+        "groupLabel": accumulator["groupLabel"],
+        "cellCount": cell_count,
+        "expressingCount": expressing_count,
+        "pctExpr": (expressing_count * 100.0 / cell_count) if cell_count else 0.0,
+        "avgExpr": (sum_expr / cell_count) if cell_count else 0.0,
+        "avgExprExpressing": (sum_expr / expressing_count) if expressing_count else 0.0,
+        "sumExpr": sum_expr,
+        "maxExpr": float(accumulator["maxExpr"]),
+    }
+
+
+def aggregate_expression_by_group(
+    groups: list[dict[str, Any]],
+    assignments: dict[str, list[tuple[int, str]]],
+    sample_ids: list[str],
+    expression_by_sample: dict[str, dict[int, float]],
+) -> list[dict[str, Any]]:
+    groups_by_id = {str(group["id"]): group for group in groups}
+    dataset_accumulators = {
+        group_id: _empty_expression_accumulator("dataset", None, group)
+        for group_id, group in groups_by_id.items()
+    }
+    sample_accumulators = {
+        (sample, group_id): _empty_expression_accumulator("sample", sample, group)
+        for sample in sample_ids
+        for group_id, group in groups_by_id.items()
+    }
+
+    for sample, cells in assignments.items():
+        if sample not in sample_ids:
+            continue
+        sample_values = expression_by_sample.get(sample, {})
+        for cell_id, group_id in cells:
+            group = groups_by_id.get(group_id)
+            if group is None:
+                continue
+            value = float(sample_values.get(cell_id, 0.0))
+            _add_expression_value(dataset_accumulators[group_id], value)
+            _add_expression_value(sample_accumulators[(sample, group_id)], value)
+
+    rows: list[dict[str, Any]] = []
+    for group in groups:
+        group_id = str(group["id"])
+        rows.append(_finalize_expression_accumulator(dataset_accumulators[group_id]))
+        for sample in sample_ids:
+            rows.append(_finalize_expression_accumulator(sample_accumulators[(sample, group_id)]))
+    return rows
+
+
+def load_agent_expression_statistics(dataset: dict[str, Any], gene: str) -> dict[str, Any]:
+    try:
+        with connect_db(dataset) as conn:
+            expression_data = load_gene_expression_lookup(conn, dataset, gene)
+            cluster_column = get_metadata_value(
+                conn,
+                "dotplot_cluster_column",
+                DOTPLOT_CLUSTER_COLUMN,
+            )
+            tissue_data = load_tissue_assignment_data(conn, dataset)
+    except sqlite3.Error as exc:
+        raise HTTPException(status_code=500, detail=f"expression SQLite error: {exc}") from exc
+
+    cluster_data = load_cluster_assignment_data(dataset)
+    sample_ids = list(dataset["sample_ids"])
+    expression_by_sample = expression_data["values"]
+    return {
+        "dataset": dataset["id"],
+        "gene": gene,
+        "samples": sample_ids,
+        "range": expression_data["range"],
+        "clusterColumn": cluster_column,
+        "tissueColumn": tissue_data["column"],
+        "clusterExpression": aggregate_expression_by_group(
+            cluster_data["groups"],
+            cluster_data["assignments"],
+            sample_ids,
+            expression_by_sample,
+        ),
+        "tissueExpression": aggregate_expression_by_group(
+            tissue_data["groups"],
+            tissue_data["assignments"],
+            sample_ids,
+            expression_by_sample,
+        ),
+    }
+
+
 def get_json_document(dataset: dict[str, Any], name: str, fallback_path: Path) -> Any | None:
     try:
         with connect_db(dataset) as conn:
@@ -605,6 +984,22 @@ async def api_replicates(dataset: str = "") -> Any:
 @router.get("/api/spatial/tissues")
 async def api_tissues(dataset: str = "") -> dict[str, Any]:
     return load_tissues_from_db(get_dataset(dataset.strip() or None))
+
+
+@router.get("/api/spatial/agent/expression")
+async def api_agent_expression(dataset: str = "", gene: str = "") -> dict[str, Any]:
+    dataset_id = dataset.strip()
+    gene = gene.strip()
+    if not dataset_id:
+        raise HTTPException(status_code=400, detail="missing dataset")
+    if not gene:
+        raise HTTPException(status_code=400, detail="missing gene")
+
+    selected = get_dataset(dataset_id)
+    try:
+        return load_agent_expression_statistics(selected, gene)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
 
 
 @router.get("/api/spatial/gene")
