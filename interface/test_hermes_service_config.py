@@ -29,6 +29,17 @@ def _write_bioinformatics_skills_template(tmp_path: Path) -> Path:
     return source
 
 
+def _write_plan_mode_skills_template(tmp_path: Path) -> Path:
+    source = tmp_path / "skill-source" / "plan-mode"
+    plan_skill = source / "plan"
+    plan_skill.mkdir(parents=True)
+    (plan_skill / "SKILL.md").write_text(
+        "---\nname: plan\ndescription: Test plan mode\n---\n\nPlan mode\n",
+        encoding="utf-8",
+    )
+    return source
+
+
 def _write_public_data_template(tmp_path: Path) -> Path:
     public_data = tmp_path / "public_data_source"
     public_data.mkdir()
@@ -228,6 +239,7 @@ def test_install_user_runtime_files_writes_only_user_runtime_paths(
     soul_template = tmp_path / "SOUL.template.md"
     soul_template.write_text("Template soul\n", encoding="utf-8")
     skills_template = _write_bioinformatics_skills_template(tmp_path)
+    plan_mode_template = _write_plan_mode_skills_template(tmp_path)
     public_data = _write_public_data_template(tmp_path)
 
     monkeypatch.setattr(
@@ -249,6 +261,10 @@ def test_install_user_runtime_files_writes_only_user_runtime_paths(
     monkeypatch.setattr(
         "interface.hermes_service.DEFAULT_BIOINFORMATICS_SKILLS_PATH",
         skills_template,
+    )
+    monkeypatch.setattr(
+        "interface.hermes_service.DEFAULT_PLAN_MODE_SKILLS_PATH",
+        plan_mode_template,
     )
     monkeypatch.setattr(
         "interface.hermes_service.DEFAULT_PUBLIC_DATA_PATH",
@@ -288,6 +304,9 @@ def test_install_user_runtime_files_writes_only_user_runtime_paths(
         / "potato-gene-search"
         / "SKILL.md"
     ).read_text(encoding="utf-8") == "Gene search\n"
+    assert (
+        user.hermes_home / "skills" / "plan-mode" / "plan" / "SKILL.md"
+    ).read_text(encoding="utf-8").startswith("---\nname: plan\n")
     public_data_link = user.home_dir / "public_data"
     assert public_data_link.is_symlink()
     assert public_data_link.resolve() == public_data
@@ -317,6 +336,7 @@ def test_install_user_runtime_files_overwrites_soul_file_with_template(
     soul_template = tmp_path / "SOUL.template.md"
     soul_template.write_text("Current template\n", encoding="utf-8")
     skills_template = _write_bioinformatics_skills_template(tmp_path)
+    plan_mode_template = _write_plan_mode_skills_template(tmp_path)
     public_data = _write_public_data_template(tmp_path)
     user.hermes_home.mkdir(parents=True)
     (user.hermes_home / "SOUL.md").write_text("Old user soul\n", encoding="utf-8")
@@ -337,6 +357,10 @@ def test_install_user_runtime_files_overwrites_soul_file_with_template(
     monkeypatch.setattr(
         "interface.hermes_service.DEFAULT_BIOINFORMATICS_SKILLS_PATH",
         skills_template,
+    )
+    monkeypatch.setattr(
+        "interface.hermes_service.DEFAULT_PLAN_MODE_SKILLS_PATH",
+        plan_mode_template,
     )
     monkeypatch.setattr(
         "interface.hermes_service.DEFAULT_PUBLIC_DATA_PATH",
@@ -372,10 +396,14 @@ def test_install_user_runtime_files_replaces_managed_bioinformatics_skills(
     soul_template = tmp_path / "SOUL.template.md"
     soul_template.write_text("Template soul\n", encoding="utf-8")
     skills_template = _write_bioinformatics_skills_template(tmp_path)
+    plan_mode_template = _write_plan_mode_skills_template(tmp_path)
     public_data = _write_public_data_template(tmp_path)
     old_skill_dir = user.hermes_home / "skills" / "potato-knowledge-bioinformatics"
     old_skill_dir.mkdir(parents=True)
     (old_skill_dir / "old.txt").write_text("stale\n", encoding="utf-8")
+    old_plan_mode_dir = user.hermes_home / "skills" / "plan-mode"
+    old_plan_mode_dir.mkdir(parents=True)
+    (old_plan_mode_dir / "old.txt").write_text("stale\n", encoding="utf-8")
     touched_modes: dict[Path, int] = {}
 
     monkeypatch.setattr(
@@ -395,6 +423,10 @@ def test_install_user_runtime_files_replaces_managed_bioinformatics_skills(
         skills_template,
     )
     monkeypatch.setattr(
+        "interface.hermes_service.DEFAULT_PLAN_MODE_SKILLS_PATH",
+        plan_mode_template,
+    )
+    monkeypatch.setattr(
         "interface.hermes_service.DEFAULT_PUBLIC_DATA_PATH",
         public_data,
     )
@@ -410,6 +442,11 @@ def test_install_user_runtime_files_replaces_managed_bioinformatics_skills(
         target_dir / "DESCRIPTION.md"
     ).read_text(encoding="utf-8") == "Bioinformatics skills\n"
     assert target_script.read_text(encoding="utf-8").startswith("#!/usr/bin/env python3")
+    plan_mode_target = user.hermes_home / "skills" / "plan-mode"
+    assert not (plan_mode_target / "old.txt").exists()
+    assert (
+        plan_mode_target / "plan" / "SKILL.md"
+    ).read_text(encoding="utf-8").startswith("---\nname: plan\n")
     assert touched_modes[user.hermes_home / "skills"] == 0o700
     assert touched_modes[target_script] == 0o755
 

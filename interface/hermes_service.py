@@ -57,6 +57,8 @@ MANAGED_BIOINFORMATICS_SKILLS_DIR_NAME = "potato-knowledge-bioinformatics"
 DEFAULT_BIOINFORMATICS_SKILLS_PATH = (
     REPO_ROOT / "skills" / MANAGED_BIOINFORMATICS_SKILLS_DIR_NAME
 )
+MANAGED_PLAN_MODE_SKILLS_DIR_NAME = "plan-mode"
+DEFAULT_PLAN_MODE_SKILLS_PATH = REPO_ROOT / "skills" / MANAGED_PLAN_MODE_SKILLS_DIR_NAME
 PUBLIC_DATA_LINK_NAME = "public_data"
 DEFAULT_PUBLIC_DATA_PATH = Path("/mnt/data/public_data")
 
@@ -151,24 +153,42 @@ def install_soul_file(user: HermesTarget, *, uid: int, gid: int) -> None:
     _set_owner_and_mode(soul_path, uid, gid, 0o600)
 
 
-def install_bioinformatics_skills(user: HermesTarget, *, uid: int, gid: int) -> None:
-    if not DEFAULT_BIOINFORMATICS_SKILLS_PATH.is_dir():
-        raise RuntimeError(
-            f"Bioinformatics skills not found: {DEFAULT_BIOINFORMATICS_SKILLS_PATH}"
-        )
-
+def _install_managed_skill_dir(
+    user: HermesTarget,
+    *,
+    uid: int,
+    gid: int,
+    source_path: Path,
+    target_dir_name: str,
+) -> None:
+    if not source_path.is_dir():
+        raise RuntimeError(f"Managed skills not found: {source_path}")
     skills_root = user.hermes_home / "skills"
     skills_root.mkdir(parents=True, exist_ok=True)
     _set_owner_and_mode(skills_root, uid, gid, 0o700)
 
-    target_path = skills_root / MANAGED_BIOINFORMATICS_SKILLS_DIR_NAME
+    target_path = skills_root / target_dir_name
     if target_path.is_dir() and not target_path.is_symlink():
         shutil.rmtree(target_path)
     elif target_path.exists() or target_path.is_symlink():
         target_path.unlink()
 
-    shutil.copytree(DEFAULT_BIOINFORMATICS_SKILLS_PATH, target_path)
+    shutil.copytree(source_path, target_path)
     _set_owner_recursive(target_path, uid, gid)
+
+
+def install_managed_skills(user: HermesTarget, *, uid: int, gid: int) -> None:
+    for target_dir_name, source_path in (
+        (MANAGED_BIOINFORMATICS_SKILLS_DIR_NAME, DEFAULT_BIOINFORMATICS_SKILLS_PATH),
+        (MANAGED_PLAN_MODE_SKILLS_DIR_NAME, DEFAULT_PLAN_MODE_SKILLS_PATH),
+    ):
+        _install_managed_skill_dir(
+            user,
+            uid=uid,
+            gid=gid,
+            source_path=source_path,
+            target_dir_name=target_dir_name,
+        )
 
 
 def install_public_data_link(user: HermesTarget, *, uid: int, gid: int) -> None:
@@ -394,7 +414,7 @@ def install_user_runtime_files(config: dict[str, Any], user: HermesTarget) -> No
     )
     _set_owner_and_mode(config_path, pw.pw_uid, gid, 0o600)
     install_soul_file(user, uid=pw.pw_uid, gid=gid)
-    install_bioinformatics_skills(user, uid=pw.pw_uid, gid=gid)
+    install_managed_skills(user, uid=pw.pw_uid, gid=gid)
     install_public_data_link(user, uid=pw.pw_uid, gid=gid)
 
 

@@ -118,6 +118,12 @@ rsync -a --delete \
 cd /srv/potato_agent
 ```
 
+同步后确认 Hermes 源码自带的旧 `plan` 技能已被删除，避免覆盖托管的 `plan-mode` 技能：
+
+```bash
+test ! -e /srv/potato_agent/hermes-agent/skills/software-development/plan/SKILL.md
+```
+
 ### 2. 创建服务用户和状态目录
 
 ```bash
