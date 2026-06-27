@@ -1,6 +1,16 @@
 {
   "updates": [
     {
+      "version": "2026-06-27-001",
+      "title": "Workspace updates",
+      "date": "June 27, 2026",
+      "summary": "This update adds a one-shot planning mode for conversations.",
+      "items": [
+        "Added Plan mode to let the agent prepare a structured plan before responding.",
+        "Plan mode applies only to the next message and automatically returns to normal chat after submission."
+      ]
+    },
+    {
       "version": "2026-06-23-001",
       "title": "Workspace updates",
       "date": "June 23, 2026",

@@ -32,6 +32,10 @@ STALE_GATEWAY_SESSION_ERROR = (
     "live TUI session not found; the run is no longer attached to a gateway session"
 )
 MODEL_RESPONSE_ERROR_MESSAGE = "模型响应失败，请稍后重试。"
+PLAN_COMMAND_FAILURE_MESSAGE = (
+    "Plan mode failed because the TUI gateway did not return a plan skill message."
+)
+VALID_TURN_MODES = {"chat", "plan"}
 
 TipSessionResolver = Callable[[str, str], str | None | Awaitable[str | None]]
 
@@ -256,8 +260,13 @@ class SessionRunManager:
         attachments: list[dict[str, Any]],
         existing_messages: list[dict[str, Any]] | None = None,
         draft_title: str = "",
+        mode: str = "chat",
     ) -> dict[str, Any]:
         await self.attach_bridge(bridge)
+
+        normalized_mode = str(mode or "chat").strip().lower()
+        if normalized_mode not in VALID_TURN_MODES:
+            raise ValueError(f"Invalid turn mode: {mode}")
 
         existing_live_state = self._get_live_session_state(user_id, session_id)
         if existing_live_state and str(existing_live_state.get("status") or "") in ACTIVE_LIVE_STATUSES:
@@ -335,6 +344,7 @@ class SessionRunManager:
                 "assistant_message_id": assistant_message_id,
                 "prompt": prompt,
                 "attachments": attachments,
+                "mode": normalized_mode,
             },
         )
 
@@ -364,6 +374,7 @@ class SessionRunManager:
                 context=context,
                 live_session_id=live_session_id,
                 text=submission_text,
+                mode=normalized_mode,
             )
         )
         return {
@@ -382,6 +393,7 @@ class SessionRunManager:
         context: SessionRunContext,
         live_session_id: str,
         text: str,
+        mode: str = "chat",
     ) -> None:
         self._save_live_session_state(
             context.user_id,
@@ -398,11 +410,27 @@ class SessionRunManager:
             last_error="",
         )
         try:
+            submission_text = text
+            if mode == "plan":
+                dispatch_result = await bridge.rpc(
+                    "command.dispatch",
+                    {
+                        "session_id": live_session_id,
+                        "name": "plan",
+                        "arg": text,
+                    },
+                )
+                if not isinstance(dispatch_result, dict):
+                    dispatch_result = {}
+                skill_message = str(dispatch_result.get("message") or "").strip()
+                if str(dispatch_result.get("type") or "").strip() != "skill" or not skill_message:
+                    raise TuiGatewayBridgeError(PLAN_COMMAND_FAILURE_MESSAGE)
+                submission_text = skill_message
             await bridge.rpc(
                 "prompt.submit",
                 {
                     "session_id": live_session_id,
-                    "text": text,
+                    "text": submission_text,
                 },
             )
         except Exception as exc:

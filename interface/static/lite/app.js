@@ -17,6 +17,7 @@ const state = {
   treeCache: new Map(),
   streamingMessageIds: new Set(),
   pendingAttachments: [],
+  composerMode: 'chat',
   isSending: false,
   chatErrorTimer: null,
   authPollTimer: null,
@@ -119,6 +120,7 @@ const dom = {
   promptInput: document.getElementById('prompt-input'),
   fileInput: document.getElementById('file-input'),
   attachButton: document.getElementById('attach-button'),
+  planButton: document.getElementById('plan-button'),
   attachmentList: document.getElementById('attachment-list'),
   sendButton: document.getElementById('send-button'),
   sendButtonIcon: document.getElementById('send-button-icon'),
@@ -257,6 +259,8 @@ const setTuiBridgeStatus = (message = '', { hidden = false } = {}) => {
   dom.tuiBridgeStatus.textContent = message;
 };
 
+const getComposerMode = () => (state.composerMode === 'plan' ? 'plan' : 'chat');
+
 const isDefaultChatTitle = (title) => {
   const normalized = String(title || '').trim();
   return !normalized || normalized === 'New chat';
@@ -375,10 +379,45 @@ const isActiveSessionBlockingModelSwitch = () => {
   );
 };
 
+const MODEL_DISPLAY_NAME_OVERRIDES = {
+  primary: 'GPT-5.5',
+  'gpt-5.5': 'GPT-5.5',
+  'gpt-5.5-alt': 'GPT-5.5-alt',
+};
+
+const MODEL_DISPLAY_ORDER = [
+  'GPT-5.5',
+  'GPT-5.5-alt',
+  'DeepSeek',
+  'Qwen3.7-Max',
+];
+
+const getModelKeyCandidates = (model) => [
+  model?.id,
+  model?.name,
+  model?.model,
+].map((value) => String(value || '').trim()).filter(Boolean);
+
 const getModelDisplayName = (model) => {
   if (!model) return '';
+  for (const key of getModelKeyCandidates(model)) {
+    if (MODEL_DISPLAY_NAME_OVERRIDES[key]) {
+      return MODEL_DISPLAY_NAME_OVERRIDES[key];
+    }
+  }
   return String(model.name || model.model || model.id || '').trim();
 };
+
+const sortModelsForDisplay = (models) => models
+  .map((model, index) => ({ model, index }))
+  .sort((left, right) => {
+    const leftRank = MODEL_DISPLAY_ORDER.indexOf(getModelDisplayName(left.model));
+    const rightRank = MODEL_DISPLAY_ORDER.indexOf(getModelDisplayName(right.model));
+    const normalizedLeftRank = leftRank === -1 ? MODEL_DISPLAY_ORDER.length : leftRank;
+    const normalizedRightRank = rightRank === -1 ? MODEL_DISPLAY_ORDER.length : rightRank;
+    return normalizedLeftRank - normalizedRightRank || left.index - right.index;
+  })
+  .map(({ model }) => model);
 
 const normalizeSessionSnapshot = (session) => {
   if (!session?.id) return null;
@@ -1422,6 +1461,12 @@ const refreshComposerBusyState = () => {
   if (dom.attachButton) {
     dom.attachButton.disabled = busy;
   }
+  if (dom.planButton) {
+    const planActive = getComposerMode() === 'plan';
+    dom.planButton.disabled = busy;
+    dom.planButton.classList.toggle('active', planActive);
+    dom.planButton.setAttribute('aria-pressed', planActive ? 'true' : 'false');
+  }
   if (dom.sendButton) {
     dom.sendButton.type = busy ? 'button' : 'submit';
     dom.sendButton.ariaLabel = busy ? 'Stop response' : 'Send message';
@@ -1433,6 +1478,11 @@ const refreshComposerBusyState = () => {
   if (dom.modelSelect) {
     dom.modelSelect.disabled = isActiveSessionBlockingModelSwitch() || state.models.length <= 1;
   }
+};
+
+const setComposerMode = (mode) => {
+  state.composerMode = mode === 'plan' ? 'plan' : 'chat';
+  refreshComposerBusyState();
 };
 
 const setSessionBusy = (sessionId, busy, { transport = '', abortController = null } = {}) => {
@@ -4115,7 +4165,7 @@ const openDirectory = async (rawPath) => {
 const fetchModels = async () => {
   const response = await api('/api/models', { method: 'GET' });
   const json = await response.json();
-  state.models = Array.isArray(json?.data) ? json.data : [];
+  state.models = sortModelsForDisplay(Array.isArray(json?.data) ? json.data : []);
   const activeId = String(json?.active_id || json?.activeId || '').trim();
   state.selectedModel = state.models.find((model) => String(model.id || '').trim() === activeId)
     || state.models.find((model) => Boolean(model.is_active || model.isActive))
@@ -4624,6 +4674,7 @@ const submitPromptViaTuiBridge = async (prompt) => {
   }
 
   showChatError('');
+  const submissionMode = getComposerMode();
 
   const userMessage = {
     id: normalizeDisplayMessageId(uuid()),
@@ -4674,6 +4725,7 @@ const submitPromptViaTuiBridge = async (prompt) => {
       method: 'POST',
       body: JSON.stringify({
         prompt: trimmedPrompt,
+        mode: submissionMode,
         attachments: uploadedAttachments.map((item) => ({
           type: item.type,
           id: item.id,
@@ -4727,6 +4779,7 @@ const submitPromptViaTuiBridge = async (prompt) => {
       nextMessages,
       previousMessages: targetMessages,
     });
+    state.composerMode = 'chat';
 
     const liveSessionId = String(liveState?.live_session_id || '').trim();
     if (liveSessionId) {
@@ -5153,6 +5206,12 @@ dom.composerForm.addEventListener('submit', async (event) => {
 dom.attachButton.addEventListener('click', () => {
   if (state.isSending) return;
   dom.fileInput?.click();
+});
+
+dom.planButton?.addEventListener('click', () => {
+  if (state.isSending) return;
+  setComposerMode(getComposerMode() === 'plan' ? 'chat' : 'plan');
+  dom.promptInput?.focus();
 });
 
 dom.fileInput.addEventListener('change', async (event) => {

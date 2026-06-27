@@ -125,9 +125,15 @@ def test_normalize_rejects_invalid_model_options() -> None:
                 "base_url": "https://three.example/v1",
                 "api_key": "sk-three",
             },
+            {
+                "id": "four",
+                "model": "four",
+                "base_url": "https://four.example/v1",
+                "api_key": "sk-four",
+            },
         ]
     )
-    with pytest.raises(ModelOptionsError, match="at most 3"):
+    with pytest.raises(ModelOptionsError, match="at most 4"):
         normalize_model_options(too_many)
 
     public = yaml.safe_load(yaml.safe_dump(base))

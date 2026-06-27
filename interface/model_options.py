@@ -24,7 +24,7 @@ except Exception:  # pragma: no cover - depends on Hermes source import path
     atomic_yaml_write = None
 
 
-MAX_MODEL_OPTIONS = 3
+MAX_MODEL_OPTIONS = 4
 DEFAULT_MODEL_PROVIDER = "custom"
 DEFAULT_MODEL_API_MODE = "codex_responses"
 DEFAULT_REASONING_EFFORT = "xhigh"
@@ -291,8 +291,8 @@ def normalize_model_options(config: dict[str, Any]) -> ModelOptions:
         raise ModelOptionsError("hermes.model_options.options must be a list.")
     if len(raw_options) > MAX_MODEL_OPTIONS:
         raise ModelOptionsError(
-            "hermes.model_options.options supports at most 3 entries "
-            "(1 primary and up to 2 optional models)."
+            "hermes.model_options.options supports at most 4 entries "
+            "(1 primary and up to 3 optional models)."
         )
 
     seen_ids: set[str] = set()

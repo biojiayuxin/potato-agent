@@ -275,6 +275,7 @@ class SessionTurnSubmitRequest(BaseModel):
     prompt: str = ""
     attachments: list[dict[str, Any]] = []
     draft_title: str = ""
+    mode: str = "chat"
 
 
 class SessionApprovalRequest(BaseModel):
@@ -2836,6 +2837,9 @@ async def submit_session_turn(
     user: CurrentUser = Depends(get_current_user),
 ) -> dict[str, Any]:
     prompt = str(payload.prompt or "").strip()
+    mode = str(payload.mode or "chat").strip().lower()
+    if mode not in {"chat", "plan"}:
+        raise HTTPException(status_code=400, detail="Invalid turn mode")
     attachments = (
         [item for item in payload.attachments if isinstance(item, dict)]
         if isinstance(payload.attachments, list)
@@ -2925,6 +2929,7 @@ async def submit_session_turn(
             attachments=attachments,
             existing_messages=base_messages,
             draft_title=draft_title,
+            mode=mode,
         )
 
         live_state = get_live_session_state(user.id, logical_session_id)

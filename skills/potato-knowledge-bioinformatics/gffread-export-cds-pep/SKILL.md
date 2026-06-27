@@ -67,6 +67,7 @@ ${PKG_MGR} run -n "${ENV_NAME}" gffread --version
 ```bash
 ${PKG_MGR} run -n "${ENV_NAME}" gffread "${ANNOTATION_GFF3}" \
   -g "${GENOME_FASTA}" \
+  --adj-stop \
   -x "${CDS_OUT}" \
   -y "${PEP_OUT}"
 ```
@@ -75,6 +76,11 @@ ${PKG_MGR} run -n "${ENV_NAME}" gffread "${ANNOTATION_GFF3}" \
 - `${CDS_OUT}`：按 transcript/mRNA 组装得到的 CDS 序列
 - `${PEP_OUT}`：由 CDS 翻译得到的蛋白序列
 - 输出 header 通常沿用注释中的 transcript/mRNA ID
+
+### 2.3 终止密码子处理
+- 默认 `gffread -y` 遇到内部终止密码子时会在蛋白序列中写入 `.`，并继续输出后续翻译结果；末端终止密码子通常不会输出。
+- 本技能默认使用 `--adj-stop`，让 gffread 在发现 premature/downstream stop codon 时调整 CDS stop 坐标，使蛋白序列在第一个 stop 处截断，不再输出后续氨基酸。
+- 如果希望直接丢弃含内部终止密码子的转录本，而不是截断保留，可改用或追加 `-V`；如果只想把 stop 符号从 `.` 改成 `*`，使用 `-S`，但 `-S` 不会截断序列。
 
 ## 3. 代表转录本与全量转录本
 
@@ -108,7 +114,7 @@ grep -c '^>' "${PEP_OUT}"
 
 - `gffread` 输出的是**转录本级**序列，不是 gene 级；要 gene 级结果需先过滤代表转录本。
 - 如果注释有多个剪接异构体，输出会多于基因数。
-- 若下游工具不接受终止符 `*`，应在后处理阶段统一清理。
+- 若不用 `--adj-stop`，内部终止密码子可能以 `.` 输出；若下游工具不接受 stop 符号，应优先用 `--adj-stop` 截断，或在后处理阶段统一清理。
 - 若 `gffread` 报 contig mismatch，先检查 `${GENOME_FASTA}` 的 header 与 `${ANNOTATION_GFF3}` 的 seqid 是否一致。
 
 ## 6. 推荐执行模板
@@ -130,7 +136,7 @@ fi
 ${PKG_MGR} create -y -n "${ENV_NAME}" -c conda-forge -c bioconda gffread
 
 # 3) 导出
-${PKG_MGR} run -n "${ENV_NAME}" gffread "${ANNOTATION_GFF3}" -g "${GENOME_FASTA}" -x "${CDS_OUT}" -y "${PEP_OUT}"
+${PKG_MGR} run -n "${ENV_NAME}" gffread "${ANNOTATION_GFF3}" -g "${GENOME_FASTA}" --adj-stop -x "${CDS_OUT}" -y "${PEP_OUT}"
 
 # 4) 校验
 grep -c '^>' "${CDS_OUT}"

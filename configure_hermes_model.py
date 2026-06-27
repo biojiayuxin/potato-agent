@@ -133,7 +133,7 @@ def build_parser() -> argparse.ArgumentParser:
         default=[],
         metavar="KEY=VALUE,...",
         help=(
-            "Additional whitelisted model option. May be passed at most twice. "
+            "Additional whitelisted model option. May be passed at most three times. "
             "Required keys: id,model,base_url,api_key. Optional keys: "
             "name,provider,context_length,api_mode,reasoning_effort. "
             f"api_mode defaults to {DEFAULT_MODEL_API_MODE}; "
@@ -295,8 +295,8 @@ def parse_option_argument(value: str) -> dict[str, Any]:
 def parse_option_arguments(values: list[str]) -> list[dict[str, Any]]:
     if len(values) > MAX_MODEL_OPTIONS - 1:
         raise ConfigureHermesModelError(
-            "--option may be provided at most twice; the whitelist supports "
-            "1 primary and up to 2 optional models."
+            "--option may be provided at most three times; the whitelist supports "
+            "1 primary and up to 3 optional models."
         )
 
     options: list[dict[str, Any]] = []
@@ -539,8 +539,8 @@ def extract_existing_additional_model_options(hermes: dict[str, Any]) -> list[di
         raise ConfigureHermesModelError("hermes.model_options.options must be a list.")
     if len(raw_options) > MAX_MODEL_OPTIONS:
         raise ConfigureHermesModelError(
-            "hermes.model_options.options supports at most 3 entries "
-            "(1 primary and up to 2 optional models)."
+            "hermes.model_options.options supports at most 4 entries "
+            "(1 primary and up to 3 optional models)."
         )
 
     additional: list[dict[str, Any]] = []

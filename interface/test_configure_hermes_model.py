@@ -268,10 +268,12 @@ def test_configure_hermes_model_rejects_too_many_optional_models() -> None:
         "id=two,model=two,base_url=https://two.example/v1,api_key=sk-two",
         "--option",
         "id=three,model=three,base_url=https://three.example/v1,api_key=sk-three",
+        "--option",
+        "id=four,model=four,base_url=https://four.example/v1,api_key=sk-four",
     )
 
     assert result.returncode == 1
-    assert "--option may be provided at most twice" in result.stderr
+    assert "--option may be provided at most three times" in result.stderr
 
 
 def test_configure_hermes_model_rejects_duplicate_option_id() -> None:

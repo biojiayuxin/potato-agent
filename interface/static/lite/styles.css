@@ -1444,7 +1444,7 @@ button.stretch {
 
 .composer-input-row {
   display: grid;
-  grid-template-columns: auto minmax(0, 1fr);
+  grid-template-columns: auto auto minmax(0, 1fr);
   align-items: end;
   gap: 10px;
   width: 100%;
@@ -1555,6 +1555,52 @@ button.stretch {
   border-radius: 14px;
   padding: 0;
   flex: 0 0 46px;
+}
+
+.composer-submit-actions {
+  display: inline-flex;
+  align-items: flex-end;
+  gap: 8px;
+}
+
+.composer-mode-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 46px;
+  height: 46px;
+  border: 1px solid var(--border);
+  background: var(--surface-subtle);
+  border-radius: 14px;
+  padding: 0 6px;
+  flex: 0 0 46px;
+  color: var(--muted);
+  font-size: 13px;
+  font-weight: 650;
+  line-height: 1;
+  text-align: center;
+}
+
+.composer-mode-label {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 1px;
+}
+
+.composer-mode-button:hover {
+  background: var(--surface-subtle-hover);
+  color: var(--text);
+}
+
+.composer-mode-button.active {
+  border-color: rgba(37, 99, 235, 0.38);
+  background: rgba(37, 99, 235, 0.12);
+  color: var(--primary);
+}
+
+.composer-mode-button:disabled {
+  opacity: 0.65;
 }
 
 .attach-button {
@@ -2840,7 +2886,7 @@ button.stretch {
 
 .workspace-view .composer-input-row {
   display: grid;
-  grid-template-columns: auto minmax(0, 1fr);
+  grid-template-columns: auto auto minmax(0, 1fr);
   align-items: end;
   gap: 6px;
 }
@@ -2871,6 +2917,29 @@ button.stretch {
   border-radius: 13px;
   border-color: transparent;
   background: transparent;
+}
+
+.workspace-view .composer-submit-actions {
+  align-items: flex-end;
+  gap: 6px;
+}
+
+.workspace-view .composer-mode-button {
+  width: 42px;
+  height: 42px;
+  flex: 0 0 42px;
+  border-radius: 13px;
+  border-color: transparent;
+  background: rgba(100, 116, 139, 0.08);
+}
+
+.workspace-view .composer-mode-button:hover {
+  background: rgba(37, 99, 235, 0.09);
+}
+
+.workspace-view .composer-mode-button.active {
+  border-color: rgba(37, 99, 235, 0.24);
+  background: rgba(37, 99, 235, 0.13);
 }
 
 .workspace-view .attach-button {

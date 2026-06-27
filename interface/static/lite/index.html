@@ -285,6 +285,7 @@
                         <button id="attach-button" type="button" class="composer-icon-button attach-button" aria-label="Upload file" title="Upload file">
                           <img src="./static/lite/icons/attachment.png" alt="" class="composer-icon composer-attachment-icon" />
                         </button>
+                        <button id="plan-button" type="button" class="composer-mode-button" aria-label="Plan" aria-pressed="false" title="Plan">Plan</button>
                         <textarea
                           id="prompt-input"
                           rows="1"
@@ -292,9 +293,11 @@
                         ></textarea>
                       </div>
                     </div>
-                    <button id="send-button" type="submit" class="composer-icon-button" aria-label="Send message" title="Send message">
-                      <img id="send-button-icon" src="./static/lite/icons/send.png" alt="" class="composer-icon" />
-                    </button>
+                    <div class="composer-submit-actions">
+                      <button id="send-button" type="submit" class="composer-icon-button" aria-label="Send message" title="Send message">
+                        <img id="send-button-icon" src="./static/lite/icons/send.png" alt="" class="composer-icon" />
+                      </button>
+                    </div>
                   </div>
                 </div>
               </form>
@@ -434,6 +437,6 @@
     </template>
 
     <script src="./static/lite/vendor/marked.umd.js"></script>
-    <script type="module" src="./static/lite/app.js"></script>
+    <script type="module" src="./static/lite/app.js?v=20260627-plan-mode-label"></script>
   </body>
 </html>

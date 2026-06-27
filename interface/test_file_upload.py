@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+from contextlib import contextmanager
 import tempfile
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any
 
 from fastapi.testclient import TestClient
 
@@ -19,6 +21,83 @@ class _DummyBridgeRegistry:
 
     async def close_for_reconfigure(self, user_id: str) -> bool:
         return True
+
+
+class _TurnBridge:
+    user_id = "user-id"
+
+    async def rpc(self, method: str, params: dict[str, Any]) -> dict[str, Any]:
+        if method == "session.create":
+            return {"session_id": "live-1"}
+        if method == "session.title":
+            return {"session_key": "logical-1"}
+        raise AssertionError(f"unexpected bridge method: {method}")
+
+
+class _TurnBridgeRegistry:
+    def __init__(self) -> None:
+        self.bridge = _TurnBridge()
+
+    async def get_or_create(self, user_id: str, target):
+        return self.bridge
+
+    async def maybe_close_if_unused(self, user_id: str) -> None:
+        return None
+
+
+class _TurnRunManager:
+    def __init__(self) -> None:
+        self.submit_calls: list[dict[str, Any]] = []
+
+    async def attach_bridge(self, bridge) -> None:
+        return None
+
+    async def ensure_session_bound(self, **kwargs: Any) -> None:
+        return None
+
+    async def submit_turn(self, **kwargs: Any) -> dict[str, Any]:
+        self.submit_calls.append(kwargs)
+        return {
+            "run_id": "run-1",
+            "session_id": kwargs["session_id"],
+            "live_session_id": kwargs["live_session_id"],
+            "assistant_message_id": "assistant-1",
+            "messages": [
+                {
+                    "id": "user-1",
+                    "role": "user",
+                    "content": kwargs["prompt"],
+                    "done": True,
+                },
+                {
+                    "id": "assistant-1",
+                    "role": "assistant",
+                    "content": "",
+                    "done": False,
+                },
+            ],
+            "live": None,
+        }
+
+
+class _FakeSessionDb:
+    def get_session(self, session_id: str) -> dict[str, Any]:
+        return {
+            "id": session_id,
+            "source": "tui",
+            "title": "Draft",
+            "preview": "",
+            "started_at": 0,
+            "last_active": 0,
+        }
+
+    def close(self) -> None:
+        return None
+
+
+@contextmanager
+def _fake_open_session_db(target):
+    yield _FakeSessionDb()
 
 
 def _build_client_and_user(monkeypatch):
@@ -167,3 +246,73 @@ def test_submit_turn_rejects_total_attachment_size_over_limit(monkeypatch) -> No
         assert response.json()["detail"] == "Total attachment size too large (> 10 MB)."
     finally:
         client.close()
+
+
+def test_submit_turn_rejects_invalid_mode(monkeypatch) -> None:
+    client, _ = _build_client_and_user(monkeypatch)
+    try:
+        response = client.post(
+            "/api/sessions/draft/turns",
+            json={"prompt": "hello", "mode": "pla n"},
+        )
+        assert response.status_code == 400, response.text
+        assert response.json()["detail"] == "Invalid turn mode"
+    finally:
+        client.close()
+
+
+def test_submit_turn_passes_plan_mode_to_run_manager(monkeypatch) -> None:
+    client, home_dir = _build_client_and_user(monkeypatch)
+    auth_db = home_dir.parent / "interface.db"
+    run_manager = _TurnRunManager()
+    monkeypatch.setattr(
+        interface_app_mod.app.state,
+        "tui_gateway_bridges",
+        _TurnBridgeRegistry(),
+        raising=False,
+    )
+    monkeypatch.setattr(
+        interface_app_mod.app.state,
+        "session_run_manager",
+        run_manager,
+        raising=False,
+    )
+    monkeypatch.setattr(interface_app_mod, "_open_session_db", _fake_open_session_db)
+    monkeypatch.setattr(
+        interface_app_mod,
+        "get_display_messages",
+        lambda user_id, session_id: display_store_mod.get_display_messages(
+            user_id,
+            session_id,
+            db_path=auth_db,
+        ),
+    )
+    monkeypatch.setattr(
+        interface_app_mod,
+        "get_display_session_meta",
+        lambda user_id, session_id: display_store_mod.get_display_session_meta(
+            user_id,
+            session_id,
+            db_path=auth_db,
+        ),
+    )
+    monkeypatch.setattr(
+        interface_app_mod,
+        "get_live_session_state",
+        lambda user_id, session_id: display_store_mod.get_live_session_state(
+            user_id,
+            session_id,
+            db_path=auth_db,
+        ),
+    )
+    try:
+        response = client.post(
+            "/api/sessions/draft/turns",
+            json={"prompt": "make a plan", "mode": "plan"},
+        )
+        assert response.status_code == 200, response.text
+    finally:
+        client.close()
+
+    assert len(run_manager.submit_calls) == 1
+    assert run_manager.submit_calls[0]["mode"] == "plan"
