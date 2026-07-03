@@ -1,6 +1,15 @@
 {
   "updates": [
     {
+      "version": "2026-07-03-001",
+      "title": "Workspace updates",
+      "date": "July 3, 2026",
+      "summary": "This update improves chat history responsiveness.",
+      "items": [
+        "Optimized the conversation list loading logic."
+      ]
+    },
+    {
       "version": "2026-06-27-001",
       "title": "Workspace updates",
       "date": "June 27, 2026",
