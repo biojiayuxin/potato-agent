@@ -18,6 +18,8 @@ const state = {
   homePath: '',
   expandedPaths: new Set(),
   treeCache: new Map(),
+  activeWorkspaceTab: 'chat',
+  filePreviewTabs: [],
   streamingMessageIds: new Set(),
   pendingAttachments: [],
   composerMode: 'chat',
@@ -114,6 +116,10 @@ const dom = {
   runtimeStartBackButton: document.getElementById('runtime-start-back-button'),
   chatError: document.getElementById('chat-error'),
   chatList: document.getElementById('chat-list'),
+  workspaceTabs: document.getElementById('workspace-tabs'),
+  workspaceTabPanels: document.getElementById('workspace-tab-panels'),
+  chatTabPanel: document.getElementById('chat-tab-panel'),
+  filePreviewPanels: document.getElementById('file-preview-panels'),
   messages: document.getElementById('messages'),
   tuiBridgeStatus: document.getElementById('tui-bridge-status'),
   chatTitle: document.getElementById('chat-title'),
@@ -213,6 +219,7 @@ const THEME_MODE_KEY = 'lite_theme_mode';
 const UPDATE_NOTES_PATH = './static/lite/update-notes.json';
 const UPDATE_NOTES_SEEN_KEY = 'lite_update_notes_seen_version';
 const UPDATE_NOTES_VISIBLE_LIMIT = 5;
+const CHAT_TAB_ID = 'chat';
 const MAX_TOTAL_ATTACHMENT_SIZE_BYTES = 200 * 1024 * 1024;
 const AUTH_POLL_INTERVAL_MS = 60 * 1000;
 const TUI_BRIDGE_RECONNECT_BASE_DELAY_MS = 1000;
@@ -1606,6 +1613,7 @@ const showDraftChat = () => {
   state.activeSession = state.draftSession;
   state.activeSessionId = state.draftSession.id;
   state.messages = [];
+  state.activeWorkspaceTab = CHAT_TAB_ID;
   state.shouldAutoScrollMessages = true;
   renderWorkspace();
   dom.promptInput?.focus();
@@ -2509,6 +2517,8 @@ const resetWorkspaceState = () => {
   state.sessionScrollPositions.clear();
   state.pendingMessageScrollRestore = null;
   state.messages = [];
+  state.activeWorkspaceTab = CHAT_TAB_ID;
+  state.filePreviewTabs = [];
   state.models = [];
   state.selectedModel = null;
   state.rootPath = '';
@@ -3563,12 +3573,16 @@ const getRenderableMessages = () => state.messages.filter((message) => message.r
 const renderMessages = () => {
   const pendingScrollRestoreSessionId = String(state.pendingMessageScrollRestore || '').trim();
   const activeScrollSessionId = getActivePersistentSessionId();
+  const chatTabVisible = state.activeWorkspaceTab === CHAT_TAB_ID;
   const shouldRestoreScroll = Boolean(
+    chatTabVisible
+    &&
     pendingScrollRestoreSessionId
     && pendingScrollRestoreSessionId === activeScrollSessionId
     && state.sessionScrollPositions.has(pendingScrollRestoreSessionId)
   );
-  const shouldStickToBottom = !shouldRestoreScroll
+  const shouldStickToBottom = chatTabVisible
+    && !shouldRestoreScroll
     && (state.shouldAutoScrollMessages || isScrolledNearBottom(dom.messages));
   dom.messages.innerHTML = '';
   const visibleMessages = getRenderableMessages();
@@ -3587,7 +3601,9 @@ const renderMessages = () => {
     empty.className = 'empty-state';
     empty.textContent = 'Start a new conversation.';
     dom.messages.append(empty);
-    restorePendingMessageScrollPosition();
+    if (chatTabVisible) {
+      restorePendingMessageScrollPosition();
+    }
     return;
   }
 
@@ -3652,11 +3668,13 @@ const renderMessages = () => {
     dom.messages.append(fragment);
   }
 
-  state.shouldAutoScrollMessages = shouldStickToBottom;
-  if (shouldStickToBottom) {
-    dom.messages.scrollTop = dom.messages.scrollHeight;
+  if (chatTabVisible) {
+    state.shouldAutoScrollMessages = shouldStickToBottom;
+    if (shouldStickToBottom) {
+      dom.messages.scrollTop = dom.messages.scrollHeight;
+    }
+    restorePendingMessageScrollPosition();
   }
-  restorePendingMessageScrollPosition();
 };
 
 const getChatDisplayTitle = (chat) => {
@@ -3942,7 +3960,7 @@ const renderWorkspaceHeader = () => {
   }
   dom.userEmail.textContent = state.user?.email || '';
   renderUpdateNotesUnreadState();
-  dom.chatTitle.textContent = getActiveChatTitle();
+  dom.chatTitle.textContent = getActiveWorkspaceTitle();
   if (!dom.modelSelect) return;
   const selectedId = String(state.selectedModel?.id || '').trim();
   dom.modelSelect.innerHTML = '';
@@ -3980,12 +3998,363 @@ const renderFileBrowserControls = () => {
   renderFilePathDisplay();
 };
 
+const normalizeFilePathForRequest = (path) => String(path || '').replace(/^\/+/, '');
+
+const buildFileQuery = (path, root = state.workspaceRoot) => {
+  const query = new URLSearchParams();
+  query.set('path', normalizeFilePathForRequest(path));
+  if (root) {
+    query.set('root', root);
+  }
+  return query;
+};
+
+const buildFileDownloadUrl = (path, root = state.workspaceRoot) => (
+  `/api/files/download?${buildFileQuery(path, root).toString()}`
+);
+
+const buildFilePreviewMetaUrl = (path, root = state.workspaceRoot) => (
+  `/api/files/preview/meta?${buildFileQuery(path, root).toString()}`
+);
+
+const buildFilePreviewTextUrl = (path, root = state.workspaceRoot) => (
+  `/api/files/preview/text?${buildFileQuery(path, root).toString()}`
+);
+
+const buildFilePreviewContentUrl = (path, root = state.workspaceRoot) => (
+  `/api/files/preview/content?${buildFileQuery(path, root).toString()}`
+);
+
+const getFilePreviewKey = (path, root = state.workspaceRoot) => (
+  `${String(root || '')}\n${normalizeFilePathForRequest(path)}`
+);
+
+const getFileNameFromPath = (path) => {
+  const normalized = normalizeFilePathForRequest(path);
+  const parts = normalized.split('/').filter(Boolean);
+  return parts[parts.length - 1] || 'file';
+};
+
+const getActiveFilePreviewTab = () => {
+  const activeId = String(state.activeWorkspaceTab || CHAT_TAB_ID);
+  return state.filePreviewTabs.find((tab) => tab.id === activeId) || null;
+};
+
+const isValidWorkspaceTab = (tabId) => (
+  tabId === CHAT_TAB_ID || state.filePreviewTabs.some((tab) => tab.id === tabId)
+);
+
+const getActiveWorkspaceTitle = () => {
+  const activeFileTab = getActiveFilePreviewTab();
+  if (activeFileTab) return activeFileTab.title || activeFileTab.filename || 'file';
+  return getActiveChatTitle();
+};
+
+const setActiveWorkspaceTab = (tabId) => {
+  const nextTabId = isValidWorkspaceTab(tabId) ? tabId : CHAT_TAB_ID;
+  if (state.activeWorkspaceTab === CHAT_TAB_ID && nextTabId !== CHAT_TAB_ID) {
+    saveActiveSessionScrollPosition();
+  }
+  state.activeWorkspaceTab = nextTabId;
+  renderWorkspaceHeader();
+  renderWorkspaceTabs();
+  if (nextTabId === CHAT_TAB_ID) {
+    renderMessages();
+  }
+};
+
+const closeFilePreviewTab = (tabId) => {
+  const normalizedTabId = String(tabId || '').trim();
+  if (!normalizedTabId) return;
+  const wasActive = state.activeWorkspaceTab === normalizedTabId;
+  const closedIndex = state.filePreviewTabs.findIndex((tab) => tab.id === normalizedTabId);
+  if (closedIndex < 0) return;
+  state.filePreviewTabs = state.filePreviewTabs.filter((tab) => tab.id !== normalizedTabId);
+  if (wasActive) {
+    const leftNeighbor = state.filePreviewTabs[closedIndex - 1] || null;
+    state.activeWorkspaceTab = leftNeighbor?.id || CHAT_TAB_ID;
+  }
+  renderWorkspaceHeader();
+  renderWorkspaceTabs();
+  if (wasActive && state.activeWorkspaceTab === CHAT_TAB_ID) {
+    renderMessages();
+  }
+};
+
+const loadFilePreviewTab = async (tabId) => {
+  const tab = state.filePreviewTabs.find((item) => item.id === tabId);
+  if (!tab) return;
+
+  try {
+    const meta = await api(buildFilePreviewMetaUrl(tab.path, tab.root), { method: 'GET' }).then((res) => res.json());
+    const nextTab = state.filePreviewTabs.find((item) => item.id === tabId);
+    if (!nextTab) return;
+
+    nextTab.meta = meta || {};
+    nextTab.filename = meta?.filename || nextTab.filename || getFileNameFromPath(nextTab.path);
+    nextTab.title = nextTab.filename;
+    nextTab.size = Number(meta?.size || 0);
+    nextTab.mimeType = String(meta?.mime_type || '');
+    nextTab.previewType = String(meta?.preview_type || 'unsupported');
+    nextTab.downloadUrl = meta?.download_url || buildFileDownloadUrl(nextTab.path, nextTab.root);
+    nextTab.contentUrl = meta?.content_url || (
+      ['image', 'pdf'].includes(nextTab.previewType)
+        ? buildFilePreviewContentUrl(nextTab.path, nextTab.root)
+        : ''
+    );
+
+    if (nextTab.previewType === 'text') {
+      renderWorkspaceHeader();
+      renderWorkspaceTabs();
+      const textJson = await api(buildFilePreviewTextUrl(nextTab.path, nextTab.root), { method: 'GET' }).then((res) => res.json());
+      const textTab = state.filePreviewTabs.find((item) => item.id === tabId);
+      if (!textTab) return;
+      textTab.content = String(textJson?.content || '');
+      textTab.loading = false;
+      textTab.error = '';
+      renderWorkspaceTabs();
+      return;
+    }
+
+    nextTab.loading = false;
+    nextTab.error = '';
+    renderWorkspaceHeader();
+    renderWorkspaceTabs();
+  } catch (error) {
+    const failedTab = state.filePreviewTabs.find((item) => item.id === tabId);
+    if (!failedTab) return;
+    failedTab.loading = false;
+    failedTab.error = String(error.message || 'Failed to load preview');
+    renderWorkspaceTabs();
+  }
+};
+
+const openFilePreview = (path, entry = null) => {
+  const relativePath = normalizeFilePathForRequest(path);
+  if (!relativePath) return;
+  const root = String(state.workspaceRoot || '').trim();
+  const key = getFilePreviewKey(relativePath, root);
+  const existingTab = state.filePreviewTabs.find((tab) => tab.key === key);
+  if (existingTab) {
+    setActiveWorkspaceTab(existingTab.id);
+    return;
+  }
+
+  const filename = entry?.name || getFileNameFromPath(relativePath);
+  const tab = {
+    id: `file-${uuid()}`,
+    key,
+    path: relativePath,
+    root,
+    title: filename,
+    filename,
+    size: Number(entry?.size || 0),
+    mimeType: '',
+    previewType: 'loading',
+    content: '',
+    contentUrl: '',
+    downloadUrl: buildFileDownloadUrl(relativePath, root),
+    loading: true,
+    error: '',
+    meta: null,
+  };
+  state.filePreviewTabs = [...state.filePreviewTabs, tab];
+  if (state.activeWorkspaceTab === CHAT_TAB_ID) {
+    saveActiveSessionScrollPosition();
+  }
+  state.activeWorkspaceTab = tab.id;
+  renderWorkspaceHeader();
+  renderWorkspaceTabs();
+  loadFilePreviewTab(tab.id);
+};
+
+const createWorkspaceTabButton = ({ id, title, closeable = false }) => {
+  const button = document.createElement('button');
+  button.type = 'button';
+  button.className = 'workspace-tab';
+  if (closeable) {
+    button.classList.add('closeable');
+  }
+  button.setAttribute('role', 'tab');
+  button.setAttribute('aria-selected', String(state.activeWorkspaceTab === id));
+  button.title = title;
+  if (state.activeWorkspaceTab === id) {
+    button.classList.add('active');
+  }
+
+  const label = document.createElement('span');
+  label.className = 'workspace-tab-label';
+  label.textContent = title;
+  button.append(label);
+
+  button.addEventListener('click', () => setActiveWorkspaceTab(id));
+
+  if (closeable) {
+    const close = document.createElement('span');
+    close.className = 'workspace-tab-close';
+    close.setAttribute('role', 'button');
+    close.setAttribute('aria-label', `Close ${title}`);
+    close.title = `Close ${title}`;
+    close.textContent = 'x';
+    close.addEventListener('click', (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      closeFilePreviewTab(id);
+    });
+    button.append(close);
+  }
+
+  return button;
+};
+
+const appendFilePreviewDownloadButton = (container, tab) => {
+  const button = document.createElement('button');
+  button.type = 'button';
+  button.className = 'file-preview-download';
+  button.setAttribute('aria-label', 'Save file');
+  button.title = 'Save file';
+  const icon = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+  icon.setAttribute('class', 'file-preview-download-icon');
+  icon.setAttribute('viewBox', '0 0 24 24');
+  icon.setAttribute('aria-hidden', 'true');
+  icon.setAttribute('focusable', 'false');
+  icon.innerHTML = [
+    '<path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2Z"></path>',
+    '<path d="M17 21v-8H7v8"></path>',
+    '<path d="M7 3v5h8"></path>',
+    '<path d="M9 17h6"></path>',
+  ].join('');
+  button.append(icon);
+  button.addEventListener('click', () => {
+    downloadFile(tab.path, tab.root).catch((error) => showChatError(error.message));
+  });
+  container.append(button);
+};
+
+const renderFilePreviewUnavailable = (panel, tab, message) => {
+  const empty = document.createElement('div');
+  empty.className = 'file-preview-empty';
+  const text = document.createElement('div');
+  text.textContent = message;
+  const actions = document.createElement('div');
+  actions.className = 'file-preview-empty-actions';
+  appendFilePreviewDownloadButton(actions, tab);
+  empty.append(text, actions);
+  panel.append(empty);
+};
+
+const renderFilePreviewPanel = (tab) => {
+  const panel = document.createElement('div');
+  panel.className = 'workspace-tab-panel file-preview-panel';
+  panel.setAttribute('role', 'tabpanel');
+  panel.setAttribute('aria-label', tab.title || tab.filename || 'file');
+
+  const toolbar = document.createElement('div');
+  toolbar.className = 'file-preview-toolbar';
+
+  const titleBlock = document.createElement('div');
+  titleBlock.className = 'file-preview-title-block';
+  const title = document.createElement('div');
+  title.className = 'file-preview-title';
+  title.textContent = tab.filename || tab.title || 'file';
+  const meta = document.createElement('div');
+  meta.className = 'file-preview-meta';
+  const metaPieces = [];
+  if (tab.mimeType) metaPieces.push(tab.mimeType);
+  if (tab.size) metaPieces.push(formatFileSize(tab.size));
+  meta.textContent = metaPieces.join(' · ');
+  titleBlock.append(title, meta);
+
+  const actions = document.createElement('div');
+  actions.className = 'file-preview-actions';
+  appendFilePreviewDownloadButton(actions, tab);
+  toolbar.append(titleBlock, actions);
+  panel.append(toolbar);
+
+  const body = document.createElement('div');
+  body.className = 'file-preview-body';
+
+  if (tab.loading) {
+    const loading = document.createElement('div');
+    loading.className = 'file-preview-empty';
+    loading.textContent = 'Loading preview...';
+    body.append(loading);
+  } else if (tab.error) {
+    renderFilePreviewUnavailable(body, tab, tab.error);
+  } else if (tab.previewType === 'too_large') {
+    renderFilePreviewUnavailable(body, tab, 'This file is too large to preview.');
+  } else if (tab.previewType === 'unsupported') {
+    renderFilePreviewUnavailable(body, tab, 'Preview is not available for this file type.');
+  } else if (tab.previewType === 'text') {
+    const pre = document.createElement('pre');
+    pre.className = 'file-preview-code';
+    pre.textContent = tab.content || '';
+    body.append(pre);
+  } else if (tab.previewType === 'image') {
+    const imageWrap = document.createElement('div');
+    imageWrap.className = 'file-preview-image-wrap';
+    const image = document.createElement('img');
+    image.className = 'file-preview-image';
+    image.alt = tab.filename || 'Preview image';
+    image.src = tab.contentUrl || buildFilePreviewContentUrl(tab.path, tab.root);
+    imageWrap.append(image);
+    body.append(imageWrap);
+  } else if (tab.previewType === 'pdf') {
+    const frame = document.createElement('iframe');
+    frame.className = 'file-preview-frame';
+    frame.title = tab.filename || 'PDF preview';
+    frame.src = tab.contentUrl || buildFilePreviewContentUrl(tab.path, tab.root);
+    body.append(frame);
+  } else {
+    renderFilePreviewUnavailable(body, tab, 'Preview is not available for this file type.');
+  }
+
+  panel.append(body);
+  return panel;
+};
+
+const renderWorkspaceTabs = () => {
+  if (!dom.workspaceTabs || !dom.chatTabPanel || !dom.filePreviewPanels) return;
+
+  if (!isValidWorkspaceTab(state.activeWorkspaceTab)) {
+    state.activeWorkspaceTab = CHAT_TAB_ID;
+  }
+
+  const activeTabId = state.activeWorkspaceTab || CHAT_TAB_ID;
+  dom.workspaceTabs.innerHTML = '';
+  dom.workspaceTabs.append(createWorkspaceTabButton({ id: CHAT_TAB_ID, title: 'Chats' }));
+  for (const tab of state.filePreviewTabs) {
+    dom.workspaceTabs.append(createWorkspaceTabButton({
+      id: tab.id,
+      title: tab.title || tab.filename || 'file',
+      closeable: true,
+    }));
+  }
+
+  const chatActive = activeTabId === CHAT_TAB_ID;
+  dom.chatTabPanel.hidden = !chatActive;
+  dom.chatTabPanel.classList.toggle('active', chatActive);
+  if (dom.composerForm) {
+    dom.composerForm.hidden = !chatActive;
+  }
+
+  dom.filePreviewPanels.hidden = chatActive;
+  dom.filePreviewPanels.innerHTML = '';
+  if (!chatActive) {
+    const activeFileTab = getActiveFilePreviewTab();
+    if (activeFileTab) {
+      dom.filePreviewPanels.append(renderFilePreviewPanel(activeFileTab));
+    }
+  }
+};
+
 const renderWorkspace = () => {
   syncActiveSessionUiState();
   renderChatList();
   renderWorkspaceHeader();
   renderMessages();
   renderAttachments();
+  renderWorkspaceTabs();
   renderApprovalModal();
   renderFileBrowserControls();
   refreshComposerBusyState();
@@ -4086,15 +4455,9 @@ const listDirectory = async (path, force = false) => {
   return entries;
 };
 
-const downloadFile = async (path) => {
-  const relativePath = String(path || '').replace(/^\/+/, '');
-  const query = new URLSearchParams();
-  query.set('path', relativePath);
-  if (state.workspaceRoot) {
-    query.set('root', state.workspaceRoot);
-  }
+const downloadFile = async (path, root = state.workspaceRoot) => {
   const link = document.createElement('a');
-  link.href = `/api/files/download?${query.toString()}`;
+  link.href = buildFileDownloadUrl(path, root);
   link.download = path.split('/').pop() || 'file';
   link.hidden = true;
   document.body.append(link);
@@ -4149,6 +4512,15 @@ const renderTreeNode = async (path, depth = 0) => {
     if (entry.type === 'directory' && normalizeDirectory(nodePath) === normalizeDirectory(state.currentPath)) {
       label.classList.add('active');
     }
+    const activeFileTab = getActiveFilePreviewTab();
+    if (
+      entry.type === 'file'
+      && activeFileTab
+      && activeFileTab.root === String(state.workspaceRoot || '').trim()
+      && normalizeFilePathForRequest(activeFileTab.path) === normalizeFilePathForRequest(nodePath)
+    ) {
+      label.classList.add('active');
+    }
     label.addEventListener('click', async () => {
       if (entry.type === 'directory') {
         try {
@@ -4161,7 +4533,7 @@ const renderTreeNode = async (path, depth = 0) => {
         }
         return;
       }
-      downloadFile(nodePath).catch((error) => showChatError(error.message));
+      openFilePreview(nodePath, entry);
     });
 
     row.append(toggleOrSpacer, label);
@@ -4349,12 +4721,14 @@ const openSession = async (sessionId) => {
     state.activeSession = state.draftSession;
     state.activeSessionId = state.draftSession?.id || null;
     state.messages = [];
+    state.activeWorkspaceTab = CHAT_TAB_ID;
     state.shouldAutoScrollMessages = true;
     renderWorkspace();
     return;
   }
 
   if (state.activeSessionId === sessionId && state.messages.length > 0) {
+    setActiveWorkspaceTab(CHAT_TAB_ID);
     return;
   }
 
@@ -4368,6 +4742,7 @@ const openSession = async (sessionId) => {
   activeTuiSessionId = liveTuiSessionsByPersistentId.get(activePersistentSessionId) || '';
   state.sessionHistoryLoading = true;
   state.messages = [];
+  state.activeWorkspaceTab = CHAT_TAB_ID;
   state.shouldAutoScrollMessages = true;
   renderWorkspace();
 

@@ -6,6 +6,7 @@ import hashlib
 import hmac
 import json
 import logging
+import mimetypes
 import os
 import pwd
 import sqlite3
@@ -148,6 +149,9 @@ SESSION_TTL_SECONDS = int(
 MAX_UPLOAD_SIZE_BYTES = int(
     os.getenv("INTERFACE_MAX_UPLOAD_BYTES", str(200 * 1024 * 1024))
 )
+MAX_PREVIEW_SIZE_BYTES = int(
+    os.getenv("INTERFACE_MAX_PREVIEW_BYTES", str(10 * 1024 * 1024))
+)
 FILE_BROWSER_MODE = (
     os.getenv("INTERFACE_FILE_BROWSER_MODE", "home_only").strip().lower()
 )
@@ -161,6 +165,87 @@ RUNTIME_IDLE_CHECK_INTERVAL_SECONDS = int(
     os.getenv("INTERFACE_RUNTIME_IDLE_CHECK_INTERVAL_SECONDS", "60")
 )
 FILENAME_SANITIZE_RE = re.compile(r"[^A-Za-z0-9._-]+")
+TEXT_PREVIEW_EXTENSIONS = {
+    ".bat",
+    ".c",
+    ".cc",
+    ".cfg",
+    ".conf",
+    ".cpp",
+    ".cs",
+    ".css",
+    ".csv",
+    ".diff",
+    ".env",
+    ".err",
+    ".fa",
+    ".faa",
+    ".fasta",
+    ".fastq",
+    ".ffn",
+    ".fna",
+    ".fq",
+    ".frn",
+    ".gff",
+    ".gff3",
+    ".go",
+    ".gtf",
+    ".h",
+    ".hpp",
+    ".html",
+    ".ini",
+    ".java",
+    ".js",
+    ".json",
+    ".jsonl",
+    ".jsx",
+    ".log",
+    ".lua",
+    ".md",
+    ".mjs",
+    ".ndjson",
+    ".out",
+    ".patch",
+    ".php",
+    ".properties",
+    ".py",
+    ".r",
+    ".rb",
+    ".rs",
+    ".scss",
+    ".sh",
+    ".sql",
+    ".stderr",
+    ".stdout",
+    ".toml",
+    ".trace",
+    ".ts",
+    ".tsx",
+    ".txt",
+    ".xml",
+    ".yaml",
+    ".yml",
+}
+IMAGE_PREVIEW_EXTENSIONS = {
+    ".bmp",
+    ".gif",
+    ".ico",
+    ".jpeg",
+    ".jpg",
+    ".png",
+    ".svg",
+    ".webp",
+}
+TEXT_PREVIEW_FILENAMES = {
+    "access_log",
+    "debug",
+    "error_log",
+    "messages",
+    "nohup.out",
+    "stderr",
+    "stdout",
+    "syslog",
+}
 INTERFACE_SESSION_SOURCES = ("tui",)
 ACTIVITY_REFRESH_EXCLUDED_PATHS = {
     "/api/auth/session",
@@ -1788,6 +1873,227 @@ def _attachment_content_disposition(filename: str) -> str:
     return f'attachment; filename="{base}"'
 
 
+def _inline_content_disposition(filename: str) -> str:
+    base = Path(filename or "preview.bin").name or "preview.bin"
+    quoted = quote(base, safe="")
+    if quoted != base:
+        return f"inline; filename*=utf-8''{quoted}"
+    return f'inline; filename="{base}"'
+
+
+def _guess_preview_mime_type(filename: str) -> str:
+    suffix = Path(filename or "").suffix.lower()
+    if suffix == ".svg":
+        return "image/svg+xml"
+    if suffix == ".md":
+        return "text/markdown"
+    if suffix == ".yaml" or suffix == ".yml":
+        return "application/yaml"
+    mime_type, _ = mimetypes.guess_type(filename or "")
+    return mime_type or "application/octet-stream"
+
+
+def _is_text_preview_filename(filename: str) -> bool:
+    path = Path(filename or "")
+    name = path.name.lower()
+    suffixes = {suffix.lower() for suffix in path.suffixes}
+    if suffixes & TEXT_PREVIEW_EXTENSIONS:
+        return True
+    if name in TEXT_PREVIEW_FILENAMES:
+        return True
+    if name.endswith("_log"):
+        return True
+    return False
+
+
+def _classify_preview_type(filename: str, mime_type: str) -> str:
+    suffix = Path(filename or "").suffix.lower()
+    normalized_mime = str(mime_type or "").split(";", 1)[0].strip().lower()
+
+    if suffix == ".pdf" or normalized_mime == "application/pdf":
+        return "pdf"
+    if suffix in IMAGE_PREVIEW_EXTENSIONS or normalized_mime.startswith("image/"):
+        return "image"
+    if (
+        normalized_mime.startswith("text/")
+        or _is_text_preview_filename(filename)
+        or normalized_mime
+        in {
+            "application/javascript",
+            "application/json",
+            "application/sql",
+            "application/toml",
+            "application/xml",
+            "application/yaml",
+            "application/x-httpd-php",
+            "application/x-javascript",
+            "application/x-sh",
+            "application/x-yaml",
+        }
+    ):
+        return "text"
+    return "unsupported"
+
+
+def _normalize_file_size(value: Any) -> int:
+    try:
+        return max(0, int(value))
+    except (TypeError, ValueError):
+        return 0
+
+
+async def _load_file_preview_context(
+    *,
+    path: str,
+    root: str | None,
+    user: CurrentUser,
+) -> tuple[dict[str, Any], Path | None]:
+    mode = _normalized_file_browser_mode()
+    target: Path | None = None
+    if _use_privileged_file_helper():
+        try:
+            info = await asyncio.to_thread(
+                privileged_client.file_info,
+                user.target.username,
+                mode=mode,
+                root=root,
+                path=path,
+            )
+        except PrivilegedClientError as exc:
+            raise HTTPException(status_code=403, detail=str(exc)) from exc
+    else:
+        browser_root = _resolve_file_browser_root(user, root)
+        _, target = _resolve_file_browser_target(browser_root, path)
+        _assert_user_can_read_file(target, linux_user=user.target.linux_user)
+        stat = target.stat()
+        info = {
+            "filename": target.name,
+            "size": int(stat.st_size),
+            "modified": int(stat.st_mtime),
+        }
+
+    filename = Path(str(info.get("filename") or path or "preview.bin")).name
+    size = _normalize_file_size(info.get("size"))
+    mime_type = _guess_preview_mime_type(filename)
+    preview_type = _classify_preview_type(filename, mime_type)
+    too_large = size > MAX_PREVIEW_SIZE_BYTES
+    return (
+        {
+            "filename": filename,
+            "size": size,
+            "modified": _normalize_file_size(info.get("modified")),
+            "mime_type": mime_type,
+            "preview_type": "too_large" if too_large else preview_type,
+            "raw_preview_type": preview_type,
+            "preview_limit": MAX_PREVIEW_SIZE_BYTES,
+            "too_large": too_large,
+            "download_url": _build_file_download_url(path=path, root=root),
+        },
+        target,
+    )
+
+
+def _build_file_download_url(*, path: str, root: str | None) -> str:
+    query = f"path={quote(str(path or '').lstrip('/'), safe='')}"
+    if root:
+        query += f"&root={quote(str(root), safe='')}"
+    return f"/api/files/download?{query}"
+
+
+def _build_file_preview_content_url(*, path: str, root: str | None) -> str:
+    query = f"path={quote(str(path or '').lstrip('/'), safe='')}"
+    if root:
+        query += f"&root={quote(str(root), safe='')}"
+    return f"/api/files/preview/content?{query}"
+
+
+def _ensure_previewable_size(info: dict[str, Any]) -> None:
+    if bool(info.get("too_large")):
+        raise HTTPException(
+            status_code=413,
+            detail=(
+                f"File is too large to preview "
+                f"(> {MAX_PREVIEW_SIZE_BYTES // (1024 * 1024)} MB)."
+            ),
+        )
+
+
+def _read_direct_file_bytes(path: Path, max_bytes: int) -> bytes:
+    chunks: list[bytes] = []
+    total = 0
+    with path.open("rb") as handle:
+        while True:
+            chunk = handle.read(1024 * 1024)
+            if not chunk:
+                break
+            total += len(chunk)
+            if total > max_bytes:
+                raise HTTPException(status_code=413, detail="File is too large to preview.")
+            chunks.append(chunk)
+    return b"".join(chunks)
+
+
+def _read_stream_command_bytes(command: list[str], max_bytes: int) -> bytes:
+    process = subprocess.Popen(
+        command,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    assert process.stdout is not None
+    chunks: list[bytes] = []
+    total = 0
+    try:
+        while True:
+            chunk = process.stdout.read(1024 * 1024)
+            if not chunk:
+                break
+            total += len(chunk)
+            if total > max_bytes:
+                process.kill()
+                raise HTTPException(status_code=413, detail="File is too large to preview.")
+            chunks.append(chunk)
+        returncode = process.wait()
+        if returncode != 0:
+            stderr = ""
+            if process.stderr is not None:
+                stderr = process.stderr.read().decode("utf-8", errors="replace").strip()
+            raise RuntimeError(stderr or f"file preview failed with exit code {returncode}")
+        return b"".join(chunks)
+    finally:
+        if process.poll() is None:
+            process.kill()
+        if process.stderr is not None:
+            process.stderr.close()
+        process.stdout.close()
+
+
+async def _read_preview_file_bytes(
+    *,
+    path: str,
+    root: str | None,
+    user: CurrentUser,
+    target: Path | None,
+) -> bytes:
+    if target is not None:
+        return await asyncio.to_thread(
+            _read_direct_file_bytes,
+            target,
+            MAX_PREVIEW_SIZE_BYTES,
+        )
+
+    command = privileged_client.file_stream_command(
+        user.target.username,
+        mode=_normalized_file_browser_mode(),
+        root=root,
+        path=path,
+    )
+    return await asyncio.to_thread(
+        _read_stream_command_bytes,
+        command,
+        MAX_PREVIEW_SIZE_BYTES,
+    )
+
+
 def _apply_file_permissions(path: Path, *, linux_user: str, is_dir: bool) -> None:
     try:
         pw = pwd.getpwnam(linux_user)
@@ -3135,6 +3441,114 @@ async def open_directory(
         "opened_path": str(target),
         "entries": entries,
     }
+
+
+@app.get("/api/files/preview/meta")
+async def files_preview_meta(
+    path: str,
+    root: str | None = None,
+    user: CurrentUser = Depends(get_current_user),
+) -> dict[str, Any]:
+    info, _ = await _load_file_preview_context(path=path, root=root, user=user)
+    if not info["too_large"] and info["raw_preview_type"] in {"image", "pdf"}:
+        info["content_url"] = _build_file_preview_content_url(path=path, root=root)
+    return info
+
+
+@app.get("/api/files/preview/text")
+async def files_preview_text(
+    path: str,
+    root: str | None = None,
+    user: CurrentUser = Depends(get_current_user),
+) -> dict[str, Any]:
+    info, target = await _load_file_preview_context(path=path, root=root, user=user)
+    _ensure_previewable_size(info)
+    if info["raw_preview_type"] != "text":
+        raise HTTPException(status_code=415, detail="Requested file is not text-previewable")
+
+    data = await _read_preview_file_bytes(
+        path=path,
+        root=root,
+        user=user,
+        target=target,
+    )
+    content = data.decode("utf-8-sig", errors="replace")
+    return {
+        "filename": info["filename"],
+        "size": info["size"],
+        "modified": info["modified"],
+        "mime_type": info["mime_type"],
+        "preview_type": "text",
+        "content": content,
+    }
+
+
+@app.get("/api/files/preview/content")
+async def files_preview_content(
+    path: str,
+    root: str | None = None,
+    user: CurrentUser = Depends(get_current_user),
+) -> FastAPIResponse:
+    info, target = await _load_file_preview_context(path=path, root=root, user=user)
+    _ensure_previewable_size(info)
+    if info["raw_preview_type"] not in {"image", "pdf"}:
+        raise HTTPException(status_code=415, detail="Requested file is not inline-previewable")
+
+    headers = {
+        "Content-Disposition": _inline_content_disposition(str(info["filename"])),
+        "X-Content-Type-Options": "nosniff",
+    }
+    if str(info["mime_type"]).split(";", 1)[0].strip().lower() == "image/svg+xml":
+        headers["Content-Security-Policy"] = "default-src 'none'; img-src data:; style-src 'unsafe-inline'"
+    size = info.get("size")
+    if isinstance(size, int) and size >= 0:
+        headers["Content-Length"] = str(size)
+
+    if target is not None:
+        return FileResponse(
+            target,
+            media_type=str(info["mime_type"]),
+            headers=headers,
+        )
+
+    command = privileged_client.file_stream_command(
+        user.target.username,
+        mode=_normalized_file_browser_mode(),
+        root=root,
+        path=path,
+    )
+
+    def iter_file() -> Iterator[bytes]:
+        process = subprocess.Popen(
+            command,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        assert process.stdout is not None
+        try:
+            while True:
+                chunk = process.stdout.read(1024 * 1024)
+                if not chunk:
+                    break
+                yield chunk
+            returncode = process.wait()
+            if returncode != 0:
+                stderr = ""
+                if process.stderr is not None:
+                    stderr = process.stderr.read().decode("utf-8", errors="replace").strip()
+                raise RuntimeError(stderr or f"file preview failed with exit code {returncode}")
+        finally:
+            if process.poll() is None:
+                process.kill()
+            if process.stderr is not None:
+                process.stderr.close()
+            process.stdout.close()
+
+    return StreamingResponse(
+        iter_file(),
+        media_type=str(info["mime_type"]),
+        headers=headers,
+    )
 
 
 @app.get("/api/files/download")

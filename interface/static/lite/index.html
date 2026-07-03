@@ -272,8 +272,14 @@
                   </label>
                 </div>
               </header>
-              <div id="messages" class="messages"></div>
-              <div id="tui-bridge-status" class="muted tiny" hidden></div>
+              <div id="workspace-tabs" class="workspace-tabs" role="tablist" aria-label="Open tabs"></div>
+              <div id="workspace-tab-panels" class="workspace-tab-panels">
+                <div id="chat-tab-panel" class="workspace-tab-panel chat-tab-panel" role="tabpanel" aria-label="chats">
+                  <div id="messages" class="messages"></div>
+                  <div id="tui-bridge-status" class="muted tiny" hidden></div>
+                </div>
+                <div id="file-preview-panels" class="file-preview-panels"></div>
+              </div>
               <form id="composer-form" class="composer">
                 <div id="chat-error" class="error chat-error" hidden></div>
                 <div class="composer-actions">

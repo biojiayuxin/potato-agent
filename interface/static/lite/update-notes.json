@@ -1,6 +1,15 @@
 {
   "updates": [
     {
+      "version": "2026-07-03-002",
+      "title": "Workspace file previews",
+      "date": "July 3, 2026",
+      "summary": "Added workspace file previews.",
+      "items": [
+        "Added workspace file previews."
+      ]
+    },
+    {
       "version": "2026-07-03-001",
       "title": "Workspace updates",
       "date": "July 3, 2026",
