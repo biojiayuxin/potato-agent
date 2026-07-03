@@ -185,29 +185,45 @@ def get_display_session_meta(
 def list_display_session_metas(
     user_id: str,
     db_path: Path = DEFAULT_AUTH_DB_PATH,
+    *,
+    include_messages: bool = True,
 ) -> dict[str, dict[str, Any]]:
     ensure_display_store(db_path)
     with connect_auth_db(db_path) as conn:
-        rows = conn.execute(
-            """
-            select session_id, messages_json, draft_title, created_at, updated_at
-            from session_display_transcripts
-            where user_id = ?
-            """,
-            (user_id,),
-        ).fetchall()
+        if include_messages:
+            rows = conn.execute(
+                """
+                select session_id, messages_json, draft_title, created_at, updated_at
+                from session_display_transcripts
+                where user_id = ?
+                """,
+                (user_id,),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                """
+                select session_id, draft_title, created_at, updated_at
+                from session_display_transcripts
+                where user_id = ?
+                """,
+                (user_id,),
+            ).fetchall()
 
     result: dict[str, dict[str, Any]] = {}
     for row in rows:
         session_id = str(row["session_id"] or "").strip()
         if not session_id:
             continue
-        try:
-            payload = json.loads(str(row["messages_json"] or "[]"))
-        except json.JSONDecodeError:
-            payload = []
+        payload: list[Any] = []
+        if include_messages:
+            try:
+                raw_payload = json.loads(str(row["messages_json"] or "[]"))
+            except json.JSONDecodeError:
+                raw_payload = []
+            payload = raw_payload if isinstance(raw_payload, list) else []
         result[session_id] = {
-            "messages": payload if isinstance(payload, list) else [],
+            "messages": payload,
+            "message_count": len(payload),
             "draft_title": str(row["draft_title"] or ""),
             "created_at": int(row["created_at"] or 0),
             "updated_at": int(row["updated_at"] or 0),

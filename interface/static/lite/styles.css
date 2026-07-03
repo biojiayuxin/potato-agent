@@ -695,6 +695,36 @@ button.stretch {
   min-height: 0;
 }
 
+.chat-load-more-shell {
+  padding: 8px 0 4px;
+}
+
+.chat-load-more-button {
+  width: 100%;
+  min-height: 36px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface-subtle);
+  color: var(--text);
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.chat-load-more-button:hover:not(:disabled) {
+  border-color: #36508a;
+  background: #142449;
+}
+
+:root[data-theme='light'] .chat-load-more-button:hover:not(:disabled) {
+  border-color: #8db0ff;
+  background: #f8fbff;
+}
+
+.chat-load-more-button:disabled {
+  cursor: wait;
+  opacity: 0.72;
+}
+
 .chat-item-shell {
   display: flex;
   flex-direction: column;

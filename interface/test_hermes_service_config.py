@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -7,6 +8,7 @@ import pytest
 import yaml
 
 from interface.hermes_service import (
+    DEFAULT_APPROVAL_MODE,
     build_config_data,
     build_systemd_unit,
     install_public_data_link,
@@ -137,6 +139,46 @@ def legacy_test_build_config_data_passes_both_standard_fallback_fields() -> None
     assert data["fallback_model"] == fallback_model
 
 
+def test_build_config_data_defaults_approvals_to_smart() -> None:
+    data = build_config_data({"hermes": {}}, _target())
+
+    assert data["approvals"]["mode"] == DEFAULT_APPROVAL_MODE
+
+
+def test_build_config_data_allows_global_approval_mode_override() -> None:
+    data = build_config_data(
+        {
+            "hermes": {
+                "config_overrides": {
+                    "approvals": {
+                        "mode": "manual",
+                    },
+                },
+            },
+        },
+        _target(),
+    )
+
+    assert data["approvals"]["mode"] == "manual"
+
+
+def test_build_config_data_allows_user_approval_mode_override() -> None:
+    target = replace(_target(), config_overrides={"approvals": {"mode": "manual"}})
+
+    data = build_config_data(
+        {
+            "hermes": {
+                "config_overrides": {
+                    "approvals": {
+                        "mode": "off",
+                    },
+                },
+            },
+        },
+        target,
+    )
+
+    assert data["approvals"]["mode"] == "manual"
 
 
 def test_build_config_data_disables_fallbacks_and_uses_proxy_credentials() -> None:

@@ -35,6 +35,7 @@ DEFAULT_HERMES_BIN = "/usr/local/bin/hermes"
 DEFAULT_SERVICE_RESTART = "always"
 DEFAULT_SERVICE_RESTART_SEC = 3
 DEFAULT_TERMINAL_TIMEOUT = 180
+DEFAULT_APPROVAL_MODE = "smart"
 DEFAULT_RUNTIME_READY_TIMEOUT = 45
 DEFAULT_GATEWAY_RESTART_DRAIN_TIMEOUT = 180
 DEFAULT_GATEWAY_STOP_GRACE_SECONDS = 30
@@ -270,6 +271,7 @@ def build_config_data(config: dict[str, Any], user: HermesTarget) -> dict[str, A
         }
     data["terminal"] = terminal_cfg
     data["agent"] = {"reasoning_effort": DEFAULT_REASONING_EFFORT}
+    data["approvals"] = {"mode": DEFAULT_APPROVAL_MODE}
 
     deep_merge(data, global_overrides)
     deep_merge(data, deepcopy(user.config_overrides))

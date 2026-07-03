@@ -4,6 +4,9 @@ const state = {
   models: [],
   selectedModel: null,
   sessions: [],
+  sessionsNextOffset: 0,
+  sessionsHasMore: false,
+  sessionsLoadingMore: false,
   activeSessionId: null,
   activeSession: null,
   draftSession: null,
@@ -224,6 +227,8 @@ const ICON_STOP_PATH = './static/lite/icons/stop.png';
 const ICON_COPY_PATH = './static/lite/icons/copy_button.png';
 const ICON_COPIED_PATH = './static/lite/icons/copied.png';
 const MESSAGE_AUTO_SCROLL_THRESHOLD_PX = 48;
+const INITIAL_SESSION_PAGE_SIZE = 50;
+const SESSION_LOAD_MORE_PAGE_SIZE = 10;
 const TUI_DEBUG_STATUS_STORAGE_KEY = 'lite_tui_bridge_debug';
 const EMAIL_VERIFICATION_COUNTDOWN_INTERVAL_MS = 1000;
 
@@ -3659,6 +3664,74 @@ const getChatDisplayTitle = (chat) => {
   return chat.title || chat.preview || 'New chat';
 };
 
+const compareSessionsByActivity = (left, right) => (
+  (right.last_active || right.started_at || 0) - (left.last_active || left.started_at || 0)
+);
+
+const sortSessionsByActivity = (sessions) => [...sessions].sort(compareSessionsByActivity);
+
+const buildSessionsPageUrl = (offset = 0, limit = INITIAL_SESSION_PAGE_SIZE) => {
+  const params = new URLSearchParams({
+    limit: String(Math.max(1, Number(limit) || INITIAL_SESSION_PAGE_SIZE)),
+    offset: String(Math.max(0, Number(offset) || 0)),
+  });
+  return `/api/sessions?${params.toString()}`;
+};
+
+const fetchSessionsPage = async (offset = 0, limit = INITIAL_SESSION_PAGE_SIZE) => {
+  const response = await api(buildSessionsPageUrl(offset, limit), { method: 'GET' });
+  return response.json();
+};
+
+const mergeSessionPage = (sessions, append = false) => {
+  const normalized = sessions
+    .map((session) => normalizeSessionSnapshot({
+      ...session,
+      persistentSessionId: session.id,
+    }))
+    .filter(Boolean);
+
+  if (!append) {
+    state.sessions = sortSessionsByActivity(normalized);
+    return normalized;
+  }
+
+  const mergedById = new Map(state.sessions.map((session) => [session.id, session]));
+  for (const session of normalized) {
+    mergedById.set(session.id, {
+      ...(mergedById.get(session.id) || {}),
+      ...session,
+    });
+  }
+  state.sessions = sortSessionsByActivity(Array.from(mergedById.values()));
+  return normalized;
+};
+
+const applySessionsPage = (json, { append = false } = {}) => {
+  const sessions = Array.isArray(json?.sessions) ? json.sessions : [];
+  const normalized = mergeSessionPage(sessions, append);
+  for (const session of normalized) {
+    applyLiveStateToSession(session?.id, session?.live || null);
+  }
+
+  const nextOffset = Number(json?.next_offset);
+  state.sessionsNextOffset = Number.isFinite(nextOffset)
+    ? Math.max(0, nextOffset)
+    : state.sessions.length;
+  state.sessionsHasMore = Boolean(json?.has_more);
+
+  if (state.activeSessionId && !state.activeSession?.isDraft) {
+    const activeSession = state.sessions.find((session) => session.id === state.activeSessionId);
+    if (activeSession) {
+      state.activeSession = activeSession;
+    }
+  }
+
+  if (state.renamingSessionId && !state.sessions.some((session) => session.id === state.renamingSessionId)) {
+    resetSessionRenameState();
+  }
+};
+
 const renderChatList = () => {
   dom.chatList.innerHTML = '';
   const chats = getCurrentChatEntries();
@@ -3815,6 +3888,21 @@ const renderChatList = () => {
     }
 
     dom.chatList.append(fragment);
+  }
+
+  if (state.sessionsHasMore || state.sessionsLoadingMore) {
+    const shell = document.createElement('div');
+    shell.className = 'chat-load-more-shell';
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = 'chat-load-more-button';
+    button.disabled = state.sessionsLoadingMore;
+    button.textContent = state.sessionsLoadingMore ? 'Loading sessions...' : 'Load more sessions';
+    button.addEventListener('click', () => {
+      loadMoreSessions().catch((error) => showChatError(error.message));
+    });
+    shell.append(button);
+    dom.chatList.append(shell);
   }
 };
 
@@ -4225,24 +4313,33 @@ const switchActiveModel = async (modelId) => {
 };
 
 const refreshSessions = async () => {
-  const response = await api('/api/sessions', { method: 'GET' });
-  const json = await response.json();
-  const sessions = Array.isArray(json?.sessions) ? json.sessions : [];
-  sessions.sort((left, right) => (right.last_active || right.started_at || 0) - (left.last_active || left.started_at || 0));
-  state.sessions = sessions
-    .map((session) => normalizeSessionSnapshot({
-      ...session,
-      persistentSessionId: session.id,
-    }))
-    .filter(Boolean);
-  for (const session of sessions) {
-    applyLiveStateToSession(session?.id, session?.live || null);
-  }
-  if (state.renamingSessionId && !state.sessions.some((session) => session.id === state.renamingSessionId)) {
-    resetSessionRenameState();
-  }
+  state.sessionsLoadingMore = false;
+  const json = await fetchSessionsPage(0, INITIAL_SESSION_PAGE_SIZE);
+  applySessionsPage(json, { append: false });
   renderChatList();
   renderWorkspaceHeader();
+};
+
+const loadMoreSessions = async () => {
+  if (state.sessionsLoadingMore || !state.sessionsHasMore) return;
+
+  const previousScrollTop = dom.chatList?.scrollTop || 0;
+  state.sessionsLoadingMore = true;
+  renderChatList();
+
+  try {
+    const json = await fetchSessionsPage(state.sessionsNextOffset, SESSION_LOAD_MORE_PAGE_SIZE);
+    applySessionsPage(json, { append: true });
+  } finally {
+    state.sessionsLoadingMore = false;
+    renderChatList();
+    renderWorkspaceHeader();
+    window.requestAnimationFrame(() => {
+      if (dom.chatList) {
+        dom.chatList.scrollTop = previousScrollTop;
+      }
+    });
+  }
 };
 
 const openSession = async (sessionId) => {

@@ -889,6 +889,7 @@ class _UserSessionDBProxy:
         offset: int = 0,
         include_children: bool = False,
         project_compression_tips: bool = True,
+        order_by_last_active: bool = False,
     ) -> list[dict[str, Any]]:
         result = self._call(
             "list_sessions_rich",
@@ -898,6 +899,7 @@ class _UserSessionDBProxy:
             offset=offset,
             include_children=include_children,
             project_compression_tips=project_compression_tips,
+            order_by_last_active=order_by_last_active,
         )
         return result if isinstance(result, list) else []
 
@@ -2573,74 +2575,81 @@ async def update_active_model(
 async def get_sessions(
     limit: int = 50, offset: int = 0, user: CurrentUser = Depends(get_current_user)
 ) -> dict[str, Any]:
+    page_limit = max(1, min(int(limit or 50), 200))
+    page_offset = max(0, int(offset or 0))
+    fetch_limit = page_offset + page_limit + 1
     live_states = list_live_session_states(user.id)
-    display_metas = list_display_session_metas(user.id)
+    display_metas = list_display_session_metas(user.id, include_messages=False)
     with _open_session_db(user.target) as db:
-        sessions = db.list_sessions_rich(source=None, limit=limit * 5, offset=offset)
-        normalized = []
+        sessions = db.list_sessions_rich(
+            source="tui",
+            limit=fetch_limit,
+            offset=0,
+            order_by_last_active=True,
+        )
+        normalized_by_id: dict[str, dict[str, Any]] = {}
         seen_session_ids: set[str] = set()
         for item in sessions:
             if not _is_interface_managed_source(item.get("source")):
                 continue
             logical_session_id = _logical_session_id_from_row(item)
-            logical_session = db.get_session(logical_session_id)
-            if not logical_session or not _is_interface_managed_source(
-                logical_session.get("source")
-            ):
-                continue
-            normalized.append(
-                _normalize_logical_session_row(
-                    item,
-                    logical_session_id=logical_session_id,
-                    logical_session=logical_session,
-                    display_meta=display_metas.get(logical_session_id),
-                    live_state=live_states.get(logical_session_id),
-                    resume_session_id=str(item.get("id") or logical_session_id),
-                )
+            logical_session = item
+            if str(item.get("_lineage_root_id") or "").strip():
+                root_session = db.get_session(logical_session_id)
+                if not root_session or not _is_interface_managed_source(
+                    root_session.get("source")
+                ):
+                    continue
+                logical_session = root_session
+            normalized_by_id[logical_session_id] = _normalize_logical_session_row(
+                item,
+                logical_session_id=logical_session_id,
+                logical_session=logical_session,
+                display_meta=display_metas.get(logical_session_id),
+                live_state=live_states.get(logical_session_id),
+                resume_session_id=str(item.get("id") or logical_session_id),
             )
             seen_session_ids.add(logical_session_id)
-            if len(normalized) >= limit:
-                break
 
-        if len(normalized) < limit:
-            for logical_session_id, display_meta in display_metas.items():
-                if logical_session_id in seen_session_ids:
-                    continue
-                live_state = live_states.get(logical_session_id)
-                normalized.append(
-                    _normalize_logical_session_row(
-                        {
-                            "id": logical_session_id,
-                            "source": "tui",
-                            "model": "",
-                            "title": str(display_meta.get("draft_title") or "").strip(),
-                            "preview": "",
-                            "started_at": int(display_meta.get("created_at") or 0),
-                            "last_active": int(
-                                live_state.get("updated_at")
-                                if isinstance(live_state, dict)
-                                else display_meta.get("updated_at") or 0
-                            ),
-                            "message_count": len(
-                                display_meta.get("messages")
-                                if isinstance(display_meta.get("messages"), list)
-                                else []
-                            ),
-                            "tool_call_count": 0,
-                        },
-                        logical_session_id=logical_session_id,
-                        logical_session={"id": logical_session_id, "source": "tui", "title": ""},
-                        display_meta=display_meta,
-                        live_state=live_state,
-                        resume_session_id=logical_session_id,
-                    )
-                )
-                if len(normalized) >= limit:
-                    break
-    normalized.sort(
-        key=lambda item: (item["last_active"], item["started_at"]), reverse=True
+        for logical_session_id, display_meta in display_metas.items():
+            if logical_session_id in seen_session_ids:
+                continue
+            live_state = live_states.get(logical_session_id)
+            normalized_by_id[logical_session_id] = _normalize_logical_session_row(
+                {
+                    "id": logical_session_id,
+                    "source": "tui",
+                    "model": "",
+                    "title": str(display_meta.get("draft_title") or "").strip(),
+                    "preview": "",
+                    "started_at": int(display_meta.get("created_at") or 0),
+                    "last_active": int(
+                        live_state.get("updated_at")
+                        if isinstance(live_state, dict)
+                        else display_meta.get("updated_at") or 0
+                    ),
+                    "message_count": int(display_meta.get("message_count") or 0),
+                    "tool_call_count": 0,
+                },
+                logical_session_id=logical_session_id,
+                logical_session={"id": logical_session_id, "source": "tui", "title": ""},
+                display_meta=display_meta,
+                live_state=live_state,
+                resume_session_id=logical_session_id,
+            )
+    normalized = sorted(
+        normalized_by_id.values(),
+        key=lambda item: (item["last_active"], item["started_at"]),
+        reverse=True,
     )
-    return {"sessions": normalized, "limit": limit, "offset": offset}
+    page = normalized[page_offset : page_offset + page_limit]
+    return {
+        "sessions": page,
+        "limit": page_limit,
+        "offset": page_offset,
+        "next_offset": page_offset + len(page),
+        "has_more": len(normalized) > page_offset + page_limit,
+    }
 
 
 @app.get("/api/sessions/{session_id}")

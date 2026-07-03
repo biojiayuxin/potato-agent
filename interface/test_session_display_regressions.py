@@ -282,6 +282,69 @@ def test_session_list_uses_display_store_draft_title() -> None:
         client.close()
 
 
+def test_session_list_paginates_without_repeating_sessions() -> None:
+    client, interface_app_mod, user = _build_client_and_user()
+    try:
+        target = interface_app_mod.mapping_store.resolve_target(
+            mapping_username=user.mapping_username,
+            email=user.email,
+            username=user.username,
+        )
+        assert target is not None
+        conn = sqlite3.connect(str(target.state_db_path))
+        try:
+            base_started_at = 1715000000
+            for index in range(65):
+                session_id = f"sess_page_{index:02d}"
+                started_at = base_started_at + (index * 60)
+                conn.execute(
+                    "INSERT INTO sessions (id, source, model, started_at, message_count, tool_call_count, title) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    (
+                        session_id,
+                        "tui",
+                        "Hermes",
+                        started_at,
+                        1,
+                        0,
+                        f"Paged chat {index:02d}",
+                    ),
+                )
+                conn.execute(
+                    "INSERT INTO messages (session_id, role, content, timestamp, reasoning, tool_calls) VALUES (?, ?, ?, ?, ?, ?)",
+                    (
+                        session_id,
+                        "user",
+                        f"Message {index:02d}",
+                        started_at + 1,
+                        "",
+                        "",
+                    ),
+                )
+            conn.commit()
+        finally:
+            conn.close()
+
+        first_response = client.get("/api/sessions?limit=50&offset=0")
+        assert first_response.status_code == 200, first_response.text
+        first_payload = first_response.json()
+        assert len(first_payload["sessions"]) == 50
+        assert first_payload["has_more"] is True
+        assert first_payload["next_offset"] == 50
+
+        second_response = client.get("/api/sessions?limit=50&offset=50")
+        assert second_response.status_code == 200, second_response.text
+        second_payload = second_response.json()
+        assert second_payload["offset"] == 50
+        assert second_payload["has_more"] is False
+        assert second_payload["sessions"]
+
+        first_ids = {session["id"] for session in first_payload["sessions"]}
+        second_ids = {session["id"] for session in second_payload["sessions"]}
+        assert first_ids.isdisjoint(second_ids)
+    finally:
+        client.close()
+
+
 def test_session_detail_prefers_saved_display_transcript() -> None:
     client, _, user = _build_client_and_user()
     try:
