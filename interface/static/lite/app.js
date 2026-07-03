@@ -212,6 +212,10 @@ const liveSessionPollInFlightBySessionId = new Set();
 const liveSessionPollFailuresBySessionId = new Map();
 const liveSessionPollGenerationBySessionId = new Map();
 let liveSessionPollGenerationCounter = 0;
+let fileTreeRefreshTimer = null;
+let fileTreeRefreshInFlight = false;
+let fileTreeRefreshPending = false;
+let fileTreeLastFocusRefreshAt = 0;
 
 const SIDEBAR_WIDTH_KEY = 'lite_sidebar_width';
 const FILES_WIDTH_KEY = 'lite_files_width';
@@ -226,6 +230,9 @@ const TUI_BRIDGE_RECONNECT_BASE_DELAY_MS = 1000;
 const TUI_BRIDGE_RECONNECT_MAX_DELAY_MS = 15000;
 const LIVE_SESSION_POLL_INTERVAL_MS = 2000;
 const LIVE_SESSION_POLL_FAILURE_DELAY_MS = 5000;
+const FILE_TREE_REFRESH_DEBOUNCE_MS = 800;
+const FILE_TREE_FOCUS_REFRESH_MIN_INTERVAL_MS = 5000;
+const FILE_TREE_REFRESH_MAX_CONCURRENCY = 3;
 const ATTACHMENT_BLOCK_START = '<potato-files>';
 const ATTACHMENT_BLOCK_END = '</potato-files>';
 const ATTACHMENT_HINT_LINE = 'Use the attachment local paths above if you need to inspect the files.';
@@ -1196,6 +1203,7 @@ const handleTuiBridgeEvent = (message) => {
         } catch {}
       }, 1200);
     }
+    scheduleFileTreeRefresh('message.complete');
     return;
   }
 
@@ -1257,11 +1265,13 @@ const handleTuiBridgeEvent = (message) => {
     if (summary) {
       setTuiBridgeStatus(`TUI tool completed: ${summary.slice(0, 120)}`);
     }
+    scheduleFileTreeRefresh('tool.complete');
     return;
   }
 
   if (type === 'background.complete') {
     setTuiBridgeStatus('TUI background task completed');
+    scheduleFileTreeRefresh('background.complete');
   }
 };
 
@@ -2528,6 +2538,12 @@ const resetWorkspaceState = () => {
   state.homePath = '';
   state.expandedPaths = new Set();
   state.treeCache.clear();
+  if (fileTreeRefreshTimer) {
+    window.clearTimeout(fileTreeRefreshTimer);
+    fileTreeRefreshTimer = null;
+  }
+  fileTreeRefreshPending = false;
+  fileTreeLastFocusRefreshAt = 0;
   state.streamingMessageIds.clear();
   busySessionIds.clear();
   sessionRunTransportById.clear();
@@ -2992,6 +3008,7 @@ const handleSelectedFiles = async (files) => {
       state.pendingAttachments = state.pendingAttachments.map((item) =>
         item.itemId === attachment.itemId ? { ...item, ...uploaded } : item
       );
+      scheduleFileTreeRefresh('upload');
     } catch (error) {
       state.pendingAttachments = state.pendingAttachments.map((item) =>
         item.itemId === attachment.itemId
@@ -4365,6 +4382,79 @@ const normalizeDirectory = (path) => {
   return normalized.endsWith('/') ? normalized : `${normalized}/`;
 };
 
+const getParentDirectory = (path) => {
+  const trimmed = normalizeDirectory(path).replace(/\/+$/g, '');
+  if (!trimmed || trimmed === '/') return '/';
+  const index = trimmed.lastIndexOf('/');
+  return index <= 0 ? '/' : normalizeDirectory(trimmed.slice(0, index));
+};
+
+const isSameOrDescendantDirectory = (path, directory) => {
+  const normalizedPath = normalizeDirectory(path);
+  const normalizedDirectory = normalizeDirectory(directory);
+  return normalizedDirectory === '/'
+    ? normalizedPath.startsWith('/')
+    : normalizedPath === normalizedDirectory || normalizedPath.startsWith(normalizedDirectory);
+};
+
+const pruneFileTreeDirectory = (path) => {
+  const normalized = normalizeDirectory(path);
+  for (const expandedPath of Array.from(state.expandedPaths)) {
+    if (isSameOrDescendantDirectory(expandedPath, normalized)) {
+      state.expandedPaths.delete(expandedPath);
+    }
+  }
+  for (const cachedPath of Array.from(state.treeCache.keys())) {
+    if (isSameOrDescendantDirectory(cachedPath, normalized)) {
+      state.treeCache.delete(cachedPath);
+    }
+  }
+};
+
+const getFileTreePathDepth = (path) => normalizeDirectory(path)
+  .split('/')
+  .filter(Boolean)
+  .length;
+
+const getVisibleFileTreeRefreshPaths = () => {
+  const root = normalizeDirectory(state.rootPath || state.currentPath || '/');
+  const paths = new Set([root]);
+  if (state.currentPath) {
+    paths.add(normalizeDirectory(state.currentPath));
+  }
+  for (const expandedPath of state.expandedPaths) {
+    const normalized = normalizeDirectory(expandedPath);
+    if (isSameOrDescendantDirectory(normalized, root)) {
+      paths.add(normalized);
+    }
+  }
+  return Array.from(paths).sort((left, right) => (
+    getFileTreePathDepth(left) - getFileTreePathDepth(right) || left.localeCompare(right)
+  ));
+};
+
+const findNearestCachedDirectory = (path, rootPath = state.rootPath || '/') => {
+  const root = normalizeDirectory(rootPath || '/');
+  let candidate = normalizeDirectory(path);
+  while (candidate !== root && candidate !== '/' && !state.treeCache.has(candidate)) {
+    candidate = getParentDirectory(candidate);
+  }
+  if (state.treeCache.has(candidate)) return candidate;
+  return root;
+};
+
+const runWithFileTreeConcurrency = async (items, worker) => {
+  const queue = [...items];
+  const workerCount = Math.min(FILE_TREE_REFRESH_MAX_CONCURRENCY, queue.length);
+  const workers = Array.from({ length: workerCount }, async () => {
+    while (queue.length) {
+      const item = queue.shift();
+      await worker(item);
+    }
+  });
+  await Promise.all(workers);
+};
+
 const getDisplayDirectoryPath = () => {
   const workspaceRoot = String(state.workspaceRoot || state.user?.workspace_root || '').trim();
   if (!workspaceRoot) {
@@ -4433,7 +4523,7 @@ const joinPath = (directory, name, type) => {
   return type === 'directory' ? `${base}${name}/` : `${base}${name}`;
 };
 
-const listDirectory = async (path, force = false) => {
+const listDirectory = async (path, force = false, { workspaceRoot = state.workspaceRoot } = {}) => {
   const directory = normalizeDirectory(path);
   if (!force && state.treeCache.has(directory)) {
     return state.treeCache.get(directory);
@@ -4442,8 +4532,9 @@ const listDirectory = async (path, force = false) => {
   const relativePath = directory === '/' ? '' : directory.replace(/^\/+|\/+$/g, '');
   const query = new URLSearchParams();
   query.set('path', relativePath);
-  if (state.workspaceRoot) {
-    query.set('root', state.workspaceRoot);
+  const requestWorkspaceRoot = String(workspaceRoot || '').trim();
+  if (requestWorkspaceRoot) {
+    query.set('root', requestWorkspaceRoot);
   }
   const json = await api(`/api/files/tree?${query.toString()}`, { method: 'GET' }).then((res) => res.json());
   const entries = Array.isArray(json?.entries) ? json.entries : [];
@@ -4451,7 +4542,9 @@ const listDirectory = async (path, force = false) => {
     if (left.type !== right.type) return left.type === 'directory' ? -1 : 1;
     return left.name.localeCompare(right.name);
   });
-  state.treeCache.set(directory, entries);
+  if (String(state.workspaceRoot || '').trim() === requestWorkspaceRoot) {
+    state.treeCache.set(directory, entries);
+  }
   return entries;
 };
 
@@ -4585,6 +4678,104 @@ const renderFileTree = async () => {
   } catch (error) {
     dom.fileTree.innerHTML = `<div class="error">${escapeHtml(error.message)}</div>`;
   }
+};
+
+const refreshVisibleFileTree = async () => {
+  if (!state.user || !state.currentPath || !dom.fileTree) return;
+
+  const userId = String(state.user?.id || '');
+  const workspaceRoot = String(state.workspaceRoot || '').trim();
+  const root = normalizeDirectory(state.rootPath || state.currentPath || '/');
+  const scrollTop = dom.fileTree.scrollTop || 0;
+  const refreshPaths = getVisibleFileTreeRefreshPaths();
+  let rootError = null;
+
+  state.expandedPaths.add(root);
+
+  await runWithFileTreeConcurrency(refreshPaths, async (path) => {
+    if (
+      !state.user
+      || String(state.user?.id || '') !== userId
+      || String(state.workspaceRoot || '').trim() !== workspaceRoot
+      || normalizeDirectory(state.rootPath || '/') !== root
+    ) {
+      return;
+    }
+
+    try {
+      await listDirectory(path, true, { workspaceRoot });
+    } catch (error) {
+      if (normalizeDirectory(path) === root) {
+        rootError = error;
+        return;
+      }
+      pruneFileTreeDirectory(path);
+    }
+  });
+
+  if (rootError) {
+    throw rootError;
+  }
+
+  if (
+    !state.user
+    || String(state.user?.id || '') !== userId
+    || String(state.workspaceRoot || '').trim() !== workspaceRoot
+    || normalizeDirectory(state.rootPath || '/') !== root
+  ) {
+    return;
+  }
+
+  const currentPath = normalizeDirectory(state.currentPath || root);
+  if (!state.treeCache.has(currentPath)) {
+    state.currentPath = findNearestCachedDirectory(currentPath, root);
+  }
+  state.expandedPaths.add(root);
+
+  await renderFileTree();
+  dom.fileTree.scrollTop = scrollTop;
+};
+
+const runFileTreeRefreshNow = async ({ silent = true } = {}) => {
+  if (!state.user || !state.currentPath) return;
+  if (fileTreeRefreshInFlight) {
+    fileTreeRefreshPending = true;
+    return;
+  }
+
+  fileTreeRefreshInFlight = true;
+  try {
+    await refreshVisibleFileTree();
+  } catch (error) {
+    if (!silent) {
+      showChatError(String(error.message || 'Failed to refresh files'));
+    }
+  } finally {
+    fileTreeRefreshInFlight = false;
+    if (fileTreeRefreshPending) {
+      fileTreeRefreshPending = false;
+      scheduleFileTreeRefresh('pending');
+    }
+  }
+};
+
+const scheduleFileTreeRefresh = (reason = '', { delay = FILE_TREE_REFRESH_DEBOUNCE_MS } = {}) => {
+  if (!state.user || !state.currentPath || document.hidden) return;
+  if (fileTreeRefreshTimer) {
+    window.clearTimeout(fileTreeRefreshTimer);
+  }
+  fileTreeRefreshTimer = window.setTimeout(() => {
+    fileTreeRefreshTimer = null;
+    runFileTreeRefreshNow({ silent: true });
+  }, Math.max(0, Number(delay) || 0));
+};
+
+const refreshFileTreeAfterFocus = () => {
+  if (document.hidden || !state.user || !state.currentPath) return;
+  const now = Date.now();
+  if (now - fileTreeLastFocusRefreshAt < FILE_TREE_FOCUS_REFRESH_MIN_INTERVAL_MS) return;
+  fileTreeLastFocusRefreshAt = now;
+  scheduleFileTreeRefresh('focus');
 };
 
 const fetchWorkspaceFiles = async () => {
@@ -5739,8 +5930,15 @@ dom.sendButton.addEventListener('click', async (event) => {
 });
 
 dom.refreshFilesButton.addEventListener('click', async () => {
-  state.treeCache.clear();
-  await fetchWorkspaceFiles().catch((error) => showChatError(error.message));
+  if (fileTreeRefreshTimer) {
+    window.clearTimeout(fileTreeRefreshTimer);
+    fileTreeRefreshTimer = null;
+  }
+  fileTreeRefreshPending = false;
+  const refreshPromise = state.currentPath
+    ? runFileTreeRefreshNow({ silent: false })
+    : fetchWorkspaceFiles();
+  await refreshPromise.catch((error) => showChatError(error.message));
 });
 
 dom.fileHomeButton?.addEventListener('click', async () => {
@@ -5752,6 +5950,18 @@ dom.filePathInput?.addEventListener('keydown', async (event) => {
   if (event.key !== 'Enter' || event.isComposing) return;
   event.preventDefault();
   await openDirectory(dom.filePathInput?.value || '').catch((error) => showChatError(error.message));
+});
+
+window.addEventListener('focus', refreshFileTreeAfterFocus);
+document.addEventListener('visibilitychange', () => {
+  if (document.hidden) {
+    if (fileTreeRefreshTimer) {
+      window.clearTimeout(fileTreeRefreshTimer);
+      fileTreeRefreshTimer = null;
+    }
+    return;
+  }
+  refreshFileTreeAfterFocus();
 });
 
 initResizablePanels();
