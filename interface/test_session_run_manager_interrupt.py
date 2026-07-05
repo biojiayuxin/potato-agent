@@ -242,6 +242,92 @@ def test_late_complete_from_interrupted_run_does_not_finish_new_turn() -> None:
     assert assistant["done"] is False
 
 
+def test_unknown_tip_complete_after_interrupt_does_not_finish_new_turn() -> None:
+    db_path = Path(tempfile.mkdtemp(prefix="potato-run-manager-tip-complete-")) / "interface.db"
+    os.environ["INTERFACE_AUTH_DB"] = str(db_path)
+
+    from interface.display_store import (
+        get_display_messages,
+        get_live_session_state,
+        save_display_messages,
+        save_live_session_state,
+    )
+    from interface.session_run_manager import SessionRunContext, SessionRunManager
+
+    save_display_messages(
+        "user-1",
+        "session-1",
+        [
+            {"id": "user-1", "role": "user", "content": "first", "done": True},
+            {"id": "assistant-1", "role": "assistant", "content": "partial", "done": True},
+            {"id": "user-2", "role": "user", "content": "second", "done": True},
+            {"id": "assistant-2", "role": "assistant", "content": "", "done": False},
+        ],
+        db_path=db_path,
+    )
+    save_live_session_state(
+        "user-1",
+        "session-1",
+        run_id="run-2",
+        live_session_id="live-2",
+        tip_session_id="session-1",
+        assistant_message_id="assistant-2",
+        status="starting",
+        pending_approval=None,
+        last_error="",
+        last_event_seq=0,
+        db_path=db_path,
+    )
+
+    async def scenario() -> None:
+        manager = SessionRunManager(
+            tip_resolver=lambda user_id, session_id: session_id,
+            db_path=db_path,
+        )
+        context = SessionRunContext(
+            user_id="user-1",
+            session_id="session-1",
+            run_id="run-2",
+            assistant_message_id="assistant-2",
+        )
+        async with manager._lock:
+            manager._run_contexts_by_session_id[("user-1", "session-1")] = context
+            manager._ensure_flush_task_locked(context)
+        await manager.handle_bridge_event(
+            _Bridge(),  # type: ignore[arg-type]
+            {
+                "type": "message.complete",
+                "session_id": "session-1",
+                "persistent_session_id": "",
+                "run_id": "",
+                "seq": 42,
+                "payload": {
+                    "text": None,
+                    "status": "interrupted",
+                    "reasoning": "stale interrupted run",
+                },
+            },
+        )
+        await manager.shutdown()
+
+    _run(scenario())
+
+    live_state = get_live_session_state("user-1", "session-1", db_path=db_path)
+    assert live_state is not None
+    assert live_state["run_id"] == "run-2"
+    assert live_state["live_session_id"] == "live-2"
+    assert live_state["status"] == "starting"
+    assert live_state["last_event_seq"] == 0
+    assert live_state["last_error"] == ""
+
+    messages = get_display_messages("user-1", "session-1", db_path=db_path)
+    assert messages is not None
+    assistant = next(message for message in messages if message["id"] == "assistant-2")
+    assert assistant["content"] == ""
+    assert assistant.get("reasoningContent", "") == ""
+    assert assistant["done"] is False
+
+
 def test_interrupt_marks_missing_gateway_session_failed() -> None:
     db_path = Path(tempfile.mkdtemp(prefix="potato-run-manager-missing-session-")) / "interface.db"
     os.environ["INTERFACE_AUTH_DB"] = str(db_path)

@@ -562,6 +562,7 @@ class SessionRunManager:
             live_session_id=live_session_id,
             session_id=persistent_session_id,
             run_id=run_id,
+            event_type=event_type,
         )
         if context is None:
             return
@@ -662,6 +663,7 @@ class SessionRunManager:
         live_session_id: str,
         session_id: str,
         run_id: str,
+        event_type: str,
     ) -> SessionRunContext | None:
         async with self._lock:
             if live_session_id:
@@ -698,6 +700,7 @@ class SessionRunManager:
             return await self._resolve_unknown_live_session_context(
                 bridge_user_id=bridge_user_id,
                 live_session_id=live_session_id,
+                event_type=event_type,
             )
 
         live_state = self._get_live_session_state(bridge_user_id, session_id)
@@ -734,9 +737,15 @@ class SessionRunManager:
         *,
         bridge_user_id: str,
         live_session_id: str,
+        event_type: str,
     ) -> SessionRunContext | None:
         normalized_live_session_id = str(live_session_id or "").strip()
         if not normalized_live_session_id:
+            return None
+        if str(event_type or "").strip() == "message.complete":
+            # A late complete event from an interrupted previous run is not a
+            # reliable signal for binding an otherwise unknown live session to
+            # the current turn. Wait for message.start/delta/progress to bind.
             return None
 
         async with self._lock:

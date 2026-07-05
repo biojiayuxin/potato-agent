@@ -162,7 +162,8 @@
       </section>
 
       <section id="workspace-view" class="workspace-view" hidden>
-        <aside class="sidebar">
+        <div id="mobile-panel-backdrop" class="mobile-panel-backdrop" hidden></div>
+        <aside id="chat-sidebar" class="sidebar">
           <div class="sidebar-header">
             <div class="sidebar-identity">
               <div class="workspace-logo" aria-hidden="true">
@@ -262,7 +263,35 @@
             <section class="chat-panel">
               <header class="topbar">
                 <div class="topbar-title-area">
+                  <button
+                    id="mobile-chats-button"
+                    class="mobile-panel-button"
+                    type="button"
+                    aria-label="Open chats"
+                    aria-controls="chat-sidebar"
+                    aria-expanded="false"
+                    title="Chats"
+                  >
+                    <svg class="mobile-panel-button-icon" viewBox="0 0 24 24" aria-hidden="true">
+                      <path d="M21 15a4 4 0 0 1-4 4H7l-4 4V7a4 4 0 0 1 4-4h10a4 4 0 0 1 4 4z"></path>
+                    </svg>
+                    <span>Chats</span>
+                  </button>
                   <h1 id="chat-title">New chat</h1>
+                  <button
+                    id="mobile-files-button"
+                    class="mobile-panel-button"
+                    type="button"
+                    aria-label="Open files"
+                    aria-controls="workspace-files-panel"
+                    aria-expanded="false"
+                    title="Files"
+                  >
+                    <svg class="mobile-panel-button-icon" viewBox="0 0 24 24" aria-hidden="true">
+                      <path d="M3 7a2 2 0 0 1 2-2h5l2 2h7a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"></path>
+                    </svg>
+                    <span>Files</span>
+                  </button>
                 </div>
                 <div class="topbar-actions">
                   <button id="change-password-button" class="ghost small topbar-password-button" type="button" hidden>Change password</button>
@@ -311,7 +340,7 @@
 
             <div id="files-resizer" class="panel-resizer inner" aria-hidden="true"></div>
 
-            <aside class="files-panel">
+            <aside id="workspace-files-panel" class="files-panel">
               <div class="files-header">
                 <div class="files-header-main">
                   <div class="files-title-row">

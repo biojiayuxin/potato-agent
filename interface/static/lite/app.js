@@ -53,6 +53,7 @@ const state = {
   renamingSessionId: null,
   renamingTitleDraft: '',
   renamingTitleError: '',
+  mobileOverlayPanel: null,
   passwordChangeSubmitting: false,
 };
 
@@ -123,6 +124,9 @@ const dom = {
   messages: document.getElementById('messages'),
   tuiBridgeStatus: document.getElementById('tui-bridge-status'),
   chatTitle: document.getElementById('chat-title'),
+  mobileChatsButton: document.getElementById('mobile-chats-button'),
+  mobileFilesButton: document.getElementById('mobile-files-button'),
+  mobilePanelBackdrop: document.getElementById('mobile-panel-backdrop'),
   modelName: document.getElementById('model-name'),
   modelSelect: document.getElementById('model-select'),
   composerForm: document.getElementById('composer-form'),
@@ -151,6 +155,8 @@ const dom = {
   sidebarSettingsMenu: document.getElementById('sidebar-settings-menu'),
   sidebarChangePasswordButton: document.getElementById('sidebar-change-password-button'),
   sidebarSignOutButton: document.getElementById('sidebar-sign-out-button'),
+  chatSidebar: document.getElementById('chat-sidebar'),
+  filesPanel: document.getElementById('workspace-files-panel'),
   fileTree: document.getElementById('file-tree'),
   cwdLabel: document.getElementById('cwd-label'),
   refreshFilesButton: document.getElementById('refresh-files-button'),
@@ -245,6 +251,10 @@ const INITIAL_SESSION_PAGE_SIZE = 50;
 const SESSION_LOAD_MORE_PAGE_SIZE = 10;
 const TUI_DEBUG_STATUS_STORAGE_KEY = 'lite_tui_bridge_debug';
 const EMAIL_VERIFICATION_COUNTDOWN_INTERVAL_MS = 1000;
+const MOBILE_PANEL_MEDIA_QUERY = '(max-width: 1180px)';
+const mobilePanelMediaQuery = typeof window.matchMedia === 'function'
+  ? window.matchMedia(MOBILE_PANEL_MEDIA_QUERY)
+  : { matches: false };
 
 const applyThemeMode = () => {
   document.documentElement.dataset.themeMode = 'light';
@@ -276,6 +286,86 @@ const setTuiBridgeStatus = (message = '', { hidden = false } = {}) => {
   }
   dom.tuiBridgeStatus.hidden = false;
   dom.tuiBridgeStatus.textContent = message;
+};
+
+const isMobilePanelLayout = () => mobilePanelMediaQuery.matches;
+
+const normalizeMobilePanelName = (panel) => {
+  const normalized = String(panel || '').trim();
+  return normalized === 'chats' || normalized === 'files' ? normalized : null;
+};
+
+const setMobilePanelInteractivity = (panel, enabled) => {
+  if (!panel) return;
+  if ('inert' in panel) {
+    panel.inert = !enabled;
+  }
+  if (enabled) {
+    panel.removeAttribute('aria-hidden');
+  } else {
+    panel.setAttribute('aria-hidden', 'true');
+  }
+};
+
+const renderMobilePanelState = () => {
+  const isMobile = isMobilePanelLayout();
+  if (!isMobile) {
+    state.mobileOverlayPanel = null;
+  }
+  const activePanel = isMobile ? normalizeMobilePanelName(state.mobileOverlayPanel) : null;
+  const chatsOpen = activePanel === 'chats';
+  const filesOpen = activePanel === 'files';
+  const anyOpen = Boolean(activePanel);
+
+  dom.workspaceView?.classList.toggle('mobile-panel-open', anyOpen);
+  dom.workspaceView?.classList.toggle('mobile-chats-open', chatsOpen);
+  dom.workspaceView?.classList.toggle('mobile-files-open', filesOpen);
+
+  if (dom.mobilePanelBackdrop) {
+    dom.mobilePanelBackdrop.hidden = !anyOpen;
+  }
+
+  if (dom.mobileChatsButton) {
+    dom.mobileChatsButton.setAttribute('aria-expanded', chatsOpen ? 'true' : 'false');
+    dom.mobileChatsButton.setAttribute('aria-label', chatsOpen ? 'Close chats' : 'Open chats');
+  }
+  if (dom.mobileFilesButton) {
+    dom.mobileFilesButton.setAttribute('aria-expanded', filesOpen ? 'true' : 'false');
+    dom.mobileFilesButton.setAttribute('aria-label', filesOpen ? 'Close files' : 'Open files');
+  }
+
+  setMobilePanelInteractivity(dom.chatSidebar, !isMobile || chatsOpen);
+  setMobilePanelInteractivity(dom.filesPanel, !isMobile || filesOpen);
+};
+
+const closeMobilePanel = () => {
+  state.mobileOverlayPanel = null;
+  renderMobilePanelState();
+};
+
+const openMobilePanel = (panel) => {
+  if (!isMobilePanelLayout()) {
+    renderMobilePanelState();
+    return;
+  }
+  const nextPanel = normalizeMobilePanelName(panel);
+  if (!nextPanel) return;
+  if (nextPanel !== 'chats') {
+    closeSidebarSettingsMenu();
+    closeUpdateNotesPanel();
+  }
+  state.mobileOverlayPanel = nextPanel;
+  renderMobilePanelState();
+};
+
+const toggleMobilePanel = (panel) => {
+  const nextPanel = normalizeMobilePanelName(panel);
+  if (!nextPanel) return;
+  if (state.mobileOverlayPanel === nextPanel) {
+    closeMobilePanel();
+    return;
+  }
+  openMobilePanel(nextPanel);
 };
 
 const getComposerMode = () => (state.composerMode === 'plan' ? 'plan' : 'chat');
@@ -1454,7 +1544,7 @@ const attachHorizontalResizer = (resizer, { getNextSize, setSize, storageKey }) 
   if (!resizer) return;
 
   const handlePointerDown = (event) => {
-    if (window.innerWidth <= 800) return;
+    if (window.innerWidth <= 1180) return;
     event.preventDefault();
     resizer.classList.add('dragging');
 
@@ -2553,6 +2643,7 @@ const resetWorkspaceState = () => {
   state.pendingAttachments = [];
   state.isSending = false;
   state.pendingApproval = null;
+  state.mobileOverlayPanel = null;
   state.approvalSubmitting = false;
   state.passwordChangeSubmitting = false;
   state.passwordResetSubmitting = false;
@@ -3884,10 +3975,12 @@ const renderChatList = () => {
         if (chat.isDraft) {
           state.activeSession = chat;
           state.activeSessionId = chat.id;
+          closeMobilePanel();
           renderWorkspace();
           return;
         }
         resetSessionRenameState();
+        closeMobilePanel();
         openSession(chat.id).catch((error) => showChatError(error.message));
       });
     }
@@ -4154,6 +4247,7 @@ const openFilePreview = (path, entry = null) => {
   const existingTab = state.filePreviewTabs.find((tab) => tab.key === key);
   if (existingTab) {
     setActiveWorkspaceTab(existingTab.id);
+    closeMobilePanel();
     return;
   }
 
@@ -4182,6 +4276,7 @@ const openFilePreview = (path, entry = null) => {
   state.activeWorkspaceTab = tab.id;
   renderWorkspaceHeader();
   renderWorkspaceTabs();
+  closeMobilePanel();
   loadFilePreviewTab(tab.id);
 };
 
@@ -4375,6 +4470,7 @@ const renderWorkspace = () => {
   renderApprovalModal();
   renderFileBrowserControls();
   refreshComposerBusyState();
+  renderMobilePanelState();
 };
 
 const normalizeDirectory = (path) => {
@@ -5474,9 +5570,11 @@ const showWorkspace = () => {
   dom.loginView.style.display = 'none';
   dom.workspaceView.hidden = false;
   dom.workspaceView.style.display = 'grid';
+  renderMobilePanelState();
 };
 
 const showLogin = () => {
+  closeMobilePanel();
   closeUpdateNotesPanel({ markSeen: false });
   dom.workspaceView.hidden = true;
   dom.workspaceView.style.display = 'none';
@@ -5784,6 +5882,7 @@ document.addEventListener('click', () => {
 
 document.addEventListener('keydown', (event) => {
   if (event.key === 'Escape') {
+    closeMobilePanel();
     closeSidebarSettingsMenu();
     closeUpdateNotesPanel();
   }
@@ -5850,7 +5949,20 @@ dom.runtimeStartBackButton.addEventListener('click', async () => {
 dom.newChatButton.addEventListener('click', () => {
   activeTuiSessionId = '';
   activePersistentSessionId = '';
+  closeMobilePanel();
   startNewChat().catch((error) => showChatError(error.message));
+});
+
+dom.mobileChatsButton?.addEventListener('click', () => {
+  toggleMobilePanel('chats');
+});
+
+dom.mobileFilesButton?.addEventListener('click', () => {
+  toggleMobilePanel('files');
+});
+
+dom.mobilePanelBackdrop?.addEventListener('click', () => {
+  closeMobilePanel();
 });
 
 dom.modelSelect?.addEventListener('change', (event) => {
@@ -5964,10 +6076,24 @@ document.addEventListener('visibilitychange', () => {
   refreshFileTreeAfterFocus();
 });
 
+const handleMobilePanelMediaChange = () => {
+  if (!isMobilePanelLayout()) {
+    state.mobileOverlayPanel = null;
+  }
+  renderMobilePanelState();
+};
+
+if (typeof mobilePanelMediaQuery.addEventListener === 'function') {
+  mobilePanelMediaQuery.addEventListener('change', handleMobilePanelMediaChange);
+} else if (typeof mobilePanelMediaQuery.addListener === 'function') {
+  mobilePanelMediaQuery.addListener(handleMobilePanelMediaChange);
+}
+
 initResizablePanels();
 initThemeControls();
 initUpdateNotes();
 autoResizePromptInput();
+renderMobilePanelState();
 renderEmailVerificationState();
 renderPasswordResetState();
 bootstrapSession();

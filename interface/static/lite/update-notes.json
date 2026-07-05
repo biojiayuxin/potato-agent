@@ -1,6 +1,17 @@
 {
   "updates": [
     {
+      "version": "2026-07-05-001",
+      "title": "Workspace updates",
+      "date": "July 5, 2026",
+      "summary": "Improved mobile display, fixed responsive bugs, and updated skills.",
+      "items": [
+        "Improved mobile display.",
+        "Fixed responsive bugs.",
+        "Updated and added skills."
+      ]
+    },
+    {
       "version": "2026-07-03-002",
       "title": "Workspace file previews",
       "date": "July 3, 2026",
