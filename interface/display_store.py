@@ -616,3 +616,29 @@ def delete_session_events(
         )
         conn.commit()
         return cursor.rowcount > 0
+
+
+def delete_display_user_data(
+    user_id: str, db_path: Path = DEFAULT_AUTH_DB_PATH
+) -> dict[str, int]:
+    ensure_display_store(db_path)
+    normalized_user_id = user_id.strip()
+    with connect_auth_db(db_path) as conn:
+        display_cursor = conn.execute(
+            "delete from session_display_transcripts where user_id = ?",
+            (normalized_user_id,),
+        )
+        live_cursor = conn.execute(
+            "delete from session_live_state where user_id = ?",
+            (normalized_user_id,),
+        )
+        event_cursor = conn.execute(
+            "delete from session_event_journal where user_id = ?",
+            (normalized_user_id,),
+        )
+        conn.commit()
+    return {
+        "display_messages": int(display_cursor.rowcount or 0),
+        "live_states": int(live_cursor.rowcount or 0),
+        "events": int(event_cursor.rowcount or 0),
+    }

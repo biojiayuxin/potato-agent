@@ -47,8 +47,11 @@ from interface.auth_db import (
     EmailVerificationError,
     activate_signup_user,
     cleanup_terminal_signup_jobs,
+    create_temporary_user,
     create_pending_email_verification,
     create_signup_job_with_email_verification,
+    delete_temporary_user_record,
+    delete_user_by_mapping_username,
     ensure_auth_db,
     email_exists,
     email_verification_send_stats,
@@ -58,11 +61,15 @@ from interface.auth_db import (
     get_user_by_id,
     get_user_with_password_by_id,
     get_user_with_password_by_login,
+    is_temporary_user,
     list_users,
     mark_email_verification_failed,
+    mark_temporary_user_cleanup_attempt,
     record_email_verification_sent,
     reset_user_password_with_email_verification,
     set_signup_job_status,
+    TEMPORARY_USER_STATUS_CLEANING,
+    TEMPORARY_USER_STATUS_FAILED,
     update_user_password,
     username_exists,
     verify_password,
@@ -77,6 +84,7 @@ from interface.archive_store import (
 )
 from interface.background_jobs import has_active_background_processes
 from interface.display_store import (
+    delete_display_user_data,
     delete_display_messages,
     delete_live_session_state,
     delete_session_events,
@@ -104,9 +112,12 @@ from interface.hermes_service import (
 from interface.runtime_state import (
     cleanup_expired_runtime_leases,
     clear_session_revocation,
+    delete_runtime_state,
     ensure_runtime_state_store,
     get_runtime_state,
+    get_temporary_user_idle_status,
     has_active_runtime_leases,
+    list_idle_temporary_user_candidates,
     list_idle_runtime_candidates,
     mark_background_activity,
     mark_foreground_activity,
@@ -170,6 +181,11 @@ RUNTIME_IDLE_TIMEOUT_SECONDS = int(
 RUNTIME_IDLE_CHECK_INTERVAL_SECONDS = int(
     os.getenv("INTERFACE_RUNTIME_IDLE_CHECK_INTERVAL_SECONDS", "60")
 )
+TEMPORARY_USER_CLEANUP_RETRY_SECONDS = int(
+    os.getenv("INTERFACE_TEMPORARY_USER_CLEANUP_RETRY_SECONDS", "60")
+)
+TEMPORARY_USER_PREFIX = "temp"
+TEMPORARY_USER_EMAIL_DOMAIN = "temporary.potato-agent.local"
 FILENAME_SANITIZE_RE = re.compile(r"[^A-Za-z0-9._-]+")
 TEXT_PREVIEW_EXTENSIONS = {
     ".bat",
@@ -257,8 +273,10 @@ ACTIVITY_REFRESH_EXCLUDED_PATHS = {
     "/api/auth/session",
     "/api/auth/signin",
     "/api/auth/signout",
+    "/api/auth/temporary",
     "/api/auth/password-reset",
     "/api/auth/password-reset/email-verifications",
+    "/api/files/tree",
 }
 EMAIL_VERIFICATION_TTL_SECONDS = 10 * 60
 EMAIL_VERIFICATION_RESEND_COOLDOWN_SECONDS = 60
@@ -321,6 +339,7 @@ class CurrentUser:
     role: str
     mapping_username: str
     target: HermesTarget
+    is_temporary: bool = False
 
 
 class SigninRequest(BaseModel):
@@ -493,6 +512,45 @@ def _validate_signup_payload(
     return username, email, password, display_name, verification_id, verification_code
 
 
+def _reset_mapping_store_cache() -> None:
+    mapping_store._mtime_ns = None
+    mapping_store._targets = []
+
+
+def _generate_temporary_identity() -> tuple[str, str, str]:
+    for _ in range(10):
+        username = f"{TEMPORARY_USER_PREFIX}_{int(time.time())}_{secrets.token_hex(4)}"
+        email = f"{username}@{TEMPORARY_USER_EMAIL_DOMAIN}"
+        if username_exists(username) or email_exists(email):
+            continue
+        return username, email, "Temporary User"
+    raise HTTPException(
+        status_code=503,
+        detail="Failed to allocate a temporary user name. Please try again.",
+    )
+
+
+async def _rollback_temporary_provision(username: str) -> None:
+    normalized_username = username.strip()
+    if not normalized_username:
+        return
+    with contextlib.suppress(Exception):
+        await asyncio.to_thread(
+            privileged_client.deprovision_user,
+            normalized_username,
+            delete_home=True,
+        )
+    with contextlib.suppress(Exception):
+        await asyncio.to_thread(privileged_client.remove_mapping, normalized_username)
+    with contextlib.suppress(Exception):
+        await asyncio.to_thread(
+            delete_user_by_mapping_username,
+            normalized_username,
+        )
+    with contextlib.suppress(Exception):
+        _reset_mapping_store_cache()
+
+
 async def _signup_worker_loop() -> None:
     while True:
         cleanup_terminal_signup_jobs()
@@ -513,8 +571,7 @@ async def _signup_worker_loop() -> None:
                 email=email,
                 display_name=display_name,
             )
-            mapping_store._mtime_ns = None
-            mapping_store._targets = []
+            _reset_mapping_store_cache()
             target = mapping_store.get_target_by_username(username)
             if target is None:
                 raise RuntimeError("Failed to resolve newly created mapping target.")
@@ -523,8 +580,7 @@ async def _signup_worker_loop() -> None:
             set_signup_job_status(job_id, status="completed")
         except Exception as exc:
             try:
-                mapping_store._mtime_ns = None
-                mapping_store._targets = []
+                _reset_mapping_store_cache()
             except Exception:
                 pass
 
@@ -595,6 +651,7 @@ def _serialize_user(user: CurrentUser) -> dict[str, Any]:
         "role": user.role,
         "mapping_username": user.mapping_username,
         "workspace_root": str(_get_user_workspace_root(user)),
+        "is_temporary": bool(user.is_temporary),
     }
 
 
@@ -602,6 +659,12 @@ def _revocation_message(reason: str) -> str:
     if reason == "idle_timeout":
         minutes = max(int(RUNTIME_IDLE_TIMEOUT_SECONDS) // 60, 1)
         return f"Workspace slept after {minutes} minutes of inactivity. Please sign in again."
+    if reason == "temporary_user_expired":
+        minutes = max(int(RUNTIME_IDLE_TIMEOUT_SECONDS) // 60, 1)
+        return (
+            f"Temporary workspace expired after {minutes} minutes of inactivity. "
+            "Your chat history and workspace data were deleted."
+        )
     if reason == "password_changed":
         return "Password changed. Please sign in again."
     return "Session expired"
@@ -642,6 +705,20 @@ def _resolve_current_user(request: Request) -> tuple[CurrentUser | None, str | N
     if revoked_after and issued_at <= revoked_after:
         return None, revoked_reason or "idle_timeout"
 
+    record_is_temporary = is_temporary_user(record.id)
+    if record_is_temporary:
+        idle_status = get_temporary_user_idle_status(
+            record.id,
+            idle_timeout_seconds=RUNTIME_IDLE_TIMEOUT_SECONDS,
+        )
+        if idle_status and bool(idle_status.get("is_expired")):
+            with contextlib.suppress(Exception):
+                revoke_runtime_session(
+                    record.id,
+                    reason="temporary_user_expired",
+                )
+            return None, "temporary_user_expired"
+
     target = mapping_store.resolve_target(
         mapping_username=record.mapping_username,
         email=record.email,
@@ -659,6 +736,7 @@ def _resolve_current_user(request: Request) -> tuple[CurrentUser | None, str | N
             role=record.role,
             mapping_username=record.mapping_username,
             target=target,
+            is_temporary=record_is_temporary,
         ),
         None,
     )
@@ -1913,6 +1991,88 @@ async def _archive_scheduler_loop() -> None:
             pass
 
 
+async def _mark_temporary_cleanup_failed(user_id: str, error_message: str) -> None:
+    if not user_id:
+        return
+    with contextlib.suppress(Exception):
+        await asyncio.to_thread(
+            revoke_runtime_session,
+            user_id,
+            reason="temporary_user_expired",
+        )
+    with contextlib.suppress(Exception):
+        await asyncio.to_thread(
+            mark_temporary_user_cleanup_attempt,
+            user_id,
+            status=TEMPORARY_USER_STATUS_FAILED,
+            error_message=error_message,
+        )
+
+
+async def _close_temporary_user_bridge(user_id: str) -> None:
+    registry: TuiGatewayBridgeRegistry | None = getattr(
+        app.state, "tui_gateway_bridges", None
+    )
+    if registry is None:
+        return
+    close_for_cleanup = getattr(registry, "close_for_cleanup", None)
+    if close_for_cleanup is not None:
+        await close_for_cleanup(user_id)
+        return
+    closed = await registry.close_for_reconfigure(user_id)
+    if not closed:
+        raise RuntimeError("Temporary user still has active gateway requests")
+
+
+async def _cleanup_temporary_user_candidate(
+    auth_user: Any, target: HermesTarget
+) -> bool:
+    user_id = str(getattr(auth_user, "id", "") or "").strip()
+    mapping_username = str(
+        getattr(target, "username", "")
+        or getattr(auth_user, "mapping_username", "")
+        or ""
+    ).strip()
+    if not user_id or not mapping_username:
+        return False
+
+    await asyncio.to_thread(
+        mark_temporary_user_cleanup_attempt,
+        user_id,
+        status=TEMPORARY_USER_STATUS_CLEANING,
+        error_message="",
+    )
+
+    try:
+        await _close_temporary_user_bridge(user_id)
+        await asyncio.to_thread(
+            revoke_runtime_session,
+            user_id,
+            reason="temporary_user_expired",
+        )
+        await asyncio.to_thread(
+            privileged_client.deprovision_user,
+            mapping_username,
+            delete_home=True,
+        )
+        await asyncio.to_thread(privileged_client.remove_mapping, mapping_username)
+        _reset_mapping_store_cache()
+        await asyncio.to_thread(delete_display_user_data, user_id)
+        await asyncio.to_thread(delete_runtime_state, user_id)
+        await asyncio.to_thread(delete_user_by_mapping_username, mapping_username)
+        LOGGER.info("Cleaned up temporary user %s", mapping_username)
+        return True
+    except Exception as exc:
+        detail = str(exc) or type(exc).__name__
+        await _mark_temporary_cleanup_failed(user_id, detail)
+        LOGGER.exception(
+            "Failed to clean up temporary user %s (%s)",
+            mapping_username,
+            user_id,
+        )
+        return False
+
+
 def _stop_idle_runtime_candidate(auth_user: Any, target: HermesTarget) -> bool:
     if not target.systemd_service or not target.username:
         return False
@@ -1979,11 +2139,18 @@ def _stop_idle_runtime_candidate(auth_user: Any, target: HermesTarget) -> bool:
 
 async def _run_runtime_idle_check_once() -> int:
     await asyncio.to_thread(cleanup_expired_runtime_leases)
-    candidates = await asyncio.to_thread(
-        list_idle_runtime_candidates,
-        idle_timeout_seconds=RUNTIME_IDLE_TIMEOUT_SECONDS,
+    candidates, temporary_candidates = await asyncio.gather(
+        asyncio.to_thread(
+            list_idle_runtime_candidates,
+            idle_timeout_seconds=RUNTIME_IDLE_TIMEOUT_SECONDS,
+        ),
+        asyncio.to_thread(
+            list_idle_temporary_user_candidates,
+            idle_timeout_seconds=RUNTIME_IDLE_TIMEOUT_SECONDS,
+            cleanup_retry_seconds=TEMPORARY_USER_CLEANUP_RETRY_SECONDS,
+        ),
     )
-    if not candidates:
+    if not candidates and not temporary_candidates:
         return 0
 
     stopped = 0
@@ -1991,6 +2158,8 @@ async def _run_runtime_idle_check_once() -> int:
     for candidate in candidates:
         auth_user = users_by_id.get(str(candidate.get("user_id") or ""))
         if auth_user is None:
+            continue
+        if is_temporary_user(auth_user.id):
             continue
         target = mapping_store.resolve_target(
             mapping_username=auth_user.mapping_username,
@@ -2000,6 +2169,30 @@ async def _run_runtime_idle_check_once() -> int:
         if target is None:
             continue
         if await asyncio.to_thread(_stop_idle_runtime_candidate, auth_user, target):
+            stopped += 1
+
+    for candidate in temporary_candidates:
+        user_id = str(candidate.get("user_id") or "").strip()
+        if not user_id:
+            continue
+        auth_user = users_by_id.get(user_id)
+        if auth_user is None:
+            await asyncio.to_thread(delete_temporary_user_record, user_id)
+            continue
+        target = mapping_store.resolve_target(
+            mapping_username=str(
+                candidate.get("mapping_username") or auth_user.mapping_username
+            ),
+            email=auth_user.email,
+            username=auth_user.username,
+        )
+        if target is None:
+            await _mark_temporary_cleanup_failed(
+                user_id,
+                "No Hermes runtime is mapped to this temporary user.",
+            )
+            continue
+        if await _cleanup_temporary_user_candidate(auth_user, target):
             stopped += 1
     return stopped
 
@@ -2569,9 +2762,72 @@ async def signin(payload: SigninRequest, response: Response) -> dict[str, Any]:
         role=record.role,
         mapping_username=record.mapping_username,
         target=target,
+        is_temporary=is_temporary_user(record.id),
     )
     _set_session_cookie(response, _create_session_token(user.id, record.auth_session_version))
     return _serialize_user(user)
+
+
+@app.post("/api/auth/temporary")
+async def create_temporary_auth_session(response: Response) -> dict[str, Any]:
+    last_integrity_error: sqlite3.IntegrityError | None = None
+    for _ in range(3):
+        username, email, display_name = _generate_temporary_identity()
+        password = secrets.token_urlsafe(32)
+        try:
+            await asyncio.to_thread(
+                privileged_client.provision_user,
+                username,
+                email=email,
+                display_name=display_name,
+            )
+            _reset_mapping_store_cache()
+            target = mapping_store.get_target_by_username(username)
+            if target is None:
+                raise RuntimeError("Failed to resolve newly created temporary runtime.")
+
+            record = await asyncio.to_thread(
+                create_temporary_user,
+                username=username,
+                email=email,
+                password=password,
+                mapping_username=username,
+                name=display_name,
+            )
+            user = CurrentUser(
+                id=record.id,
+                email=record.email,
+                username=record.username,
+                name=record.name,
+                role=record.role,
+                mapping_username=record.mapping_username,
+                target=target,
+                is_temporary=True,
+            )
+            _set_session_cookie(
+                response,
+                _create_session_token(user.id, record.auth_session_version),
+            )
+            return _serialize_user(user)
+        except sqlite3.IntegrityError as exc:
+            last_integrity_error = exc
+            await _rollback_temporary_provision(username)
+            continue
+        except Exception as exc:
+            await _rollback_temporary_provision(username)
+            raise HTTPException(
+                status_code=503,
+                detail=f"Failed to create temporary user: {exc}",
+            ) from exc
+
+    raise HTTPException(
+        status_code=503,
+        detail=(
+            "Failed to allocate a temporary user name."
+            if last_integrity_error is None
+            else "Temporary user name collision. Please try again."
+        ),
+    )
 
 
 @app.post("/api/auth/signup/email-verifications")
@@ -2892,6 +3148,11 @@ async def change_password(
     response: Response,
     user: CurrentUser = Depends(get_current_user),
 ) -> dict[str, Any]:
+    if user.is_temporary:
+        raise HTTPException(
+            status_code=403,
+            detail="Temporary users cannot change passwords.",
+        )
     current_password = payload.current_password
     new_password = payload.new_password
     if not current_password or not new_password:

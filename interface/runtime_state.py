@@ -7,7 +7,13 @@ import uuid
 from pathlib import Path
 from typing import Any
 
-from interface.auth_db import DEFAULT_AUTH_DB_PATH, connect_auth_db
+from interface.auth_db import (
+    DEFAULT_AUTH_DB_PATH,
+    TEMPORARY_USER_STATUS_ACTIVE,
+    TEMPORARY_USER_STATUS_CLEANING,
+    TEMPORARY_USER_STATUS_FAILED,
+    connect_auth_db,
+)
 
 
 FOREGROUND_CHAT_LEASE = "foreground_chat"
@@ -221,6 +227,15 @@ def get_runtime_state(
     return dict(row) if row is not None else None
 
 
+def delete_runtime_state(user_id: str, db_path: Path = DEFAULT_AUTH_DB_PATH) -> None:
+    ensure_runtime_state_store(db_path)
+    normalized_user_id = user_id.strip()
+    with connect_auth_db(db_path) as conn:
+        conn.execute("DELETE FROM runtime_leases WHERE user_id = ?", (normalized_user_id,))
+        conn.execute("DELETE FROM runtime_state WHERE user_id = ?", (normalized_user_id,))
+        conn.commit()
+
+
 def create_runtime_lease(
     user_id: str,
     *,
@@ -375,3 +390,116 @@ def list_idle_runtime_candidates(
     with connect_auth_db(db_path) as conn:
         rows = conn.execute(query, (cutoff, now)).fetchall()
     return [dict(row) for row in rows]
+
+
+def list_idle_temporary_user_candidates(
+    *,
+    idle_timeout_seconds: int,
+    cleanup_retry_seconds: int,
+    db_path: Path = DEFAULT_AUTH_DB_PATH,
+) -> list[dict[str, Any]]:
+    ensure_runtime_state_store(db_path)
+    now = _now()
+    cutoff = now - max(int(idle_timeout_seconds), 1)
+    retry_cutoff = now - max(int(cleanup_retry_seconds), 1)
+    query = """
+        SELECT *
+        FROM (
+            SELECT tu.user_id,
+                   tu.mapping_username,
+                   tu.created_at,
+                   tu.last_cleanup_attempt_at,
+                   tu.cleanup_status,
+                   tu.cleanup_error,
+                   rs.runtime_started_at,
+                   rs.last_user_message_at,
+                   rs.last_background_activity_at,
+                   max(
+                       tu.created_at,
+                       coalesce(rs.runtime_started_at, 0),
+                       coalesce(rs.last_user_message_at, 0),
+                       coalesce(rs.last_background_activity_at, 0)
+                   ) AS idle_since
+            FROM temporary_users tu
+            LEFT JOIN runtime_state rs ON rs.user_id = tu.user_id
+            WHERE tu.cleanup_status IN (?, ?, ?)
+        ) candidate
+        WHERE idle_since > 0
+          AND idle_since <= ?
+          AND (
+                cleanup_status = ?
+                OR last_cleanup_attempt_at <= ?
+          )
+          AND NOT EXISTS (
+                SELECT 1
+                FROM runtime_leases rl
+                WHERE rl.user_id = candidate.user_id AND rl.expires_at > ?
+          )
+        ORDER BY idle_since ASC
+    """
+    with connect_auth_db(db_path) as conn:
+        rows = conn.execute(
+            query,
+            (
+                TEMPORARY_USER_STATUS_ACTIVE,
+                TEMPORARY_USER_STATUS_CLEANING,
+                TEMPORARY_USER_STATUS_FAILED,
+                cutoff,
+                TEMPORARY_USER_STATUS_ACTIVE,
+                retry_cutoff,
+                now,
+            ),
+        ).fetchall()
+    return [dict(row) for row in rows]
+
+
+def get_temporary_user_idle_status(
+    user_id: str,
+    *,
+    idle_timeout_seconds: int,
+    db_path: Path = DEFAULT_AUTH_DB_PATH,
+) -> dict[str, Any] | None:
+    ensure_runtime_state_store(db_path)
+    normalized_user_id = user_id.strip()
+    if not normalized_user_id:
+        return None
+    now = _now()
+    cutoff = now - max(int(idle_timeout_seconds), 1)
+    query = """
+        SELECT tu.user_id,
+               tu.mapping_username,
+               tu.created_at,
+               tu.cleanup_status,
+               rs.runtime_started_at,
+               rs.last_user_message_at,
+               rs.last_background_activity_at,
+               max(
+                   tu.created_at,
+                   coalesce(rs.runtime_started_at, 0),
+                   coalesce(rs.last_user_message_at, 0),
+                   coalesce(rs.last_background_activity_at, 0)
+               ) AS idle_since,
+               EXISTS (
+                   SELECT 1
+                   FROM runtime_leases rl
+                   WHERE rl.user_id = tu.user_id AND rl.expires_at > ?
+               ) AS has_active_runtime_lease
+        FROM temporary_users tu
+        LEFT JOIN runtime_state rs ON rs.user_id = tu.user_id
+        WHERE tu.user_id = ?
+        LIMIT 1
+    """
+    with connect_auth_db(db_path) as conn:
+        row = conn.execute(query, (now, normalized_user_id)).fetchone()
+    if row is None:
+        return None
+    result = dict(row)
+    idle_since = int(result.get("idle_since") or 0)
+    has_active_runtime_lease = bool(result.get("has_active_runtime_lease"))
+    result["now"] = now
+    result["idle_elapsed_seconds"] = max(now - idle_since, 0) if idle_since else 0
+    result["has_active_runtime_lease"] = has_active_runtime_lease
+    result["is_expired"] = bool(
+        idle_since and idle_since <= cutoff and not has_active_runtime_lease
+    )
+    return result

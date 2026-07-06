@@ -7,6 +7,7 @@ import time
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 import bcrypt
 
@@ -40,6 +41,19 @@ CREATE TABLE IF NOT EXISTS users (
 
 CREATE INDEX IF NOT EXISTS idx_interface_users_mapping_username
 ON users(mapping_username);
+
+CREATE TABLE IF NOT EXISTS temporary_users (
+    user_id TEXT PRIMARY KEY,
+    mapping_username TEXT NOT NULL UNIQUE,
+    created_at INTEGER NOT NULL,
+    last_cleanup_attempt_at INTEGER NOT NULL DEFAULT 0,
+    cleanup_status TEXT NOT NULL DEFAULT 'active',
+    cleanup_error TEXT NOT NULL DEFAULT '',
+    FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_temporary_users_cleanup
+ON temporary_users(cleanup_status, last_cleanup_attempt_at);
 
 CREATE TABLE IF NOT EXISTS signup_jobs (
     job_id TEXT PRIMARY KEY,
@@ -97,6 +111,9 @@ EMAIL_VERIFICATION_STATUS_EXPIRED = "expired"
 EMAIL_VERIFICATION_STATUS_CONSUMED = "consumed"
 EMAIL_VERIFICATION_STATUS_FAILED = "failed"
 DEFAULT_EMAIL_VERIFICATION_MAX_ATTEMPTS = 5
+TEMPORARY_USER_STATUS_ACTIVE = "active"
+TEMPORARY_USER_STATUS_CLEANING = "cleaning"
+TEMPORARY_USER_STATUS_FAILED = "failed"
 
 
 @dataclass(frozen=True)
@@ -468,6 +485,129 @@ def list_users(db_path: Path = DEFAULT_AUTH_DB_PATH) -> list[InterfaceUser]:
     with connect_auth_db(db_path) as conn:
         rows = conn.execute(query).fetchall()
     return [_row_to_user(row) for row in rows if row is not None]
+
+
+def create_temporary_user(
+    *,
+    username: str,
+    email: str,
+    password: str,
+    mapping_username: str,
+    name: str | None = None,
+    db_path: Path | None = None,
+) -> InterfaceUser:
+    resolved_db_path = db_path or DEFAULT_AUTH_DB_PATH
+    normalized_email = email.strip().lower()
+    normalized_username = username.strip()
+    normalized_mapping_username = mapping_username.strip()
+    display_name = (name or username).strip() or username
+    password_hash = hash_password(password)
+    now = int(time.time())
+    user_id = str(uuid.uuid4())
+
+    with connect_auth_db(resolved_db_path) as conn:
+        conn.execute("begin immediate")
+        conn.execute(
+            "insert into users (id, username, email, password_hash, name, role, mapping_username, active, created_at, updated_at) "
+            "values (?, ?, ?, ?, ?, 'user', ?, 1, ?, ?)",
+            (
+                user_id,
+                normalized_username,
+                normalized_email,
+                password_hash,
+                display_name,
+                normalized_mapping_username,
+                now,
+                now,
+            ),
+        )
+        conn.execute(
+            "insert into temporary_users (user_id, mapping_username, created_at, last_cleanup_attempt_at, cleanup_status, cleanup_error) "
+            "values (?, ?, ?, 0, ?, '')",
+            (
+                user_id,
+                normalized_mapping_username,
+                now,
+                TEMPORARY_USER_STATUS_ACTIVE,
+            ),
+        )
+        conn.commit()
+
+    user = get_user_by_id(user_id, resolved_db_path)
+    if user is None:
+        raise RuntimeError("Failed to create temporary user")
+    return user
+
+
+def get_temporary_user(
+    user_id: str, db_path: Path | None = None
+) -> dict[str, Any] | None:
+    resolved_db_path = db_path or DEFAULT_AUTH_DB_PATH
+    normalized_user_id = user_id.strip()
+    with connect_auth_db(resolved_db_path) as conn:
+        row = conn.execute(
+            """
+            select user_id, mapping_username, created_at,
+                   last_cleanup_attempt_at, cleanup_status, cleanup_error
+            from temporary_users
+            where user_id = ?
+            limit 1
+            """,
+            (normalized_user_id,),
+        ).fetchone()
+    return dict(row) if row is not None else None
+
+
+def is_temporary_user(
+    user_id: str, db_path: Path | None = None
+) -> bool:
+    return get_temporary_user(user_id, db_path=db_path) is not None
+
+
+def mark_temporary_user_cleanup_attempt(
+    user_id: str,
+    *,
+    status: str,
+    error_message: str = "",
+    now: int | None = None,
+    db_path: Path | None = None,
+) -> bool:
+    resolved_db_path = db_path or DEFAULT_AUTH_DB_PATH
+    normalized_user_id = user_id.strip()
+    timestamp = int(time.time()) if now is None else int(now)
+    normalized_status = status.strip() or TEMPORARY_USER_STATUS_FAILED
+    with connect_auth_db(resolved_db_path) as conn:
+        cursor = conn.execute(
+            """
+            update temporary_users
+            set cleanup_status = ?,
+                cleanup_error = ?,
+                last_cleanup_attempt_at = ?
+            where user_id = ?
+            """,
+            (
+                normalized_status,
+                str(error_message or "")[:2000],
+                timestamp,
+                normalized_user_id,
+            ),
+        )
+        conn.commit()
+        return cursor.rowcount > 0
+
+
+def delete_temporary_user_record(
+    user_id: str, db_path: Path | None = None
+) -> bool:
+    resolved_db_path = db_path or DEFAULT_AUTH_DB_PATH
+    normalized_user_id = user_id.strip()
+    with connect_auth_db(resolved_db_path) as conn:
+        cursor = conn.execute(
+            "delete from temporary_users where user_id = ?",
+            (normalized_user_id,),
+        )
+        conn.commit()
+        return cursor.rowcount > 0
 
 
 def upsert_user(
@@ -872,10 +1012,42 @@ def delete_signup_job(job_id: str, db_path: Path = DEFAULT_AUTH_DB_PATH) -> bool
 def delete_user_by_mapping_username(
     mapping_username: str, db_path: Path = DEFAULT_AUTH_DB_PATH
 ) -> bool:
+    normalized_mapping_username = mapping_username.strip()
     with connect_auth_db(db_path) as conn:
+        conn.execute(
+            """
+            delete from temporary_users
+            where mapping_username = ?
+               or user_id in (
+                    select id from users
+                    where mapping_username = ? or username = ?
+               )
+            """,
+            (
+                normalized_mapping_username,
+                normalized_mapping_username,
+                normalized_mapping_username,
+            ),
+        )
         cursor = conn.execute(
             "delete from users where mapping_username = ? or username = ?",
-            (mapping_username, mapping_username),
+            (normalized_mapping_username, normalized_mapping_username),
+        )
+        conn.commit()
+        return cursor.rowcount > 0
+
+
+def delete_user_by_id(user_id: str, db_path: Path | None = None) -> bool:
+    resolved_db_path = db_path or DEFAULT_AUTH_DB_PATH
+    normalized_user_id = user_id.strip()
+    with connect_auth_db(resolved_db_path) as conn:
+        conn.execute(
+            "delete from temporary_users where user_id = ?",
+            (normalized_user_id,),
+        )
+        cursor = conn.execute(
+            "delete from users where id = ?",
+            (normalized_user_id,),
         )
         conn.commit()
         return cursor.rowcount > 0

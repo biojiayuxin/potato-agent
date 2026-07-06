@@ -1,6 +1,15 @@
 {
   "updates": [
     {
+      "version": "2026-07-06-002",
+      "title": "Quick Start mode",
+      "date": "July 6, 2026",
+      "summary": "Added Quick Start mode.",
+      "items": [
+        "Added Quick Start mode."
+      ]
+    },
+    {
       "version": "2026-07-06-001",
       "title": "Chat export",
       "date": "July 6, 2026",

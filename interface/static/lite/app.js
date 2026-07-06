@@ -64,6 +64,9 @@ const COMMON_PASSWORD_SYMBOLS = '!"#$%&\'()*+,-./:;<=>?@[\\]^_`{|}~';
 const PASSWORD_COMPLEXITY_MESSAGE = (
   'Password must be at least 8 characters and include uppercase letters, lowercase letters, numbers, and common symbols.'
 );
+const TEMPORARY_USER_NOTICE = (
+  'Temporary users are intended for occasional use. If inactive for more than 30 minutes, the user\'s chat history and workspace data will be deleted.'
+);
 
 const dom = {
   loginView: document.getElementById('login-view'),
@@ -97,6 +100,7 @@ const dom = {
   registerCodeStatus: document.getElementById('register-code-status'),
   showRegisterButton: document.getElementById('show-register-button'),
   showLoginButton: document.getElementById('show-login-button'),
+  showTemporaryButton: document.getElementById('show-temporary-button'),
   authBackButton: document.getElementById('auth-back-button'),
   switchRegisterButton: document.getElementById('switch-register-button'),
   registerBackButton: document.getElementById('register-back-button'),
@@ -193,6 +197,7 @@ const dom = {
 };
 
 let loginInFlight = false;
+let temporaryLoginInFlight = false;
 let bootstrapInFlight = false;
 let signupInFlight = false;
 let tuiBridge = null;
@@ -223,7 +228,6 @@ let liveSessionPollGenerationCounter = 0;
 let fileTreeRefreshTimer = null;
 let fileTreeRefreshInFlight = false;
 let fileTreeRefreshPending = false;
-let fileTreeLastFocusRefreshAt = 0;
 
 const SIDEBAR_WIDTH_KEY = 'lite_sidebar_width';
 const FILES_WIDTH_KEY = 'lite_files_width';
@@ -239,7 +243,6 @@ const TUI_BRIDGE_RECONNECT_MAX_DELAY_MS = 15000;
 const LIVE_SESSION_POLL_INTERVAL_MS = 2000;
 const LIVE_SESSION_POLL_FAILURE_DELAY_MS = 5000;
 const FILE_TREE_REFRESH_DEBOUNCE_MS = 800;
-const FILE_TREE_FOCUS_REFRESH_MIN_INTERVAL_MS = 5000;
 const FILE_TREE_REFRESH_MAX_CONCURRENCY = 3;
 const ATTACHMENT_BLOCK_START = '<potato-files>';
 const ATTACHMENT_BLOCK_END = '</potato-files>';
@@ -1990,6 +1993,16 @@ const setLoginPending = (pending) => {
   submitButton.textContent = pending ? 'Signing in...' : 'Sign in';
 };
 
+const setTemporaryLoginPending = (pending) => {
+  temporaryLoginInFlight = pending;
+  if (dom.showTemporaryButton) {
+    dom.showTemporaryButton.disabled = pending;
+    dom.showTemporaryButton.textContent = pending ? 'Creating temporary workspace...' : 'Temporary user';
+  }
+  if (dom.showLoginButton) dom.showLoginButton.disabled = pending;
+  if (dom.showRegisterButton) dom.showRegisterButton.disabled = pending;
+};
+
 const setSignupPending = (pending) => {
   signupInFlight = pending;
   const submitButton = dom.registerForm.querySelector('button[type="submit"]');
@@ -2022,6 +2035,7 @@ const clearPasswordForm = () => {
 };
 
 const openPasswordModal = () => {
+  if (state.user?.is_temporary) return;
   if (!dom.passwordModal) return;
   clearPasswordForm();
   dom.passwordModal.hidden = false;
@@ -2741,7 +2755,6 @@ const resetWorkspaceState = () => {
     fileTreeRefreshTimer = null;
   }
   fileTreeRefreshPending = false;
-  fileTreeLastFocusRefreshAt = 0;
   state.streamingMessageIds.clear();
   busySessionIds.clear();
   sessionRunTransportById.clear();
@@ -2779,9 +2792,12 @@ const showRuntimeStartView = ({ title, copy, error = '', canRetry = false, canBa
 
 const startWorkspaceRuntime = async (user, { allowRetry = true, source = 'signin' } = {}) => {
   state.pendingWorkspaceUser = user || null;
+  const isTemporaryUser = Boolean(user?.is_temporary);
   showRuntimeStartView({
-    title: 'Starting your Potato Agent runtime',
-    copy: 'We are waking the dedicated Potato Agent service bound to your account. This usually takes a few seconds.',
+    title: isTemporaryUser ? 'Starting your temporary workspace' : 'Starting your Potato Agent runtime',
+    copy: isTemporaryUser
+      ? 'We are waking a temporary Potato Agent workspace for this browser session. This usually takes a few seconds.'
+      : 'We are waking the dedicated Potato Agent service bound to your account. This usually takes a few seconds.',
     error: '',
     canRetry: false,
     canBack: false,
@@ -2802,8 +2818,10 @@ const startWorkspaceRuntime = async (user, { allowRetry = true, source = 'signin
     resetWorkspaceState();
     const message = String(error.message || 'Failed to start Potato Agent runtime');
     showRuntimeStartView({
-      title: 'Failed to start your Potato Agent runtime',
-      copy: source === 'restore'
+      title: isTemporaryUser ? 'Failed to start your temporary workspace' : 'Failed to start your Potato Agent runtime',
+      copy: isTemporaryUser
+        ? 'The temporary account was created, but its Potato Agent runtime could not be started. Review the error below before retrying.'
+        : source === 'restore'
         ? 'The previous session is valid, but the Potato Agent runtime could not be started. Review the error below before retrying.'
         : 'Sign-in succeeded, but the Potato Agent runtime could not be started. Review the error below before retrying.',
       error: message,
@@ -2932,10 +2950,13 @@ const api = async (path, options = {}) => {
       (response.status === 401 || response.status === 403)
       && (
         payload?.reason === 'idle_timeout'
+        || payload?.reason === 'temporary_user_expired'
         || payload?.reason === 'password_changed'
         || /Workspace slept/i.test(detail)
+        || /Temporary workspace expired/i.test(detail)
         || /Password changed/i.test(detail)
         || /Please sign in again/i.test(detail)
+        || (state.user && /Not authenticated/i.test(detail))
       )
     ) {
       handleSessionExpired(payload?.message || detail);
@@ -4177,6 +4198,9 @@ const renderWorkspaceHeader = () => {
     dom.userName.textContent = state.user?.username || state.user?.name || state.user?.email || 'Potato workspace';
   }
   dom.userEmail.textContent = state.user?.email || '';
+  const canChangePassword = Boolean(state.user) && !state.user?.is_temporary;
+  if (dom.changePasswordButton) dom.changePasswordButton.hidden = !canChangePassword;
+  if (dom.sidebarChangePasswordButton) dom.sidebarChangePasswordButton.hidden = !canChangePassword;
   renderUpdateNotesUnreadState();
   dom.chatTitle.textContent = getActiveWorkspaceTitle();
   if (!dom.modelSelect) return;
@@ -4972,14 +4996,6 @@ const scheduleFileTreeRefresh = (reason = '', { delay = FILE_TREE_REFRESH_DEBOUN
     fileTreeRefreshTimer = null;
     runFileTreeRefreshNow({ silent: true });
   }, Math.max(0, Number(delay) || 0));
-};
-
-const refreshFileTreeAfterFocus = () => {
-  if (document.hidden || !state.user || !state.currentPath) return;
-  const now = Date.now();
-  if (now - fileTreeLastFocusRefreshAt < FILE_TREE_FOCUS_REFRESH_MIN_INTERVAL_MS) return;
-  fileTreeLastFocusRefreshAt = now;
-  scheduleFileTreeRefresh('focus');
 };
 
 const fetchWorkspaceFiles = async () => {
@@ -5898,6 +5914,23 @@ dom.showLoginButton.addEventListener('click', () => {
   setAuthViewMode('signin');
 });
 
+dom.showTemporaryButton?.addEventListener('click', async () => {
+  if (loginInFlight || temporaryLoginInFlight || bootstrapInFlight) return;
+  if (!window.confirm(TEMPORARY_USER_NOTICE)) return;
+
+  try {
+    setTemporaryLoginPending(true);
+    const response = await api('/api/auth/temporary', { method: 'POST' });
+    const user = await response.json();
+    await startWorkspaceRuntime(user, { allowRetry: true, source: 'temporary' });
+  } catch (error) {
+    setAuthViewMode('signin');
+    showError(dom.loginError, String(error.message || 'Failed to create temporary user'));
+  } finally {
+    setTemporaryLoginPending(false);
+  }
+});
+
 dom.forgotPasswordButton?.addEventListener('click', () => {
   const loginEmail = document.getElementById('email')?.value.trim() || '';
   if (dom.passwordResetEmail && !dom.passwordResetEmail.value.trim()) {
@@ -6174,18 +6207,6 @@ dom.filePathInput?.addEventListener('keydown', async (event) => {
   if (event.key !== 'Enter' || event.isComposing) return;
   event.preventDefault();
   await openDirectory(dom.filePathInput?.value || '').catch((error) => showChatError(error.message));
-});
-
-window.addEventListener('focus', refreshFileTreeAfterFocus);
-document.addEventListener('visibilitychange', () => {
-  if (document.hidden) {
-    if (fileTreeRefreshTimer) {
-      window.clearTimeout(fileTreeRefreshTimer);
-      fileTreeRefreshTimer = null;
-    }
-    return;
-  }
-  refreshFileTreeAfterFocus();
 });
 
 const handleMobilePanelMediaChange = () => {

@@ -557,6 +557,16 @@ class TuiGatewayBridgeRegistry:
         await bridge.close()
         return True
 
+    async def close_for_cleanup(self, user_id: str) -> None:
+        async with self._lock:
+            bridge = self._bridges.pop(user_id, None)
+            close_task = self._close_tasks.pop(user_id, None)
+
+        if close_task is not None:
+            close_task.cancel()
+        if bridge is not None:
+            await bridge.close()
+
     async def maybe_close_if_unused(self, user_id: str) -> None:
         async with self._lock:
             bridge = self._bridges.get(user_id)
