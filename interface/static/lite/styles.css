@@ -894,6 +894,72 @@ button.stretch {
   gap: 12px;
 }
 
+.chat-export-button {
+  position: absolute;
+  top: 12px;
+  right: 18px;
+  z-index: 5;
+  min-height: 36px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  flex: 0 0 auto;
+  white-space: nowrap;
+  opacity: 0;
+  pointer-events: none;
+  transform: translateY(-4px);
+  box-shadow: 0 10px 22px rgba(15, 23, 42, 0.12);
+  transition: opacity 120ms ease, transform 120ms ease;
+}
+
+.chat-tab-panel:hover .chat-export-button,
+.chat-export-button:focus,
+.chat-export-button:focus-visible {
+  opacity: 1;
+  pointer-events: auto;
+  transform: translateY(0);
+}
+
+.chat-export-button:disabled {
+  cursor: not-allowed;
+}
+
+.chat-tab-panel:hover .chat-export-button:disabled,
+.chat-export-button:disabled:focus,
+.chat-export-button:disabled:focus-visible {
+  opacity: 0.55;
+}
+
+.chat-export-button:disabled:hover {
+  border-color: var(--border);
+  background: var(--panel);
+}
+
+.chat-export-icon {
+  width: 15px;
+  height: 15px;
+  display: block;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  pointer-events: none;
+}
+
+@media (hover: none) {
+  .chat-export-button {
+    opacity: 1;
+    pointer-events: auto;
+    transform: translateY(0);
+  }
+
+  .chat-export-button:disabled {
+    opacity: 0.55;
+  }
+}
+
 .topbar-password-button {
   flex: 0 0 auto;
   white-space: nowrap;
@@ -2867,6 +2933,7 @@ button.stretch {
 }
 
 .chat-tab-panel {
+  position: relative;
   display: grid;
   grid-template-rows: minmax(0, 1fr) auto;
   overflow: hidden;
@@ -3636,6 +3703,13 @@ button.stretch {
   .workspace-view .topbar-actions {
     width: 100%;
     align-items: stretch;
+  }
+
+  .workspace-view .chat-export-button {
+    top: 10px;
+    right: 12px;
+    min-height: 36px;
+    padding: 0 10px;
   }
 
   .mobile-panel-button {

@@ -130,7 +130,13 @@ from interface.tui_gateway_bridge import (
     TuiGatewayBridgeError,
     TuiGatewayBridgeRegistry,
 )
-from interface.session_run_manager import ACTIVE_LIVE_STATUSES, SessionRunManager
+from interface.session_run_manager import (
+    ACTIVE_LIVE_STATUSES,
+    ATTACHMENT_BLOCK_END,
+    ATTACHMENT_BLOCK_START,
+    ATTACHMENT_HINT_LINE,
+    SessionRunManager,
+)
 from interface.spatial_viewer import router as spatial_viewer_router
 
 
@@ -1433,6 +1439,156 @@ def _build_fallback_display_messages(
 
     flush_pending()
     return normalized
+
+
+def _markdown_single_line(value: Any, default: str = "") -> str:
+    text = re.sub(r"\s+", " ", str(value or "")).strip()
+    return text or default
+
+
+def _normalize_markdown_body(value: Any) -> str:
+    return str(value or "").replace("\r\n", "\n").replace("\r", "\n").strip()
+
+
+def _strip_export_progress_content(content: str) -> str:
+    cleaned = _normalize_markdown_body(content)
+    for progress_line in _extract_progress_lines(cleaned):
+        cleaned = cleaned.replace(progress_line, "")
+    return re.sub(r"\n{3,}", "\n\n", cleaned).strip()
+
+
+def _parse_stored_user_content_for_export(
+    content: Any,
+) -> tuple[str, list[dict[str, Any]]]:
+    source = str(content or "")
+    start = source.find(ATTACHMENT_BLOCK_START)
+    end = source.find(ATTACHMENT_BLOCK_END)
+    if start != 0 or end < 0:
+        return source, []
+
+    json_text = source[len(ATTACHMENT_BLOCK_START) : end].strip()
+    remainder = source[end + len(ATTACHMENT_BLOCK_END) :].lstrip()
+    if remainder.startswith(ATTACHMENT_HINT_LINE):
+        remainder = remainder[len(ATTACHMENT_HINT_LINE) :].lstrip()
+
+    parsed_files: list[dict[str, Any]] = []
+    try:
+        decoded = json.loads(json_text)
+    except json.JSONDecodeError:
+        decoded = []
+    if isinstance(decoded, list):
+        for item in decoded:
+            if not isinstance(item, dict):
+                continue
+            try:
+                size = int(item.get("size") or 0)
+            except (TypeError, ValueError):
+                size = 0
+            parsed_files.append(
+                {
+                    "name": str(item.get("name") or "attachment"),
+                    "localPath": str(item.get("path") or item.get("localPath") or ""),
+                    "content_type": str(item.get("content_type") or ""),
+                    "size": size,
+                }
+            )
+
+    return remainder, parsed_files
+
+
+def _format_export_attachment(file: dict[str, Any]) -> str:
+    name = _markdown_single_line(file.get("name"), "attachment")
+    local_path = _markdown_single_line(
+        file.get("localPath") or file.get("path") or "", ""
+    )
+    if local_path:
+        return f"- {name} ({local_path})"
+    return f"- {name}"
+
+
+def _export_message_section(message: dict[str, Any]) -> tuple[str, str] | None:
+    normalized = _normalize_display_message(message)
+    role = str(normalized.get("role") or "").strip()
+    if role == "tool":
+        return None
+
+    if role == "user":
+        content, parsed_files = _parse_stored_user_content_for_export(
+            normalized.get("content")
+        )
+        files = normalized.get("files") if isinstance(normalized.get("files"), list) else []
+        if not files and parsed_files:
+            files = parsed_files
+
+        blocks: list[str] = []
+        if files:
+            attachment_lines = [
+                _format_export_attachment(item)
+                for item in files
+                if isinstance(item, dict)
+            ]
+            if attachment_lines:
+                blocks.append("**Attachments**\n" + "\n".join(attachment_lines))
+
+        content_text = _normalize_markdown_body(content)
+        if content_text:
+            blocks.append(content_text)
+
+        if not blocks:
+            return None
+        return "You", "\n\n".join(blocks)
+
+    if role != "assistant":
+        return None
+
+    content_text = _strip_export_progress_content(str(normalized.get("content") or ""))
+    if not content_text:
+        return None
+    return "Potato Agent", content_text
+
+
+def _build_session_markdown_export(title: str, messages: list[dict[str, Any]]) -> str:
+    heading = _markdown_single_line(title, "Chat export")
+    parts = [f"# {heading}"]
+    exported_count = 0
+
+    for message in messages:
+        if not isinstance(message, dict):
+            continue
+        section = _export_message_section(message)
+        if section is None:
+            continue
+        label, body = section
+        parts.extend(["", f"## {label}", "", body])
+        exported_count += 1
+
+    if exported_count == 0:
+        parts.extend(["", "_No exportable chat messages._"])
+
+    return "\n".join(parts).rstrip() + "\n"
+
+
+def _export_markdown_filename(title: str, session_id: str) -> str:
+    base = _markdown_single_line(title, "")
+    base = re.sub(r'[\x00-\x1f\x7f/\\:*?"<>|]+', "_", base).strip(" ._")
+    if not base or base == "New chat":
+        session_fragment = re.sub(r"[^A-Za-z0-9_-]+", "", str(session_id or ""))[:12]
+        base = f"chat-{session_fragment}" if session_fragment else "chat"
+    if len(base) > 96:
+        base = base[:96].rstrip(" ._")
+    if not base.lower().endswith(".md"):
+        base = f"{base}.md"
+    return base
+
+
+def _session_export_title(
+    logical_session: dict[str, Any] | None,
+    display_meta: dict[str, Any] | None,
+    session_id: str,
+) -> str:
+    root_title = _markdown_single_line((logical_session or {}).get("title"), "")
+    draft_title = _markdown_single_line((display_meta or {}).get("draft_title"), "")
+    return root_title or draft_title or f"Chat {str(session_id or '').strip() or 'export'}"
 
 
 def _display_message_bucket_key(message: dict[str, Any]) -> str:
@@ -3027,6 +3183,49 @@ async def get_session_detail(
         "messages": [_normalize_display_message(item) for item in display_messages],
         "live": live_state,
     }
+
+
+@app.get("/api/sessions/{session_id}/export.md")
+async def export_session_markdown(
+    session_id: str, user: CurrentUser = Depends(get_current_user)
+) -> FastAPIResponse:
+    display_meta_fallback = get_display_session_meta(user.id, session_id)
+    with _open_session_db(user.target) as db:
+        logical_session_id, logical_session, tip_session_id, _ = (
+            _resolve_logical_session_context(db, session_id)
+        )
+        if not logical_session or not _is_interface_managed_source(
+            logical_session.get("source")
+        ):
+            if display_meta_fallback is None:
+                raise HTTPException(status_code=404, detail="Session not found")
+            logical_session_id = session_id
+            logical_session = {"id": session_id, "source": "tui", "title": ""}
+            raw_messages = []
+        else:
+            raw_messages = db.get_messages(tip_session_id)
+
+    display_messages = get_display_messages(user.id, logical_session_id)
+    if display_messages is None:
+        display_messages = _build_fallback_display_messages(raw_messages)
+
+    display_meta = get_display_session_meta(user.id, logical_session_id)
+    export_title = _session_export_title(
+        logical_session,
+        display_meta or display_meta_fallback,
+        logical_session_id,
+    )
+    markdown = _build_session_markdown_export(export_title, display_messages)
+    filename = _export_markdown_filename(export_title, logical_session_id)
+
+    return FastAPIResponse(
+        content=markdown,
+        media_type="text/markdown; charset=utf-8",
+        headers={
+            "Content-Disposition": _attachment_content_disposition(filename),
+            "X-Content-Type-Options": "nosniff",
+        },
+    )
 
 
 @app.put("/api/sessions/{session_id}/display")

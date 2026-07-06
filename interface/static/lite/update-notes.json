@@ -1,6 +1,15 @@
 {
   "updates": [
     {
+      "version": "2026-07-06-001",
+      "title": "Chat export",
+      "date": "July 6, 2026",
+      "summary": "Added chat history export.",
+      "items": [
+        "Added chat history export."
+      ]
+    },
+    {
       "version": "2026-07-05-001",
       "title": "Workspace updates",
       "date": "July 5, 2026",

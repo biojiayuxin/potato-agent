@@ -24,6 +24,7 @@ const state = {
   pendingAttachments: [],
   composerMode: 'chat',
   isSending: false,
+  chatExporting: false,
   chatErrorTimer: null,
   authPollTimer: null,
   signupJobId: null,
@@ -126,6 +127,7 @@ const dom = {
   chatTitle: document.getElementById('chat-title'),
   mobileChatsButton: document.getElementById('mobile-chats-button'),
   mobileFilesButton: document.getElementById('mobile-files-button'),
+  exportChatButton: document.getElementById('export-chat-button'),
   mobilePanelBackdrop: document.getElementById('mobile-panel-backdrop'),
   modelName: document.getElementById('model-name'),
   modelSelect: document.getElementById('model-select'),
@@ -414,6 +416,107 @@ const getSessionTitleById = (sessionId) => {
   }
   const session = state.sessions.find((chat) => chat.id === normalizedSessionId);
   return String(session?.title || '').trim();
+};
+
+const hasExportableActiveMessages = () => state.messages.some((message) => {
+  const role = String(message?.role || '').trim();
+  if (role !== 'user' && role !== 'assistant') return false;
+  if (String(message?.content ?? '').trim()) return true;
+  return role === 'user' && Array.isArray(message?.files) && message.files.length > 0;
+});
+
+const getChatExportDisabledReason = () => {
+  const sessionId = getActivePersistentSessionId();
+  if (state.chatExporting) return 'Exporting chat...';
+  if (!sessionId || state.activeSession?.isDraft) return 'Open a saved chat to export.';
+  if (state.sessionHistoryLoading) return 'Wait for chat history to finish loading.';
+  if (isSessionBusy(sessionId) || sessionNeedsApproval(sessionId)) {
+    return 'Wait for the current response to finish before exporting.';
+  }
+  if (!hasExportableActiveMessages()) return 'No chat messages to export.';
+  return '';
+};
+
+const refreshExportButtonState = () => {
+  if (!dom.exportChatButton) return;
+  const reason = getChatExportDisabledReason();
+  dom.exportChatButton.disabled = Boolean(reason);
+  dom.exportChatButton.title = reason || 'Export chat';
+  dom.exportChatButton.setAttribute('aria-disabled', reason ? 'true' : 'false');
+};
+
+const buildSessionExportUrl = (sessionId) => (
+  `/api/sessions/${encodeURIComponent(sessionId)}/export.md`
+);
+
+const sanitizeDownloadFilename = (value) => {
+  const cleaned = String(value || 'chat')
+    .replace(/[\\/:*?"<>|\x00-\x1f]+/g, '_')
+    .replace(/^\.+/, '')
+    .trim()
+    .slice(0, 96)
+    .replace(/[ ._]+$/g, '');
+  const base = cleaned || 'chat';
+  return base.toLowerCase().endsWith('.md') ? base : `${base}.md`;
+};
+
+const parseContentDispositionFilename = (header) => {
+  const value = String(header || '');
+  const encoded = value.match(/filename\*=utf-8''([^;]+)/i);
+  if (encoded?.[1]) {
+    try {
+      return decodeURIComponent(encoded[1].trim().replace(/^"|"$/g, ''));
+    } catch {
+      return encoded[1].trim().replace(/^"|"$/g, '');
+    }
+  }
+
+  const quoted = value.match(/filename="([^"]+)"/i);
+  if (quoted?.[1]) return quoted[1];
+
+  const plain = value.match(/filename=([^;]+)/i);
+  if (plain?.[1]) return plain[1].trim();
+
+  return '';
+};
+
+const downloadBlob = (blob, filename) => {
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement('a');
+  link.href = url;
+  link.download = filename;
+  link.hidden = true;
+  document.body.append(link);
+  link.click();
+  link.remove();
+  window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+};
+
+const exportActiveChat = async () => {
+  const disabledReason = getChatExportDisabledReason();
+  if (disabledReason) {
+    showChatError(disabledReason);
+    return;
+  }
+
+  const sessionId = getActivePersistentSessionId();
+  state.chatExporting = true;
+  refreshExportButtonState();
+
+  try {
+    const response = await api(buildSessionExportUrl(sessionId), { method: 'GET' });
+    const blob = await response.blob();
+    const filename = (
+      parseContentDispositionFilename(response.headers.get('Content-Disposition'))
+      || sanitizeDownloadFilename(getActiveChatTitle())
+    );
+    downloadBlob(blob, sanitizeDownloadFilename(filename));
+  } catch (error) {
+    showChatError(String(error.message || 'Failed to export chat'));
+  } finally {
+    state.chatExporting = false;
+    refreshExportButtonState();
+  }
 };
 
 const resetSessionRenameState = () => {
@@ -1590,6 +1693,7 @@ const refreshComposerBusyState = () => {
   if (dom.modelSelect) {
     dom.modelSelect.disabled = isActiveSessionBlockingModelSwitch() || state.models.length <= 1;
   }
+  refreshExportButtonState();
 };
 
 const setComposerMode = (mode) => {
@@ -1628,6 +1732,7 @@ const setSessionPendingApproval = (sessionId, approval) => {
     sessionId: normalizedSessionId,
   });
   syncActiveSessionUiState();
+  refreshExportButtonState();
   renderApprovalModal();
 };
 
@@ -1637,12 +1742,14 @@ const clearSessionPendingApproval = (sessionId = '') => {
   if (!normalizedSessionId) {
     state.pendingApproval = null;
     showError(dom.approvalError, '');
+    refreshExportButtonState();
     renderApprovalModal();
     return;
   }
   pendingApprovalsBySessionId.delete(normalizedSessionId);
   syncActiveSessionUiState();
   showError(dom.approvalError, '');
+  refreshExportButtonState();
   renderApprovalModal();
 };
 
@@ -2621,6 +2728,7 @@ const resetWorkspaceState = () => {
   state.filePreviewTabs = [];
   state.models = [];
   state.selectedModel = null;
+  state.chatExporting = false;
   state.rootPath = '';
   state.workspaceRoot = '';
   state.currentPath = '';
@@ -5959,6 +6067,10 @@ dom.mobileChatsButton?.addEventListener('click', () => {
 
 dom.mobileFilesButton?.addEventListener('click', () => {
   toggleMobilePanel('files');
+});
+
+dom.exportChatButton?.addEventListener('click', () => {
+  exportActiveChat().catch((error) => showChatError(String(error.message || 'Failed to export chat')));
 });
 
 dom.mobilePanelBackdrop?.addEventListener('click', () => {

@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Potato Agent</title>
     <link rel="icon" type="image/png" href="./static/favicon.png" />
-    <link rel="stylesheet" href="./static/lite/styles.css" />
+    <link rel="stylesheet" href="./static/lite/styles.css?v=20260706-chat-export-floating" />
   </head>
   <body>
     <div id="app" class="app-shell">
@@ -304,6 +304,14 @@
               <div id="workspace-tabs" class="workspace-tabs" role="tablist" aria-label="Open tabs"></div>
               <div id="workspace-tab-panels" class="workspace-tab-panels">
                 <div id="chat-tab-panel" class="workspace-tab-panel chat-tab-panel" role="tabpanel" aria-label="chats">
+                  <button id="export-chat-button" class="ghost small chat-export-button" type="button" aria-label="Export chat as markdown" title="Export chat" disabled>
+                    <svg class="chat-export-icon" viewBox="0 0 24 24" aria-hidden="true">
+                      <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
+                      <path d="M7 10l5 5 5-5"></path>
+                      <path d="M12 15V3"></path>
+                    </svg>
+                    <span>Export chat</span>
+                  </button>
                   <div id="messages" class="messages"></div>
                   <div id="tui-bridge-status" class="muted tiny" hidden></div>
                 </div>
@@ -472,6 +480,6 @@
     </template>
 
     <script src="./static/lite/vendor/marked.umd.js"></script>
-    <script type="module" src="./static/lite/app.js?v=20260627-plan-mode-label"></script>
+    <script type="module" src="./static/lite/app.js?v=20260706-chat-export-floating"></script>
   </body>
 </html>

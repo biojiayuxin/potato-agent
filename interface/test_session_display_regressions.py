@@ -383,6 +383,107 @@ def test_session_detail_prefers_saved_display_transcript() -> None:
         client.close()
 
 
+def test_session_markdown_export_uses_display_transcript_without_tool_context() -> None:
+    client, _, user = _build_client_and_user()
+    try:
+        from interface.display_store import save_display_messages
+
+        save_display_messages(
+            user.id,
+            "sess_tui_1",
+            [
+                {
+                    "id": "user-1",
+                    "role": "user",
+                    "content": "列出 test_dir 中的文件",
+                    "progressLines": [],
+                    "done": True,
+                },
+                {
+                    "id": "assistant-1",
+                    "role": "assistant",
+                    "content": "`🛠️ list_directory test_dir`\n\ntest_dir 里有 2 个文件：test.py 和 test2.py",
+                    "reasoningContent": "need to inspect the folder",
+                    "toolCalls": [
+                        {
+                            "id": "call_1",
+                            "index": 0,
+                            "function": {
+                                "name": "list_directory",
+                                "arguments": '{"path":"test_dir"}',
+                            },
+                        }
+                    ],
+                    "progressLines": ["`🛠️ list_directory test_dir`"],
+                    "done": True,
+                },
+            ],
+            draft_title="列出 test_dir",
+        )
+
+        response = client.get("/api/sessions/sess_tui_1/export.md")
+        assert response.status_code == 200, response.text
+        assert response.headers["content-type"].startswith("text/markdown")
+        assert "attachment;" in response.headers["content-disposition"]
+
+        markdown = response.text
+        assert markdown.startswith("# 列出 test_dir\n")
+        assert "## You\n\n列出 test_dir 中的文件" in markdown
+        assert "## Potato Agent\n\ntest_dir 里有 2 个文件：test.py 和 test2.py" in markdown
+        assert "🛠️" not in markdown
+        assert "list_directory" not in markdown
+        assert "need to inspect" not in markdown
+        assert "call_1" not in markdown
+    finally:
+        client.close()
+
+
+def test_session_markdown_export_lists_user_attachments() -> None:
+    client, _, user = _build_client_and_user()
+    try:
+        from interface.display_store import save_display_messages
+
+        save_display_messages(
+            user.id,
+            "sess_tui_1",
+            [
+                {
+                    "id": "user-1",
+                    "role": "user",
+                    "content": "请分析这个文件",
+                    "files": [
+                        {
+                            "name": "报告.md",
+                            "localPath": "/tmp/报告.md",
+                            "content_type": "text/markdown",
+                            "size": 12,
+                        }
+                    ],
+                    "progressLines": [],
+                    "done": True,
+                },
+                {
+                    "id": "assistant-1",
+                    "role": "assistant",
+                    "content": "我会基于附件内容分析。",
+                    "progressLines": [],
+                    "done": True,
+                },
+            ],
+            draft_title="附件分析",
+        )
+
+        response = client.get("/api/sessions/sess_tui_1/export.md")
+        assert response.status_code == 200, response.text
+        markdown = response.text
+        assert "**Attachments**" in markdown
+        assert "- 报告.md (/tmp/报告.md)" in markdown
+        assert "请分析这个文件" in markdown
+        assert "我会基于附件内容分析。" in markdown
+    finally:
+        client.close()
+
+
 def test_display_sync_merges_progress_with_fallback_tool_context() -> None:
     client, _, _ = _build_client_and_user()
     try:
@@ -431,6 +532,22 @@ def test_session_detail_falls_back_when_display_transcript_missing() -> None:
         client.close()
 
 
+def test_session_markdown_export_falls_back_without_tool_process() -> None:
+    client, _, _ = _build_client_and_user()
+    try:
+        response = client.get("/api/sessions/sess_tui_1/export.md")
+        assert response.status_code == 200, response.text
+        markdown = response.text
+        assert "## You\n\n列出 test_dir 中的文件" in markdown
+        assert "## Potato Agent\n\ntest_dir 里有 2 个文件：test.py 和 test2.py" in markdown
+        assert "🛠️" not in markdown
+        assert "list_directory" not in markdown
+        assert '{"files"' not in markdown
+        assert "need to inspect" not in markdown
+    finally:
+        client.close()
+
+
 def test_tui_compression_chain_uses_logical_root_and_tip_resume_id() -> None:
     client, _, _ = _build_client_and_user()
     try:
@@ -449,6 +566,29 @@ def test_tui_compression_chain_uses_logical_root_and_tip_resume_id() -> None:
         assert detail_payload["session"]["id"] == "sess_tui_root"
         assert detail_payload["session"]["resume_session_id"] == "sess_tui_tip"
         assert detail_payload["messages"][-1]["content"] == "压缩后的新 tip session 仍在继续"
+    finally:
+        client.close()
+
+
+def test_session_markdown_export_resolves_compression_chain() -> None:
+    client, _, _ = _build_client_and_user()
+    try:
+        response = client.get("/api/sessions/sess_tui_root/export.md")
+        assert response.status_code == 200, response.text
+        markdown = response.text
+        assert markdown.startswith("# compression root\n")
+        assert "压缩之后继续回答" in markdown
+        assert "压缩后的新 tip session 仍在继续" in markdown
+        assert "pre-compression tool" not in markdown
+    finally:
+        client.close()
+
+
+def test_session_markdown_export_returns_404_for_missing_session() -> None:
+    client, _, _ = _build_client_and_user()
+    try:
+        response = client.get("/api/sessions/missing/export.md")
+        assert response.status_code == 404, response.text
     finally:
         client.close()
 
@@ -549,9 +689,14 @@ def test_session_title_update_rejects_overlong_titles() -> None:
 def run() -> None:
     test_session_list_uses_display_store_draft_title()
     test_session_detail_prefers_saved_display_transcript()
+    test_session_markdown_export_uses_display_transcript_without_tool_context()
+    test_session_markdown_export_lists_user_attachments()
     test_display_sync_merges_progress_with_fallback_tool_context()
     test_session_detail_falls_back_when_display_transcript_missing()
+    test_session_markdown_export_falls_back_without_tool_process()
     test_tui_compression_chain_uses_logical_root_and_tip_resume_id()
+    test_session_markdown_export_resolves_compression_chain()
+    test_session_markdown_export_returns_404_for_missing_session()
     test_session_title_update_persists_and_returns_updated_snapshot()
     test_session_title_update_targets_logical_root_for_compression_chain()
     test_session_title_update_rejects_duplicate_titles()
