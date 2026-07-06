@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Potato Agent</title>
     <link rel="icon" type="image/png" href="./static/favicon.png" />
-    <link rel="stylesheet" href="./static/lite/styles.css?v=20260706-chat-export-floating" />
+    <link rel="stylesheet" href="./static/lite/styles.css?v=20260706-export-left-position" />
   </head>
   <body>
     <div id="app" class="app-shell">
@@ -23,9 +23,9 @@
               </div>
 
               <div id="auth-home-view" class="auth-home-view">
+                <button id="show-temporary-button" type="button" class="primary login-home-button">Quick Start</button>
                 <button id="show-login-button" type="button" class="primary login-home-button">Sign in</button>
                 <button id="show-register-button" type="button" class="ghost login-home-button">Register</button>
-                <button id="show-temporary-button" type="button" class="ghost login-home-button">Temporary user</button>
               </div>
 
               <div id="auth-panel-header" class="login-card-header" hidden>
@@ -161,6 +161,31 @@
           </div>
         </div>
       </section>
+
+      <div id="temporary-confirm-modal" class="temporary-confirm-modal" hidden>
+        <div id="temporary-confirm-backdrop" class="temporary-confirm-backdrop"></div>
+        <section class="temporary-confirm-dialog" role="dialog" aria-modal="true" aria-labelledby="temporary-confirm-title" aria-describedby="temporary-confirm-description">
+          <button id="temporary-confirm-close" class="temporary-confirm-close" type="button" aria-label="Close Quick Start confirmation" title="Close">
+            <svg class="temporary-confirm-close-icon" viewBox="0 0 24 24" aria-hidden="true">
+              <path d="M18 6 6 18"></path>
+              <path d="m6 6 12 12"></path>
+            </svg>
+          </button>
+          <div class="temporary-confirm-mark" aria-hidden="true">
+            <svg class="temporary-confirm-mark-icon" viewBox="0 0 24 24">
+              <path d="M13 2 3 14h9l-1 8 10-12h-9l1-8z"></path>
+            </svg>
+          </div>
+          <h2 id="temporary-confirm-title">Quick Start?</h2>
+          <p id="temporary-confirm-description">
+            After 30 minutes of inactivity, chat history and workspace data are deleted.
+          </p>
+          <div class="temporary-confirm-actions">
+            <button id="temporary-confirm-cancel" type="button" class="ghost">Cancel</button>
+            <button id="temporary-confirm-start" type="button" class="primary">Confirm</button>
+          </div>
+        </section>
+      </div>
 
       <section id="workspace-view" class="workspace-view" hidden>
         <div id="mobile-panel-backdrop" class="mobile-panel-backdrop" hidden></div>
@@ -481,6 +506,6 @@
     </template>
 
     <script src="./static/lite/vendor/marked.umd.js"></script>
-    <script type="module" src="./static/lite/app.js?v=20260706-no-focus-file-refresh"></script>
+    <script type="module" src="./static/lite/app.js?v=20260706-timeout-home"></script>
   </body>
 </html>

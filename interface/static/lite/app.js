@@ -44,6 +44,8 @@ const state = {
   passwordResetSubmitting: false,
   pendingApproval: null,
   approvalSubmitting: false,
+  temporaryConfirmResolve: null,
+  temporaryConfirmPreviousFocus: null,
   updateNotes: null,
   pendingSessionPromise: null,
   shouldAutoScrollMessages: true,
@@ -65,7 +67,7 @@ const PASSWORD_COMPLEXITY_MESSAGE = (
   'Password must be at least 8 characters and include uppercase letters, lowercase letters, numbers, and common symbols.'
 );
 const TEMPORARY_USER_NOTICE = (
-  'Temporary users are intended for occasional use. If inactive for more than 30 minutes, the user\'s chat history and workspace data will be deleted.'
+  'After 30 minutes of inactivity, chat history and workspace data are deleted.'
 );
 
 const dom = {
@@ -101,6 +103,11 @@ const dom = {
   showRegisterButton: document.getElementById('show-register-button'),
   showLoginButton: document.getElementById('show-login-button'),
   showTemporaryButton: document.getElementById('show-temporary-button'),
+  temporaryConfirmModal: document.getElementById('temporary-confirm-modal'),
+  temporaryConfirmBackdrop: document.getElementById('temporary-confirm-backdrop'),
+  temporaryConfirmClose: document.getElementById('temporary-confirm-close'),
+  temporaryConfirmCancel: document.getElementById('temporary-confirm-cancel'),
+  temporaryConfirmStart: document.getElementById('temporary-confirm-start'),
   authBackButton: document.getElementById('auth-back-button'),
   switchRegisterButton: document.getElementById('switch-register-button'),
   registerBackButton: document.getElementById('register-back-button'),
@@ -1907,6 +1914,76 @@ const showChatError = (message) => {
   }, 10000);
 };
 
+const isTemporaryConfirmModalOpen = () => Boolean(dom.temporaryConfirmModal && !dom.temporaryConfirmModal.hidden);
+
+const getTemporaryConfirmFocusTargets = () => ([
+  dom.temporaryConfirmClose,
+  dom.temporaryConfirmCancel,
+  dom.temporaryConfirmStart,
+].filter((element) => element && !element.disabled && !element.hidden));
+
+const resolveTemporaryConfirmModal = (confirmed) => {
+  const resolve = state.temporaryConfirmResolve;
+  const previousFocus = state.temporaryConfirmPreviousFocus;
+  state.temporaryConfirmResolve = null;
+  state.temporaryConfirmPreviousFocus = null;
+
+  if (dom.temporaryConfirmModal) {
+    dom.temporaryConfirmModal.hidden = true;
+  }
+
+  if (previousFocus && document.contains(previousFocus)) {
+    window.requestAnimationFrame(() => previousFocus.focus({ preventScroll: true }));
+  }
+
+  if (resolve) {
+    resolve(Boolean(confirmed));
+  }
+};
+
+const confirmTemporaryWorkspace = () => {
+  if (!dom.temporaryConfirmModal || !dom.temporaryConfirmStart) {
+    showError(dom.loginError, TEMPORARY_USER_NOTICE);
+    return Promise.resolve(false);
+  }
+
+  if (state.temporaryConfirmResolve) {
+    dom.temporaryConfirmStart.focus({ preventScroll: true });
+    return Promise.resolve(false);
+  }
+
+  return new Promise((resolve) => {
+    state.temporaryConfirmResolve = resolve;
+    const activeElement = document.activeElement;
+    state.temporaryConfirmPreviousFocus = activeElement instanceof HTMLElement ? activeElement : null;
+    dom.temporaryConfirmModal.hidden = false;
+    window.requestAnimationFrame(() => dom.temporaryConfirmStart.focus({ preventScroll: true }));
+  });
+};
+
+const handleTemporaryConfirmKeydown = (event) => {
+  if (!isTemporaryConfirmModalOpen()) return false;
+
+  if (event.key === 'Escape') {
+    event.preventDefault();
+    resolveTemporaryConfirmModal(false);
+    return true;
+  }
+
+  if (event.key !== 'Tab') return false;
+
+  const focusTargets = getTemporaryConfirmFocusTargets();
+  if (focusTargets.length === 0) return false;
+
+  const currentIndex = focusTargets.indexOf(document.activeElement);
+  const nextIndex = event.shiftKey
+    ? (currentIndex <= 0 ? focusTargets.length - 1 : currentIndex - 1)
+    : (currentIndex === focusTargets.length - 1 ? 0 : currentIndex + 1);
+  event.preventDefault();
+  focusTargets[nextIndex].focus({ preventScroll: true });
+  return true;
+};
+
 const setApprovalSubmitting = (submitting) => {
   state.approvalSubmitting = submitting;
   const buttons = [
@@ -1982,7 +2059,6 @@ const handleSessionExpired = (message) => {
   state.pendingWorkspaceUser = null;
   resetWorkspaceState();
   showLogin();
-  setAuthViewMode('signin');
   showError(dom.loginError, message || SESSION_EXPIRED_MESSAGE);
 };
 
@@ -1997,7 +2073,7 @@ const setTemporaryLoginPending = (pending) => {
   temporaryLoginInFlight = pending;
   if (dom.showTemporaryButton) {
     dom.showTemporaryButton.disabled = pending;
-    dom.showTemporaryButton.textContent = pending ? 'Creating temporary workspace...' : 'Temporary user';
+    dom.showTemporaryButton.textContent = pending ? 'Creating temporary workspace...' : 'Quick Start';
   }
   if (dom.showLoginButton) dom.showLoginButton.disabled = pending;
   if (dom.showRegisterButton) dom.showRegisterButton.disabled = pending;
@@ -5916,7 +5992,8 @@ dom.showLoginButton.addEventListener('click', () => {
 
 dom.showTemporaryButton?.addEventListener('click', async () => {
   if (loginInFlight || temporaryLoginInFlight || bootstrapInFlight) return;
-  if (!window.confirm(TEMPORARY_USER_NOTICE)) return;
+  const confirmed = await confirmTemporaryWorkspace();
+  if (!confirmed) return;
 
   try {
     setTemporaryLoginPending(true);
@@ -5929,6 +6006,22 @@ dom.showTemporaryButton?.addEventListener('click', async () => {
   } finally {
     setTemporaryLoginPending(false);
   }
+});
+
+dom.temporaryConfirmBackdrop?.addEventListener('click', () => {
+  resolveTemporaryConfirmModal(false);
+});
+
+dom.temporaryConfirmClose?.addEventListener('click', () => {
+  resolveTemporaryConfirmModal(false);
+});
+
+dom.temporaryConfirmCancel?.addEventListener('click', () => {
+  resolveTemporaryConfirmModal(false);
+});
+
+dom.temporaryConfirmStart?.addEventListener('click', () => {
+  resolveTemporaryConfirmModal(true);
 });
 
 dom.forgotPasswordButton?.addEventListener('click', () => {
@@ -6023,9 +6116,15 @@ document.addEventListener('click', () => {
 
 document.addEventListener('keydown', (event) => {
   if (event.key === 'Escape') {
+    if (handleTemporaryConfirmKeydown(event)) return;
     closeMobilePanel();
     closeSidebarSettingsMenu();
     closeUpdateNotesPanel();
+    return;
+  }
+
+  if (event.key === 'Tab') {
+    handleTemporaryConfirmKeydown(event);
   }
 });
 

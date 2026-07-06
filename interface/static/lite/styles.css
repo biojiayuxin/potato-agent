@@ -271,6 +271,141 @@ button {
   width: 100%;
 }
 
+.temporary-confirm-modal {
+  position: fixed;
+  inset: 0;
+  z-index: 90;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+}
+
+.temporary-confirm-backdrop {
+  position: absolute;
+  inset: 0;
+  background: rgba(15, 23, 42, 0.42);
+  backdrop-filter: blur(9px);
+}
+
+.temporary-confirm-dialog {
+  position: relative;
+  width: min(440px, 100%);
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 28px;
+  border: 1px solid rgba(255, 255, 255, 0.56);
+  border-radius: 24px;
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.98) 0%, rgba(245, 249, 255, 0.98) 100%);
+  box-shadow: 0 28px 76px rgba(15, 23, 42, 0.28);
+  color: #14213d;
+}
+
+.temporary-confirm-close {
+  position: absolute;
+  top: 14px;
+  right: 14px;
+  width: 34px;
+  height: 34px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  border: 1px solid transparent;
+  border-radius: 10px;
+  background: transparent;
+  color: rgba(20, 33, 61, 0.62);
+  transition: background 120ms ease, border-color 120ms ease, color 120ms ease;
+}
+
+.temporary-confirm-close:hover {
+  border-color: rgba(20, 33, 61, 0.1);
+  background: rgba(20, 33, 61, 0.05);
+  color: #14213d;
+}
+
+.temporary-confirm-close-icon,
+.temporary-confirm-mark-icon {
+  display: block;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  pointer-events: none;
+}
+
+.temporary-confirm-close-icon {
+  width: 17px;
+  height: 17px;
+}
+
+.temporary-confirm-mark {
+  width: 52px;
+  height: 52px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid rgba(29, 45, 80, 0.12);
+  border-radius: 18px;
+  background: rgba(49, 110, 255, 0.1);
+  color: #1d2d50;
+}
+
+.temporary-confirm-mark-icon {
+  width: 25px;
+  height: 25px;
+}
+
+.temporary-confirm-dialog h2 {
+  margin: 0;
+  color: #12203b;
+  font-size: 25px;
+  line-height: 1.18;
+  font-weight: 760;
+  letter-spacing: 0;
+}
+
+.temporary-confirm-dialog p {
+  margin: 2px 0 0;
+  color: #4b5870;
+  font-size: 16px;
+  line-height: 1.62;
+}
+
+.temporary-confirm-actions {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+  margin-top: 8px;
+}
+
+.temporary-confirm-actions button {
+  min-height: 50px;
+  border-radius: 16px;
+  font-weight: 650;
+}
+
+.temporary-confirm-actions button.primary {
+  background: #1d2d50;
+  color: #ffffff;
+  box-shadow: 0 14px 30px rgba(29, 45, 80, 0.18);
+}
+
+.temporary-confirm-actions button.primary:hover {
+  background: #24375f;
+}
+
+.temporary-confirm-actions button.ghost {
+  background: rgba(255, 255, 255, 0.56);
+  border-color: rgba(20, 33, 61, 0.12);
+  color: #16233d;
+}
+
+.temporary-confirm-actions button.ghost:hover {
+  background: rgba(255, 255, 255, 0.78);
+}
+
 .signup-wait-view {
   display: flex;
   flex-direction: column;
@@ -897,7 +1032,7 @@ button.stretch {
 .chat-export-button {
   position: absolute;
   top: 12px;
-  right: 18px;
+  left: 18px;
   z-index: 5;
   min-height: 36px;
   display: inline-flex;
@@ -2097,6 +2232,23 @@ button.stretch {
   }
 
   .login-secondary-actions {
+    grid-template-columns: 1fr;
+  }
+
+  .temporary-confirm-modal {
+    padding: 16px;
+  }
+
+  .temporary-confirm-dialog {
+    padding: 24px 20px 20px;
+    border-radius: 22px;
+  }
+
+  .temporary-confirm-dialog h2 {
+    font-size: 23px;
+  }
+
+  .temporary-confirm-actions {
     grid-template-columns: 1fr;
   }
 
@@ -3707,7 +3859,7 @@ button.stretch {
 
   .workspace-view .chat-export-button {
     top: 10px;
-    right: 12px;
+    left: 12px;
     min-height: 36px;
     padding: 0 10px;
   }
