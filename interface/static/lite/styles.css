@@ -77,7 +77,10 @@ button {
 :root[data-theme='light'] .login-view {
   min-height: 100vh;
   display: grid;
-  place-items: center;
+  grid-template-rows: auto minmax(0, 1fr);
+  align-items: stretch;
+  justify-items: center;
+  gap: 22px;
   padding: 24px;
   position: relative;
   overflow-x: hidden;
@@ -110,46 +113,112 @@ button {
   filter: blur(10px);
 }
 
-.spatial-entry-button {
-  position: absolute;
-  top: 24px;
-  right: 24px;
-  z-index: 3;
+.portal-header {
+  width: min(1180px, 100%);
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  position: relative;
+  z-index: 2;
+}
+
+.portal-hero {
+  position: relative;
+  text-align: center;
+}
+
+.portal-hero-content {
+  position: relative;
+  max-width: 960px;
+  margin: 0 auto;
+  padding: 4px 16px 2px;
+  color: #12203b;
+}
+
+.portal-hero h1 {
+  margin: 0;
+  font-size: 32px;
+  line-height: 1.08;
+  font-weight: 800;
+  letter-spacing: 0;
+}
+
+.portal-nav {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  min-height: 58px;
+  padding: 8px;
+  overflow-x: auto;
+  border: 1px solid rgba(255, 255, 255, 0.46);
+  border-radius: 14px;
+  background: rgba(255, 255, 255, 0.52);
+  box-shadow: 0 18px 42px rgba(8, 15, 30, 0.12);
+  backdrop-filter: blur(18px) saturate(150%);
+  scrollbar-width: thin;
+}
+
+.portal-nav-item {
+  flex: 0 0 auto;
+  min-height: 40px;
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  min-height: 40px;
   padding: 0 16px;
-  border: 1px solid rgba(255, 255, 255, 0.42);
+  border: 1px solid rgba(22, 101, 52, 0.18);
   border-radius: 8px;
-  color: #ffffff;
-  background: rgba(18, 32, 59, 0.42);
-  box-shadow: 0 14px 32px rgba(8, 15, 30, 0.18);
+  color: #17324d;
+  background: rgba(255, 255, 255, 0.62);
+  box-shadow: none;
   font-size: 14px;
   font-weight: 800;
   letter-spacing: 0;
+  line-height: 1;
   text-decoration: none;
-  backdrop-filter: blur(14px);
+  white-space: nowrap;
+  transition: background 140ms ease, border-color 140ms ease, color 140ms ease, box-shadow 140ms ease;
 }
 
-.spatial-entry-button:hover {
-  background: rgba(18, 32, 59, 0.58);
+.portal-nav-item:hover {
+  border-color: rgba(22, 101, 52, 0.34);
+  background: rgba(255, 255, 255, 0.84);
+}
+
+.portal-nav-item.active {
+  border-color: rgba(22, 101, 52, 0.58);
+  color: #ffffff;
+  background: #166534;
+  box-shadow: 0 10px 24px rgba(22, 101, 52, 0.28);
+}
+
+.portal-nav-item:disabled {
+  cursor: default;
+  opacity: 0.58;
+  color: rgba(23, 50, 77, 0.72);
+  background: rgba(255, 255, 255, 0.38);
+}
+
+.portal-nav-item:disabled:hover {
+  border-color: rgba(22, 101, 52, 0.18);
+  background: rgba(255, 255, 255, 0.38);
 }
 
 .login-stage {
   width: 100%;
-  min-height: calc(100vh - 48px);
+  min-height: 0;
   display: flex;
   align-items: center;
   justify-content: center;
   position: relative;
   z-index: 1;
+  padding-bottom: 24px;
 }
 
 .login-logo-frame {
-  width: 270px;
-  height: 270px;
-  border-radius: 42px;
+  width: 238px;
+  height: 238px;
+  border-radius: 36px;
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -181,7 +250,7 @@ button {
 .login-card[data-auth-mode='home'] {
   justify-content: center;
   text-align: center;
-  min-height: min(680px, calc(100vh - 48px));
+  min-height: 580px;
 }
 
 .login-card[data-auth-mode='home'] .login-card-brand {
@@ -2187,35 +2256,58 @@ button.stretch {
   .login-view,
   :root[data-theme='light'] .login-view {
     padding: 16px;
+    gap: 16px;
   }
 
-  .spatial-entry-button {
-    top: 16px;
-    right: 16px;
-    min-height: 36px;
-    padding: 0 12px;
+  .portal-header {
+    gap: 8px;
+  }
+
+  .portal-hero {
+    text-align: left;
+  }
+
+  .portal-hero-content {
+    padding: 0 4px;
+  }
+
+  .portal-hero h1 {
+    font-size: 26px;
+    line-height: 1.12;
+  }
+
+  .portal-nav {
+    min-height: 52px;
+    padding: 6px;
+    border-radius: 12px;
+  }
+
+  .portal-nav-item {
+    min-height: 38px;
+    padding: 0 13px;
     font-size: 13px;
   }
 
   .login-stage {
-    min-height: calc(100vh - 32px);
+    min-height: 0;
+    padding-bottom: 16px;
   }
 
   .login-card {
     width: 100%;
-    max-height: calc(100vh - 32px);
+    max-height: none;
     padding: 28px 22px 24px;
     border-radius: 26px;
   }
 
   .login-card[data-auth-mode='home'] {
-    min-height: min(620px, calc(100vh - 32px));
+    min-height: 0;
   }
 
   .login-logo-frame {
-    width: 216px;
-    height: 216px;
-    border-radius: 34px;
+    width: 184px;
+    height: 184px;
+    border-radius: 30px;
   }
 
   .login-brand-wordmark {

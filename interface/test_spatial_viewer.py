@@ -554,7 +554,11 @@ def test_spatial_api_does_not_refresh_runtime_activity() -> None:
 
 def test_spatial_entry_and_static_paths_are_prefixed() -> None:
     lite_index = (REPO_ROOT / "interface/static/lite/index.html").read_text(encoding="utf-8")
-    assert '<section id="login-view" class="login-view">\n        <a class="spatial-entry-button" href="/spatial">' in lite_index
+    assert '<header class="portal-header">' in lite_index
+    assert '<nav class="portal-nav" aria-label="Portal modules">' in lite_index
+    assert '<button class="portal-nav-item active" type="button" aria-current="page">Potato Agent</button>' in lite_index
+    assert '<a class="portal-nav-item" href="/spatial">Spatial Expression</a>' in lite_index
+    assert "spatial-entry-button" not in lite_index
 
     spatial_index = (REPO_ROOT / "interface/static/spatial/index.html").read_text(encoding="utf-8")
     assert 'href="/static/spatial/style.css"' in spatial_index

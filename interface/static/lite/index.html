@@ -3,14 +3,28 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>Potato Agent</title>
+    <title>AI-powered multi-omics database for potato research</title>
     <link rel="icon" type="image/png" href="./static/favicon.png" />
-    <link rel="stylesheet" href="./static/lite/styles.css?v=20260706-export-left-position" />
+    <link rel="stylesheet" href="./static/lite/styles.css?v=20260707-portal-header" />
   </head>
   <body>
     <div id="app" class="app-shell">
       <section id="login-view" class="login-view">
-        <a class="spatial-entry-button" href="/spatial">Spatial Expression</a>
+        <header class="portal-header">
+          <section class="portal-hero" aria-labelledby="portal-title">
+            <div class="portal-hero-content">
+              <h1 id="portal-title">AI-powered multi-omics database for potato research</h1>
+            </div>
+          </section>
+          <nav class="portal-nav" aria-label="Portal modules">
+            <button class="portal-nav-item active" type="button" aria-current="page">Potato Agent</button>
+            <a class="portal-nav-item" href="/spatial">Spatial Expression</a>
+            <button class="portal-nav-item" type="button" disabled>Genome Browser</button>
+            <button class="portal-nav-item" type="button" disabled>Expression Atlas</button>
+            <button class="portal-nav-item" type="button" disabled>Variants</button>
+            <button class="portal-nav-item" type="button" disabled>Germplasm</button>
+          </nav>
+        </header>
         <div class="login-stage">
           <div class="login-card-shell">
             <div id="auth-card" class="login-card login-card-form" data-auth-mode="home">
