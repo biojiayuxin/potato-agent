@@ -1,0 +1,15 @@
+base_dir: /mnt/data/potato_agent/work/WGCNA/03-network
+output_dir: ~/tmp/wgcna_coexpression_export
+networks:
+  - leaf
+  - stem
+  - root
+  - reproductive
+  - tuberization
+network_type: signed
+tom_type: signed
+correlation_method: bicor
+min_module_size: 30
+merge_cut_height: 0.25
+top_n_edges_per_gene: 100
+export_full_tom_parquet: false

@@ -149,6 +149,7 @@ from interface.session_run_manager import (
     SessionRunManager,
 )
 from interface.spatial_viewer import router as spatial_viewer_router
+from interface.wgcna_viewer import router as wgcna_viewer_router
 
 
 LOGGER = logging.getLogger("potato_interface")
@@ -2504,6 +2505,7 @@ app.mount(
 )
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 app.include_router(spatial_viewer_router)
+app.include_router(wgcna_viewer_router)
 
 
 def _should_refresh_activity_for_request(request: Request) -> bool:
@@ -2511,6 +2513,8 @@ def _should_refresh_activity_for_request(request: Request) -> bool:
     if not path.startswith("/api/"):
         return False
     if path.startswith("/api/spatial/"):
+        return False
+    if path.startswith("/api/wgcna/"):
         return False
     if path in ACTIVITY_REFRESH_EXCLUDED_PATHS:
         return False

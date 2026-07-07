@@ -1,0 +1,118 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>WGCNA Network | Potato Research</title>
+    <link rel="icon" type="image/png" href="/static/favicon.png" />
+    <link rel="stylesheet" href="/static/wgcna/styles.css?v=20260707-wgcna-export-label" />
+  </head>
+  <body>
+    <div class="wgcna-app">
+      <header class="portal-header">
+        <section class="portal-hero" aria-labelledby="portal-title">
+          <div class="portal-hero-content">
+            <h1 id="portal-title">AI-powered multi-omics database for potato research</h1>
+          </div>
+        </section>
+        <nav class="portal-nav" aria-label="Portal modules">
+          <a class="portal-nav-item" href="/lite">Potato Agent</a>
+          <a class="portal-nav-item" href="/spatial">Spatial Expression</a>
+          <a class="portal-nav-item active" href="/wgcna" aria-current="page">WGCNA Network</a>
+          <button class="portal-nav-item" type="button" disabled>Genome Browser</button>
+          <button class="portal-nav-item" type="button" disabled>Expression Atlas</button>
+          <button class="portal-nav-item" type="button" disabled>Variants</button>
+          <button class="portal-nav-item" type="button" disabled>Germplasm</button>
+        </nav>
+      </header>
+
+      <main class="wgcna-main">
+        <section class="query-panel" aria-label="WGCNA query controls">
+          <div class="query-heading">
+            <h2>WGCNA Network</h2>
+          </div>
+
+          <form id="query-form" class="query-form">
+            <label class="field field-wide">
+              <span>Gene IDs</span>
+              <textarea id="genes-input" rows="3" spellcheck="false" placeholder="DM8.2_chr09G24280&#10;DM8.2_chr09G24270"></textarea>
+            </label>
+
+            <div class="control-grid">
+              <label class="field">
+                <span>Top N</span>
+                <select id="top-n-select">
+                  <option value="25">25</option>
+                  <option value="50" selected>50</option>
+                  <option value="100">100</option>
+                  <option value="200">200</option>
+                </select>
+              </label>
+              <label class="field">
+                <span>TOM min</span>
+                <input id="tom-min-input" type="number" min="0" max="1" step="0.01" placeholder="optional" />
+              </label>
+              <label class="toggle">
+                <input id="same-module-only" type="checkbox" checked />
+                <span>Same module</span>
+              </label>
+              <label class="toggle">
+                <input id="neighbor-edges" type="checkbox" checked />
+                <span>Neighbor edges</span>
+              </label>
+              <label class="toggle">
+                <input id="cross-network" type="checkbox" checked />
+                <span>Cross-network</span>
+              </label>
+              <label class="toggle">
+                <input id="shared-edges" type="checkbox" checked />
+                <span>Shared edges</span>
+              </label>
+            </div>
+
+            <fieldset class="network-filter">
+              <legend>Networks</legend>
+              <label><input type="checkbox" name="network" value="leaf" checked />Leaf</label>
+              <label><input type="checkbox" name="network" value="stem" checked />Stem</label>
+              <label><input type="checkbox" name="network" value="root" checked />Root</label>
+              <label><input type="checkbox" name="network" value="reproductive" checked />Reproductive</label>
+              <label><input type="checkbox" name="network" value="tuberization" checked />Tuberization</label>
+            </fieldset>
+
+            <div class="query-actions">
+              <button id="submit-button" type="submit" class="primary">Search</button>
+              <button id="reset-view-button" type="button" class="ghost">Fit</button>
+            </div>
+          </form>
+
+          <section class="selection-panel" aria-label="WGCNA selection details">
+            <h3>Selection</h3>
+            <div id="selection-detail" class="detail-body muted">Select a node or edge.</div>
+          </section>
+        </section>
+
+        <section class="viewer-panel" aria-label="WGCNA co-expression graph">
+          <div class="viewer-toolbar">
+            <div>
+              <div id="graph-title" class="graph-title">No query loaded</div>
+              <div id="graph-summary" class="graph-summary">Enter one or more gene IDs.</div>
+            </div>
+            <div class="export-actions">
+              <button id="download-png" type="button" class="icon-button" title="Download PNG" aria-label="Download PNG">PNG</button>
+              <button id="download-svg" type="button" class="icon-button" title="Download SVG" aria-label="Download SVG">SVG</button>
+              <button id="download-tsv" type="button" class="icon-button export-data-button" title="Download Cytoscape TSV files" aria-label="Download Cytoscape TSV files">Export network data</button>
+            </div>
+          </div>
+          <div class="graph-stage">
+            <div id="cy"></div>
+            <div id="graph-empty" class="graph-empty">No network loaded</div>
+          </div>
+        </section>
+
+      </main>
+    </div>
+
+    <script src="/static/wgcna/vendor/cytoscape.min.js"></script>
+    <script src="/static/wgcna/app.js?v=20260707-wgcna-export-label"></script>
+  </body>
+</html>

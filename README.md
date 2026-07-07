@@ -17,6 +17,8 @@ Git checkout 里。
 - interface 状态目录：`/var/lib/potato-agent`。
 - 空间转录组查看器数据目录：`/srv/spatial_data`，运行时默认读取
   `/srv/spatial_data/current`。
+- WGCNA 共表达网络查看器入口：`/wgcna`；运行数据快照放在 `/srv/wgcna_data/current`，
+  在线查询使用 PostgreSQL 数据库 `potato_wgcna`。
 - Hermes 源码安装目录：`/opt/hermes-agent-src`。
 - Hermes Python 环境：`/opt/hermes-agent-venv`。
 - interface Python 环境：`/opt/interface-env`。
@@ -30,14 +32,16 @@ interface 进程不应该以 root 运行。需要 root 的动作由 privileged h
 
 ## 安全边界
 
-当前安全部署依赖四层边界：
+当前安全部署依赖五层边界：
 
 1. `/srv/potato_agent` 只允许 `root` 和 `potato-interface` 组读取，普通 Hermes 用户不能读源码。
 2. `/var/lib/potato-agent/data` 由 `potato-interface` 独占，普通 Hermes 用户不能读
    interface 用户数据库和归档数据库。
 3. `/srv/spatial_data` 由 `root:potato-interface` 只读维护，空间转录组页面可公开访问，但底层
    SQLite 和轮廓数据不暴露给普通 Linux 用户直接读取。
-4. 每用户 Hermes service 以各自 Linux 用户运行，并在 systemd unit 中隐藏
+4. `/srv/wgcna_data` 由 `root:potato-interface` 只读维护，WGCNA 页面可公开访问，但底层导出
+   TSV 和 PostgreSQL 写入权限不开放给普通 Linux 用户。
+5. 每用户 Hermes service 以各自 Linux 用户运行，并在 systemd unit 中隐藏
    `/srv/potato_agent`、`/var/lib/potato-agent`、`/etc/potato-agent` 和
    `/opt/interface-env`。
 
@@ -61,6 +65,10 @@ chmod 0600 /var/lib/potato-agent/data/*.db 2>/dev/null || true
 chown -R root:potato-interface /srv/spatial_data 2>/dev/null || true
 find /srv/spatial_data -type d -exec chmod 0750 {} + 2>/dev/null || true
 find /srv/spatial_data -type f -exec chmod 0640 {} + 2>/dev/null || true
+
+chown -R root:potato-interface /srv/wgcna_data 2>/dev/null || true
+find /srv/wgcna_data -type d -exec chmod 0750 {} + 2>/dev/null || true
+find /srv/wgcna_data -type f -exec chmod 0640 {} + 2>/dev/null || true
 ```
 
 共享服务器或公网部署应使用 `INTERFACE_FILE_BROWSER_MODE=home_only`。只有在可信内网机器上，
@@ -79,6 +87,7 @@ find /srv/spatial_data -type f -exec chmod 0640 {} + 2>/dev/null || true
 - `sudo`
 - `systemctl`
 - `micromamba`，用于生信技能共享环境和按用户隔离安装工具环境
+- `PostgreSQL` server/client，用于 WGCNA 共表达网络查看器
 - 系统默认 Python 可直接导入 GO/KEGG 分析依赖
 - Hermes Python 依赖需要的编译工具
 
@@ -86,7 +95,7 @@ Debian 或 Ubuntu 可先安装基础包：
 
 ```bash
 apt-get update
-apt-get install -y python3 python3-venv python3-pip git curl rsync sudo build-essential
+apt-get install -y python3 python3-venv python3-pip git curl rsync sudo build-essential postgresql postgresql-client
 ```
 
 `micromamba` 推荐系统级安装到 `/opt/micromamba/bin/micromamba`，但环境根目录使用每个
@@ -441,7 +450,126 @@ Environment=SPATIAL_VIEWER_DATA_ROOT=/srv/spatial_data/current
 查看器入口是 `/spatial`，API 前缀是 `/api/spatial/`。这些接口不要求网页登录态，但文件系统权限仍
 只允许 `potato-interface` 读取数据目录；不要把 `expression.sqlite` 放到可被普通用户直接读取的目录。
 
-### 8. 安装 interface 运行时
+### 8. 部署 WGCNA 共表达网络查看器数据
+
+WGCNA 共表达网络查看器代码随 `potato-agent` 仓库部署，页面入口是 `/wgcna`，API 前缀是
+`/api/wgcna/`。Lite 首页导航栏中的 `WGCNA Network` 会打开这个页面。页面支持搜索基因、按网络
+显示 TOM 共表达边，并通过 `Export network data` 导出当前图的 nodes/edges TSV，方便在本地
+Cytoscape 中复现基本网络结构和样式映射。
+
+WGCNA 原始结果目录通常是只读目录，例如当前数据源：
+
+```text
+/mnt/data/potato_agent/work/WGCNA/03-network
+```
+
+导出脚本不要写回原始结果目录。默认导出位置是：
+
+```bash
+$HOME/tmp/wgcna_coexpression_export
+```
+
+正式部署时，导出的 TSV 快照放在 `/srv/wgcna_data`，并用 `current` 指向当前 release。当前线上
+约定布局是：
+
+```text
+/srv/wgcna_data/
+  current -> releases/20260707
+  releases/
+    20260707/
+      tables/
+        networks.tsv
+        genes.tsv
+        modules.tsv
+        network_genes.tsv
+        network_gene_kme.tsv
+        coexpression_edges_top.tsv.gz
+        module_overlaps.tsv
+        shared_coexpression_edges.tsv
+      logs/
+```
+
+运行时 API 不直接查询 TSV，而是查询 PostgreSQL。推荐数据库和 peer auth role：
+
+```text
+database: potato_wgcna
+role:     potato-interface
+url:      postgresql:///potato_wgcna?host=/var/run/postgresql
+```
+
+新机器上可以这样创建数据库。后续如果用 SQL 手写授权语句，role 名 `potato-interface` 需要双引号：
+
+```bash
+sudo -u postgres createuser --no-superuser --no-createdb --no-createrole potato-interface 2>/dev/null || true
+sudo -u postgres createdb -O potato-interface potato_wgcna 2>/dev/null || true
+```
+
+从 WGCNA 原始结果导出 TSV：
+
+```bash
+cd /srv/potato_agent
+export WGCNA_EXPORT_DIR="$HOME/tmp/wgcna_coexpression_export"
+
+/opt/interface-env/bin/python wgcna_export/scripts/export_network_metadata.py
+/opt/interface-env/bin/python wgcna_export/scripts/export_gene_module_tables.py
+/opt/interface-env/bin/python wgcna_export/scripts/compute_module_overlaps.py
+Rscript wgcna_export/scripts/export_tom_top_edges.R \
+  --base-dir /mnt/data/potato_agent/work/WGCNA/03-network \
+  --output-dir "$WGCNA_EXPORT_DIR" \
+  --networks leaf,stem,root,reproductive,tuberization \
+  --top-n 100
+/opt/interface-env/bin/python wgcna_export/scripts/compute_shared_edges.py
+/opt/interface-env/bin/python wgcna_export/scripts/validate_exports.py
+```
+
+发布导出快照：
+
+```bash
+release=/srv/wgcna_data/releases/$(date +%Y%m%d)
+mkdir -p "$release"
+rsync -a --delete "$HOME/tmp/wgcna_coexpression_export/" "$release/"
+
+chown -R root:potato-interface /srv/wgcna_data
+find /srv/wgcna_data -type d -exec chmod 0750 {} +
+find /srv/wgcna_data -type f -exec chmod 0640 {} +
+ln -sfn "$release" /srv/wgcna_data/current
+chown -h root:potato-interface /srv/wgcna_data/current
+```
+
+把当前快照加载到 PostgreSQL：
+
+```bash
+sudo -u potato-interface env \
+  WGCNA_EXPORT_DIR=/srv/wgcna_data/current \
+  WGCNA_DATABASE_URL='postgresql:///potato_wgcna?host=/var/run/postgresql' \
+  /opt/interface-env/bin/python /srv/potato_agent/wgcna_export/scripts/load_to_postgresql.py --truncate
+```
+
+生产服务通过 systemd drop-in 设置数据库 URL，避免把运行时配置写进源码目录：
+
+```bash
+install -d -o root -g root -m 0755 /etc/systemd/system/potato-interface.service.d
+cat >/etc/systemd/system/potato-interface.service.d/40-wgcna.conf <<'EOF'
+[Service]
+Environment=WGCNA_DATABASE_URL=postgresql:///potato_wgcna?host=/var/run/postgresql
+EOF
+chown root:root /etc/systemd/system/potato-interface.service.d/40-wgcna.conf
+chmod 0644 /etc/systemd/system/potato-interface.service.d/40-wgcna.conf
+systemctl daemon-reload
+systemctl restart potato-interface.service
+```
+
+当前 20260707 release 已验证的主表规模：
+
+```text
+genes: 18922
+network_genes: 60000
+coexpression_edges_top: 6000000
+module_overlaps: 476
+shared_coexpression_edges: 570217
+```
+
+### 9. 安装 interface 运行时
 
 ```bash
 python3 -m venv /opt/interface-env
@@ -449,7 +577,7 @@ python3 -m venv /opt/interface-env
 /opt/interface-env/bin/pip install -r /srv/potato_agent/interface/requirements.txt
 ```
 
-### 9. 配置本地模型代理
+### 10. 配置本地模型代理
 
 上游模型网关需要兼容 OpenAI API。真实上游 API key 只写入 root-owned
 `/var/lib/potato-agent/config/model_proxy.yaml`；每个用户的 Hermes 配置只会包含
@@ -512,7 +640,7 @@ systemctl enable --now potato-model-proxy.service
 配置并重启当前正在运行的 Hermes service。升级旧部署后可以运行
 `cleanup_hermes_user_keys.py --dry-run` 检查历史 key，再去掉 `--dry-run` 执行清理。
 
-### 10. 安装 privileged helper
+### 11. 安装 privileged helper
 
 ```bash
 mkdir -p /usr/local/libexec
@@ -536,7 +664,7 @@ visudo -cf /etc/sudoers.d/potato-agent-interface
 
 helper 只暴露 `interface.privileged_helper` 中实现的固定命令集。
 
-### 11. 安装 systemd service
+### 12. 安装 systemd service
 
 生成固定的 session secret：
 
@@ -565,6 +693,7 @@ Environment=INTERFACE_ARCHIVE_DB=/var/lib/potato-agent/data/archive.db
 Environment=INTERFACE_PRIVILEGED_HELPER=/usr/local/libexec/potato-agent-privileged-helper
 Environment=INTERFACE_TUI_GATEWAY_PYTHON=/opt/hermes-agent-venv/bin/python3
 Environment=SPATIAL_VIEWER_DATA_ROOT=/srv/spatial_data/current
+Environment=WGCNA_DATABASE_URL=postgresql:///potato_wgcna?host=/var/run/postgresql
 Environment=INTERFACE_RESEND_API_KEY=replace-with-resend-api-key
 Environment="INTERFACE_MAIL_FROM=Potato Agent <noreply@mail.example.com>"
 ExecStart=/opt/interface-env/bin/python -m uvicorn interface.app:app --host 0.0.0.0 --port 3000
@@ -637,7 +766,7 @@ systemctl status potato-interface.service
 http://<server>:3000/lite
 ```
 
-### 12. 创建用户
+### 13. 创建用户
 
 创建系统托管的 Linux 用户和网页账号：
 
@@ -839,15 +968,19 @@ cd /srv/potato_agent
 curl -fsS http://127.0.0.1:3000/lite >/dev/null
 curl -fsS http://127.0.0.1:3000/spatial >/dev/null
 curl -fsS http://127.0.0.1:3000/api/spatial/datasets | python3 -m json.tool >/dev/null
+curl -fsS http://127.0.0.1:3000/wgcna >/dev/null
+curl -fsS http://127.0.0.1:3000/api/wgcna/status | python3 -m json.tool >/dev/null
 systemctl is-active potato-interface.service
 ```
 
-检查空间转录组数据对 interface 服务可读：
+检查空间转录组和 WGCNA 数据对 interface 服务可读：
 
 ```bash
 sudo -u potato-interface test -r /srv/spatial_data/current/datasets.json
 sudo -u potato-interface test -r /srv/spatial_data/current/data/expression.sqlite
 sudo -u potato-interface test -r /srv/spatial_data/current/datasets/s1_stem/expression.sqlite
+sudo -u potato-interface test -r /srv/wgcna_data/current/tables/network_genes.tsv
+sudo -u potato-interface test -r /srv/wgcna_data/current/tables/coexpression_edges_top.tsv.gz
 ```
 
 检查普通 Hermes 用户不能读取源码和 interface 状态。把 `hmx_user_test` 换成实际 mapped Linux
@@ -859,6 +992,7 @@ sudo -u hmx_user_test test ! -r /var/lib/potato-agent/config/users_mapping.yaml
 sudo -u hmx_user_test test ! -r /var/lib/potato-agent/data/interface.db
 sudo -u hmx_user_test test ! -r /var/lib/potato-agent/data/archive.db
 sudo -u hmx_user_test test ! -r /srv/spatial_data/current/data/expression.sqlite
+sudo -u hmx_user_test test ! -r /srv/wgcna_data/current/tables/coexpression_edges_top.tsv.gz
 ```
 
 检查生成的 Hermes unit hardening：
