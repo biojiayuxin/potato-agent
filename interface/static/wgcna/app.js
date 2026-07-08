@@ -35,6 +35,8 @@ const NETWORK_EDGE_COLORS = {
   reproductive: '#c2410c',
   tuberization: '#0369a1',
 };
+const GRAPH_EMPTY_MESSAGE = 'No network loaded';
+const GRAPH_LOADING_MESSAGE = 'Loading networks';
 const DETAIL_TOOLTIPS = {
   Type: 'Selected element type.',
   Gene: 'Original gene identifier.',
@@ -369,6 +371,7 @@ const renderGraph = (payload) => {
   state.cy.elements().remove();
   state.cy.add([...nodes, ...edges]);
   dom.graphEmpty.hidden = nodes.length > 0;
+  dom.graphEmpty.textContent = GRAPH_EMPTY_MESSAGE;
   const title = payload.query_genes?.length
     ? payload.query_genes.join(', ')
     : 'No query loaded';
@@ -376,6 +379,16 @@ const renderGraph = (payload) => {
   dom.graphSummary.textContent = `${payload.summary.node_count} nodes · ${payload.summary.edge_count} edges · ${payload.summary.tom_edge_count} TOM edges`;
   renderSelectionEmpty();
   applyFacetLayout();
+};
+
+const renderGraphLoading = (genes) => {
+  state.lastPayload = null;
+  state.cy.elements().remove();
+  dom.graphEmpty.hidden = false;
+  dom.graphEmpty.textContent = GRAPH_LOADING_MESSAGE;
+  dom.graphTitle.textContent = genes;
+  dom.graphSummary.textContent = 'Searching WGCNA networks.';
+  renderSelectionEmpty();
 };
 
 const runQuery = async () => {
@@ -387,12 +400,14 @@ const runQuery = async () => {
   state.loading = true;
   dom.submitButton.disabled = true;
   dom.submitButton.textContent = 'Searching';
+  renderGraphLoading(genes);
   try {
     const payload = await api(buildQueryUrl());
     renderGraph(payload);
   } catch (error) {
     dom.graphTitle.textContent = 'Query failed';
     dom.graphSummary.textContent = error.message || 'Request failed';
+    dom.graphEmpty.textContent = GRAPH_EMPTY_MESSAGE;
   } finally {
     state.loading = false;
     dom.submitButton.disabled = false;
