@@ -314,6 +314,9 @@ function requestDotplotDraw() {
 
 function resizeCanvasElement(targetCanvas) {
   const rect = targetCanvas.getBoundingClientRect();
+  if (rect.width <= 0 || rect.height <= 0) {
+    return;
+  }
   targetCanvas.width = Math.max(1, Math.floor(rect.width * state.devicePixelRatio));
   targetCanvas.height = Math.max(1, Math.floor(rect.height * state.devicePixelRatio));
 }
@@ -1365,11 +1368,8 @@ function setDisplayMode(mode) {
   state.displayMode = ["gene", "cluster", "tissue"].includes(mode) ? mode : "gene";
   hideDotplotTooltip();
   updateModeControls();
-  resizeCanvas();
-  fitView();
   updateStats();
-  requestDraw();
-  requestDotplotDraw();
+  handleLayoutResize();
 }
 
 function setSelectedCluster(clusterId) {
@@ -1392,6 +1392,21 @@ function zoomAt(factor, centerX = canvas.clientWidth / 2, centerY = canvas.clien
   state.view.y = centerY - beforeY * state.view.scale;
   updateScaleText();
   requestDraw();
+}
+
+let layoutResizePending = false;
+
+function handleLayoutResize() {
+  if (layoutResizePending) return;
+  layoutResizePending = true;
+  window.requestAnimationFrame(() => {
+    layoutResizePending = false;
+    hideDotplotTooltip();
+    resizeCanvas();
+    fitView();
+    requestDraw();
+    requestDotplotDraw();
+  });
 }
 
 els.form.addEventListener("submit", (event) => {
@@ -1461,13 +1476,12 @@ dotplotCanvas.addEventListener("pointerleave", () => {
   hideDotplotTooltip();
 });
 
-window.addEventListener("resize", () => {
-  hideDotplotTooltip();
-  resizeCanvas();
-  fitView();
-  requestDraw();
-  requestDotplotDraw();
-});
+window.addEventListener("resize", handleLayoutResize);
+
+if (window.ResizeObserver && els.viewer) {
+  const viewerResizeObserver = new ResizeObserver(handleLayoutResize);
+  viewerResizeObserver.observe(els.viewer);
+}
 
 (async function init() {
   try {

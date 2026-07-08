@@ -561,12 +561,24 @@ def test_spatial_entry_and_static_paths_are_prefixed() -> None:
     assert "spatial-entry-button" not in lite_index
 
     spatial_index = (REPO_ROOT / "interface/static/spatial/index.html").read_text(encoding="utf-8")
-    assert 'href="/static/spatial/style.css"' in spatial_index
-    assert 'class="agent-return" href="/"' in spatial_index
+    assert 'href="/static/spatial/style.css?v=' in spatial_index
+    assert '<header class="portal-header">' in spatial_index
+    assert '<nav class="portal-nav" aria-label="Portal modules">' in spatial_index
+    assert 'href="/lite">Potato Agent</a>' in spatial_index
+    assert 'href="/spatial" aria-current="page">Spatial Expression</a>' in spatial_index
+    assert 'href="/wgcna">WGCNA Network</a>' in spatial_index
+    assert "agent-return" not in spatial_index
     assert 'id="dotplotTooltip"' in spatial_index
-    assert 'src="/static/spatial/app.js"' in spatial_index
+    assert 'src="/static/spatial/app.js?v=' in spatial_index
     assert 'href="/style.css"' not in spatial_index
     assert 'src="/app.js"' not in spatial_index
+
+    spatial_css = (REPO_ROOT / "interface/static/spatial/style.css").read_text(encoding="utf-8")
+    assert "background: url('../background.png')" in spatial_css
+    assert ".spatial-app {\n  height: 100vh;" in spatial_css
+    assert ".spatial-main {\n  width: min(1680px, 100%);\n  height: 100%;" in spatial_css
+    assert ".viewer {\n  position: relative;" in spatial_css
+    assert "  min-height: 0;\n  height: 100%;" in spatial_css
 
     spatial_app = (REPO_ROOT / "interface/static/spatial/app.js").read_text(encoding="utf-8")
     assert 'const API_BASE = "/api/spatial";' in spatial_app
