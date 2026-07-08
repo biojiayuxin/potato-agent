@@ -19,6 +19,8 @@ Git checkout 里。
   `/srv/spatial_data/current`。
 - WGCNA 共表达网络查看器入口：`/wgcna`；运行数据快照放在 `/srv/wgcna_data/current`，
   在线查询使用 PostgreSQL 数据库 `potato_wgcna`。
+- Bulk RNA-Seq 表达查看器入口：`/bulk-rnaseq`；运行数据库放在
+  `/srv/bulk_rnaseq/current/bulk_rnaseq.sqlite`，从公开整理结果目录构建只读 SQLite。
 - Hermes 源码安装目录：`/opt/hermes-agent-src`。
 - Hermes Python 环境：`/opt/hermes-agent-venv`。
 - interface Python 环境：`/opt/interface-env`。
@@ -32,7 +34,7 @@ interface 进程不应该以 root 运行。需要 root 的动作由 privileged h
 
 ## 安全边界
 
-当前安全部署依赖五层边界：
+当前安全部署依赖六层边界：
 
 1. `/srv/potato_agent` 只允许 `root` 和 `potato-interface` 组读取，普通 Hermes 用户不能读源码。
 2. `/var/lib/potato-agent/data` 由 `potato-interface` 独占，普通 Hermes 用户不能读
@@ -41,7 +43,9 @@ interface 进程不应该以 root 运行。需要 root 的动作由 privileged h
    SQLite 和轮廓数据不暴露给普通 Linux 用户直接读取。
 4. `/srv/wgcna_data` 由 `root:potato-interface` 只读维护，WGCNA 页面可公开访问，但底层导出
    TSV 和 PostgreSQL 写入权限不开放给普通 Linux 用户。
-5. 每用户 Hermes service 以各自 Linux 用户运行，并在 systemd unit 中隐藏
+5. `/srv/bulk_rnaseq` 由 `root:potato-interface` 只读维护，Bulk RNA-Seq 页面可公开访问，但底层
+   SQLite 不暴露给普通 Linux 用户直接读取。
+6. 每用户 Hermes service 以各自 Linux 用户运行，并在 systemd unit 中隐藏
    `/srv/potato_agent`、`/var/lib/potato-agent`、`/etc/potato-agent` 和
    `/opt/interface-env`。
 
@@ -69,6 +73,10 @@ find /srv/spatial_data -type f -exec chmod 0640 {} + 2>/dev/null || true
 chown -R root:potato-interface /srv/wgcna_data 2>/dev/null || true
 find /srv/wgcna_data -type d -exec chmod 0750 {} + 2>/dev/null || true
 find /srv/wgcna_data -type f -exec chmod 0640 {} + 2>/dev/null || true
+
+chown -R root:potato-interface /srv/bulk_rnaseq 2>/dev/null || true
+find /srv/bulk_rnaseq -type d -exec chmod 0750 {} + 2>/dev/null || true
+find /srv/bulk_rnaseq -type f -exec chmod 0640 {} + 2>/dev/null || true
 ```
 
 共享服务器或公网部署应使用 `INTERFACE_FILE_BROWSER_MODE=home_only`。只有在可信内网机器上，
@@ -569,7 +577,81 @@ module_overlaps: 476
 shared_coexpression_edges: 570217
 ```
 
-### 9. 安装 interface 运行时
+### 9. 部署 Bulk RNA-Seq 表达查看器数据
+
+Bulk RNA-Seq 表达查看器代码随 `potato-agent` 仓库部署，页面入口是 `/bulk-rnaseq`，API 前缀是
+`/api/bulk-rnaseq/`。Lite 首页导航栏中的 `Bulk RNA-Seq` 会打开这个页面。用户输入一个或多个
+DMv8.2 gene ID 后，页面会从只读 SQLite 查询 TPM、`log2(TPM + 1)` 或 row z-score，并在浏览器端
+渲染热图。
+
+原始整理结果目录通常是只读目录，例如当前数据源：
+
+```text
+/mnt/data/public_data/Expression_atlas/DMv8.2
+```
+
+该目录需要包含：
+
+```text
+sample_tissue_list.tsv
+transcript_tpm_matrix_merged.tsv
+```
+
+构建脚本不会写回原始结果目录。运行数据库默认位置是：
+
+```text
+/srv/bulk_rnaseq/current/bulk_rnaseq.sqlite
+```
+
+从原始 TSV 构建 SQLite：
+
+```bash
+cd /srv/potato_agent
+tmp_db=$HOME/tmp/bulk_rnaseq.sqlite
+mkdir -p "$(dirname "$tmp_db")"
+
+/opt/interface-env/bin/python -m interface.build_bulk_rnaseq_db \
+  --source-root /mnt/data/public_data/Expression_atlas/DMv8.2 \
+  --output-db "$tmp_db"
+```
+
+构建脚本默认排除非马铃薯材料 `PG0003`、`PG0009`、`PG0019`。当前源数据中 `PG0009` 和
+`PG0019` 各 9 个 run，`PG0003` 不存在；构建后的线上库样本数应为 259。排除名单和排除数量会
+写入 SQLite 的 `metadata` 表。
+
+发布 SQLite 时先安装到临时文件，再原子替换，避免服务读到半成品数据库：
+
+```bash
+install -d -o root -g potato-interface -m 0750 /srv/bulk_rnaseq/current
+install -o root -g potato-interface -m 0640 "$tmp_db" \
+  /srv/bulk_rnaseq/current/.bulk_rnaseq.sqlite.new
+mv /srv/bulk_rnaseq/current/.bulk_rnaseq.sqlite.new \
+  /srv/bulk_rnaseq/current/bulk_rnaseq.sqlite
+
+chown -R root:potato-interface /srv/bulk_rnaseq
+find /srv/bulk_rnaseq -type d -exec chmod 0750 {} +
+find /srv/bulk_rnaseq -type f -exec chmod 0640 {} +
+```
+
+生产服务默认读取 `/srv/bulk_rnaseq/current/bulk_rnaseq.sqlite`。如果需要使用其它路径，在
+`potato-interface.service` 中设置：
+
+```ini
+Environment=BULK_RNASEQ_DB_PATH=/srv/bulk_rnaseq/current/bulk_rnaseq.sqlite
+```
+
+当前过滤后数据库已验证的规模：
+
+```text
+genes: 37658
+samples: 259
+sample_name groups: 45
+sample_tissue groups: 194
+tissue groups: 15
+excluded samples: 18
+```
+
+### 10. 安装 interface 运行时
 
 ```bash
 python3 -m venv /opt/interface-env
@@ -577,7 +659,7 @@ python3 -m venv /opt/interface-env
 /opt/interface-env/bin/pip install -r /srv/potato_agent/interface/requirements.txt
 ```
 
-### 10. 配置本地模型代理
+### 11. 配置本地模型代理
 
 上游模型网关需要兼容 OpenAI API。真实上游 API key 只写入 root-owned
 `/var/lib/potato-agent/config/model_proxy.yaml`；每个用户的 Hermes 配置只会包含
@@ -640,7 +722,7 @@ systemctl enable --now potato-model-proxy.service
 配置并重启当前正在运行的 Hermes service。升级旧部署后可以运行
 `cleanup_hermes_user_keys.py --dry-run` 检查历史 key，再去掉 `--dry-run` 执行清理。
 
-### 11. 安装 privileged helper
+### 12. 安装 privileged helper
 
 ```bash
 mkdir -p /usr/local/libexec
@@ -664,7 +746,7 @@ visudo -cf /etc/sudoers.d/potato-agent-interface
 
 helper 只暴露 `interface.privileged_helper` 中实现的固定命令集。
 
-### 12. 安装 systemd service
+### 13. 安装 systemd service
 
 生成固定的 session secret：
 
@@ -694,6 +776,7 @@ Environment=INTERFACE_PRIVILEGED_HELPER=/usr/local/libexec/potato-agent-privileg
 Environment=INTERFACE_TUI_GATEWAY_PYTHON=/opt/hermes-agent-venv/bin/python3
 Environment=SPATIAL_VIEWER_DATA_ROOT=/srv/spatial_data/current
 Environment=WGCNA_DATABASE_URL=postgresql:///potato_wgcna?host=/var/run/postgresql
+Environment=BULK_RNASEQ_DB_PATH=/srv/bulk_rnaseq/current/bulk_rnaseq.sqlite
 Environment=INTERFACE_RESEND_API_KEY=replace-with-resend-api-key
 Environment="INTERFACE_MAIL_FROM=Potato Agent <noreply@mail.example.com>"
 ExecStart=/opt/interface-env/bin/python -m uvicorn interface.app:app --host 0.0.0.0 --port 3000
@@ -766,7 +849,7 @@ systemctl status potato-interface.service
 http://<server>:3000/lite
 ```
 
-### 13. 创建用户
+### 14. 创建用户
 
 创建系统托管的 Linux 用户和网页账号：
 
@@ -970,10 +1053,12 @@ curl -fsS http://127.0.0.1:3000/spatial >/dev/null
 curl -fsS http://127.0.0.1:3000/api/spatial/datasets | python3 -m json.tool >/dev/null
 curl -fsS http://127.0.0.1:3000/wgcna >/dev/null
 curl -fsS http://127.0.0.1:3000/api/wgcna/status | python3 -m json.tool >/dev/null
+curl -fsS http://127.0.0.1:3000/bulk-rnaseq >/dev/null
+curl -fsS http://127.0.0.1:3000/api/bulk-rnaseq/status | python3 -m json.tool >/dev/null
 systemctl is-active potato-interface.service
 ```
 
-检查空间转录组和 WGCNA 数据对 interface 服务可读：
+检查空间转录组、WGCNA 和 Bulk RNA-Seq 数据对 interface 服务可读：
 
 ```bash
 sudo -u potato-interface test -r /srv/spatial_data/current/datasets.json
@@ -981,6 +1066,7 @@ sudo -u potato-interface test -r /srv/spatial_data/current/data/expression.sqlit
 sudo -u potato-interface test -r /srv/spatial_data/current/datasets/s1_stem/expression.sqlite
 sudo -u potato-interface test -r /srv/wgcna_data/current/tables/network_genes.tsv
 sudo -u potato-interface test -r /srv/wgcna_data/current/tables/coexpression_edges_top.tsv.gz
+sudo -u potato-interface test -r /srv/bulk_rnaseq/current/bulk_rnaseq.sqlite
 ```
 
 检查普通 Hermes 用户不能读取源码和 interface 状态。把 `hmx_user_test` 换成实际 mapped Linux
@@ -993,6 +1079,7 @@ sudo -u hmx_user_test test ! -r /var/lib/potato-agent/data/interface.db
 sudo -u hmx_user_test test ! -r /var/lib/potato-agent/data/archive.db
 sudo -u hmx_user_test test ! -r /srv/spatial_data/current/data/expression.sqlite
 sudo -u hmx_user_test test ! -r /srv/wgcna_data/current/tables/coexpression_edges_top.tsv.gz
+sudo -u hmx_user_test test ! -r /srv/bulk_rnaseq/current/bulk_rnaseq.sqlite
 ```
 
 检查生成的 Hermes unit hardening：

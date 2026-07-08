@@ -1,0 +1,100 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Bulk RNA-Seq | Potato Research</title>
+    <link rel="icon" type="image/png" href="/static/favicon.png" />
+    <link rel="stylesheet" href="/static/bulk_rnaseq/styles.css?v=20260708-primary-zscore" />
+  </head>
+  <body>
+    <div class="bulk-app">
+      <header class="portal-header">
+        <section class="portal-hero" aria-labelledby="portal-title">
+          <div class="portal-hero-content">
+            <h1 id="portal-title">AI-powered multi-omics database for potato research</h1>
+          </div>
+        </section>
+        <nav class="portal-nav" aria-label="Portal modules">
+          <a class="portal-nav-item" href="/lite">Potato Agent</a>
+          <a class="portal-nav-item" href="/spatial">Spatial Expression</a>
+          <a class="portal-nav-item" href="/wgcna">WGCNA Network</a>
+          <a class="portal-nav-item active" href="/bulk-rnaseq" aria-current="page">Bulk RNA-Seq</a>
+          <button class="portal-nav-item" type="button" disabled>Genome Browser</button>
+          <button class="portal-nav-item" type="button" disabled>Variants</button>
+          <button class="portal-nav-item" type="button" disabled>Germplasm</button>
+        </nav>
+      </header>
+
+      <main class="bulk-main">
+        <section class="query-panel" aria-label="Bulk RNA-Seq query controls">
+          <div class="query-heading">
+            <h2>Bulk RNA-Seq</h2>
+          </div>
+
+          <form id="query-form" class="query-form">
+            <label class="field field-wide">
+              <span>Gene IDs</span>
+              <textarea id="genes-input" rows="4" spellcheck="false" placeholder="DM8.2_chr01G00010&#10;DM8.2_chr01G00020"></textarea>
+            </label>
+
+            <div class="control-grid">
+              <label class="field">
+                <span>Grouping</span>
+                <select id="scope-select">
+                  <option value="sample_tissue" selected>Material by tissue</option>
+                  <option value="tissue">Tissue mean</option>
+                  <option value="sample_name">Material mean</option>
+                  <option value="sample">All runs</option>
+                </select>
+              </label>
+              <label class="field">
+                <span>Scale</span>
+                <select id="transform-select">
+                  <option value="log2_tpm" selected>log2(TPM + 1)</option>
+                  <option value="row_zscore">Row z-score</option>
+                  <option value="tpm">TPM</option>
+                </select>
+              </label>
+            </div>
+
+            <div class="query-actions">
+              <button id="submit-button" type="submit" class="primary">Search</button>
+            </div>
+          </form>
+
+          <section class="status-panel" aria-label="Bulk RNA-Seq database status">
+            <h3>Dataset</h3>
+            <div id="status-detail" class="detail-body muted">Loading status.</div>
+          </section>
+
+        </section>
+
+        <section class="viewer-panel" aria-label="Bulk RNA-Seq heatmap">
+          <div class="viewer-toolbar">
+            <div>
+              <div id="graph-title" class="graph-title">No query loaded</div>
+              <div id="graph-summary" class="graph-summary">Enter one or more gene IDs.</div>
+            </div>
+            <div class="export-actions">
+              <button id="download-png" type="button" class="icon-button" title="Download PNG" aria-label="Download PNG">PNG</button>
+              <button id="download-tsv" type="button" class="icon-button export-data-button" title="Download TSV" aria-label="Download TSV">Export data</button>
+            </div>
+          </div>
+          <div class="heatmap-stage">
+            <canvas id="heatmap"></canvas>
+            <div id="heatmap-empty" class="heatmap-empty">No expression loaded</div>
+            <div id="heatmap-tooltip" class="heatmap-tooltip" role="tooltip" hidden></div>
+          </div>
+          <div class="legend-strip" aria-label="Heatmap color scale">
+            <span id="legend-min">0</span>
+            <div id="legend-bar" class="legend-bar"></div>
+            <span id="legend-max">max</span>
+          </div>
+        </section>
+      </main>
+    </div>
+
+    <script src="/static/bulk_rnaseq/app.js?v=20260708-primary-zscore"></script>
+  </body>
+</html>

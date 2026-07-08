@@ -14,6 +14,9 @@
 - 会话归档：后台定时把旧会话归档到 `archive.db`
 - 前端：Lite 页面位于 `interface/static/lite/`
 - 空间转录组查看器：公开页面 `/spatial`，数据从 `/srv/spatial_data/current` 只读加载
+- WGCNA 共表达网络查看器：公开页面 `/wgcna`，运行时通过 `WGCNA_DATABASE_URL` 查询 PostgreSQL
+- Bulk RNA-Seq 表达查看器：公开页面 `/bulk-rnaseq`，数据从
+  `/srv/bulk_rnaseq/current/bulk_rnaseq.sqlite` 只读加载
 
 ## 目录
 
@@ -35,12 +38,22 @@
   root/systemd 运行的本地 OpenAI-compatible model proxy，负责校验 `{username}-local-token` 并转发到真实上游
 - `spatial_viewer.py`
   空间转录组查看器的公开 FastAPI router；只读查询外部数据目录
+- `wgcna_viewer.py`
+  WGCNA 共表达网络查看器的公开 FastAPI router；只读查询 PostgreSQL
+- `bulk_rnaseq_viewer.py`
+  Bulk RNA-Seq 表达查看器的公开 FastAPI router；只读查询外部 SQLite
+- `build_bulk_rnaseq_db.py`
+  从整理后的 bulk RNA-Seq TSV 构建只读 SQLite；默认排除非马铃薯材料
 - `requirements.txt`
   最小运行依赖
 - `static/lite/`
   Lite 前端页面、样式、脚本、图标
 - `static/spatial/`
   空间转录组查看器前端页面、样式、脚本、图标
+- `static/wgcna/`
+  WGCNA 共表达网络查看器前端页面、样式、脚本和 vendor 资源
+- `static/bulk_rnaseq/`
+  Bulk RNA-Seq 表达热图前端页面、样式和脚本
 
 ## 依赖的数据源
 
@@ -50,6 +63,8 @@
 - `interface/data/archive.db`
 - 每用户 `~/.hermes/state.db`
 - 空间转录组数据目录，默认 `/srv/spatial_data/current`
+- WGCNA PostgreSQL 数据库，默认通过 `WGCNA_DATABASE_URL` 配置
+- Bulk RNA-Seq SQLite 数据库，默认 `/srv/bulk_rnaseq/current/bulk_rnaseq.sqlite`
 
 ## 关键环境变量
 
@@ -63,6 +78,8 @@
 - `INTERFACE_ARCHIVE_RETENTION_DAYS`
 - `INTERFACE_ARCHIVE_SCHEDULE_HOUR`
 - `SPATIAL_VIEWER_DATA_ROOT`
+- `WGCNA_DATABASE_URL`
+- `BULK_RNASEQ_DB_PATH`
 
 说明：
 
@@ -73,6 +90,8 @@
 - `INTERFACE_MAX_UPLOAD_BYTES` 默认为 200 MB，用于限制单个上传请求，并限制单条消息的附件总大小
 - 上传文件会保存到每用户工作区下的 `.<INTERFACE_UPLOAD_DIR_NAME>` 目录，默认是 `.potato-interface-uploads/`
 - `SPATIAL_VIEWER_DATA_ROOT` 默认 `/srv/spatial_data/current`；建议目录 owner 为 `root`、group 为 `potato-interface`，目录 `0750`、文件 `0640`
+- `WGCNA_DATABASE_URL` 指向 WGCNA PostgreSQL 数据库，例如 `postgresql:///potato_wgcna?host=/var/run/postgresql`
+- `BULK_RNASEQ_DB_PATH` 默认 `/srv/bulk_rnaseq/current/bulk_rnaseq.sqlite`；建议 `/srv/bulk_rnaseq` owner 为 `root`、group 为 `potato-interface`，目录 `0750`、SQLite 文件 `0640`
 
 ## 当前边界
 
