@@ -73,6 +73,8 @@ const TEMPORARY_USER_NOTICE = (
 const dom = {
   loginView: document.getElementById('login-view'),
   workspaceView: document.getElementById('workspace-view'),
+  portalNav: document.querySelector('.portal-nav'),
+  portalNavToggle: document.getElementById('portal-nav-toggle'),
   authHomeView: document.getElementById('auth-home-view'),
   authPanelHeader: document.getElementById('auth-panel-header'),
   loginForm: document.getElementById('login-form'),
@@ -264,8 +266,13 @@ const SESSION_LOAD_MORE_PAGE_SIZE = 10;
 const TUI_DEBUG_STATUS_STORAGE_KEY = 'lite_tui_bridge_debug';
 const EMAIL_VERIFICATION_COUNTDOWN_INTERVAL_MS = 1000;
 const MOBILE_PANEL_MEDIA_QUERY = '(max-width: 1180px)';
+const PORTAL_SMALL_SCREEN_MEDIA_QUERY = '(max-width: 800px)';
+const HIGH_RESOLUTION_NOTICE_PATH = '/static/lite/high-resolution-required.html';
 const mobilePanelMediaQuery = typeof window.matchMedia === 'function'
   ? window.matchMedia(MOBILE_PANEL_MEDIA_QUERY)
+  : { matches: false };
+const portalSmallScreenMediaQuery = typeof window.matchMedia === 'function'
+  ? window.matchMedia(PORTAL_SMALL_SCREEN_MEDIA_QUERY)
   : { matches: false };
 
 const applyThemeMode = () => {
@@ -1912,6 +1919,35 @@ const showChatError = (message) => {
     }
     state.chatErrorTimer = null;
   }, 10000);
+};
+
+const setPortalNavExpanded = (expanded) => {
+  const nextExpanded = Boolean(expanded);
+  dom.portalNav?.classList.toggle('expanded', nextExpanded);
+  if (!dom.portalNavToggle) return;
+  dom.portalNavToggle.setAttribute('aria-expanded', nextExpanded ? 'true' : 'false');
+  dom.portalNavToggle.setAttribute(
+    'aria-label',
+    nextExpanded ? 'Close module navigation' : 'Open module navigation'
+  );
+};
+
+const handlePortalNavClick = (event) => {
+  if (dom.portalNavToggle && event.target instanceof Element && dom.portalNavToggle.contains(event.target)) {
+    event.preventDefault();
+    if (!portalSmallScreenMediaQuery.matches) return;
+    setPortalNavExpanded(!dom.portalNav?.classList.contains('expanded'));
+    return;
+  }
+
+  if (!portalSmallScreenMediaQuery.matches) return;
+  const item = event.target instanceof Element
+    ? event.target.closest('.portal-nav-item')
+    : null;
+  if (!item || !dom.portalNav?.contains(item) || item.classList.contains('active')) return;
+
+  event.preventDefault();
+  window.location.assign(HIGH_RESOLUTION_NOTICE_PATH);
 };
 
 const isTemporaryConfirmModalOpen = () => Boolean(dom.temporaryConfirmModal && !dom.temporaryConfirmModal.hidden);
@@ -5863,6 +5899,8 @@ const bootstrapSession = async () => {
   }
 };
 
+dom.portalNav?.addEventListener('click', handlePortalNavClick);
+
 dom.loginForm.addEventListener('submit', async (event) => {
   event.preventDefault();
   if (loginInFlight) return;
@@ -6319,6 +6357,18 @@ if (typeof mobilePanelMediaQuery.addEventListener === 'function') {
   mobilePanelMediaQuery.addEventListener('change', handleMobilePanelMediaChange);
 } else if (typeof mobilePanelMediaQuery.addListener === 'function') {
   mobilePanelMediaQuery.addListener(handleMobilePanelMediaChange);
+}
+
+const handlePortalSmallScreenMediaChange = () => {
+  if (!portalSmallScreenMediaQuery.matches) {
+    setPortalNavExpanded(false);
+  }
+};
+
+if (typeof portalSmallScreenMediaQuery.addEventListener === 'function') {
+  portalSmallScreenMediaQuery.addEventListener('change', handlePortalSmallScreenMediaChange);
+} else if (typeof portalSmallScreenMediaQuery.addListener === 'function') {
+  portalSmallScreenMediaQuery.addListener(handlePortalSmallScreenMediaChange);
 }
 
 initResizablePanels();

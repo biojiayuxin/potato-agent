@@ -192,16 +192,22 @@ button {
   box-shadow: 0 10px 24px rgba(22, 101, 52, 0.28);
 }
 
-.portal-nav-item:disabled {
+.portal-nav-item:disabled,
+.portal-nav-item[aria-disabled='true'] {
   cursor: default;
   opacity: 0.58;
   color: rgba(23, 50, 77, 0.72);
   background: rgba(255, 255, 255, 0.38);
 }
 
-.portal-nav-item:disabled:hover {
+.portal-nav-item:disabled:hover,
+.portal-nav-item[aria-disabled='true']:hover {
   border-color: rgba(22, 101, 52, 0.18);
   background: rgba(255, 255, 255, 0.38);
+}
+
+.portal-nav-toggle {
+  display: none;
 }
 
 .login-stage {
@@ -2255,8 +2261,14 @@ button.stretch {
 @media (max-width: 800px) {
   .login-view,
   :root[data-theme='light'] .login-view {
+    height: 100vh;
+    height: 100dvh;
+    grid-template-rows: auto auto;
+    align-content: start;
     padding: 16px;
+    padding-bottom: calc(40px + env(safe-area-inset-bottom));
     gap: 16px;
+    -webkit-overflow-scrolling: touch;
   }
 
   .portal-header {
@@ -2277,25 +2289,73 @@ button.stretch {
   }
 
   .portal-nav {
+    display: grid;
+    grid-template-columns: auto auto;
+    justify-content: center;
+    align-items: center;
     min-height: 52px;
     padding: 6px;
+    overflow-x: visible;
     border-radius: 12px;
   }
 
   .portal-nav-item {
+    width: auto;
+    align-self: center;
     min-height: 38px;
     padding: 0 13px;
     font-size: 13px;
   }
 
+  .portal-nav > .portal-nav-item:not(.active) {
+    display: none;
+  }
+
+  .portal-nav.expanded > .portal-nav-item:not(.active) {
+    grid-column: 1 / -1;
+    display: inline-flex;
+    justify-self: center;
+  }
+
+  .portal-nav-toggle {
+    width: 38px;
+    min-height: 38px;
+    display: inline-flex;
+    flex: 0 0 auto;
+    align-items: center;
+    justify-content: center;
+    flex-direction: column;
+    gap: 4px;
+    padding: 0;
+    border: 1px solid rgba(22, 101, 52, 0.18);
+    border-radius: 8px;
+    background: rgba(255, 255, 255, 0.62);
+    color: #17324d;
+  }
+
+  .portal-nav-toggle:hover {
+    border-color: rgba(22, 101, 52, 0.34);
+    background: rgba(255, 255, 255, 0.84);
+  }
+
+  .portal-nav-toggle-bar {
+    width: 16px;
+    height: 2px;
+    display: block;
+    border-radius: 999px;
+    background: currentColor;
+  }
+
   .login-stage {
     min-height: 0;
-    padding-bottom: 16px;
+    align-items: flex-start;
+    padding-bottom: calc(32px + env(safe-area-inset-bottom));
   }
 
   .login-card {
     width: 100%;
     max-height: none;
+    overflow: visible;
     padding: 28px 22px 24px;
     border-radius: 26px;
   }
