@@ -55,7 +55,8 @@ body {
   font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
   background: linear-gradient(180deg, var(--bg-gradient-top) 0%, var(--bg-gradient-bottom) 100%);
   color: var(--text);
-  overflow: hidden;
+  overflow-x: hidden;
+  overflow-y: auto;
 }
 
 button,
@@ -69,13 +70,14 @@ button {
 }
 
 .app-shell {
-  height: 100vh;
-  overflow: hidden;
+  min-height: 100vh;
+  overflow: visible;
 }
 
 .login-view,
 :root[data-theme='light'] .login-view {
   min-height: 100vh;
+  min-height: 100dvh;
   display: grid;
   grid-template-rows: auto minmax(0, 1fr);
   align-items: stretch;
@@ -84,7 +86,7 @@ button {
   padding: 24px;
   position: relative;
   overflow-x: hidden;
-  overflow-y: auto;
+  overflow-y: visible;
   background: url('../background.png') center center / cover no-repeat;
 }
 
@@ -306,14 +308,26 @@ button {
   width: min(100%, 480px);
   border-radius: 32px;
   padding: 36px 32px 30px;
-  max-height: calc(100vh - 48px);
-  overflow-y: auto;
+  max-height: none;
+  overflow: visible;
   position: relative;
   border: 1px solid rgba(255, 255, 255, 0.52);
   background: rgba(255, 255, 255, 0.42);
   backdrop-filter: blur(20px) saturate(145%);
   box-shadow: 0 26px 80px rgba(8, 14, 28, 0.22);
   color: #16233d;
+}
+
+@media (max-height: 760px) {
+  .login-view,
+  :root[data-theme='light'] .login-view {
+    grid-template-rows: auto auto;
+    align-content: start;
+  }
+
+  .login-stage {
+    align-items: flex-start;
+  }
 }
 
 .login-card::before {
@@ -334,6 +348,34 @@ button {
   display: flex;
   flex-direction: column;
   gap: 20px;
+}
+
+.high-resolution-card {
+  max-width: 520px;
+}
+
+.high-resolution-message {
+  align-items: flex-start;
+}
+
+.high-resolution-return {
+  min-height: 44px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  margin-top: 8px;
+  padding: 11px 16px;
+  border-radius: 12px;
+  background: var(--primary);
+  color: #ffffff;
+  font-weight: 700;
+  line-height: 1;
+  text-decoration: none;
+  transition: background 120ms ease;
+}
+
+.high-resolution-return:hover {
+  background: var(--primary-hover);
 }
 
 .login-secondary-actions {
@@ -2261,13 +2303,15 @@ button.stretch {
 @media (max-width: 800px) {
   .login-view,
   :root[data-theme='light'] .login-view {
-    height: 100vh;
-    height: 100dvh;
+    --mobile-browser-bottom-space: 180px;
+    min-height: 100vh;
+    min-height: 100dvh;
     grid-template-rows: auto auto;
     align-content: start;
     padding: 16px;
-    padding-bottom: calc(40px + env(safe-area-inset-bottom));
+    padding-bottom: calc(var(--mobile-browser-bottom-space) + env(safe-area-inset-bottom));
     gap: 16px;
+    scroll-padding-bottom: calc(var(--mobile-browser-bottom-space) + env(safe-area-inset-bottom));
     -webkit-overflow-scrolling: touch;
   }
 
@@ -2349,7 +2393,7 @@ button.stretch {
   .login-stage {
     min-height: 0;
     align-items: flex-start;
-    padding-bottom: calc(32px + env(safe-area-inset-bottom));
+    padding-bottom: calc(96px + env(safe-area-inset-bottom));
   }
 
   .login-card {
