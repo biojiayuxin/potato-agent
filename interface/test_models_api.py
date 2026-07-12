@@ -285,6 +285,194 @@ def test_auth_session_poll_does_not_refresh_idle_activity(monkeypatch) -> None:
         client.close()
 
 
+def test_live_session_poll_is_lightweight_and_does_not_refresh_activity(
+    monkeypatch,
+) -> None:
+    client, interface_app_mod, user, _ = _build_client_and_user(monkeypatch)
+    try:
+        from interface.runtime_state import (
+            ensure_runtime_state_store,
+            get_runtime_state,
+            mark_runtime_started,
+        )
+
+        db_path = Path(os.environ["INTERFACE_AUTH_DB"])
+        ensure_runtime_state_store(db_path)
+        mark_runtime_started(user.id, db_path=db_path)
+        old_activity_at = int(time.time()) - 3600
+        with sqlite3.connect(str(db_path)) as conn:
+            conn.execute(
+                """
+                UPDATE runtime_state
+                SET runtime_started_at = ?,
+                    last_user_message_at = ?,
+                    updated_at = ?
+                WHERE user_id = ?
+                """,
+                (old_activity_at, old_activity_at, old_activity_at, user.id),
+            )
+            conn.commit()
+
+        display_store_mod.save_display_messages(
+            user.id,
+            "session-1",
+            [{"id": "m1", "role": "assistant", "content": "working"}],
+            db_path=db_path,
+        )
+        display_store_mod.save_live_session_state(
+            user.id,
+            "session-1",
+            run_id="run-1",
+            live_session_id="live-1",
+            assistant_message_id="m1",
+            status="awaiting_approval",
+            pending_approval={
+                "approval_id": "run-1:3",
+                "command": "echo ok",
+                "description": "Approve",
+            },
+            db_path=db_path,
+        )
+        monkeypatch.setattr(
+            interface_app_mod,
+            "get_live_session_state",
+            lambda user_id, session_id: display_store_mod.get_live_session_state(
+                user_id, session_id, db_path=db_path
+            ),
+        )
+        monkeypatch.setattr(
+            interface_app_mod,
+            "get_display_session_meta",
+            lambda user_id, session_id: display_store_mod.get_display_session_meta(
+                user_id, session_id, db_path=db_path
+            ),
+        )
+        monkeypatch.setattr(
+            interface_app_mod,
+            "get_display_messages",
+            lambda user_id, session_id: display_store_mod.get_display_messages(
+                user_id, session_id, db_path=db_path
+            ),
+        )
+        monkeypatch.setattr(
+            interface_app_mod,
+            "get_live_poll_snapshot",
+            lambda user_id, session_id, **kwargs: display_store_mod.get_live_poll_snapshot(
+                user_id,
+                session_id,
+                db_path=db_path,
+                **kwargs,
+            ),
+        )
+        monkeypatch.setattr(
+            interface_app_mod,
+            "find_live_session_id_by_run_id",
+            lambda user_id, run_id: display_store_mod.find_live_session_id_by_run_id(
+                user_id, run_id, db_path=db_path
+            ),
+        )
+        monkeypatch.setattr(
+            interface_app_mod,
+            "get_turn_submission_receipt",
+            lambda user_id, request_id: display_store_mod.get_turn_submission_receipt(
+                user_id, request_id, db_path=db_path
+            ),
+        )
+        monkeypatch.setattr(
+            interface_app_mod,
+            "_open_session_db",
+            lambda *_args, **_kwargs: (_ for _ in ()).throw(
+                AssertionError("live polling must not open Hermes SessionDB")
+            ),
+        )
+
+        response = client.get("/api/sessions/session-1/live")
+
+        assert response.status_code == 200, response.text
+        payload = response.json()
+        assert payload["session_id"] == "session-1"
+        assert payload["messages"][0]["content"] == "working"
+        assert payload["live"]["status"] == "awaiting_approval"
+        assert payload["live"]["pending_approval"]["command"] == "echo ok"
+        assert payload["live"]["pending_approval"]["approval_id"] == "run-1:3"
+        assert payload["file_tree_refresh"] is False
+        unchanged_response = client.get(
+            "/api/sessions/session-1/live?after_run_id=run-1&after_event_seq=0"
+        )
+        assert unchanged_response.status_code == 200
+        assert unchanged_response.json()["messages"] is None
+        assert unchanged_response.json()["file_tree_refresh"] is False
+        display_store_mod.append_session_event(
+            user.id,
+            "session-1",
+            run_id="run-1",
+            seq=1,
+            event_type="tool.complete",
+            db_path=db_path,
+        )
+        display_store_mod.save_live_session_state(
+            user.id,
+            "session-1",
+            last_event_seq=1,
+            last_workspace_event_seq=1,
+            db_path=db_path,
+        )
+        changed_response = client.get(
+            "/api/sessions/session-1/live?after_run_id=run-1&after_event_seq=0"
+        )
+        assert changed_response.status_code == 200
+        assert changed_response.json()["file_tree_refresh"] is True
+
+        class _RevisionManager:
+            async def get_workspace_change_revision(self, user_id: str) -> str:
+                assert user_id == user.id
+                return "revision-1"
+
+        monkeypatch.setattr(
+            interface_app_mod.app.state,
+            "session_run_manager",
+            _RevisionManager(),
+            raising=False,
+        )
+        revision_response = client.get("/api/files/revision")
+        assert revision_response.status_code == 200
+        assert revision_response.json() == {"revision": "revision-1"}
+        recovered_response = client.get("/api/turns/run-1")
+        assert recovered_response.status_code == 200
+        assert recovered_response.json()["session"]["id"] == "session-1"
+        assert recovered_response.json()["live"]["run_id"] == "run-1"
+        display_store_mod.create_turn_submission_receipt(
+            user.id,
+            "pending-request",
+            requested_session_id="draft",
+            db_path=db_path,
+        )
+        pending_response = client.get("/api/turns/pending-request")
+        assert pending_response.status_code == 202
+        assert pending_response.json()["pending"] is True
+        assert pending_response.json()["expires_at"] > int(time.time())
+        display_store_mod.create_turn_submission_receipt(
+            user.id,
+            "old-request",
+            requested_session_id="session-1",
+            db_path=db_path,
+        )
+        display_store_mod.finish_turn_submission_receipt(
+            user.id,
+            "old-request",
+            session_id="session-1",
+            db_path=db_path,
+        )
+        stale_response = client.get("/api/turns/old-request")
+        assert stale_response.status_code == 409
+        assert "no longer the current run" in stale_response.json()["detail"]
+        state = get_runtime_state(user.id, db_path=db_path)
+        assert state is not None
+        assert int(state["last_user_message_at"]) == old_activity_at
+    finally:
+        client.close()
+
+
 def test_put_active_model_rejects_non_whitelist_id(monkeypatch) -> None:
     client, _, _, _ = _build_client_and_user(monkeypatch)
     try:

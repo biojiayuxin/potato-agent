@@ -1,0 +1,92 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Genome Browser | Potato Research</title>
+    <link rel="icon" type="image/png" href="/static/favicon.png" />
+    <link rel="stylesheet" href="/static/genome_browser/styles.css?v=20260710-initial" />
+  </head>
+  <body>
+    <div class="genome-browser-app">
+      <header class="portal-header">
+        <section class="portal-hero" aria-labelledby="portal-title">
+          <div class="portal-hero-content">
+            <h1 id="portal-title">AI-powered multi-omics database for potato research</h1>
+          </div>
+        </section>
+        <nav class="portal-nav" aria-label="Portal modules">
+          <a class="portal-nav-item" href="/lite">Potato Agent</a>
+          <a class="portal-nav-item" href="/spatial">Spatial Expression</a>
+          <a class="portal-nav-item" href="/wgcna">WGCNA Network</a>
+          <a class="portal-nav-item" href="/bulk-rnaseq">Bulk RNA-Seq</a>
+          <a class="portal-nav-item active" href="/genome-browser" aria-current="page">Genome Browser</a>
+          <button class="portal-nav-item" type="button" disabled>Variants</button>
+          <button class="portal-nav-item" type="button" disabled>Germplasm</button>
+        </nav>
+      </header>
+
+      <main class="browser-main">
+        <section class="query-panel" aria-label="Genome browser controls">
+          <div class="query-heading">
+            <h2>Genome Browser</h2>
+          </div>
+
+          <form id="browser-form" class="query-form">
+            <label class="field">
+              <span>Genome Type</span>
+              <select id="category-select" disabled>
+                <option value="all">All genomes</option>
+              </select>
+            </label>
+
+            <label class="field">
+              <span>Assembly</span>
+              <select id="assembly-select" disabled>
+                <option value="">Loading...</option>
+              </select>
+            </label>
+
+            <label class="field">
+              <span>Location</span>
+              <input id="location-input" type="text" spellcheck="false" autocomplete="off" placeholder="chr01:1..100000" />
+            </label>
+
+            <div class="query-actions">
+              <button id="load-button" type="submit" class="primary" disabled>Load</button>
+              <button id="reset-location-button" type="button" class="ghost" disabled>Default locus</button>
+            </div>
+          </form>
+
+          <section class="status-panel" aria-label="Genome browser dataset status">
+            <h3>Assembly</h3>
+            <dl id="assembly-detail" class="detail-list">
+              <div>
+                <dt>Status</dt>
+                <dd>Loading manifest</dd>
+              </div>
+            </dl>
+          </section>
+        </section>
+
+        <section class="viewer-panel" aria-label="Genome browser viewer">
+          <div class="viewer-toolbar">
+            <div>
+              <div id="browser-title" class="browser-title">No assembly loaded</div>
+              <div id="browser-summary" class="browser-summary">Loading genome browser</div>
+            </div>
+          </div>
+          <div class="browser-stage">
+            <div id="jbrowse-linear-genome-view"></div>
+            <div id="browser-empty" class="browser-empty">Loading genome browser</div>
+          </div>
+        </section>
+      </main>
+    </div>
+
+    <script src="/static/genome_browser/vendor/react.production.min.js"></script>
+    <script src="/static/genome_browser/vendor/react-dom.production.min.js"></script>
+    <script src="/static/genome_browser/vendor/react-linear-genome-view.umd.production.min.js"></script>
+    <script src="/static/genome_browser/app.js?v=20260710-initial"></script>
+  </body>
+</html>

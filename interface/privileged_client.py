@@ -28,11 +28,15 @@ from interface.model_options import (
     patch_user_active_model,
 )
 from interface.model_proxy_config import get_model_proxy_base_url
+from interface.process_utils import SESSION_DB_HELPER_TIMEOUT_SECONDS, run_process_group
 from interface.runtime_state import (
-    cleanup_expired_runtime_leases,
-    has_active_runtime_leases,
+    DEFAULT_RUNTIME_IDLE_TIMEOUT_SECONDS,
+    claim_runtime_sleep,
+    get_runtime_idle_eligibility,
     mark_background_activity,
+    release_runtime_sleep_claim,
     revoke_runtime_session,
+    runtime_sleep_claim_is_valid,
 )
 
 
@@ -93,14 +97,32 @@ class PrivilegedClient:
     def helper_exec_command(self, args: list[str]) -> list[str]:
         return self._helper_command(args)
 
-    def _call_helper(self, args: list[str], *, input_text: str | None = None) -> dict[str, Any]:
-        result = subprocess.run(
-            self._helper_command(args),
-            capture_output=True,
-            text=True,
-            input=input_text,
-            check=False,
-        )
+    def _call_helper(
+        self,
+        args: list[str],
+        *,
+        input_text: str | None = None,
+        timeout_seconds: float | None = None,
+    ) -> dict[str, Any]:
+        try:
+            if timeout_seconds is None:
+                result = subprocess.run(
+                    self._helper_command(args),
+                    capture_output=True,
+                    text=True,
+                    input=input_text,
+                    check=False,
+                )
+            else:
+                result = run_process_group(
+                    self._helper_command(args),
+                    timeout_seconds=timeout_seconds,
+                    input_text=input_text,
+                )
+        except subprocess.TimeoutExpired as exc:
+            raise PrivilegedClientError(
+                f"privileged helper timed out after {float(timeout_seconds or 0):.0f} seconds"
+            ) from exc
         stdout_lines = [line for line in result.stdout.splitlines() if line.strip()]
         raw_payload = stdout_lines[-1] if stdout_lines else ""
         if not raw_payload:
@@ -201,27 +223,74 @@ class PrivilegedClient:
         payload = self._call_helper(["has-background-jobs", "--username", username])
         return bool(payload.get("active"))
 
-    def stop_idle_runtime(self, username: str, user_id: str) -> dict[str, Any]:
+    def stop_idle_runtime(
+        self,
+        username: str,
+        user_id: str,
+        idle_timeout_seconds: int = DEFAULT_RUNTIME_IDLE_TIMEOUT_SECONDS,
+    ) -> dict[str, Any]:
+        normalized_timeout = max(int(idle_timeout_seconds), 1)
         if self._can_call_directly():
             target = MappingStore(DEFAULT_MAPPING_PATH).get_target_by_username(username)
             if target is None:
                 raise PrivilegedClientError(f"Unknown mapping user: {username}")
             with service_operation_lock(target.systemd_service):
-                cleanup_expired_runtime_leases()
-                if has_active_runtime_leases(user_id):
-                    return {"stopped": False, "reason": "active_lease"}
+                eligibility = get_runtime_idle_eligibility(
+                    user_id,
+                    idle_timeout_seconds=normalized_timeout,
+                )
+                if not eligibility or not bool(eligibility.get("eligible")):
+                    reason = str((eligibility or {}).get("reason") or "recent_activity")
+                    return {"stopped": False, "reason": reason}
                 if has_active_background_processes(target):
                     mark_background_activity(user_id)
                     return {"stopped": False, "reason": "background_jobs"}
-                if not is_service_active(target.systemd_service):
+                claim_id = claim_runtime_sleep(
+                    user_id,
+                    idle_timeout_seconds=normalized_timeout,
+                )
+                if claim_id is None:
+                    eligibility = get_runtime_idle_eligibility(
+                        user_id,
+                        idle_timeout_seconds=normalized_timeout,
+                    )
+                    reason = str((eligibility or {}).get("reason") or "recent_activity")
+                    return {"stopped": False, "reason": reason}
+                try:
+                    if has_active_background_processes(target):
+                        release_runtime_sleep_claim(user_id, claim_id=claim_id)
+                        claim_id = ""
+                        mark_background_activity(user_id)
+                        return {"stopped": False, "reason": "background_jobs"}
+                    service_active = is_service_active(target.systemd_service)
+                    if not runtime_sleep_claim_is_valid(
+                        user_id,
+                        claim_id=claim_id,
+                        idle_timeout_seconds=normalized_timeout,
+                    ):
+                        return {"stopped": False, "reason": "recent_activity"}
+                    if not service_active:
+                        revoke_runtime_session(user_id, reason="idle_timeout")
+                        claim_id = ""
+                        return {"stopped": True, "reason": "service_inactive"}
+                    stop_service(target.systemd_service)
                     revoke_runtime_session(user_id, reason="idle_timeout")
-                    return {"stopped": True, "reason": "service_inactive"}
-                stop_service(target.systemd_service)
-                revoke_runtime_session(user_id, reason="idle_timeout")
-                return {"stopped": True}
+                    claim_id = ""
+                    return {"stopped": True}
+                finally:
+                    if claim_id:
+                        release_runtime_sleep_claim(user_id, claim_id=claim_id)
 
         payload = self._call_helper(
-            ["stop-idle-runtime", "--username", username, "--user-id", user_id]
+            [
+                "stop-idle-runtime",
+                "--username",
+                username,
+                "--user-id",
+                user_id,
+                "--idle-timeout-seconds",
+                str(normalized_timeout),
+            ]
         )
         return {
             "stopped": bool(payload.get("stopped")),
@@ -271,7 +340,8 @@ class PrivilegedClient:
                 method,
                 "--kwargs-json",
                 json.dumps(kwargs, ensure_ascii=False),
-            ]
+            ],
+            timeout_seconds=SESSION_DB_HELPER_TIMEOUT_SECONDS,
         )
         return payload.get("result")
 

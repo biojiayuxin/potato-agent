@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import copy
 import os
 import tempfile
 from pathlib import Path
@@ -491,6 +492,7 @@ def test_tool_start_and_complete_are_persisted_as_progress() -> None:
     async def scenario() -> None:
         manager = SessionRunManager(db_path=db_path)
         bridge = _Bridge()
+        assert await manager.get_workspace_change_revision("user-1") == ""
         await manager.handle_bridge_event(
             bridge,  # type: ignore[arg-type]
             {
@@ -513,6 +515,13 @@ def test_tool_start_and_complete_are_persisted_as_progress() -> None:
                 "payload": {"summary": "`🛠️ list_directory completed`"},
             },
         )
+        tool_live_state = get_live_session_state(
+            "user-1", "session-1", db_path=db_path
+        )
+        assert tool_live_state is not None
+        assert tool_live_state["last_workspace_event_seq"] == 3
+        tool_revision = await manager.get_workspace_change_revision("user-1")
+        assert tool_revision
         await manager.handle_bridge_event(
             bridge,  # type: ignore[arg-type]
             {
@@ -524,12 +533,30 @@ def test_tool_start_and_complete_are_persisted_as_progress() -> None:
                 "payload": {"text": "done", "status": "complete"},
             },
         )
+        complete_revision = await manager.get_workspace_change_revision("user-1")
+        assert complete_revision
+        assert complete_revision != tool_revision
+        await manager.handle_bridge_event(
+            bridge,  # type: ignore[arg-type]
+            {
+                "type": "background.complete",
+                "session_id": "live-1",
+                "persistent_session_id": "session-1",
+                "run_id": "run-1",
+                "seq": 5,
+                "payload": {"task_id": "bg-1", "text": "done"},
+            },
+        )
+        background_revision = await manager.get_workspace_change_revision("user-1")
+        assert background_revision
+        assert background_revision != complete_revision
 
     _run(scenario())
 
     live_state = get_live_session_state("user-1", "session-1", db_path=db_path)
     assert live_state is not None
     assert live_state["status"] == "completed"
+    assert live_state["last_workspace_event_seq"] == 4
 
     messages = get_display_messages("user-1", "session-1", db_path=db_path)
     assert messages is not None
@@ -540,6 +567,78 @@ def test_tool_start_and_complete_are_persisted_as_progress() -> None:
     ]
     assert assistant["content"] == "done"
     assert assistant["done"] is True
+
+
+def test_delta_retry_after_partial_persistence_is_idempotent(monkeypatch) -> None:
+    from interface.session_run_manager import SessionRunContext, SessionRunManager
+
+    manager = SessionRunManager()
+    context = SessionRunContext(
+        user_id="user-1",
+        session_id="session-1",
+        run_id="run-1",
+        assistant_message_id="assistant-1",
+    )
+    stored_messages = [
+        {
+            "id": "assistant-1",
+            "role": "assistant",
+            "content": "",
+            "done": False,
+        }
+    ]
+    live_save_calls = 0
+
+    async def get_messages(user_id: str, session_id: str):
+        return copy.deepcopy(stored_messages)
+
+    async def save_messages(user_id: str, session_id: str, messages, **kwargs):
+        nonlocal stored_messages
+        stored_messages = copy.deepcopy(messages)
+
+    async def get_live_state(user_id: str, session_id: str):
+        return {"pending_approval": None, "tip_session_id": "session-1"}
+
+    async def save_live_state(user_id: str, session_id: str, **kwargs):
+        nonlocal live_save_calls
+        live_save_calls += 1
+        if live_save_calls == 1:
+            raise RuntimeError("database is locked")
+
+    async def request_flush(run_context):
+        return None
+
+    monkeypatch.setattr(manager, "_get_display_messages", get_messages)
+    monkeypatch.setattr(manager, "_save_display_messages", save_messages)
+    monkeypatch.setattr(manager, "_get_live_session_state", get_live_state)
+    monkeypatch.setattr(manager, "_save_live_session_state", save_live_state)
+    monkeypatch.setattr(manager, "_request_flush", request_flush)
+
+    async def scenario() -> None:
+        try:
+            await manager._append_delta(
+                context,
+                {"text": "hello"},
+                7,
+                "live-1",
+            )
+        except RuntimeError as exc:
+            assert str(exc) == "database is locked"
+        else:
+            raise AssertionError("the first live-state write should fail")
+
+        await manager._append_delta(
+            context,
+            {"text": "hello"},
+            7,
+            "live-1",
+        )
+
+    _run(scenario())
+
+    assert live_save_calls == 2
+    assert stored_messages[0]["content"] == "hello"
+    assert stored_messages[0]["_lastDeltaEventSeq"] == 7
 
 
 def run() -> None:

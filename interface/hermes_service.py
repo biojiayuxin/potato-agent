@@ -62,10 +62,21 @@ MANAGED_PLAN_MODE_SKILLS_DIR_NAME = "plan-mode"
 DEFAULT_PLAN_MODE_SKILLS_PATH = REPO_ROOT / "skills" / MANAGED_PLAN_MODE_SKILLS_DIR_NAME
 PUBLIC_DATA_LINK_NAME = "public_data"
 DEFAULT_PUBLIC_DATA_PATH = Path("/mnt/data/public_data")
+SYSTEMCTL_STOP_TIMEOUT_SECONDS = 120.0
+SYSTEMCTL_QUERY_TIMEOUT_SECONDS = 30.0
 
 
-def _run_command(command: list[str]) -> str:
-    result = subprocess.run(command, capture_output=True, text=True, check=False)
+def _run_command(
+    command: list[str], *, timeout_seconds: float | None = None
+) -> str:
+    run_kwargs: dict[str, Any] = {
+        "capture_output": True,
+        "text": True,
+        "check": False,
+    }
+    if timeout_seconds is not None:
+        run_kwargs["timeout"] = timeout_seconds
+    result = subprocess.run(command, **run_kwargs)
     if result.returncode != 0:
         detail = (
             result.stderr.strip()
@@ -76,8 +87,17 @@ def _run_command(command: list[str]) -> str:
     return result.stdout
 
 
-def _run_command_result(command: list[str]) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(command, capture_output=True, text=True, check=False)
+def _run_command_result(
+    command: list[str], *, timeout_seconds: float | None = None
+) -> subprocess.CompletedProcess[str]:
+    run_kwargs: dict[str, Any] = {
+        "capture_output": True,
+        "text": True,
+        "check": False,
+    }
+    if timeout_seconds is not None:
+        run_kwargs["timeout"] = timeout_seconds
+    return subprocess.run(command, **run_kwargs)
 
 
 def require_root() -> None:
@@ -448,12 +468,21 @@ def start_service(service_name: str) -> None:
 
 
 def stop_service(service_name: str) -> None:
-    _run_command(["systemctl", "stop", service_name])
-    _run_command_result(["systemctl", "reset-failed", service_name])
+    _run_command(
+        ["systemctl", "stop", service_name],
+        timeout_seconds=SYSTEMCTL_STOP_TIMEOUT_SECONDS,
+    )
+    _run_command_result(
+        ["systemctl", "reset-failed", service_name],
+        timeout_seconds=SYSTEMCTL_QUERY_TIMEOUT_SECONDS,
+    )
 
 
 def is_service_active(service_name: str) -> bool:
-    result = _run_command_result(["systemctl", "is-active", service_name])
+    result = _run_command_result(
+        ["systemctl", "is-active", service_name],
+        timeout_seconds=SYSTEMCTL_QUERY_TIMEOUT_SECONDS,
+    )
     return result.returncode == 0 and result.stdout.strip() == "active"
 
 

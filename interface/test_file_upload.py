@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from contextlib import contextmanager
 import tempfile
 from pathlib import Path
@@ -7,6 +8,7 @@ from types import SimpleNamespace
 from typing import Any
 
 from fastapi.testclient import TestClient
+import pytest
 
 import interface.auth_db as auth_db_mod
 import interface.display_store as display_store_mod
@@ -145,6 +147,45 @@ users:
     monkeypatch.setattr(mapping_mod, "DEFAULT_MAPPING_PATH", mapping_path)
     monkeypatch.setattr(interface_app_mod, "DEFAULT_MAPPING_PATH", mapping_path)
     interface_app_mod.mapping_store = mapping_mod.MappingStore(mapping_path)
+    monkeypatch.setattr(
+        interface_app_mod,
+        "create_turn_submission_receipt",
+        lambda user_id, request_id, *, requested_session_id: display_store_mod.create_turn_submission_receipt(
+            user_id,
+            request_id,
+            requested_session_id=requested_session_id,
+            db_path=auth_db,
+        ),
+    )
+    monkeypatch.setattr(
+        interface_app_mod,
+        "finish_turn_submission_receipt",
+        lambda user_id, request_id, *, session_id: display_store_mod.finish_turn_submission_receipt(
+            user_id,
+            request_id,
+            session_id=session_id,
+            db_path=auth_db,
+        ),
+    )
+    monkeypatch.setattr(
+        interface_app_mod,
+        "fail_turn_submission_receipt",
+        lambda user_id, request_id, *, error_message: display_store_mod.fail_turn_submission_receipt(
+            user_id,
+            request_id,
+            error_message=error_message,
+            db_path=auth_db,
+        ),
+    )
+    monkeypatch.setattr(
+        interface_app_mod,
+        "heartbeat_turn_submission_receipt",
+        lambda user_id, request_id: display_store_mod.heartbeat_turn_submission_receipt(
+            user_id,
+            request_id,
+            db_path=auth_db,
+        ),
+    )
     monkeypatch.setattr(
         interface_app_mod,
         "get_user_by_id",
@@ -316,3 +357,66 @@ def test_submit_turn_passes_plan_mode_to_run_manager(monkeypatch) -> None:
 
     assert len(run_manager.submit_calls) == 1
     assert run_manager.submit_calls[0]["mode"] == "plan"
+
+
+@pytest.mark.asyncio
+async def test_submit_turn_records_receipt_before_bridge_and_cancellation(
+    monkeypatch,
+) -> None:
+    created_receipts: list[tuple[str, str, str]] = []
+    failed_receipts: list[tuple[str, str, str]] = []
+    bridge_wait_started = asyncio.Event()
+    hold_bridge = asyncio.Event()
+
+    def create_receipt(
+        user_id: str,
+        request_id: str,
+        *,
+        requested_session_id: str,
+    ) -> dict[str, Any]:
+        created_receipts.append((user_id, request_id, requested_session_id))
+        return {"created": True, "status": "pending"}
+
+    def fail_receipt(
+        user_id: str,
+        request_id: str,
+        *,
+        error_message: str,
+    ) -> bool:
+        failed_receipts.append((user_id, request_id, error_message))
+        return True
+
+    async def get_bridge(user) -> Any:
+        bridge_wait_started.set()
+        await hold_bridge.wait()
+        raise AssertionError("cancelled submission must not acquire a bridge")
+
+    monkeypatch.setattr(interface_app_mod, "create_turn_submission_receipt", create_receipt)
+    monkeypatch.setattr(interface_app_mod, "fail_turn_submission_receipt", fail_receipt)
+    monkeypatch.setattr(interface_app_mod, "_get_tui_bridge_for_user", get_bridge)
+    monkeypatch.setattr(
+        interface_app_mod.app.state,
+        "session_run_manager",
+        SimpleNamespace(),
+        raising=False,
+    )
+
+    task = asyncio.create_task(
+        interface_app_mod.submit_session_turn(
+            "draft",
+            interface_app_mod.SessionTurnSubmitRequest(
+                prompt="hello",
+                request_id="request-1",
+            ),
+            SimpleNamespace(id="user-1"),  # type: ignore[arg-type]
+        )
+    )
+    await bridge_wait_started.wait()
+
+    assert created_receipts == [("user-1", "request-1", "draft")]
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert failed_receipts == [
+        ("user-1", "request-1", "Turn submission request was cancelled")
+    ]

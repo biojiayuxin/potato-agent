@@ -17,6 +17,8 @@
 - WGCNA 共表达网络查看器：公开页面 `/wgcna`，运行时通过 `WGCNA_DATABASE_URL` 查询 PostgreSQL
 - Bulk RNA-Seq 表达查看器：公开页面 `/bulk-rnaseq`，数据从
   `/srv/bulk_rnaseq/current/bulk_rnaseq.sqlite` 只读加载
+- Genome Browser：公开页面 `/genome-browser`，数据从
+  `/mnt/data/public_data/Genome_browser_DB` 只读加载
 
 ## 目录
 
@@ -42,6 +44,8 @@
   WGCNA 共表达网络查看器的公开 FastAPI router；只读查询 PostgreSQL
 - `bulk_rnaseq_viewer.py`
   Bulk RNA-Seq 表达查看器的公开 FastAPI router；只读查询外部 SQLite
+- `genome_browser.py`
+  Genome Browser 的公开 FastAPI router；只读加载 bgzip FASTA/GFF3 及索引文件
 - `build_bulk_rnaseq_db.py`
   从整理后的 bulk RNA-Seq TSV 构建只读 SQLite；默认排除非马铃薯材料
 - `requirements.txt`
@@ -54,6 +58,8 @@
   WGCNA 共表达网络查看器前端页面、样式、脚本和 vendor 资源
 - `static/bulk_rnaseq/`
   Bulk RNA-Seq 表达热图前端页面、样式和脚本
+- `static/genome_browser/`
+  Genome Browser 前端页面、样式、脚本和 JBrowse vendor 资源
 
 ## 依赖的数据源
 
@@ -65,6 +71,7 @@
 - 空间转录组数据目录，默认 `/srv/spatial_data/current`
 - WGCNA PostgreSQL 数据库，默认通过 `WGCNA_DATABASE_URL` 配置
 - Bulk RNA-Seq SQLite 数据库，默认 `/srv/bulk_rnaseq/current/bulk_rnaseq.sqlite`
+- Genome Browser 数据库，默认 `/mnt/data/public_data/Genome_browser_DB`
 
 ## 关键环境变量
 
@@ -80,6 +87,7 @@
 - `SPATIAL_VIEWER_DATA_ROOT`
 - `WGCNA_DATABASE_URL`
 - `BULK_RNASEQ_DB_PATH`
+- `GENOME_BROWSER_DB_ROOT`
 
 说明：
 
@@ -92,6 +100,7 @@
 - `SPATIAL_VIEWER_DATA_ROOT` 默认 `/srv/spatial_data/current`；建议目录 owner 为 `root`、group 为 `potato-interface`，目录 `0750`、文件 `0640`
 - `WGCNA_DATABASE_URL` 指向 WGCNA PostgreSQL 数据库，例如 `postgresql:///potato_wgcna?host=/var/run/postgresql`
 - `BULK_RNASEQ_DB_PATH` 默认 `/srv/bulk_rnaseq/current/bulk_rnaseq.sqlite`；建议 `/srv/bulk_rnaseq` owner 为 `root`、group 为 `potato-interface`，目录 `0750`、SQLite 文件 `0640`
+- `GENOME_BROWSER_DB_ROOT` 默认 `/mnt/data/public_data/Genome_browser_DB`；目录内 FASTA/GFF3 需要是 bgzip 压缩并带 `.fai/.gzi/.tbi` 索引
 
 ## 当前边界
 

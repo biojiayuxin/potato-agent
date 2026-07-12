@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+import subprocess
 from pathlib import Path
 
 from interface.mapping import HermesTarget
@@ -43,3 +45,151 @@ def test_exec_tui_gateway_chdirs_to_target_workdir(monkeypatch) -> None:
     assert binary == "runuser"
     assert command[:4] == ["runuser", "-u", "hmx_alice", "--"]
     assert "TERMINAL_CWD=/home/hmx_alice" in command
+
+
+def test_session_db_rpc_source_is_passed_without_repo_path(monkeypatch) -> None:
+    captured: list[str] = []
+
+    def fake_run_as_user(target, command, *, cwd=None, timeout_seconds=None):
+        assert timeout_seconds == 60.0
+        captured.extend(command)
+        return subprocess.CompletedProcess(
+            command,
+            0,
+            stdout=json.dumps({"ok": True, "result": {"id": "session-1"}}),
+            stderr="",
+        )
+
+    monkeypatch.setattr(privileged_helper, "_run_as_user", fake_run_as_user)
+
+    result = privileged_helper._session_db_call(
+        _target(), "get_session", {"session_id": "session-1"}
+    )
+
+    assert result == {"id": "session-1"}
+    assert captured[1] == "-c"
+    assert "from hermes_state import SessionDB" in captured[2]
+    assert str(privileged_helper.USER_SESSION_DB_RPC_PATH) not in captured
+
+
+def test_stop_idle_runtime_cli_rechecks_with_requested_timeout(
+    monkeypatch,
+    capsys,
+) -> None:
+    events: list[str] = []
+
+    class FakeLock:
+        def __enter__(self):
+            events.append("lock_enter")
+
+        def __exit__(self, exc_type, exc, traceback):
+            events.append("lock_exit")
+
+    def fake_eligibility(user_id: str, *, idle_timeout_seconds: int):
+        assert events == ["lock_enter"]
+        assert user_id == "user-1"
+        assert idle_timeout_seconds == 321
+        events.append("eligibility")
+        return {"eligible": False, "reason": "active_lease"}
+
+    monkeypatch.setattr(privileged_helper, "require_root", lambda: None)
+    monkeypatch.setattr(privileged_helper, "require_binary", lambda binary: None)
+    monkeypatch.setattr(privileged_helper, "_load_target", lambda username: _target())
+    monkeypatch.setattr(
+        privileged_helper,
+        "service_operation_lock",
+        lambda service_name: FakeLock(),
+    )
+    monkeypatch.setattr(
+        privileged_helper,
+        "get_runtime_idle_eligibility",
+        fake_eligibility,
+    )
+    monkeypatch.setattr(
+        privileged_helper,
+        "stop_service",
+        lambda service_name: events.append("stop"),
+    )
+    monkeypatch.setattr(
+        privileged_helper.sys,
+        "argv",
+        [
+            "privileged-helper",
+            "stop-idle-runtime",
+            "--username",
+            "alice",
+            "--user-id",
+            "user-1",
+            "--idle-timeout-seconds",
+            "321",
+        ],
+    )
+
+    assert privileged_helper.main() == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload == {"ok": True, "stopped": False, "reason": "active_lease"}
+    assert events == ["lock_enter", "eligibility", "lock_exit"]
+
+
+def test_stop_idle_runtime_cli_rechecks_after_service_probe(
+    monkeypatch,
+    capsys,
+) -> None:
+    eligibility_calls = 0
+
+    class FakeLock:
+        def __enter__(self):
+            return None
+
+        def __exit__(self, exc_type, exc, traceback):
+            return None
+
+    def fake_eligibility(user_id: str, *, idle_timeout_seconds: int):
+        nonlocal eligibility_calls
+        eligibility_calls += 1
+        if eligibility_calls == 1:
+            return {"eligible": True, "reason": ""}
+        return {"eligible": False, "reason": "recent_activity"}
+
+    monkeypatch.setattr(privileged_helper, "require_root", lambda: None)
+    monkeypatch.setattr(privileged_helper, "require_binary", lambda binary: None)
+    monkeypatch.setattr(privileged_helper, "_load_target", lambda username: _target())
+    monkeypatch.setattr(
+        privileged_helper, "service_operation_lock", lambda service_name: FakeLock()
+    )
+    monkeypatch.setattr(
+        privileged_helper, "get_runtime_idle_eligibility", fake_eligibility
+    )
+    monkeypatch.setattr(
+        privileged_helper, "claim_runtime_sleep", lambda *args, **kwargs: None
+    )
+    monkeypatch.setattr(
+        privileged_helper, "has_active_background_processes", lambda target: False
+    )
+    monkeypatch.setattr(privileged_helper, "is_service_active", lambda service: True)
+    monkeypatch.setattr(
+        privileged_helper,
+        "stop_service",
+        lambda service: (_ for _ in ()).throw(
+            AssertionError("recent activity must prevent service stop")
+        ),
+    )
+    monkeypatch.setattr(
+        privileged_helper.sys,
+        "argv",
+        [
+            "privileged-helper",
+            "stop-idle-runtime",
+            "--username",
+            "alice",
+            "--user-id",
+            "user-1",
+            "--idle-timeout-seconds",
+            "321",
+        ],
+    )
+
+    assert privileged_helper.main() == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload == {"ok": True, "stopped": False, "reason": "recent_activity"}
+    assert eligibility_calls == 2

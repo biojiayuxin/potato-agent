@@ -35,7 +35,7 @@ from fastapi import (
     WebSocketDisconnect,
     status,
 )
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, JSONResponse
 from fastapi.responses import Response as FastAPIResponse
 from fastapi.responses import StreamingResponse
 from fastapi.staticfiles import StaticFiles
@@ -68,7 +68,7 @@ from interface.auth_db import (
     record_email_verification_sent,
     reset_user_password_with_email_verification,
     set_signup_job_status,
-    TEMPORARY_USER_STATUS_CLEANING,
+    TEMPORARY_USER_STATUS_ACTIVE,
     TEMPORARY_USER_STATUS_FAILED,
     update_user_password,
     username_exists,
@@ -84,16 +84,24 @@ from interface.archive_store import (
 )
 from interface.background_jobs import has_active_background_processes
 from interface.display_store import (
+    cleanup_turn_submission_receipts,
+    create_turn_submission_receipt,
     delete_display_user_data,
     delete_display_messages,
     delete_live_session_state,
     delete_session_events,
     ensure_display_store,
+    fail_turn_submission_receipt,
+    find_live_session_id_by_run_id,
+    finish_turn_submission_receipt,
     get_live_session_state,
     list_live_session_states,
     mark_active_live_session_states_failed,
     get_display_session_meta,
     get_display_messages,
+    get_live_poll_snapshot,
+    get_turn_submission_receipt,
+    heartbeat_turn_submission_receipt,
     list_display_session_metas,
     save_display_messages,
 )
@@ -110,19 +118,24 @@ from interface.hermes_service import (
     stop_service,
 )
 from interface.runtime_state import (
+    claim_runtime_sleep,
+    claim_temporary_user_cleanup,
     cleanup_expired_runtime_leases,
     clear_session_revocation,
     delete_runtime_state,
     ensure_runtime_state_store,
     get_runtime_state,
-    get_temporary_user_idle_status,
-    has_active_runtime_leases,
+    get_runtime_idle_eligibility,
     list_idle_temporary_user_candidates,
     list_idle_runtime_candidates,
     mark_background_activity,
     mark_foreground_activity,
     mark_runtime_started,
+    release_runtime_sleep_claim,
+    release_temporary_cleanup_claim,
     revoke_runtime_session,
+    runtime_sleep_claim_is_valid,
+    temporary_cleanup_claim_is_valid,
 )
 from interface.model_options import (
     ModelOptionsError,
@@ -135,6 +148,7 @@ from interface.password_policy import (
     PASSWORD_COMPLEXITY_DETAIL,
     password_complexity_error,
 )
+from interface.process_utils import SESSION_DB_INNER_TIMEOUT_SECONDS, run_process_group
 from interface.privileged_client import PrivilegedClientError, privileged_client
 from interface.tui_gateway_bridge import (
     TuiGatewayBridge,
@@ -149,6 +163,7 @@ from interface.session_run_manager import (
     SessionRunManager,
 )
 from interface.bulk_rnaseq_viewer import router as bulk_rnaseq_viewer_router
+from interface.genome_browser import router as genome_browser_router
 from interface.spatial_viewer import router as spatial_viewer_router
 from interface.wgcna_viewer import router as wgcna_viewer_router
 
@@ -161,6 +176,7 @@ LITE_DIR = STATIC_DIR / "lite"
 SPATIAL_STATIC_DIR = STATIC_DIR / "spatial"
 FAVICON_PATH = STATIC_DIR / "favicon.png"
 SESSION_COOKIE_NAME = "potato_interface_token"
+REQUEST_AUTH_RESOLUTION_STATE_KEY = "potato_auth_resolution"
 SESSION_SECRET = os.getenv("INTERFACE_SESSION_SECRET") or secrets.token_urlsafe(32)
 SESSION_TTL_SECONDS = int(
     os.getenv("INTERFACE_SESSION_TTL_SECONDS", str(7 * 24 * 3600))
@@ -186,6 +202,7 @@ RUNTIME_IDLE_CHECK_INTERVAL_SECONDS = int(
 TEMPORARY_USER_CLEANUP_RETRY_SECONDS = int(
     os.getenv("INTERFACE_TEMPORARY_USER_CLEANUP_RETRY_SECONDS", "60")
 )
+TURN_SUBMISSION_RECEIPT_HEARTBEAT_SECONDS = 30
 TEMPORARY_USER_PREFIX = "temp"
 TEMPORARY_USER_EMAIL_DOMAIN = "temporary.potato-agent.local"
 FILENAME_SANITIZE_RE = re.compile(r"[^A-Za-z0-9._-]+")
@@ -278,6 +295,7 @@ ACTIVITY_REFRESH_EXCLUDED_PATHS = {
     "/api/auth/temporary",
     "/api/auth/password-reset",
     "/api/auth/password-reset/email-verifications",
+    "/api/files/revision",
     "/api/files/tree",
 }
 EMAIL_VERIFICATION_TTL_SECONDS = 10 * 60
@@ -291,43 +309,8 @@ if str(HERMES_SRC) not in sys.path:
 DEFAULT_SESSION_DB_PYTHON = (
     os.getenv("INTERFACE_TUI_GATEWAY_PYTHON") or "/opt/hermes-agent-venv/bin/python3"
 )
-USER_SESSION_DB_RPC_SCRIPT = (
-    "import json, sys\n"
-    "from pathlib import Path\n"
-    "from hermes_state import SessionDB\n"
-    "db = None\n"
-    "db_path = Path(sys.argv[1])\n"
-    "method = sys.argv[2]\n"
-    "kwargs = json.loads(sys.argv[3]) if len(sys.argv) > 3 else {}\n"
-    "try:\n"
-    "    db = SessionDB(db_path=db_path)\n"
-    "    if method == 'list_sessions_rich':\n"
-    "        result = db.list_sessions_rich(**kwargs)\n"
-    "    elif method == 'get_session':\n"
-    "        result = db.get_session(str(kwargs.get('session_id') or '').strip())\n"
-    "    elif method == 'resolve_session_id':\n"
-    "        result = db.resolve_session_id(str(kwargs.get('session_id_or_prefix') or '').strip())\n"
-    "    elif method == 'get_compression_tip':\n"
-    "        result = db.get_compression_tip(str(kwargs.get('session_id') or '').strip())\n"
-    "    elif method == 'get_messages':\n"
-    "        result = db.get_messages(str(kwargs.get('session_id') or '').strip())\n"
-    "    elif method == 'set_session_title':\n"
-    "        result = db.set_session_title(\n"
-    "            str(kwargs.get('session_id') or '').strip(),\n"
-    "            str(kwargs.get('title') or ''),\n"
-    "        )\n"
-    "    elif method == 'delete_session':\n"
-    "        result = db.delete_session(str(kwargs.get('session_id') or '').strip())\n"
-    "    else:\n"
-    "        raise RuntimeError(f'Unsupported session DB method: {method}')\n"
-    "    print(json.dumps({'ok': True, 'result': result}, ensure_ascii=False))\n"
-    "except Exception as exc:\n"
-    "    print(json.dumps({'ok': False, 'error': str(exc), 'type': type(exc).__name__}, ensure_ascii=False))\n"
-    "    raise SystemExit(1)\n"
-    "finally:\n"
-    "    if db is not None:\n"
-    "        db.close()\n"
-)
+USER_SESSION_DB_RPC_PATH = ROOT_DIR / "session_db_rpc.py"
+USER_SESSION_DB_RPC_SOURCE = USER_SESSION_DB_RPC_PATH.read_text(encoding="utf-8")
 
 mapping_store = MappingStore(DEFAULT_MAPPING_PATH)
 
@@ -388,10 +371,12 @@ class SessionTurnSubmitRequest(BaseModel):
     attachments: list[dict[str, Any]] = []
     draft_title: str = ""
     mode: str = "chat"
+    request_id: str = ""
 
 
 class SessionApprovalRequest(BaseModel):
     choice: str
+    approval_id: str = ""
 
 
 class ActiveModelUpdateRequest(BaseModel):
@@ -553,45 +538,52 @@ async def _rollback_temporary_provision(username: str) -> None:
         _reset_mapping_store_cache()
 
 
+def _process_signup_job_sync(job: dict[str, Any]) -> None:
+    job_id = str(job["job_id"])
+    username = str(job["username"])
+    email = str(job["email"])
+    display_name = str(job["display_name"])
+    set_signup_job_status(job_id, status="provisioning")
+
+    try:
+        privileged_client.provision_user(
+            username=username,
+            email=email,
+            display_name=display_name,
+        )
+        _reset_mapping_store_cache()
+        target = mapping_store.get_target_by_username(username)
+        if target is None:
+            raise RuntimeError("Failed to resolve newly created mapping target.")
+
+        activate_signup_user(job_id, mapping_username=username)
+        set_signup_job_status(job_id, status="completed")
+    except Exception as exc:
+        try:
+            _reset_mapping_store_cache()
+        except Exception:
+            pass
+
+        with contextlib.suppress(Exception):
+            privileged_client.deprovision_user(username, delete_home=True)
+        with contextlib.suppress(Exception):
+            privileged_client.remove_mapping(username)
+
+        set_signup_job_status(
+            job_id,
+            status="failed",
+            error_message=str(exc),
+        )
+
+
 async def _signup_worker_loop() -> None:
     while True:
-        cleanup_terminal_signup_jobs()
-        job = get_next_pending_signup_job()
+        await asyncio.to_thread(cleanup_terminal_signup_jobs)
+        job = await asyncio.to_thread(get_next_pending_signup_job)
         if job is None:
             await asyncio.sleep(2)
             continue
-
-        job_id = str(job["job_id"])
-        username = str(job["username"])
-        email = str(job["email"])
-        display_name = str(job["display_name"])
-        set_signup_job_status(job_id, status="provisioning")
-
-        try:
-            privileged_client.provision_user(
-                username=username,
-                email=email,
-                display_name=display_name,
-            )
-            _reset_mapping_store_cache()
-            target = mapping_store.get_target_by_username(username)
-            if target is None:
-                raise RuntimeError("Failed to resolve newly created mapping target.")
-
-            activate_signup_user(job_id, mapping_username=username)
-            set_signup_job_status(job_id, status="completed")
-        except Exception as exc:
-            try:
-                _reset_mapping_store_cache()
-            except Exception:
-                pass
-
-            with contextlib.suppress(Exception):
-                privileged_client.deprovision_user(username, delete_home=True)
-            with contextlib.suppress(Exception):
-                privileged_client.remove_mapping(username)
-
-            set_signup_job_status(job_id, status="failed", error_message=str(exc))
+        await asyncio.to_thread(_process_signup_job_sync, job)
 
 
 def _create_session_token(user_id: str, session_version: int | None = None) -> str:
@@ -708,18 +700,6 @@ def _resolve_current_user(request: Request) -> tuple[CurrentUser | None, str | N
         return None, revoked_reason or "idle_timeout"
 
     record_is_temporary = is_temporary_user(record.id)
-    if record_is_temporary:
-        idle_status = get_temporary_user_idle_status(
-            record.id,
-            idle_timeout_seconds=RUNTIME_IDLE_TIMEOUT_SECONDS,
-        )
-        if idle_status and bool(idle_status.get("is_expired")):
-            with contextlib.suppress(Exception):
-                revoke_runtime_session(
-                    record.id,
-                    reason="temporary_user_expired",
-                )
-            return None, "temporary_user_expired"
 
     target = mapping_store.resolve_target(
         mapping_username=record.mapping_username,
@@ -745,18 +725,31 @@ def _resolve_current_user(request: Request) -> tuple[CurrentUser | None, str | N
 
 
 async def get_current_user_ws(websocket: WebSocket) -> CurrentUser:
-    user, revoked_reason = _resolve_current_user(websocket)
+    user, revoked_reason = await asyncio.to_thread(_resolve_current_user, websocket)
     if user is None and revoked_reason:
         await websocket.close(code=4401, reason=_revocation_message(revoked_reason))
         raise RuntimeError("websocket session revoked")
     if user is None:
         await websocket.close(code=4401, reason="Not authenticated")
         raise RuntimeError("websocket unauthenticated")
+    activity_recorded = await asyncio.to_thread(mark_foreground_activity, user.id)
+    if activity_recorded is False:
+        reason = "temporary_user_expired" if user.is_temporary else "idle_timeout"
+        await websocket.close(code=4401, reason=_revocation_message(reason))
+        raise RuntimeError("websocket runtime sleep is in progress")
     return user
 
 
 async def get_current_user(request: Request) -> CurrentUser:
-    user, revoked_reason = _resolve_current_user(request)
+    cached_resolution = getattr(
+        request.state,
+        REQUEST_AUTH_RESOLUTION_STATE_KEY,
+        None,
+    )
+    if isinstance(cached_resolution, tuple) and len(cached_resolution) == 2:
+        user, revoked_reason = cached_resolution
+    else:
+        user, revoked_reason = await asyncio.to_thread(_resolve_current_user, request)
     if user is None and revoked_reason:
         raise HTTPException(status_code=401, detail=_revocation_message(revoked_reason))
     if user is None:
@@ -966,48 +959,64 @@ class _UserSessionDBProxy:
         self.spec = spec
 
     def _call(self, method: str, **kwargs: Any) -> Any:
-        if os.geteuid() != 0 or os.getenv("INTERFACE_FORCE_PRIVILEGED_HELPER", "").strip().lower() in {
-            "1",
-            "true",
-            "yes",
-        }:
+        started_at = time.monotonic()
+        try:
+            if os.geteuid() != 0 or os.getenv(
+                "INTERFACE_FORCE_PRIVILEGED_HELPER", ""
+            ).strip().lower() in {"1", "true", "yes"}:
+                try:
+                    return privileged_client.session_db_call(
+                        self.spec.username, method, kwargs
+                    )
+                except PrivilegedClientError as exc:
+                    raise HTTPException(
+                        status_code=500,
+                        detail=(
+                            f"Failed to access Hermes session DB as "
+                            f"{self.spec.linux_user}: {exc}"
+                        ),
+                    ) from exc
+
             try:
-                return privileged_client.session_db_call(
-                    self.spec.username, method, kwargs
+                result = run_process_group(
+                    [
+                        "runuser",
+                        "-u",
+                        self.spec.linux_user,
+                        "--",
+                        "env",
+                        f"HOME={self.spec.home_dir}",
+                        f"HERMES_HOME={self.spec.hermes_home}",
+                        f"TERMINAL_CWD={self.spec.workdir}",
+                        f"PATH={os.environ.get('PATH', '')}",
+                        "PYTHONUNBUFFERED=1",
+                        DEFAULT_SESSION_DB_PYTHON,
+                        "-c",
+                        USER_SESSION_DB_RPC_SOURCE,
+                        str(self.spec.state_db_path),
+                        method,
+                        json.dumps(kwargs, ensure_ascii=False),
+                    ],
+                    cwd=str(self.spec.workdir),
+                    timeout_seconds=SESSION_DB_INNER_TIMEOUT_SECONDS,
                 )
-            except PrivilegedClientError as exc:
+            except subprocess.TimeoutExpired as exc:
                 raise HTTPException(
-                    status_code=500,
+                    status_code=504,
                     detail=(
-                        f"Failed to access Hermes session DB as "
-                        f"{self.spec.linux_user}: {exc}"
+                        f"Hermes session DB helper timed out after "
+                        f"{SESSION_DB_INNER_TIMEOUT_SECONDS:.0f} seconds"
                     ),
                 ) from exc
-
-        result = subprocess.run(
-            [
-                "runuser",
-                "-u",
-                self.spec.linux_user,
-                "--",
-                "env",
-                f"HOME={self.spec.home_dir}",
-                f"HERMES_HOME={self.spec.hermes_home}",
-                f"TERMINAL_CWD={self.spec.workdir}",
-                f"PATH={os.environ.get('PATH', '')}",
-                "PYTHONUNBUFFERED=1",
-                DEFAULT_SESSION_DB_PYTHON,
-                "-c",
-                USER_SESSION_DB_RPC_SCRIPT,
-                str(self.spec.state_db_path),
-                method,
-                json.dumps(kwargs, ensure_ascii=False),
-            ],
-            capture_output=True,
-            text=True,
-            cwd=str(self.spec.workdir),
-            check=False,
-        )
+        finally:
+            elapsed = time.monotonic() - started_at
+            if elapsed >= 1.0:
+                LOGGER.info(
+                    "Hermes session DB helper %s for %s took %.3fs",
+                    method,
+                    self.spec.username,
+                    elapsed,
+                )
 
         stdout_lines = [line for line in result.stdout.splitlines() if line.strip()]
         raw_payload = stdout_lines[-1] if stdout_lines else ""
@@ -1094,6 +1103,16 @@ class _UserSessionDBProxy:
         result = self._call("get_messages", session_id=session_id)
         return result if isinstance(result, list) else []
 
+    def get_logical_session_context(
+        self, session_id: str, *, include_messages: bool = False
+    ) -> dict[str, Any]:
+        result = self._call(
+            "get_logical_session_context",
+            session_id=session_id,
+            include_messages=include_messages,
+        )
+        return result if isinstance(result, dict) else {}
+
     def set_session_title(self, session_id: str, title: str) -> bool:
         return bool(self._call("set_session_title", session_id=session_id, title=title))
 
@@ -1129,6 +1148,26 @@ def _open_session_db(spec: HermesTarget) -> Iterator[Any]:
         yield db
     finally:
         db.close()
+
+
+def _load_session_context_sync(
+    target: HermesTarget,
+    session_id: str,
+    *,
+    include_messages: bool = False,
+) -> tuple[
+    str,
+    dict[str, Any] | None,
+    str,
+    dict[str, Any] | None,
+    list[dict[str, Any]],
+]:
+    with _open_session_db(target) as db:
+        return _resolve_logical_session_context_snapshot(
+            db,
+            session_id,
+            include_messages=include_messages,
+        )
 
 
 def _normalize_session_row(session: dict[str, Any]) -> dict[str, Any]:
@@ -1864,9 +1903,42 @@ def _collect_compression_lineage_session_ids(db: Any, logical_session_id: str) -
 def _resolve_logical_session_context(
     db: Any, session_id: str
 ) -> tuple[str, dict[str, Any] | None, str, dict[str, Any] | None]:
+    logical_session_id, logical_session, tip_session_id, projected_session, _ = (
+        _resolve_logical_session_context_snapshot(db, session_id)
+    )
+    return logical_session_id, logical_session, tip_session_id, projected_session
+
+
+def _resolve_logical_session_context_snapshot(
+    db: Any,
+    session_id: str,
+    *,
+    include_messages: bool = False,
+) -> tuple[
+    str,
+    dict[str, Any] | None,
+    str,
+    dict[str, Any] | None,
+    list[dict[str, Any]],
+]:
+    get_context = getattr(db, "get_logical_session_context", None)
+    if callable(get_context):
+        result = get_context(session_id, include_messages=include_messages)
+        return (
+            str(result.get("logical_session_id") or "").strip(),
+            result.get("logical_session")
+            if isinstance(result.get("logical_session"), dict)
+            else None,
+            str(result.get("tip_session_id") or "").strip(),
+            result.get("projected_session")
+            if isinstance(result.get("projected_session"), dict)
+            else None,
+            result.get("messages") if isinstance(result.get("messages"), list) else [],
+        )
+
     resolved = db.resolve_session_id(session_id)
     if not resolved:
-        return "", None, "", None
+        return "", None, "", None, []
 
     logical_session_id = _find_logical_session_root_id(db, resolved)
     logical_session = db.get_session(logical_session_id)
@@ -1875,7 +1947,14 @@ def _resolve_logical_session_context(
         _get_projected_logical_session_row(db, logical_session_id)
         or logical_session
     )
-    return logical_session_id, logical_session, tip_session_id, projected_session
+    messages = db.get_messages(tip_session_id) if include_messages else []
+    return (
+        logical_session_id,
+        logical_session,
+        tip_session_id,
+        projected_session,
+        messages,
+    )
 
 
 def _session_title_error(
@@ -1909,68 +1988,88 @@ def _sanitize_session_title_or_raise(raw_title: Any) -> str:
     return sanitized
 
 
+def _archive_expired_target_sync(
+    target: HermesTarget,
+    auth_user: Any,
+    cutoff: float,
+) -> int:
+    archived_count = 0
+    with _open_session_db(target) as db:
+        sessions = db.list_sessions_rich(source=None, limit=100000, offset=0)
+        for session in sessions:
+            if not _is_interface_managed_source(session.get("source")):
+                continue
+            session_id = _logical_session_id_from_row(session)
+            last_active = float(
+                session.get("last_active") or session.get("started_at") or 0
+            )
+            if not session_id or last_active >= cutoff:
+                continue
+
+            tip_session_id = _get_logical_session_tip_id(db, session_id)
+            raw_messages = db.get_messages(tip_session_id)
+            display_meta = (
+                get_display_session_meta(auth_user.id, session_id)
+                if auth_user is not None
+                else None
+            )
+            display_messages = (
+                display_meta.get("messages")
+                if display_meta and isinstance(display_meta.get("messages"), list)
+                else _build_fallback_display_messages(raw_messages)
+            )
+            draft_title = (
+                str(display_meta.get("draft_title") or "") if display_meta else ""
+            )
+
+            archived = archive_session_record(
+                mapping_username=target.username,
+                email_snapshot=target.email,
+                session=session,
+                messages=raw_messages,
+                display_messages=display_messages,
+                draft_title=draft_title,
+            )
+            if not archived:
+                continue
+
+            for lineage_session_id in reversed(
+                _collect_compression_lineage_session_ids(db, session_id)
+            ):
+                db.delete_session(lineage_session_id)
+            if auth_user is not None:
+                delete_display_messages(auth_user.id, session_id)
+            archived_count += 1
+    return archived_count
+
+
 async def _archive_expired_sessions_once() -> None:
-    run_id = start_archive_run()
+    run_id = await asyncio.to_thread(start_archive_run)
     archived_count = 0
     try:
         cutoff = time.time() - (ARCHIVE_RETENTION_DAYS * 86400)
-        auth_users = {user.mapping_username: user for user in list_users()}
+        auth_users = {
+            user.mapping_username: user
+            for user in await asyncio.to_thread(list_users)
+        }
 
-        for target in mapping_store.load_targets():
-            auth_user = auth_users.get(target.username)
-            with _open_session_db(target) as db:
-                sessions = db.list_sessions_rich(source=None, limit=100000, offset=0)
-                for session in sessions:
-                    if not _is_interface_managed_source(session.get("source")):
-                        continue
-                    session_id = _logical_session_id_from_row(session)
-                    last_active = float(
-                        session.get("last_active") or session.get("started_at") or 0
-                    )
-                    if not session_id or last_active >= cutoff:
-                        continue
+        for target in await asyncio.to_thread(mapping_store.load_targets):
+            archived_count += await asyncio.to_thread(
+                _archive_expired_target_sync,
+                target,
+                auth_users.get(target.username),
+                cutoff,
+            )
 
-                    tip_session_id = _get_logical_session_tip_id(db, session_id)
-                    raw_messages = db.get_messages(tip_session_id)
-                    display_meta = (
-                        get_display_session_meta(auth_user.id, session_id)
-                        if auth_user is not None
-                        else None
-                    )
-                    display_messages = (
-                        display_meta.get("messages")
-                        if display_meta
-                        and isinstance(display_meta.get("messages"), list)
-                        else _build_fallback_display_messages(raw_messages)
-                    )
-                    draft_title = (
-                        str(display_meta.get("draft_title") or "")
-                        if display_meta
-                        else ""
-                    )
-
-                    archived = archive_session_record(
-                        mapping_username=target.username,
-                        email_snapshot=target.email,
-                        session=session,
-                        messages=raw_messages,
-                        display_messages=display_messages,
-                        draft_title=draft_title,
-                    )
-                    if not archived:
-                        continue
-
-                    for lineage_session_id in reversed(
-                        _collect_compression_lineage_session_ids(db, session_id)
-                    ):
-                        db.delete_session(lineage_session_id)
-                    if auth_user is not None:
-                        delete_display_messages(auth_user.id, session_id)
-                    archived_count += 1
-
-        finish_archive_run(run_id, status="success", archived_count=archived_count)
+        await asyncio.to_thread(
+            finish_archive_run,
+            run_id,
+            status="success",
+            archived_count=archived_count,
+        )
     except Exception as exc:
-        finish_archive_run(
+        await asyncio.to_thread(
+            finish_archive_run,
             run_id,
             status="error",
             archived_count=archived_count,
@@ -2011,19 +2110,27 @@ async def _mark_temporary_cleanup_failed(user_id: str, error_message: str) -> No
         )
 
 
-async def _close_temporary_user_bridge(user_id: str) -> None:
+async def _delete_temporary_user_local_state(
+    user_id: str,
+    mapping_username: str,
+) -> None:
+    await asyncio.to_thread(delete_display_user_data, user_id)
+    await asyncio.to_thread(delete_runtime_state, user_id)
+    await asyncio.to_thread(delete_user_by_mapping_username, mapping_username)
+
+
+async def _close_temporary_user_bridge(user_id: str) -> bool:
     registry: TuiGatewayBridgeRegistry | None = getattr(
         app.state, "tui_gateway_bridges", None
     )
     if registry is None:
-        return
+        return True
     close_for_cleanup = getattr(registry, "close_for_cleanup", None)
     if close_for_cleanup is not None:
-        await close_for_cleanup(user_id)
-        return
+        result = await close_for_cleanup(user_id)
+        return result is not False
     closed = await registry.close_for_reconfigure(user_id)
-    if not closed:
-        raise RuntimeError("Temporary user still has active gateway requests")
+    return bool(closed)
 
 
 async def _cleanup_temporary_user_candidate(
@@ -2038,15 +2145,67 @@ async def _cleanup_temporary_user_candidate(
     if not user_id or not mapping_username:
         return False
 
-    await asyncio.to_thread(
-        mark_temporary_user_cleanup_attempt,
+    claimed = await asyncio.to_thread(
+        claim_temporary_user_cleanup,
         user_id,
-        status=TEMPORARY_USER_STATUS_CLEANING,
-        error_message="",
+        idle_timeout_seconds=RUNTIME_IDLE_TIMEOUT_SECONDS,
+        cleanup_retry_seconds=TEMPORARY_USER_CLEANUP_RETRY_SECONDS,
     )
+    if claimed is None:
+        return False
+    claimed_at = int(claimed.get("last_cleanup_attempt_at") or 0)
+
+    async def claim_is_valid() -> bool:
+        return await asyncio.to_thread(
+            temporary_cleanup_claim_is_valid,
+            user_id,
+            claimed_at=claimed_at,
+            idle_timeout_seconds=RUNTIME_IDLE_TIMEOUT_SECONDS,
+        )
+
+    async def restore_active_claim() -> None:
+        await asyncio.to_thread(
+            release_temporary_cleanup_claim,
+            user_id,
+            claimed_at=claimed_at,
+        )
 
     try:
-        await _close_temporary_user_bridge(user_id)
+        if not await claim_is_valid():
+            await restore_active_claim()
+            return False
+        bridge_closed = await _close_temporary_user_bridge(user_id)
+        if not bridge_closed:
+            await restore_active_claim()
+            return False
+        if not await claim_is_valid():
+            await restore_active_claim()
+            return False
+        try:
+            has_background_jobs = await asyncio.to_thread(
+                _has_active_background_processes_for_target,
+                target,
+            )
+        except Exception:
+            LOGGER.exception(
+                "Keeping temporary runtime active because background process check failed for %s",
+                mapping_username,
+            )
+            await restore_active_claim()
+            return False
+        if has_background_jobs:
+            await restore_active_claim()
+            try:
+                await asyncio.to_thread(mark_background_activity, user_id)
+            except Exception:
+                LOGGER.exception(
+                    "Failed to record background activity for temporary user %s",
+                    mapping_username,
+                )
+            return False
+        if not await claim_is_valid():
+            await restore_active_claim()
+            return False
         await asyncio.to_thread(
             revoke_runtime_session,
             user_id,
@@ -2059,9 +2218,7 @@ async def _cleanup_temporary_user_candidate(
         )
         await asyncio.to_thread(privileged_client.remove_mapping, mapping_username)
         _reset_mapping_store_cache()
-        await asyncio.to_thread(delete_display_user_data, user_id)
-        await asyncio.to_thread(delete_runtime_state, user_id)
-        await asyncio.to_thread(delete_user_by_mapping_username, mapping_username)
+        await _delete_temporary_user_local_state(user_id, mapping_username)
         LOGGER.info("Cleaned up temporary user %s", mapping_username)
         return True
     except Exception as exc:
@@ -2082,7 +2239,11 @@ def _stop_idle_runtime_candidate(auth_user: Any, target: HermesTarget) -> bool:
         return False
 
     if os.geteuid() != 0 or privileged_client.force_helper:
-        result = privileged_client.stop_idle_runtime(target.username, auth_user.id)
+        result = privileged_client.stop_idle_runtime(
+            target.username,
+            auth_user.id,
+            RUNTIME_IDLE_TIMEOUT_SECONDS,
+        )
         stopped = bool(result.get("stopped"))
         if stopped:
             LOGGER.info(
@@ -2099,8 +2260,11 @@ def _stop_idle_runtime_candidate(auth_user: Any, target: HermesTarget) -> bool:
         return stopped
 
     with service_operation_lock(target.systemd_service):
-        cleanup_expired_runtime_leases()
-        if has_active_runtime_leases(auth_user.id):
+        eligibility = get_runtime_idle_eligibility(
+            auth_user.id,
+            idle_timeout_seconds=RUNTIME_IDLE_TIMEOUT_SECONDS,
+        )
+        if not eligibility or not bool(eligibility.get("eligible")):
             return False
         try:
             if _has_active_background_processes_for_target(target):
@@ -2112,35 +2276,69 @@ def _stop_idle_runtime_candidate(auth_user: Any, target: HermesTarget) -> bool:
                 target.username,
             )
             return False
-        if not is_service_active(target.systemd_service):
+        claim_id = claim_runtime_sleep(
+            auth_user.id,
+            idle_timeout_seconds=RUNTIME_IDLE_TIMEOUT_SECONDS,
+        )
+        if claim_id is None:
+            return False
+        try:
+            try:
+                if _has_active_background_processes_for_target(target):
+                    release_runtime_sleep_claim(auth_user.id, claim_id=claim_id)
+                    claim_id = ""
+                    mark_background_activity(auth_user.id)
+                    return False
+            except Exception:
+                LOGGER.exception(
+                    "Keeping runtime active because background process check failed for %s",
+                    target.username,
+                )
+                return False
+            service_active = is_service_active(target.systemd_service)
+            if not runtime_sleep_claim_is_valid(
+                auth_user.id,
+                claim_id=claim_id,
+                idle_timeout_seconds=RUNTIME_IDLE_TIMEOUT_SECONDS,
+            ):
+                return False
+            if not service_active:
+                revoke_runtime_session(
+                    auth_user.id,
+                    reason="idle_timeout",
+                )
+                claim_id = ""
+                LOGGER.info(
+                    "Revoked idle runtime session for inactive service %s after %s seconds",
+                    target.username,
+                    RUNTIME_IDLE_TIMEOUT_SECONDS,
+                )
+                return True
+            if os.geteuid() == 0:
+                stop_service(target.systemd_service)
+            else:
+                privileged_client.stop_runtime(target.username)
             revoke_runtime_session(
                 auth_user.id,
                 reason="idle_timeout",
             )
+            claim_id = ""
             LOGGER.info(
-                "Revoked idle runtime session for inactive service %s after %s seconds",
+                "Stopped idle runtime for %s after %s seconds",
                 target.username,
                 RUNTIME_IDLE_TIMEOUT_SECONDS,
             )
             return True
-        if os.geteuid() == 0:
-            stop_service(target.systemd_service)
-        else:
-            privileged_client.stop_runtime(target.username)
-        revoke_runtime_session(
-            auth_user.id,
-            reason="idle_timeout",
-        )
-        LOGGER.info(
-            "Stopped idle runtime for %s after %s seconds",
-            target.username,
-            RUNTIME_IDLE_TIMEOUT_SECONDS,
-        )
-        return True
+        finally:
+            if claim_id:
+                release_runtime_sleep_claim(auth_user.id, claim_id=claim_id)
 
 
 async def _run_runtime_idle_check_once() -> int:
-    await asyncio.to_thread(cleanup_expired_runtime_leases)
+    await asyncio.gather(
+        asyncio.to_thread(cleanup_expired_runtime_leases),
+        asyncio.to_thread(cleanup_turn_submission_receipts),
+    )
     candidates, temporary_candidates = await asyncio.gather(
         asyncio.to_thread(
             list_idle_runtime_candidates,
@@ -2156,14 +2354,17 @@ async def _run_runtime_idle_check_once() -> int:
         return 0
 
     stopped = 0
-    users_by_id = {user.id: user for user in list_users()}
+    users_by_id = {
+        user.id: user for user in await asyncio.to_thread(list_users)
+    }
     for candidate in candidates:
         auth_user = users_by_id.get(str(candidate.get("user_id") or ""))
         if auth_user is None:
             continue
-        if is_temporary_user(auth_user.id):
+        if await asyncio.to_thread(is_temporary_user, auth_user.id):
             continue
-        target = mapping_store.resolve_target(
+        target = await asyncio.to_thread(
+            mapping_store.resolve_target,
             mapping_username=auth_user.mapping_username,
             email=auth_user.email,
             username=auth_user.username,
@@ -2181,7 +2382,8 @@ async def _run_runtime_idle_check_once() -> int:
         if auth_user is None:
             await asyncio.to_thread(delete_temporary_user_record, user_id)
             continue
-        target = mapping_store.resolve_target(
+        target = await asyncio.to_thread(
+            mapping_store.resolve_target,
             mapping_username=str(
                 candidate.get("mapping_username") or auth_user.mapping_username
             ),
@@ -2189,6 +2391,30 @@ async def _run_runtime_idle_check_once() -> int:
             username=auth_user.username,
         )
         if target is None:
+            cleanup_status = str(candidate.get("cleanup_status") or "")
+            if cleanup_status != TEMPORARY_USER_STATUS_ACTIVE:
+                mapping_username = str(
+                    candidate.get("mapping_username")
+                    or auth_user.mapping_username
+                    or ""
+                ).strip()
+                try:
+                    await _delete_temporary_user_local_state(
+                        user_id,
+                        mapping_username,
+                    )
+                except Exception as exc:
+                    await _mark_temporary_cleanup_failed(
+                        user_id,
+                        str(exc) or type(exc).__name__,
+                    )
+                    continue
+                LOGGER.info(
+                    "Finished local cleanup for temporary user %s after mapping removal",
+                    mapping_username,
+                )
+                stopped += 1
+                continue
             await _mark_temporary_cleanup_failed(
                 user_id,
                 "No Hermes runtime is mapped to this temporary user.",
@@ -2293,6 +2519,26 @@ def _normalize_file_size(value: Any) -> int:
         return 0
 
 
+def _load_direct_file_preview_info(
+    user: CurrentUser,
+    *,
+    root: str | None,
+    path: str,
+) -> tuple[dict[str, Any], Path]:
+    browser_root = _resolve_file_browser_root(user, root)
+    _, target = _resolve_file_browser_target(browser_root, path)
+    _assert_user_can_read_file(target, linux_user=user.target.linux_user)
+    stat_result = target.stat()
+    return (
+        {
+            "filename": target.name,
+            "size": int(stat_result.st_size),
+            "modified": int(stat_result.st_mtime),
+        },
+        target,
+    )
+
+
 async def _load_file_preview_context(
     *,
     path: str,
@@ -2313,15 +2559,12 @@ async def _load_file_preview_context(
         except PrivilegedClientError as exc:
             raise HTTPException(status_code=403, detail=str(exc)) from exc
     else:
-        browser_root = _resolve_file_browser_root(user, root)
-        _, target = _resolve_file_browser_target(browser_root, path)
-        _assert_user_can_read_file(target, linux_user=user.target.linux_user)
-        stat = target.stat()
-        info = {
-            "filename": target.name,
-            "size": int(stat.st_size),
-            "modified": int(stat.st_mtime),
-        }
+        info, target = await asyncio.to_thread(
+            _load_direct_file_preview_info,
+            user,
+            root=root,
+            path=path,
+        )
 
     filename = Path(str(info.get("filename") or path or "preview.bin")).name
     size = _normalize_file_size(info.get("size"))
@@ -2475,6 +2718,48 @@ def _ensure_upload_root(user: CurrentUser) -> Path:
     return upload_root
 
 
+def _store_direct_upload(
+    user: CurrentUser,
+    *,
+    filename: str,
+    source: Any,
+) -> dict[str, Any]:
+    upload_root = _ensure_upload_root(user)
+    safe_name = _sanitize_filename(filename)
+    timestamp = datetime.now().strftime("%Y%m%d%H%M%S")
+    file_id = uuid.uuid4().hex
+    destination = upload_root / f"{file_id}_{timestamp}_{safe_name}"
+    total_size = 0
+    try:
+        with destination.open("wb") as handle:
+            while True:
+                chunk = source.read(1024 * 1024)
+                if not chunk:
+                    break
+                total_size += len(chunk)
+                if total_size > MAX_UPLOAD_SIZE_BYTES:
+                    raise HTTPException(
+                        status_code=413,
+                        detail=_upload_file_too_large_detail(),
+                    )
+                handle.write(chunk)
+    except BaseException:
+        with contextlib.suppress(FileNotFoundError):
+            destination.unlink()
+        raise
+    _apply_file_permissions(
+        destination,
+        linux_user=user.target.linux_user,
+        is_dir=False,
+    )
+    return {
+        "id": file_id,
+        "name": safe_name,
+        "size": total_size,
+        "path": str(destination),
+    }
+
+
 def _use_privileged_file_helper() -> bool:
     return os.geteuid() != 0 or privileged_client.force_helper
 
@@ -2506,6 +2791,7 @@ app.mount(
 )
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 app.include_router(bulk_rnaseq_viewer_router)
+app.include_router(genome_browser_router)
 app.include_router(spatial_viewer_router)
 app.include_router(wgcna_viewer_router)
 
@@ -2520,6 +2806,23 @@ def _should_refresh_activity_for_request(request: Request) -> bool:
         return False
     if path.startswith("/api/bulk-rnaseq/"):
         return False
+    if path.startswith("/api/genome-browser/"):
+        return False
+    if getattr(request, "method", "GET") == "GET" and re.fullmatch(
+        r"/api/sessions/[^/]+/live", path
+    ):
+        return False
+    if getattr(request, "method", "GET") == "GET" and re.fullmatch(
+        r"/api/turns/[^/]+", path
+    ):
+        return False
+    query_params = getattr(request, "query_params", {})
+    if (
+        getattr(request, "method", "GET") == "GET"
+        and re.fullmatch(r"/api/sessions/[^/]+", path)
+        and str(query_params.get("background") or "") == "1"
+    ):
+        return False
     if path in ACTIVITY_REFRESH_EXCLUDED_PATHS:
         return False
     if path.startswith("/api/auth/signup/"):
@@ -2529,12 +2832,28 @@ def _should_refresh_activity_for_request(request: Request) -> bool:
 
 @app.middleware("http")
 async def refresh_authenticated_activity(request: Request, call_next):
-    response = await call_next(request)
-    if response.status_code < 400 and _should_refresh_activity_for_request(request):
-        user, _ = _resolve_current_user(request)
+    if _should_refresh_activity_for_request(request):
+        user, revoked_reason = await asyncio.to_thread(_resolve_current_user, request)
+        setattr(
+            request.state,
+            REQUEST_AUTH_RESOLUTION_STATE_KEY,
+            (user, revoked_reason),
+        )
         if user is not None:
-            await asyncio.to_thread(mark_foreground_activity, user.id)
-    return response
+            activity_recorded = await asyncio.to_thread(
+                mark_foreground_activity, user.id
+            )
+            if activity_recorded is False:
+                reason = (
+                    "temporary_user_expired"
+                    if user.is_temporary
+                    else "idle_timeout"
+                )
+                return JSONResponse(
+                    status_code=401,
+                    content={"detail": _revocation_message(reason)},
+                )
+    return await call_next(request)
 
 
 @app.on_event("startup")
@@ -2542,6 +2861,7 @@ async def on_startup() -> None:
     ensure_auth_db()
     cleanup_terminal_signup_jobs()
     ensure_display_store()
+    app.state.turn_submission_receipt_cleanup = cleanup_turn_submission_receipts()
     app.state.stale_live_sessions_failed = mark_active_live_session_states_failed(
         "interface restarted before the run completed"
     )
@@ -2597,7 +2917,7 @@ async def favicon() -> FileResponse:
 
 @app.get("/api/auth/session")
 async def auth_session(request: Request) -> dict[str, Any]:
-    user, revoked_reason = _resolve_current_user(request)
+    user, revoked_reason = await asyncio.to_thread(_resolve_current_user, request)
     if user is None and revoked_reason:
         return _session_revocation_payload(revoked_reason)
     if user is None:
@@ -2623,9 +2943,8 @@ async def start_runtime(user: CurrentUser = Depends(get_current_user)) -> dict[s
 @app.websocket("/api/tui/ws")
 async def tui_gateway_websocket(websocket: WebSocket) -> None:
     user = await get_current_user_ws(websocket)
-    await websocket.accept()
-
     bridge = await _get_tui_bridge_for_user(user)
+    await websocket.accept()
     await bridge.add_subscriber(websocket)
 
     try:
@@ -2708,11 +3027,12 @@ async def tui_gateway_websocket(websocket: WebSocket) -> None:
 
 @app.get("/api/status")
 async def api_status(user: CurrentUser = Depends(get_current_user)) -> dict[str, Any]:
+    archived_session_count = await asyncio.to_thread(count_archived_sessions)
     return {
         "status": True,
         "user": _serialize_user(user),
         "workspace_service": user.target.systemd_service,
-        "archived_session_count": count_archived_sessions(),
+        "archived_session_count": archived_session_count,
     }
 
 
@@ -2720,12 +3040,16 @@ async def api_status(user: CurrentUser = Depends(get_current_user)) -> dict[str,
 async def archive_status(
     user: CurrentUser = Depends(get_current_user),
 ) -> dict[str, Any]:
+    archived_session_count, runs = await asyncio.gather(
+        asyncio.to_thread(count_archived_sessions),
+        asyncio.to_thread(list_archive_runs, limit=10),
+    )
     return {
         "status": True,
         "retention_days": ARCHIVE_RETENTION_DAYS,
         "schedule_hour": ARCHIVE_SCHEDULE_HOUR,
-        "archived_session_count": count_archived_sessions(),
-        "runs": list_archive_runs(limit=10),
+        "archived_session_count": archived_session_count,
+        "runs": runs,
     }
 
 
@@ -2746,10 +3070,14 @@ async def signin(payload: SigninRequest, response: Response) -> dict[str, Any]:
             status_code=400, detail="Email/username and password are required"
         )
 
-    record, password_hash = get_user_with_password_by_login(login)
+    record, password_hash = await asyncio.to_thread(
+        get_user_with_password_by_login, login
+    )
     if record is None or not record.active:
         raise HTTPException(status_code=401, detail="Invalid credentials")
-    if not verify_password(payload.password, password_hash):
+    if not await asyncio.to_thread(
+        verify_password, payload.password, password_hash
+    ):
         raise HTTPException(status_code=401, detail="Invalid credentials")
 
     target = mapping_store.resolve_target(
@@ -2770,7 +3098,7 @@ async def signin(payload: SigninRequest, response: Response) -> dict[str, Any]:
         role=record.role,
         mapping_username=record.mapping_username,
         target=target,
-        is_temporary=is_temporary_user(record.id),
+        is_temporary=await asyncio.to_thread(is_temporary_user, record.id),
     )
     _set_session_cookie(response, _create_session_token(user.id, record.auth_session_version))
     return _serialize_user(user)
@@ -2780,7 +3108,9 @@ async def signin(payload: SigninRequest, response: Response) -> dict[str, Any]:
 async def create_temporary_auth_session(response: Response) -> dict[str, Any]:
     last_integrity_error: sqlite3.IntegrityError | None = None
     for _ in range(3):
-        username, email, display_name = _generate_temporary_identity()
+        username, email, display_name = await asyncio.to_thread(
+            _generate_temporary_identity
+        )
         password = secrets.token_urlsafe(32)
         try:
             await asyncio.to_thread(
@@ -2843,12 +3173,13 @@ async def create_signup_email_verification(
     payload: EmailVerificationRequest, request: Request
 ) -> dict[str, Any]:
     email = _validate_signup_email(payload.email)
-    if email_exists(email):
+    if await asyncio.to_thread(email_exists, email):
         raise HTTPException(status_code=409, detail="Email is already taken.")
 
     now = _now_seconds()
     client_ip_hash = _hash_client_ip(_client_ip_for_request(request))
-    stats = email_verification_send_stats(
+    stats = await asyncio.to_thread(
+        email_verification_send_stats,
         email=email,
         purpose=EMAIL_VERIFICATION_PURPOSE_SIGNUP,
         client_ip_hash=client_ip_hash,
@@ -2880,7 +3211,8 @@ async def create_signup_email_verification(
 
     code = f"{secrets.randbelow(1_000_000):06d}"
     expires_at = now + EMAIL_VERIFICATION_TTL_SECONDS
-    verification_id = create_pending_email_verification(
+    verification_id = await asyncio.to_thread(
+        create_pending_email_verification,
         email=email,
         code_hash=_hash_email_verification_code(email, code),
         purpose=EMAIL_VERIFICATION_PURPOSE_SIGNUP,
@@ -2897,7 +3229,7 @@ async def create_signup_email_verification(
             expires_at=expires_at,
         )
     except MailerConfigurationError as exc:
-        mark_email_verification_failed(verification_id)
+        await asyncio.to_thread(mark_email_verification_failed, verification_id)
         LOGGER.warning(
             "Signup verification email is not configured: error_type=%s",
             type(exc).__name__,
@@ -2907,7 +3239,7 @@ async def create_signup_email_verification(
             detail="Verification email could not be sent. Please try again later.",
         ) from exc
     except MailerDeliveryError as exc:
-        mark_email_verification_failed(verification_id)
+        await asyncio.to_thread(mark_email_verification_failed, verification_id)
         LOGGER.warning(
             "Signup verification email send failed: status=%s error_type=%s",
             exc.status_code,
@@ -2918,7 +3250,7 @@ async def create_signup_email_verification(
             detail="Verification email could not be sent. Please try again later.",
         ) from exc
     except Exception as exc:
-        mark_email_verification_failed(verification_id)
+        await asyncio.to_thread(mark_email_verification_failed, verification_id)
         LOGGER.warning(
             "Signup verification email send failed: error_type=%s",
             type(exc).__name__,
@@ -2928,7 +3260,8 @@ async def create_signup_email_verification(
             detail="Verification email could not be sent. Please try again later.",
         ) from exc
 
-    record_email_verification_sent(
+    await asyncio.to_thread(
+        record_email_verification_sent,
         verification_id,
         resend_email_id=result.email_id,
         now=_now_seconds(),
@@ -2953,7 +3286,8 @@ async def create_password_reset_email_verification(
     email = _validate_signup_email(payload.email)
     now = _now_seconds()
     client_ip_hash = _hash_client_ip(_client_ip_for_request(request))
-    stats = email_verification_send_stats(
+    stats = await asyncio.to_thread(
+        email_verification_send_stats,
         email=email,
         purpose=EMAIL_VERIFICATION_PURPOSE_PASSWORD_RESET,
         client_ip_hash=client_ip_hash,
@@ -2985,7 +3319,8 @@ async def create_password_reset_email_verification(
 
     code = f"{secrets.randbelow(1_000_000):06d}"
     expires_at = now + EMAIL_VERIFICATION_TTL_SECONDS
-    verification_id = create_pending_email_verification(
+    verification_id = await asyncio.to_thread(
+        create_pending_email_verification,
         email=email,
         code_hash=_hash_email_verification_code(
             email,
@@ -2998,7 +3333,7 @@ async def create_password_reset_email_verification(
         now=now,
     )
 
-    record = get_user_by_email(email)
+    record = await asyncio.to_thread(get_user_by_email, email)
     if record is not None and record.active:
         try:
             result = await send_password_reset_email(
@@ -3008,7 +3343,7 @@ async def create_password_reset_email_verification(
                 expires_at=expires_at,
             )
         except MailerConfigurationError as exc:
-            mark_email_verification_failed(verification_id)
+            await asyncio.to_thread(mark_email_verification_failed, verification_id)
             LOGGER.warning(
                 "Password reset email is not configured: error_type=%s",
                 type(exc).__name__,
@@ -3018,7 +3353,7 @@ async def create_password_reset_email_verification(
                 detail="Password reset email could not be sent. Please try again later.",
             ) from exc
         except MailerDeliveryError as exc:
-            mark_email_verification_failed(verification_id)
+            await asyncio.to_thread(mark_email_verification_failed, verification_id)
             LOGGER.warning(
                 "Password reset email send failed: status=%s error_type=%s",
                 exc.status_code,
@@ -3029,7 +3364,7 @@ async def create_password_reset_email_verification(
                 detail="Password reset email could not be sent. Please try again later.",
             ) from exc
         except Exception as exc:
-            mark_email_verification_failed(verification_id)
+            await asyncio.to_thread(mark_email_verification_failed, verification_id)
             LOGGER.warning(
                 "Password reset email send failed: error_type=%s",
                 type(exc).__name__,
@@ -3039,7 +3374,8 @@ async def create_password_reset_email_verification(
                 detail="Password reset email could not be sent. Please try again later.",
             ) from exc
 
-        record_email_verification_sent(
+        await asyncio.to_thread(
+            record_email_verification_sent,
             verification_id,
             resend_email_id=result.email_id,
             now=_now_seconds(),
@@ -3079,7 +3415,8 @@ async def reset_password(
         )
 
     try:
-        reset_user_password_with_email_verification(
+        await asyncio.to_thread(
+            reset_user_password_with_email_verification,
             email=email,
             new_password=new_password,
             email_verification_id=verification_id,
@@ -3107,9 +3444,10 @@ async def signup(payload: SignupRequest) -> dict[str, Any]:
         display_name,
         verification_id,
         verification_code,
-    ) = _validate_signup_payload(payload)
+    ) = await asyncio.to_thread(_validate_signup_payload, payload)
     try:
-        job_id = create_signup_job_with_email_verification(
+        job_id = await asyncio.to_thread(
+            create_signup_job_with_email_verification,
             username=username,
             email=email,
             password=password,
@@ -3139,7 +3477,7 @@ async def signup(payload: SignupRequest) -> dict[str, Any]:
 
 @app.get("/api/auth/signup/{job_id}")
 async def signup_status(job_id: str) -> dict[str, Any]:
-    job = get_signup_job(job_id)
+    job = await asyncio.to_thread(get_signup_job, job_id)
     if job is None:
         raise HTTPException(status_code=404, detail="Signup job not found")
     return {"ok": True, "job": job}
@@ -3169,13 +3507,24 @@ async def change_password(
         )
     _validate_password_complexity(new_password)
 
-    record, password_hash = get_user_with_password_by_id(user.id)
-    if record is None or record.id != user.id or not verify_password(
-        current_password, password_hash
-    ):
+    record, password_hash = await asyncio.to_thread(
+        get_user_with_password_by_id, user.id
+    )
+    password_matches = bool(
+        record is not None
+        and record.id == user.id
+        and await asyncio.to_thread(
+            verify_password,
+            current_password,
+            password_hash,
+        )
+    )
+    if not password_matches:
         raise HTTPException(status_code=401, detail="Current password is incorrect.")
 
-    updated_record = update_user_password(user.id, new_password)
+    updated_record = await asyncio.to_thread(
+        update_user_password, user.id, new_password
+    )
     if updated_record is None:
         raise HTTPException(status_code=404, detail="User not found.")
 
@@ -3195,9 +3544,16 @@ async def signout(response: Response) -> dict[str, Any]:
 @app.get("/api/models")
 async def get_models(user: CurrentUser = Depends(get_current_user)) -> dict[str, Any]:
     try:
-        config = mapping_store.load_config(resolve_env=True)
+        config = await asyncio.to_thread(
+            mapping_store.load_config, resolve_env=True
+        )
         model_options = normalize_model_options(config)
-        active_id = _get_active_model_id_for_user(user.target, model_options, config=config)
+        active_id = await asyncio.to_thread(
+            _get_active_model_id_for_user,
+            user.target,
+            model_options,
+            config=config,
+        )
     except ModelOptionsError as exc:
         raise HTTPException(
             status_code=500,
@@ -3232,7 +3588,9 @@ async def update_active_model(
         raise HTTPException(status_code=400, detail="Model id is required")
 
     try:
-        config = mapping_store.load_config(resolve_env=True)
+        config = await asyncio.to_thread(
+            mapping_store.load_config, resolve_env=True
+        )
         model_options = normalize_model_options(config)
     except ModelOptionsError as exc:
         raise HTTPException(
@@ -3245,7 +3603,12 @@ async def update_active_model(
         raise HTTPException(status_code=400, detail="Model is not allowed")
 
     try:
-        active_id = _get_active_model_id_for_user(user.target, model_options, config=config)
+        active_id = await asyncio.to_thread(
+            _get_active_model_id_for_user,
+            user.target,
+            model_options,
+            config=config,
+        )
         if requested_id == active_id:
             return {
                 "ok": True,
@@ -3260,8 +3623,16 @@ async def update_active_model(
 
     registry: TuiGatewayBridgeRegistry = app.state.tui_gateway_bridges
     existing_bridge = await registry.get_existing(user.id)
-    if _active_live_state_conflict(user.id) or (
-        existing_bridge is not None and existing_bridge.has_pending_requests()
+    bridge_reconfigure_conflict = bool(
+        existing_bridge is not None
+        and (
+            existing_bridge.has_reconfigure_conflict()
+            if hasattr(existing_bridge, "has_reconfigure_conflict")
+            else existing_bridge.has_pending_requests()
+        )
+    )
+    if await asyncio.to_thread(_active_live_state_conflict, user.id) or (
+        bridge_reconfigure_conflict
     ):
         raise HTTPException(
             status_code=409,
@@ -3302,16 +3673,14 @@ async def update_active_model(
     }
 
 
-@app.get("/api/sessions")
-async def get_sessions(
-    limit: int = 50, offset: int = 0, user: CurrentUser = Depends(get_current_user)
-) -> dict[str, Any]:
-    page_limit = max(1, min(int(limit or 50), 200))
-    page_offset = max(0, int(offset or 0))
-    fetch_limit = page_offset + page_limit + 1
-    live_states = list_live_session_states(user.id)
-    display_metas = list_display_session_metas(user.id, include_messages=False)
-    with _open_session_db(user.target) as db:
+def _load_normalized_sessions_sync(
+    target: HermesTarget,
+    *,
+    live_states: dict[str, dict[str, Any]],
+    display_metas: dict[str, dict[str, Any]],
+    fetch_limit: int,
+) -> list[dict[str, Any]]:
+    with _open_session_db(target) as db:
         sessions = db.list_sessions_rich(
             source="tui",
             limit=fetch_limit,
@@ -3368,10 +3737,34 @@ async def get_sessions(
                 live_state=live_state,
                 resume_session_id=logical_session_id,
             )
-    normalized = sorted(
+    return sorted(
         normalized_by_id.values(),
         key=lambda item: (item["last_active"], item["started_at"]),
         reverse=True,
+    )
+
+
+@app.get("/api/sessions")
+async def get_sessions(
+    limit: int = 50, offset: int = 0, user: CurrentUser = Depends(get_current_user)
+) -> dict[str, Any]:
+    page_limit = max(1, min(int(limit or 50), 200))
+    page_offset = max(0, int(offset or 0))
+    fetch_limit = page_offset + page_limit + 1
+    live_states, display_metas = await asyncio.gather(
+        asyncio.to_thread(list_live_session_states, user.id),
+        asyncio.to_thread(
+            list_display_session_metas,
+            user.id,
+            include_messages=False,
+        ),
+    )
+    normalized = await asyncio.to_thread(
+        _load_normalized_sessions_sync,
+        user.target,
+        live_states=live_states,
+        display_metas=display_metas,
+        fetch_limit=fetch_limit,
     )
     page = normalized[page_offset : page_offset + page_limit]
     return {
@@ -3383,46 +3776,228 @@ async def get_sessions(
     }
 
 
+def _get_live_poll_snapshot_sync(
+    user_id: str,
+    session_id: str,
+    *,
+    after_run_id: str = "",
+    after_event_seq: int = -1,
+) -> dict[str, Any] | None:
+    snapshot = get_live_poll_snapshot(
+        user_id,
+        session_id,
+        after_run_id=after_run_id,
+        after_event_seq=after_event_seq,
+    )
+    if snapshot is None:
+        return None
+    messages = snapshot.get("messages")
+    if isinstance(messages, list):
+        snapshot["messages"] = [
+            _normalize_display_message(item) for item in messages
+        ]
+    return snapshot
+
+
+@app.get("/api/sessions/{session_id}/live")
+async def get_session_live_snapshot(
+    session_id: str,
+    after_run_id: str = "",
+    after_event_seq: int = -1,
+    user: CurrentUser = Depends(get_current_user),
+) -> dict[str, Any]:
+    snapshot = await asyncio.to_thread(
+        _get_live_poll_snapshot_sync,
+        user.id,
+        str(session_id or "").strip(),
+        after_run_id=str(after_run_id or "").strip(),
+        after_event_seq=int(after_event_seq),
+    )
+    if snapshot is None:
+        raise HTTPException(status_code=404, detail="Session not found")
+    return snapshot
+
+
+@app.get("/api/turns/{request_id}", response_model=None)
+async def get_submitted_turn(
+    request_id: str, user: CurrentUser = Depends(get_current_user)
+) -> dict[str, Any] | JSONResponse:
+    normalized_request_id = str(request_id or "").strip()
+    if not normalized_request_id or len(normalized_request_id) > 128:
+        raise HTTPException(status_code=404, detail="Submitted turn not found")
+    live_session_id, receipt = await asyncio.gather(
+        asyncio.to_thread(
+            find_live_session_id_by_run_id,
+            user.id,
+            normalized_request_id,
+        ),
+        asyncio.to_thread(
+            get_turn_submission_receipt,
+            user.id,
+            normalized_request_id,
+        ),
+    )
+    session_id = str(
+        live_session_id or (receipt or {}).get("session_id") or ""
+    ).strip()
+    if not session_id:
+        receipt_status = str((receipt or {}).get("status") or "")
+        if receipt_status == "pending":
+            return JSONResponse(
+                status_code=202,
+                content={
+                    "ok": True,
+                    "pending": True,
+                    "request_id": normalized_request_id,
+                    "expires_at": int((receipt or {}).get("expires_at") or 0),
+                },
+            )
+        if receipt_status == "failed":
+            raise HTTPException(
+                status_code=409,
+                detail=str((receipt or {}).get("last_error") or "Turn submission failed"),
+            )
+        raise HTTPException(status_code=404, detail="Submitted turn not found")
+    response = await _build_submitted_turn_response(
+        user,
+        session_id,
+        expected_run_id=normalized_request_id,
+    )
+    if response is None:
+        if str((receipt or {}).get("status") or "") == "submitted":
+            raise HTTPException(
+                status_code=409,
+                detail="Submitted turn is no longer the current run",
+            )
+        raise HTTPException(status_code=404, detail="Submitted turn not found")
+    return response
+
+
+async def _build_submitted_turn_response(
+    user: CurrentUser,
+    session_id: str,
+    *,
+    expected_run_id: str = "",
+) -> dict[str, Any] | None:
+    snapshot, display_meta = await asyncio.gather(
+        asyncio.to_thread(
+            _get_live_poll_snapshot_sync,
+            user.id,
+            session_id,
+        ),
+        asyncio.to_thread(get_display_session_meta, user.id, session_id),
+    )
+    if snapshot is None:
+        return None
+    live_state = snapshot.get("live")
+    if expected_run_id and str((live_state or {}).get("run_id") or "") != str(
+        expected_run_id
+    ):
+        return None
+    messages = snapshot.get("messages")
+    session = _normalize_logical_session_row(
+        {
+            "id": session_id,
+            "source": "tui",
+            "model": "",
+            "title": str((display_meta or {}).get("draft_title") or ""),
+            "preview": "",
+            "started_at": int((display_meta or {}).get("created_at") or 0),
+            "last_active": int((display_meta or {}).get("updated_at") or 0),
+            "message_count": len(messages) if isinstance(messages, list) else 0,
+            "tool_call_count": 0,
+        },
+        logical_session_id=session_id,
+        logical_session={"id": session_id, "source": "tui", "title": ""},
+        display_meta=display_meta,
+        live_state=live_state if isinstance(live_state, dict) else None,
+        resume_session_id=str(
+            (live_state or {}).get("tip_session_id") or session_id
+        ),
+    )
+    return {
+        "ok": True,
+        "created": False,
+        "session": session,
+        **snapshot,
+    }
+
+
+async def _heartbeat_pending_turn_submission(
+    user_id: str,
+    request_id: str,
+) -> None:
+    while True:
+        await asyncio.sleep(TURN_SUBMISSION_RECEIPT_HEARTBEAT_SECONDS)
+        try:
+            renewed = await asyncio.to_thread(
+                heartbeat_turn_submission_receipt,
+                user_id,
+                request_id,
+            )
+        except Exception:
+            LOGGER.exception(
+                "Failed to heartbeat turn submission receipt %s for user %s",
+                request_id,
+                user_id,
+            )
+            continue
+        if not renewed:
+            return
+
+
 @app.get("/api/sessions/{session_id}")
 async def get_session_detail(
     session_id: str, user: CurrentUser = Depends(get_current_user)
 ) -> dict[str, Any]:
-    display_meta_fallback = get_display_session_meta(user.id, session_id)
-    with _open_session_db(user.target) as db:
-        logical_session_id, logical_session, tip_session_id, projected_session = (
-            _resolve_logical_session_context(db, session_id)
-        )
-        if not logical_session or not _is_interface_managed_source(
-            logical_session.get("source")
-        ):
-            if display_meta_fallback is None:
-                raise HTTPException(status_code=404, detail="Session not found")
-            logical_session_id = session_id
-            logical_session = {"id": session_id, "source": "tui", "title": ""}
-            tip_session_id = session_id
-            projected_session = {
-                "id": session_id,
-                "source": "tui",
-                "model": "",
-                "title": str(display_meta_fallback.get("draft_title") or "").strip(),
-                "preview": "",
-                "started_at": int(display_meta_fallback.get("created_at") or 0),
-                "last_active": int(display_meta_fallback.get("updated_at") or 0),
-                "message_count": len(
-                    display_meta_fallback.get("messages")
-                    if isinstance(display_meta_fallback.get("messages"), list)
-                    else []
-                ),
-                "tool_call_count": 0,
-            }
-            raw_messages = []
-        else:
-            raw_messages = db.get_messages(tip_session_id)
+    display_meta_fallback, session_context = await asyncio.gather(
+        asyncio.to_thread(get_display_session_meta, user.id, session_id),
+        asyncio.to_thread(
+            _load_session_context_sync,
+            user.target,
+            session_id,
+            include_messages=True,
+        ),
+    )
+    (
+        logical_session_id,
+        logical_session,
+        tip_session_id,
+        projected_session,
+        raw_messages,
+    ) = session_context
+    if not logical_session or not _is_interface_managed_source(
+        logical_session.get("source")
+    ):
+        if display_meta_fallback is None:
+            raise HTTPException(status_code=404, detail="Session not found")
+        logical_session_id = session_id
+        logical_session = {"id": session_id, "source": "tui", "title": ""}
+        tip_session_id = session_id
+        projected_session = {
+            "id": session_id,
+            "source": "tui",
+            "model": "",
+            "title": str(display_meta_fallback.get("draft_title") or "").strip(),
+            "preview": "",
+            "started_at": int(display_meta_fallback.get("created_at") or 0),
+            "last_active": int(display_meta_fallback.get("updated_at") or 0),
+            "message_count": len(
+                display_meta_fallback.get("messages")
+                if isinstance(display_meta_fallback.get("messages"), list)
+                else []
+            ),
+            "tool_call_count": 0,
+        }
+        raw_messages = []
 
-    display_messages = get_display_messages(user.id, logical_session_id)
+    display_messages, live_state, display_meta = await asyncio.gather(
+        asyncio.to_thread(get_display_messages, user.id, logical_session_id),
+        asyncio.to_thread(get_live_session_state, user.id, logical_session_id),
+        asyncio.to_thread(get_display_session_meta, user.id, logical_session_id),
+    )
     if display_messages is None:
         display_messages = _build_fallback_display_messages(raw_messages)
-    live_state = get_live_session_state(user.id, logical_session_id)
     if (
         isinstance(live_state, dict)
         and str(live_state.get("status") or "").strip() in ACTIVE_LIVE_STATUSES
@@ -3437,15 +4012,16 @@ async def get_session_detail(
                 user.id,
                 logical_session_id,
             )
-            with _open_session_db(user.target) as db:
-                tip_session_id = _get_logical_session_tip_id(db, logical_session_id) or tip_session_id
+            tip_session_id = str(
+                (live_state or {}).get("tip_session_id") or tip_session_id
+            ).strip()
 
     return {
         "session": _normalize_logical_session_row(
             projected_session,
             logical_session_id=logical_session_id,
             logical_session=logical_session,
-            display_meta=get_display_session_meta(user.id, logical_session_id),
+            display_meta=display_meta,
             live_state=live_state,
             resume_session_id=tip_session_id or logical_session_id,
         ),
@@ -3458,27 +4034,37 @@ async def get_session_detail(
 async def export_session_markdown(
     session_id: str, user: CurrentUser = Depends(get_current_user)
 ) -> FastAPIResponse:
-    display_meta_fallback = get_display_session_meta(user.id, session_id)
-    with _open_session_db(user.target) as db:
-        logical_session_id, logical_session, tip_session_id, _ = (
-            _resolve_logical_session_context(db, session_id)
-        )
-        if not logical_session or not _is_interface_managed_source(
-            logical_session.get("source")
-        ):
-            if display_meta_fallback is None:
-                raise HTTPException(status_code=404, detail="Session not found")
-            logical_session_id = session_id
-            logical_session = {"id": session_id, "source": "tui", "title": ""}
-            raw_messages = []
-        else:
-            raw_messages = db.get_messages(tip_session_id)
+    display_meta_fallback, session_context = await asyncio.gather(
+        asyncio.to_thread(get_display_session_meta, user.id, session_id),
+        asyncio.to_thread(
+            _load_session_context_sync,
+            user.target,
+            session_id,
+            include_messages=True,
+        ),
+    )
+    (
+        logical_session_id,
+        logical_session,
+        _,
+        _,
+        raw_messages,
+    ) = session_context
+    if not logical_session or not _is_interface_managed_source(
+        logical_session.get("source")
+    ):
+        if display_meta_fallback is None:
+            raise HTTPException(status_code=404, detail="Session not found")
+        logical_session_id = session_id
+        logical_session = {"id": session_id, "source": "tui", "title": ""}
+        raw_messages = []
 
-    display_messages = get_display_messages(user.id, logical_session_id)
+    display_messages, display_meta = await asyncio.gather(
+        asyncio.to_thread(get_display_messages, user.id, logical_session_id),
+        asyncio.to_thread(get_display_session_meta, user.id, logical_session_id),
+    )
     if display_messages is None:
         display_messages = _build_fallback_display_messages(raw_messages)
-
-    display_meta = get_display_session_meta(user.id, logical_session_id)
     export_title = _session_export_title(
         logical_session,
         display_meta or display_meta_fallback,
@@ -3503,22 +4089,30 @@ async def sync_session_display(
     payload: SessionDisplaySyncRequest,
     user: CurrentUser = Depends(get_current_user),
 ) -> dict[str, Any]:
-    with _open_session_db(user.target) as db:
-        logical_session_id, logical_session, tip_session_id, _ = _resolve_logical_session_context(
-            db, session_id
-        )
-        if not logical_session or not _is_interface_managed_source(
-            logical_session.get("source")
-        ):
-            raise HTTPException(status_code=404, detail="Session not found")
-        raw_messages = db.get_messages(tip_session_id)
+    (
+        logical_session_id,
+        logical_session,
+        _,
+        _,
+        raw_messages,
+    ) = await asyncio.to_thread(
+        _load_session_context_sync,
+        user.target,
+        session_id,
+        include_messages=True,
+    )
+    if not logical_session or not _is_interface_managed_source(
+        logical_session.get("source")
+    ):
+        raise HTTPException(status_code=404, detail="Session not found")
 
     merged_messages = _merge_display_transcripts(
         payload.messages,
         _build_fallback_display_messages(raw_messages),
     )
     draft_title = str(payload.draft_title or "").strip() or None
-    save_display_messages(
+    await asyncio.to_thread(
+        save_display_messages,
         user.id,
         logical_session_id,
         merged_messages,
@@ -3530,27 +4124,24 @@ async def sync_session_display(
     }
 
 
-@app.put("/api/sessions/{session_id}/title")
-async def update_session_title(
+def _update_session_title_sync(
+    target: HermesTarget,
     session_id: str,
-    payload: SessionTitleUpdateRequest,
-    user: CurrentUser = Depends(get_current_user),
-) -> dict[str, Any]:
-    sanitized_title = _sanitize_session_title_or_raise(payload.title)
-    display_meta = get_display_session_meta(user.id, session_id)
-    with _open_session_db(user.target) as db:
+    sanitized_title: str,
+) -> tuple[
+    str,
+    dict[str, Any] | None,
+    str,
+    dict[str, Any] | None,
+    list[dict[str, Any]],
+]:
+    with _open_session_db(target) as db:
         logical_session_id, logical_session, tip_session_id, _ = _resolve_logical_session_context(
             db, session_id
         )
         if not logical_session or not _is_interface_managed_source(
             logical_session.get("source")
         ):
-            if display_meta is None:
-                raise _session_title_error(
-                    status_code=404,
-                    code="session_not_found",
-                    message="Session not found.",
-                )
             raise _session_title_error(
                 status_code=404,
                 code="session_not_found",
@@ -3594,17 +4185,49 @@ async def update_session_title(
         )
         raw_messages = db.get_messages(refreshed_tip_session_id)
 
-    display_messages = get_display_messages(user.id, logical_session_id)
+    return (
+        logical_session_id,
+        refreshed_logical_session,
+        refreshed_tip_session_id,
+        projected_session,
+        raw_messages,
+    )
+
+
+@app.put("/api/sessions/{session_id}/title")
+async def update_session_title(
+    session_id: str,
+    payload: SessionTitleUpdateRequest,
+    user: CurrentUser = Depends(get_current_user),
+) -> dict[str, Any]:
+    sanitized_title = _sanitize_session_title_or_raise(payload.title)
+    (
+        logical_session_id,
+        refreshed_logical_session,
+        refreshed_tip_session_id,
+        projected_session,
+        raw_messages,
+    ) = await asyncio.to_thread(
+        _update_session_title_sync,
+        user.target,
+        session_id,
+        sanitized_title,
+    )
+
+    display_messages, live_state, display_meta = await asyncio.gather(
+        asyncio.to_thread(get_display_messages, user.id, logical_session_id),
+        asyncio.to_thread(get_live_session_state, user.id, logical_session_id),
+        asyncio.to_thread(get_display_session_meta, user.id, logical_session_id),
+    )
     if display_messages is None:
         display_messages = _build_fallback_display_messages(raw_messages)
-    live_state = get_live_session_state(user.id, logical_session_id)
 
     return {
         "session": _normalize_logical_session_row(
             projected_session or {"id": logical_session_id, "title": sanitized_title},
             logical_session_id=logical_session_id,
             logical_session=refreshed_logical_session,
-            display_meta=get_display_session_meta(user.id, logical_session_id),
+            display_meta=display_meta,
             live_state=live_state,
             resume_session_id=refreshed_tip_session_id or logical_session_id,
         ),
@@ -3647,49 +4270,101 @@ async def submit_session_turn(
     created_new_session = False
     session_run_manager: SessionRunManager = app.state.session_run_manager
     draft_title = str(payload.draft_title or "").strip()
+    request_id = str(payload.request_id or "").strip()
+    if len(request_id) > 128:
+        raise HTTPException(status_code=400, detail="Invalid request id")
+    request_id = request_id or uuid.uuid4().hex
+    receipt = await asyncio.to_thread(
+        create_turn_submission_receipt,
+        user.id,
+        request_id,
+        requested_session_id=str(session_id or "").strip(),
+    )
+    if not bool(receipt.get("created")):
+        existing_session_id = str(receipt.get("session_id") or "").strip()
+        if str(receipt.get("status") or "") == "submitted" and existing_session_id:
+            existing_response = await _build_submitted_turn_response(
+                user,
+                existing_session_id,
+                expected_run_id=request_id,
+            )
+            if existing_response is not None:
+                return existing_response
+        detail = str(receipt.get("last_error") or "Turn submission is already in progress")
+        raise HTTPException(status_code=409, detail=detail)
 
+    receipt_heartbeat_task = asyncio.create_task(
+        _heartbeat_pending_turn_submission(user.id, request_id)
+    )
+    receipt_finished = False
     try:
         bridge = await _get_tui_bridge_for_user(user)
-        with _open_session_db(user.target) as db:
-            if session_id == "draft":
-                created = await bridge.rpc("session.create", {"cols": 100})
-                live_session_id = str(created.get("session_id") or "").strip()
-                if not live_session_id:
-                    raise HTTPException(status_code=500, detail="Failed to create TUI gateway session")
-                title_info = await bridge.rpc("session.title", {"session_id": live_session_id})
-                logical_session_id = str(title_info.get("session_key") or live_session_id).strip()
-                tip_session_id = logical_session_id
-                logical_session = db.get_session(logical_session_id)
-                projected_session = logical_session
-                fallback_messages = []
-                created_new_session = True
-            else:
-                (
-                    logical_session_id,
-                    logical_session,
-                    tip_session_id,
-                    projected_session,
-                ) = _resolve_logical_session_context(db, session_id)
-                if not logical_session or not _is_interface_managed_source(
-                    logical_session.get("source")
-                ):
-                    raise HTTPException(status_code=404, detail="Session not found")
-                resumed = await bridge.rpc(
-                    "session.resume",
-                    {
-                        "cols": 100,
-                        "session_id": tip_session_id or logical_session_id,
-                    },
+        if session_id == "draft":
+            created = await bridge.rpc("session.create", {"cols": 100})
+            live_session_id = str(created.get("session_id") or "").strip()
+            if not live_session_id:
+                raise HTTPException(
+                    status_code=500,
+                    detail="Failed to create TUI gateway session",
                 )
-                live_session_id = str(resumed.get("session_id") or "").strip()
-                if not live_session_id:
-                    raise HTTPException(status_code=500, detail="TUI gateway did not return a live session id on resume")
-                fallback_messages = _build_fallback_display_messages(db.get_messages(tip_session_id))
+            title_info = await bridge.rpc(
+                "session.title", {"session_id": live_session_id}
+            )
+            logical_session_id = str(
+                title_info.get("session_key") or live_session_id
+            ).strip()
+            logical_session = {
+                "id": logical_session_id,
+                "source": "tui",
+                "title": "",
+                "preview": "",
+                "started_at": _now_seconds(),
+                "last_active": _now_seconds(),
+                "message_count": 0,
+                "tool_call_count": 0,
+            }
+            tip_session_id = logical_session_id
+            projected_session = logical_session
+            fallback_messages = []
+            created_new_session = True
+        else:
+            (
+                logical_session_id,
+                logical_session,
+                tip_session_id,
+                projected_session,
+                raw_messages,
+            ) = await asyncio.to_thread(
+                _load_session_context_sync,
+                user.target,
+                session_id,
+                include_messages=True,
+            )
+            if not logical_session or not _is_interface_managed_source(
+                logical_session.get("source")
+            ):
+                raise HTTPException(status_code=404, detail="Session not found")
+            resumed = await bridge.rpc(
+                "session.resume",
+                {
+                    "cols": 100,
+                    "session_id": tip_session_id or logical_session_id,
+                },
+            )
+            live_session_id = str(resumed.get("session_id") or "").strip()
+            if not live_session_id:
+                raise HTTPException(
+                    status_code=500,
+                    detail="TUI gateway did not return a live session id on resume",
+                )
+            fallback_messages = _build_fallback_display_messages(raw_messages)
 
         if not logical_session_id:
             raise HTTPException(status_code=500, detail="Failed to resolve logical session id")
 
-        display_messages = get_display_messages(user.id, logical_session_id)
+        display_messages = await asyncio.to_thread(
+            get_display_messages, user.id, logical_session_id
+        )
         base_messages = (
             display_messages
             if display_messages is not None
@@ -3702,6 +4377,13 @@ async def submit_session_turn(
             session_id=logical_session_id,
             live_session_id=live_session_id,
         )
+        receipt_is_pending = await asyncio.to_thread(
+            heartbeat_turn_submission_receipt,
+            user.id,
+            request_id,
+        )
+        if not receipt_is_pending:
+            raise TuiGatewayBridgeError("Turn submission is no longer pending")
         submit_result = await session_run_manager.submit_turn(
             bridge=bridge,
             user_id=user.id,
@@ -3713,14 +4395,28 @@ async def submit_session_turn(
             existing_messages=base_messages,
             draft_title=draft_title,
             mode=mode,
+            request_id=request_id,
+        )
+        receipt_finished = await asyncio.to_thread(
+            finish_turn_submission_receipt,
+            user.id,
+            request_id,
+            session_id=logical_session_id,
         )
 
-        live_state = get_live_session_state(user.id, logical_session_id)
+        live_state, display_meta = await asyncio.gather(
+            asyncio.to_thread(
+                get_live_session_state, user.id, logical_session_id
+            ),
+            asyncio.to_thread(
+                get_display_session_meta, user.id, logical_session_id
+            ),
+        )
         normalized_session = _normalize_logical_session_row(
             projected_session or logical_session or {"id": logical_session_id, "source": "tui"},
             logical_session_id=logical_session_id,
             logical_session=logical_session or projected_session or {"id": logical_session_id, "source": "tui"},
-            display_meta=get_display_session_meta(user.id, logical_session_id),
+            display_meta=display_meta,
             live_state=live_state,
             resume_session_id=tip_session_id or logical_session_id,
         )
@@ -3734,9 +4430,41 @@ async def submit_session_turn(
             "messages": [_normalize_display_message(item) for item in submit_result.get("messages", [])],
             "live": live_state,
         }
+    except asyncio.CancelledError:
+        if not receipt_finished:
+            failure_task = asyncio.create_task(
+                asyncio.to_thread(
+                    fail_turn_submission_receipt,
+                    user.id,
+                    request_id,
+                    error_message="Turn submission request was cancelled",
+                )
+            )
+            with contextlib.suppress(Exception, asyncio.CancelledError):
+                await asyncio.shield(failure_task)
+        raise
     except TuiGatewayBridgeError as exc:
+        if not receipt_finished:
+            await asyncio.to_thread(
+                fail_turn_submission_receipt,
+                user.id,
+                request_id,
+                error_message=str(exc),
+            )
         raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except Exception as exc:
+        if not receipt_finished:
+            await asyncio.to_thread(
+                fail_turn_submission_receipt,
+                user.id,
+                request_id,
+                error_message=str(exc) or type(exc).__name__,
+            )
+        raise
     finally:
+        receipt_heartbeat_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await receipt_heartbeat_task
         if bridge is not None:
             registry: TuiGatewayBridgeRegistry = app.state.tui_gateway_bridges
             await registry.maybe_close_if_unused(user.id)
@@ -3756,7 +4484,9 @@ async def interrupt_session_turn(
             user_id=user.id,
             session_id=session_id,
         )
-        live_state = get_live_session_state(user.id, session_id)
+        live_state = await asyncio.to_thread(
+            get_live_session_state, user.id, session_id
+        )
         return {"ok": True, "result": result, "live": live_state}
     except TuiGatewayBridgeError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
@@ -3775,6 +4505,25 @@ async def respond_session_approval(
     choice = str(payload.choice or "").strip().lower()
     if choice not in {"once", "session", "always", "deny"}:
         raise HTTPException(status_code=400, detail="Invalid approval choice")
+    approval_id = str(payload.approval_id or "").strip()
+
+    live_state = await asyncio.to_thread(
+        get_live_session_state, user.id, session_id
+    )
+    pending_approval = (
+        live_state.get("pending_approval") if isinstance(live_state, dict) else None
+    )
+    if (
+        not isinstance(live_state, dict)
+        or str(live_state.get("status") or "").strip() != "awaiting_approval"
+        or not isinstance(pending_approval, dict)
+        or not approval_id
+        or str(pending_approval.get("approval_id") or "").strip() != approval_id
+    ):
+        raise HTTPException(
+            status_code=409,
+            detail="Approval request is no longer pending",
+        )
 
     bridge: TuiGatewayBridge | None = None
     try:
@@ -3785,8 +4534,11 @@ async def respond_session_approval(
             user_id=user.id,
             session_id=session_id,
             choice=choice,
+            approval_id=approval_id,
         )
-        live_state = get_live_session_state(user.id, session_id)
+        live_state = await asyncio.to_thread(
+            get_live_session_state, user.id, session_id
+        )
         return {"ok": True, "result": result, "live": live_state}
     except TuiGatewayBridgeError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
@@ -3796,11 +4548,8 @@ async def respond_session_approval(
             await registry.maybe_close_if_unused(user.id)
 
 
-@app.delete("/api/sessions/{session_id}")
-async def delete_session(
-    session_id: str, user: CurrentUser = Depends(get_current_user)
-) -> dict[str, Any]:
-    with _open_session_db(user.target) as db:
+def _delete_session_sync(target: HermesTarget, session_id: str) -> str:
+    with _open_session_db(target) as db:
         logical_session_id, logical_session, _, _ = _resolve_logical_session_context(
             db, session_id
         )
@@ -3812,10 +4561,90 @@ async def delete_session(
             _collect_compression_lineage_session_ids(db, logical_session_id)
         ):
             db.delete_session(lineage_session_id)
-    delete_display_messages(user.id, logical_session_id)
-    delete_live_session_state(user.id, logical_session_id)
-    delete_session_events(user.id, logical_session_id)
+    return logical_session_id
+
+
+def _delete_interface_session_state_sync(user_id: str, session_id: str) -> None:
+    delete_display_messages(user_id, session_id)
+    delete_live_session_state(user_id, session_id)
+    delete_session_events(user_id, session_id)
+
+
+def _load_direct_file_tree(
+    user: CurrentUser,
+    *,
+    root: str | None,
+    path: str | None,
+) -> dict[str, Any]:
+    browser_root = _resolve_file_browser_root(user, root)
+    relative_path, target = _resolve_file_browser_target(browser_root, path)
+    if not browser_root.exists():
+        raise HTTPException(status_code=404, detail="Workspace root does not exist")
+    _assert_user_can_open_directory(target, linux_user=user.target.linux_user)
+    entries = _list_directory_as_user(
+        target,
+        relative_path=relative_path,
+        linux_user=user.target.linux_user,
+    )
+    return {
+        "root": str(browser_root),
+        "path": relative_path,
+        "entries": entries,
+    }
+
+
+def _open_direct_file_tree(user: CurrentUser, path: str) -> dict[str, Any]:
+    target = _resolve_file_browser_root(user, path)
+    _assert_user_can_open_directory(target, linux_user=user.target.linux_user)
+    entries = _list_directory_as_user(
+        target,
+        relative_path="",
+        linux_user=user.target.linux_user,
+    )
+    return {
+        "mode": _normalized_file_browser_mode(),
+        "root": str(target),
+        "path": "",
+        "opened_path": str(target),
+        "entries": entries,
+    }
+
+
+def _resolve_direct_download_target(
+    user: CurrentUser,
+    *,
+    root: str | None,
+    path: str,
+) -> Path:
+    browser_root = _resolve_file_browser_root(user, root)
+    _, target = _resolve_file_browser_target(browser_root, path)
+    _assert_user_can_read_file(target, linux_user=user.target.linux_user)
+    return target
+
+
+@app.delete("/api/sessions/{session_id}")
+async def delete_session(
+    session_id: str, user: CurrentUser = Depends(get_current_user)
+) -> dict[str, Any]:
+    logical_session_id = await asyncio.to_thread(
+        _delete_session_sync,
+        user.target,
+        session_id,
+    )
+    await asyncio.to_thread(
+        _delete_interface_session_state_sync,
+        user.id,
+        logical_session_id,
+    )
     return {"ok": True}
+
+
+@app.get("/api/files/revision")
+async def files_revision(
+    user: CurrentUser = Depends(get_current_user),
+) -> dict[str, str]:
+    manager: SessionRunManager = app.state.session_run_manager
+    return {"revision": await manager.get_workspace_change_revision(user.id)}
 
 
 @app.get("/api/files/tree")
@@ -3841,22 +4670,12 @@ async def files_tree(
             "entries": payload.get("entries") if isinstance(payload.get("entries"), list) else [],
         }
 
-    browser_root = _resolve_file_browser_root(user, root)
-    relative_path, target = _resolve_file_browser_target(browser_root, path)
-    if not browser_root.exists():
-        raise HTTPException(status_code=404, detail="Workspace root does not exist")
-    _assert_user_can_open_directory(target, linux_user=user.target.linux_user)
-    entries = _list_directory_as_user(
-        target,
-        relative_path=relative_path,
-        linux_user=user.target.linux_user,
+    return await asyncio.to_thread(
+        _load_direct_file_tree,
+        user,
+        root=root,
+        path=path,
     )
-
-    return {
-        "root": str(browser_root),
-        "path": relative_path,
-        "entries": entries,
-    }
 
 
 @app.get("/api/files/config")
@@ -3895,20 +4714,7 @@ async def open_directory(
             "entries": payload.get("entries") if isinstance(payload.get("entries"), list) else [],
         }
 
-    target = _resolve_file_browser_root(user, path)
-    _assert_user_can_open_directory(target, linux_user=user.target.linux_user)
-    entries = _list_directory_as_user(
-        target,
-        relative_path="",
-        linux_user=user.target.linux_user,
-    )
-    return {
-        "mode": mode,
-        "root": str(target),
-        "path": "",
-        "opened_path": str(target),
-        "entries": entries,
-    }
+    return await asyncio.to_thread(_open_direct_file_tree, user, path)
 
 
 @app.get("/api/files/preview/meta")
@@ -4081,9 +4887,12 @@ async def files_download(
             headers=headers,
         )
 
-    browser_root = _resolve_file_browser_root(user, root)
-    _, target = _resolve_file_browser_target(browser_root, path)
-    _assert_user_can_read_file(target, linux_user=user.target.linux_user)
+    target = await asyncio.to_thread(
+        _resolve_direct_download_target,
+        user,
+        root=root,
+        path=path,
+    )
     return FileResponse(target, filename=target.name)
 
 
@@ -4130,40 +4939,20 @@ async def upload_file(
             "path": str(stored.get("path") or ""),
         }
 
-    upload_root = _ensure_upload_root(user)
-    safe_name = _sanitize_filename(file.filename)
-    timestamp = datetime.now().strftime("%Y%m%d%H%M%S")
-    file_id = uuid.uuid4().hex
-    destination = upload_root / f"{file_id}_{timestamp}_{safe_name}"
-
-    total_size = 0
     try:
-        with destination.open("wb") as handle:
-            while True:
-                chunk = await file.read(1024 * 1024)
-                if not chunk:
-                    break
-                total_size += len(chunk)
-                if total_size > MAX_UPLOAD_SIZE_BYTES:
-                    raise HTTPException(
-                        status_code=413,
-                        detail=_upload_file_too_large_detail(),
-                    )
-                handle.write(chunk)
-    except HTTPException:
-        with contextlib.suppress(FileNotFoundError):
-            destination.unlink()
-        raise
+        stored = await asyncio.to_thread(
+            _store_direct_upload,
+            user,
+            filename=file.filename,
+            source=file.file,
+        )
     finally:
         await file.close()
 
-    _apply_file_permissions(
-        destination, linux_user=user.target.linux_user, is_dir=False
-    )
     return {
-        "id": file_id,
-        "name": safe_name,
-        "size": total_size,
+        "id": str(stored["id"]),
+        "name": str(stored["name"]),
+        "size": int(stored["size"]),
         "content_type": file.content_type or "application/octet-stream",
-        "path": str(destination),
+        "path": str(stored["path"]),
     }

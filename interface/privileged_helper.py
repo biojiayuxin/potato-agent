@@ -44,55 +44,23 @@ from interface.model_options import (
 )
 from interface.model_options import normalize_model_options
 from interface.model_proxy_config import get_model_proxy_base_url
+from interface.process_utils import SESSION_DB_INNER_TIMEOUT_SECONDS, run_process_group
 from interface.runtime_state import (
-    cleanup_expired_runtime_leases,
-    has_active_runtime_leases,
+    DEFAULT_RUNTIME_IDLE_TIMEOUT_SECONDS,
+    claim_runtime_sleep,
+    get_runtime_idle_eligibility,
     mark_background_activity,
+    release_runtime_sleep_claim,
     revoke_runtime_session,
+    runtime_sleep_claim_is_valid,
 )
 
 
 DEFAULT_SESSION_DB_PYTHON = (
     os.getenv("INTERFACE_TUI_GATEWAY_PYTHON") or "/opt/hermes-agent-venv/bin/python3"
 )
-
-USER_SESSION_DB_RPC_SCRIPT = (
-    "import json, sys\n"
-    "from pathlib import Path\n"
-    "from hermes_state import SessionDB\n"
-    "db = None\n"
-    "db_path = Path(sys.argv[1])\n"
-    "method = sys.argv[2]\n"
-    "kwargs = json.loads(sys.argv[3]) if len(sys.argv) > 3 else {}\n"
-    "try:\n"
-    "    db = SessionDB(db_path=db_path)\n"
-    "    if method == 'list_sessions_rich':\n"
-    "        result = db.list_sessions_rich(**kwargs)\n"
-    "    elif method == 'get_session':\n"
-    "        result = db.get_session(str(kwargs.get('session_id') or '').strip())\n"
-    "    elif method == 'resolve_session_id':\n"
-    "        result = db.resolve_session_id(str(kwargs.get('session_id_or_prefix') or '').strip())\n"
-    "    elif method == 'get_compression_tip':\n"
-    "        result = db.get_compression_tip(str(kwargs.get('session_id') or '').strip())\n"
-    "    elif method == 'get_messages':\n"
-    "        result = db.get_messages(str(kwargs.get('session_id') or '').strip())\n"
-    "    elif method == 'set_session_title':\n"
-    "        result = db.set_session_title(\n"
-    "            str(kwargs.get('session_id') or '').strip(),\n"
-    "            str(kwargs.get('title') or ''),\n"
-    "        )\n"
-    "    elif method == 'delete_session':\n"
-    "        result = db.delete_session(str(kwargs.get('session_id') or '').strip())\n"
-    "    else:\n"
-    "        raise RuntimeError(f'Unsupported session DB method: {method}')\n"
-    "    print(json.dumps({'ok': True, 'result': result}, ensure_ascii=False))\n"
-    "except Exception as exc:\n"
-    "    print(json.dumps({'ok': False, 'error': str(exc), 'type': type(exc).__name__}, ensure_ascii=False))\n"
-    "    raise SystemExit(1)\n"
-    "finally:\n"
-    "    if db is not None:\n"
-    "        db.close()\n"
-)
+USER_SESSION_DB_RPC_PATH = Path(__file__).with_name("session_db_rpc.py")
+USER_SESSION_DB_RPC_SOURCE = USER_SESSION_DB_RPC_PATH.read_text(encoding="utf-8")
 
 
 def _emit(payload: dict[str, Any]) -> int:
@@ -107,21 +75,34 @@ def _load_target(username: str) -> HermesTarget:
     return target
 
 
-def _run_as_user(target: HermesTarget, command: list[str], *, cwd: Path | None = None) -> subprocess.CompletedProcess[str]:
+def _run_as_user(
+    target: HermesTarget,
+    command: list[str],
+    *,
+    cwd: Path | None = None,
+    timeout_seconds: float | None = None,
+) -> subprocess.CompletedProcess[str]:
+    full_command = [
+        "runuser",
+        "-u",
+        target.linux_user,
+        "--",
+        "env",
+        f"HOME={target.home_dir}",
+        f"HERMES_HOME={target.hermes_home}",
+        f"TERMINAL_CWD={target.workdir}",
+        f"PATH={os.environ.get('PATH', '')}",
+        "PYTHONUNBUFFERED=1",
+        *command,
+    ]
+    if timeout_seconds is not None:
+        return run_process_group(
+            full_command,
+            timeout_seconds=timeout_seconds,
+            cwd=cwd or target.workdir,
+        )
     return subprocess.run(
-        [
-            "runuser",
-            "-u",
-            target.linux_user,
-            "--",
-            "env",
-            f"HOME={target.home_dir}",
-            f"HERMES_HOME={target.hermes_home}",
-            f"TERMINAL_CWD={target.workdir}",
-            f"PATH={os.environ.get('PATH', '')}",
-            "PYTHONUNBUFFERED=1",
-            *command,
-        ],
+        full_command,
         capture_output=True,
         text=True,
         cwd=str(cwd or target.workdir),
@@ -135,11 +116,12 @@ def _session_db_call(target: HermesTarget, method: str, kwargs: dict[str, Any]) 
         [
             DEFAULT_SESSION_DB_PYTHON,
             "-c",
-            USER_SESSION_DB_RPC_SCRIPT,
+            USER_SESSION_DB_RPC_SOURCE,
             str(target.state_db_path),
             method,
             json.dumps(kwargs, ensure_ascii=False),
         ],
+        timeout_seconds=SESSION_DB_INNER_TIMEOUT_SECONDS,
     )
     stdout_lines = [line for line in result.stdout.splitlines() if line.strip()]
     raw_payload = stdout_lines[-1] if stdout_lines else ""
@@ -410,6 +392,11 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("stop-idle-runtime")
     p.add_argument("--username", required=True)
     p.add_argument("--user-id", required=True)
+    p.add_argument(
+        "--idle-timeout-seconds",
+        type=int,
+        default=DEFAULT_RUNTIME_IDLE_TIMEOUT_SECONDS,
+    )
 
     p = sub.add_parser("patch-active-model")
     p.add_argument("--username", required=True)
@@ -498,18 +485,61 @@ def main() -> int:
         if args.command == "stop-idle-runtime":
             target = _load_target(args.username)
             with service_operation_lock(target.systemd_service):
-                cleanup_expired_runtime_leases()
-                if has_active_runtime_leases(args.user_id):
-                    return _emit({"ok": True, "stopped": False, "reason": "active_lease"})
+                eligibility = get_runtime_idle_eligibility(
+                    args.user_id,
+                    idle_timeout_seconds=max(int(args.idle_timeout_seconds), 1),
+                )
+                if not eligibility or not bool(eligibility.get("eligible")):
+                    reason = str((eligibility or {}).get("reason") or "recent_activity")
+                    return _emit({"ok": True, "stopped": False, "reason": reason})
                 if has_active_background_processes(target):
                     mark_background_activity(args.user_id)
                     return _emit({"ok": True, "stopped": False, "reason": "background_jobs"})
-                if not is_service_active(target.systemd_service):
+                claim_id = claim_runtime_sleep(
+                    args.user_id,
+                    idle_timeout_seconds=max(int(args.idle_timeout_seconds), 1),
+                )
+                if claim_id is None:
+                    eligibility = get_runtime_idle_eligibility(
+                        args.user_id,
+                        idle_timeout_seconds=max(int(args.idle_timeout_seconds), 1),
+                    )
+                    reason = str((eligibility or {}).get("reason") or "recent_activity")
+                    return _emit({"ok": True, "stopped": False, "reason": reason})
+                try:
+                    if has_active_background_processes(target):
+                        release_runtime_sleep_claim(args.user_id, claim_id=claim_id)
+                        claim_id = ""
+                        mark_background_activity(args.user_id)
+                        return _emit(
+                            {"ok": True, "stopped": False, "reason": "background_jobs"}
+                        )
+                    service_active = is_service_active(target.systemd_service)
+                    if not runtime_sleep_claim_is_valid(
+                        args.user_id,
+                        claim_id=claim_id,
+                        idle_timeout_seconds=max(int(args.idle_timeout_seconds), 1),
+                    ):
+                        return _emit(
+                            {"ok": True, "stopped": False, "reason": "recent_activity"}
+                        )
+                    if not service_active:
+                        revoke_runtime_session(args.user_id, reason="idle_timeout")
+                        claim_id = ""
+                        return _emit(
+                            {
+                                "ok": True,
+                                "stopped": True,
+                                "reason": "service_inactive",
+                            }
+                        )
+                    stop_service(target.systemd_service)
                     revoke_runtime_session(args.user_id, reason="idle_timeout")
-                    return _emit({"ok": True, "stopped": True, "reason": "service_inactive"})
-                stop_service(target.systemd_service)
-                revoke_runtime_session(args.user_id, reason="idle_timeout")
-                return _emit({"ok": True, "stopped": True})
+                    claim_id = ""
+                    return _emit({"ok": True, "stopped": True})
+                finally:
+                    if claim_id:
+                        release_runtime_sleep_claim(args.user_id, claim_id=claim_id)
 
         if args.command == "patch-active-model":
             target = _load_target(args.username)

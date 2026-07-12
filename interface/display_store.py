@@ -1,11 +1,18 @@
 from __future__ import annotations
 
 import json
+import sqlite3
+import threading
 import time
 from pathlib import Path
 from typing import Any
 
 from interface.auth_db import DEFAULT_AUTH_DB_PATH, connect_auth_db
+
+TURN_SUBMISSION_PENDING_TIMEOUT_SECONDS = 5 * 60
+TURN_SUBMISSION_RECEIPT_RETENTION_SECONDS = 7 * 24 * 60 * 60
+_DISPLAY_STORE_INIT_LOCK = threading.Lock()
+_DISPLAY_STORE_IDENTITIES: dict[str, tuple[int, int]] = {}
 
 
 SCHEMA_SQL = """
@@ -35,6 +42,7 @@ CREATE TABLE IF NOT EXISTS session_live_state (
     pending_approval_json TEXT NOT NULL DEFAULT '',
     last_error TEXT NOT NULL DEFAULT '',
     last_event_seq INTEGER NOT NULL DEFAULT 0,
+    last_workspace_event_seq INTEGER NOT NULL DEFAULT 0,
     created_at INTEGER NOT NULL,
     updated_at INTEGER NOT NULL,
     started_at INTEGER NOT NULL DEFAULT 0,
@@ -58,10 +66,37 @@ CREATE TABLE IF NOT EXISTS session_event_journal (
 
 CREATE INDEX IF NOT EXISTS idx_session_event_journal_lookup
 ON session_event_journal(user_id, session_id, created_at);
+
+CREATE TABLE IF NOT EXISTS turn_submission_receipts (
+    user_id TEXT NOT NULL,
+    request_id TEXT NOT NULL,
+    requested_session_id TEXT NOT NULL DEFAULT '',
+    session_id TEXT NOT NULL DEFAULT '',
+    status TEXT NOT NULL DEFAULT 'pending',
+    last_error TEXT NOT NULL DEFAULT '',
+    expires_at INTEGER NOT NULL DEFAULT 0,
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL,
+    PRIMARY KEY (user_id, request_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_turn_submission_receipts_updated_at
+ON turn_submission_receipts(updated_at);
+
+CREATE INDEX IF NOT EXISTS idx_turn_submission_receipts_status_expires
+ON turn_submission_receipts(status, expires_at);
 """
 
 
-def ensure_display_store(db_path: Path = DEFAULT_AUTH_DB_PATH) -> Path:
+def _display_store_identity(db_path: Path) -> tuple[int, int] | None:
+    try:
+        stat_result = db_path.stat()
+    except OSError:
+        return None
+    return (int(stat_result.st_dev), int(stat_result.st_ino))
+
+
+def _initialize_display_store(db_path: Path) -> Path:
     with connect_auth_db(db_path) as conn:
         conn.executescript(
             """
@@ -89,6 +124,7 @@ CREATE TABLE IF NOT EXISTS session_live_state (
     pending_approval_json TEXT NOT NULL DEFAULT '',
     last_error TEXT NOT NULL DEFAULT '',
     last_event_seq INTEGER NOT NULL DEFAULT 0,
+    last_workspace_event_seq INTEGER NOT NULL DEFAULT 0,
     created_at INTEGER NOT NULL,
     updated_at INTEGER NOT NULL,
     started_at INTEGER NOT NULL DEFAULT 0,
@@ -112,6 +148,25 @@ CREATE TABLE IF NOT EXISTS session_event_journal (
 
 CREATE INDEX IF NOT EXISTS idx_session_event_journal_lookup
 ON session_event_journal(user_id, session_id, created_at);
+
+CREATE TABLE IF NOT EXISTS turn_submission_receipts (
+    user_id TEXT NOT NULL,
+    request_id TEXT NOT NULL,
+    requested_session_id TEXT NOT NULL DEFAULT '',
+    session_id TEXT NOT NULL DEFAULT '',
+    status TEXT NOT NULL DEFAULT 'pending',
+    last_error TEXT NOT NULL DEFAULT '',
+    expires_at INTEGER NOT NULL DEFAULT 0,
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL,
+    PRIMARY KEY (user_id, request_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_turn_submission_receipts_updated_at
+ON turn_submission_receipts(updated_at);
+
+CREATE INDEX IF NOT EXISTS idx_turn_submission_receipts_status_expires
+ON turn_submission_receipts(status, expires_at);
 """
         )
         columns = {
@@ -132,7 +187,45 @@ ON session_event_journal(user_id, session_id, created_at);
             conn.execute(
                 "ALTER TABLE session_live_state ADD COLUMN tip_session_id TEXT NOT NULL DEFAULT ''"
             )
+        if "last_workspace_event_seq" not in live_state_columns:
+            conn.execute(
+                "ALTER TABLE session_live_state ADD COLUMN last_workspace_event_seq INTEGER NOT NULL DEFAULT 0"
+            )
+        receipt_columns = {
+            str(row[1])
+            for row in conn.execute(
+                "pragma table_info(turn_submission_receipts)"
+            ).fetchall()
+        }
+        if "expires_at" not in receipt_columns:
+            conn.execute(
+                "ALTER TABLE turn_submission_receipts ADD COLUMN expires_at INTEGER NOT NULL DEFAULT 0"
+            )
+            conn.execute(
+                """
+                UPDATE turn_submission_receipts
+                SET expires_at = created_at + ?
+                WHERE status = 'pending' AND expires_at = 0
+                """,
+                (TURN_SUBMISSION_PENDING_TIMEOUT_SECONDS,),
+            )
         conn.commit()
+    return db_path
+
+
+def ensure_display_store(db_path: Path = DEFAULT_AUTH_DB_PATH) -> Path:
+    cache_key = str(db_path.expanduser().absolute())
+    identity = _display_store_identity(db_path)
+    if identity is not None and _DISPLAY_STORE_IDENTITIES.get(cache_key) == identity:
+        return db_path
+    with _DISPLAY_STORE_INIT_LOCK:
+        identity = _display_store_identity(db_path)
+        if identity is not None and _DISPLAY_STORE_IDENTITIES.get(cache_key) == identity:
+            return db_path
+        _initialize_display_store(db_path)
+        identity = _display_store_identity(db_path)
+        if identity is not None:
+            _DISPLAY_STORE_IDENTITIES[cache_key] = identity
     return db_path
 
 
@@ -179,6 +272,392 @@ def get_display_session_meta(
         "draft_title": str(row["draft_title"] or ""),
         "created_at": int(row["created_at"] or 0),
         "updated_at": int(row["updated_at"] or 0),
+    }
+
+
+def get_live_poll_snapshot(
+    user_id: str,
+    session_id: str,
+    *,
+    after_run_id: str = "",
+    after_event_seq: int = -1,
+    db_path: Path = DEFAULT_AUTH_DB_PATH,
+) -> dict[str, Any] | None:
+    """Read live state and optional changed transcript through one RO connection."""
+    uri = f"file:{db_path}?mode=ro"
+    with sqlite3.connect(uri, uri=True) as conn:
+        conn.row_factory = sqlite3.Row
+        conn.execute("BEGIN")
+        live_row = conn.execute(
+            """
+            select session_id, run_id, live_session_id, tip_session_id,
+                   assistant_message_id, status,
+                   pending_approval_json, last_error, last_event_seq,
+                   last_workspace_event_seq,
+                   created_at, updated_at, started_at, finished_at
+            from session_live_state
+            where user_id = ? and session_id = ?
+            limit 1
+            """,
+            (user_id, session_id),
+        ).fetchone()
+        live_state = (
+            _normalize_live_state_row(live_row) if live_row is not None else None
+        )
+        current_run_id = str((live_state or {}).get("run_id") or "")
+        current_event_seq = int((live_state or {}).get("last_event_seq") or 0)
+        current_workspace_event_seq = int(
+            (live_state or {}).get("last_workspace_event_seq") or 0
+        )
+        file_tree_refresh = bool(
+            current_run_id
+            and str(after_run_id or "") == current_run_id
+            and current_workspace_event_seq > 0
+            and int(after_event_seq) < current_workspace_event_seq
+        )
+        cursor_changed = bool(
+            not str(after_run_id or "")
+            or str(after_run_id or "") != current_run_id
+            or int(after_event_seq) < current_event_seq
+        )
+        transcript_columns = (
+            "messages_json, updated_at" if cursor_changed else "updated_at"
+        )
+        transcript_row = conn.execute(
+            f"""
+            select {transcript_columns}
+            from session_display_transcripts
+            where user_id = ? and session_id = ?
+            limit 1
+            """,
+            (user_id, session_id),
+        ).fetchone()
+
+    if live_row is None and transcript_row is None:
+        return None
+
+    include_messages = bool(transcript_row is not None and cursor_changed)
+    messages: list[dict[str, Any]] | None = None
+    if include_messages and transcript_row is not None:
+        try:
+            parsed = json.loads(str(transcript_row["messages_json"] or "[]"))
+        except json.JSONDecodeError:
+            parsed = []
+        messages = parsed if isinstance(parsed, list) else []
+
+    return {
+        "session_id": session_id,
+        "messages": messages,
+        "display_updated_at": int(
+            transcript_row["updated_at"] if transcript_row is not None else 0
+        ),
+        "file_tree_refresh": file_tree_refresh,
+        "live": live_state,
+    }
+
+
+def find_live_session_id_by_run_id(
+    user_id: str,
+    run_id: str,
+    *,
+    db_path: Path = DEFAULT_AUTH_DB_PATH,
+) -> str:
+    uri = f"file:{db_path}?mode=ro"
+    with sqlite3.connect(uri, uri=True) as conn:
+        row = conn.execute(
+            """
+            select session_id
+            from session_live_state
+            where user_id = ? and run_id = ?
+            order by updated_at desc
+            limit 1
+            """,
+            (user_id, run_id),
+        ).fetchone()
+    return str(row[0] or "").strip() if row is not None else ""
+
+
+def create_turn_submission_receipt(
+    user_id: str,
+    request_id: str,
+    *,
+    requested_session_id: str,
+    pending_timeout_seconds: int = TURN_SUBMISSION_PENDING_TIMEOUT_SECONDS,
+    db_path: Path = DEFAULT_AUTH_DB_PATH,
+) -> dict[str, Any]:
+    ensure_display_store(db_path)
+    now = int(time.time())
+    expires_at = now + max(int(pending_timeout_seconds), 1)
+    with connect_auth_db(db_path) as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        row = conn.execute(
+            """
+            SELECT requested_session_id, session_id, status, last_error,
+                   expires_at, created_at, updated_at
+            FROM turn_submission_receipts
+            WHERE user_id = ? AND request_id = ?
+            LIMIT 1
+            """,
+            (user_id, request_id),
+        ).fetchone()
+        created = row is None
+        if created:
+            conn.execute(
+                """
+                INSERT INTO turn_submission_receipts (
+                    user_id, request_id, requested_session_id, session_id,
+                    status, last_error, expires_at, created_at, updated_at
+                ) VALUES (?, ?, ?, '', 'pending', '', ?, ?, ?)
+                """,
+                (
+                    user_id,
+                    request_id,
+                    requested_session_id,
+                    expires_at,
+                    now,
+                    now,
+                ),
+            )
+            conn.commit()
+            return {
+                "user_id": user_id,
+                "request_id": request_id,
+                "requested_session_id": requested_session_id,
+                "session_id": "",
+                "status": "pending",
+                "last_error": "",
+                "expires_at": expires_at,
+                "created_at": now,
+                "updated_at": now,
+                "created": True,
+            }
+        if (
+            str(row["status"] or "") == "pending"
+            and (
+                (
+                    int(row["expires_at"] or 0) > 0
+                    and int(row["expires_at"] or 0) <= now
+                )
+                or (
+                    int(row["expires_at"] or 0) <= 0
+                    and int(row["updated_at"] or 0)
+                    <= now - TURN_SUBMISSION_PENDING_TIMEOUT_SECONDS
+                )
+            )
+        ):
+            conn.execute(
+                """
+                UPDATE turn_submission_receipts
+                SET status = 'failed',
+                    last_error = 'Turn submission did not complete before its deadline',
+                    updated_at = ?
+                WHERE user_id = ? AND request_id = ? AND status = 'pending'
+                """,
+                (now, user_id, request_id),
+            )
+            conn.commit()
+            row = conn.execute(
+                """
+                SELECT requested_session_id, session_id, status, last_error,
+                       expires_at, created_at, updated_at
+                FROM turn_submission_receipts
+                WHERE user_id = ? AND request_id = ?
+                LIMIT 1
+                """,
+                (user_id, request_id),
+            ).fetchone()
+        else:
+            conn.rollback()
+
+    return {
+        "user_id": user_id,
+        "request_id": request_id,
+        **dict(row),
+        "created": False,
+    }
+
+
+def get_turn_submission_receipt(
+    user_id: str,
+    request_id: str,
+    *,
+    db_path: Path = DEFAULT_AUTH_DB_PATH,
+) -> dict[str, Any] | None:
+    now = int(time.time())
+    with connect_auth_db(db_path) as conn:
+        row = conn.execute(
+            """
+            SELECT requested_session_id, session_id, status, last_error,
+                   expires_at, created_at, updated_at
+            FROM turn_submission_receipts
+            WHERE user_id = ? AND request_id = ?
+            LIMIT 1
+            """,
+            (user_id, request_id),
+        ).fetchone()
+        if (
+            row is not None
+            and str(row["status"] or "") == "pending"
+            and (
+                (
+                    int(row["expires_at"] or 0) > 0
+                    and int(row["expires_at"] or 0) <= now
+                )
+                or (
+                    int(row["expires_at"] or 0) <= 0
+                    and int(row["updated_at"] or 0)
+                    <= now - TURN_SUBMISSION_PENDING_TIMEOUT_SECONDS
+                )
+            )
+        ):
+            cursor = conn.execute(
+                """
+                UPDATE turn_submission_receipts
+                SET status = 'failed',
+                    last_error = 'Turn submission did not complete before its deadline',
+                    updated_at = ?
+                WHERE user_id = ? AND request_id = ?
+                  AND status = 'pending'
+                  AND (
+                      (expires_at > 0 AND expires_at <= ?)
+                      OR (expires_at = 0 AND updated_at <= ?)
+                  )
+                """,
+                (
+                    now,
+                    user_id,
+                    request_id,
+                    now,
+                    now - TURN_SUBMISSION_PENDING_TIMEOUT_SECONDS,
+                ),
+            )
+            if cursor.rowcount > 0:
+                conn.commit()
+                row = conn.execute(
+                    """
+                    SELECT requested_session_id, session_id, status, last_error,
+                           expires_at, created_at, updated_at
+                    FROM turn_submission_receipts
+                    WHERE user_id = ? AND request_id = ?
+                    LIMIT 1
+                    """,
+                    (user_id, request_id),
+                ).fetchone()
+    if row is None:
+        return None
+    return {
+        "user_id": user_id,
+        "request_id": request_id,
+        **dict(row),
+    }
+
+
+def finish_turn_submission_receipt(
+    user_id: str,
+    request_id: str,
+    *,
+    session_id: str,
+    db_path: Path = DEFAULT_AUTH_DB_PATH,
+) -> bool:
+    ensure_display_store(db_path)
+    now = int(time.time())
+    with connect_auth_db(db_path) as conn:
+        cursor = conn.execute(
+            """
+            UPDATE turn_submission_receipts
+            SET session_id = ?, status = 'submitted', last_error = '', updated_at = ?
+            WHERE user_id = ? AND request_id = ? AND status = 'pending'
+            """,
+            (session_id, now, user_id, request_id),
+        )
+        conn.commit()
+        return cursor.rowcount > 0
+
+
+def heartbeat_turn_submission_receipt(
+    user_id: str,
+    request_id: str,
+    *,
+    pending_timeout_seconds: int = TURN_SUBMISSION_PENDING_TIMEOUT_SECONDS,
+    db_path: Path = DEFAULT_AUTH_DB_PATH,
+) -> bool:
+    ensure_display_store(db_path)
+    now = int(time.time())
+    expires_at = now + max(int(pending_timeout_seconds), 1)
+    with connect_auth_db(db_path) as conn:
+        cursor = conn.execute(
+            """
+            UPDATE turn_submission_receipts
+            SET expires_at = ?, updated_at = ?
+            WHERE user_id = ? AND request_id = ? AND status = 'pending'
+            """,
+            (expires_at, now, user_id, request_id),
+        )
+        conn.commit()
+        return cursor.rowcount > 0
+
+
+def fail_turn_submission_receipt(
+    user_id: str,
+    request_id: str,
+    *,
+    error_message: str,
+    db_path: Path = DEFAULT_AUTH_DB_PATH,
+) -> bool:
+    ensure_display_store(db_path)
+    now = int(time.time())
+    with connect_auth_db(db_path) as conn:
+        cursor = conn.execute(
+            """
+            UPDATE turn_submission_receipts
+            SET status = 'failed', last_error = ?, updated_at = ?
+            WHERE user_id = ? AND request_id = ? AND status = 'pending'
+            """,
+            (str(error_message or ""), now, user_id, request_id),
+        )
+        conn.commit()
+        return cursor.rowcount > 0
+
+
+def cleanup_turn_submission_receipts(
+    *,
+    retention_seconds: int = TURN_SUBMISSION_RECEIPT_RETENTION_SECONDS,
+    now: int | None = None,
+    db_path: Path = DEFAULT_AUTH_DB_PATH,
+) -> dict[str, int]:
+    ensure_display_store(db_path)
+    checked_at = int(time.time()) if now is None else int(now)
+    retention_cutoff = checked_at - max(int(retention_seconds), 1)
+    with connect_auth_db(db_path) as conn:
+        expired_cursor = conn.execute(
+            """
+            UPDATE turn_submission_receipts
+            SET status = 'failed',
+                last_error = 'Turn submission did not complete before its deadline',
+                updated_at = ?
+            WHERE status = 'pending'
+              AND (
+                  (expires_at > 0 AND expires_at <= ?)
+                  OR (expires_at = 0 AND updated_at <= ?)
+              )
+            """,
+            (
+                checked_at,
+                checked_at,
+                checked_at - TURN_SUBMISSION_PENDING_TIMEOUT_SECONDS,
+            ),
+        )
+        deleted_cursor = conn.execute(
+            """
+            DELETE FROM turn_submission_receipts
+            WHERE status != 'pending' AND updated_at <= ?
+            """,
+            (retention_cutoff,),
+        )
+        conn.commit()
+    return {
+        "expired": int(expired_cursor.rowcount or 0),
+        "deleted": int(deleted_cursor.rowcount or 0),
     }
 
 
@@ -337,6 +816,7 @@ def _normalize_live_state_row(row: Any) -> dict[str, Any]:
         "pending_approval": pending_approval,
         "last_error": str(row["last_error"] or ""),
         "last_event_seq": int(row["last_event_seq"] or 0),
+        "last_workspace_event_seq": int(row["last_workspace_event_seq"] or 0),
         "created_at": int(row["created_at"] or 0),
         "updated_at": int(row["updated_at"] or 0),
         "started_at": int(row["started_at"] or 0),
@@ -355,6 +835,7 @@ def get_live_session_state(
             """
             select run_id, live_session_id, tip_session_id, assistant_message_id, status,
                    pending_approval_json, last_error, last_event_seq,
+                   last_workspace_event_seq,
                    created_at, updated_at, started_at, finished_at
             from session_live_state
             where user_id = ? and session_id = ?
@@ -378,6 +859,7 @@ def list_live_session_states(
             select session_id, run_id, live_session_id, tip_session_id,
                    assistant_message_id, status,
                    pending_approval_json, last_error, last_event_seq,
+                   last_workspace_event_seq,
                    created_at, updated_at, started_at, finished_at
             from session_live_state
             where user_id = ?
@@ -428,6 +910,7 @@ def save_live_session_state(
     pending_approval: dict[str, Any] | None | object = _MISSING,
     last_error: str | None = None,
     last_event_seq: int | None = None,
+    last_workspace_event_seq: int | None = None,
     created_at: int | None = None,
     started_at: int | None = None,
     finished_at: int | None = None,
@@ -441,6 +924,7 @@ def save_live_session_state(
             """
             select run_id, live_session_id, tip_session_id, assistant_message_id, status,
                    pending_approval_json, last_error, last_event_seq,
+                   last_workspace_event_seq,
                    created_at, updated_at, started_at, finished_at
             from session_live_state
             where user_id = ? and session_id = ?
@@ -481,6 +965,11 @@ def save_live_session_state(
                 if last_event_seq is not None
                 else (existing_payload or {}).get("last_event_seq") or 0
             ),
+            "last_workspace_event_seq": int(
+                last_workspace_event_seq
+                if last_workspace_event_seq is not None
+                else (existing_payload or {}).get("last_workspace_event_seq") or 0
+            ),
             "created_at": int((existing_payload or {}).get("created_at") or created_at_value),
             "updated_at": now,
             "started_at": int(
@@ -506,9 +995,10 @@ def save_live_session_state(
                 """
                 insert into session_live_state (
                     user_id, session_id, run_id, live_session_id, tip_session_id,
-                    assistant_message_id, status, pending_approval_json, last_error, last_event_seq,
+                    assistant_message_id, status, pending_approval_json, last_error,
+                    last_event_seq, last_workspace_event_seq,
                     created_at, updated_at, started_at, finished_at
-                ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     user_id,
@@ -521,6 +1011,7 @@ def save_live_session_state(
                     pending_approval_json,
                     next_payload["last_error"],
                     next_payload["last_event_seq"],
+                    next_payload["last_workspace_event_seq"],
                     next_payload["created_at"],
                     next_payload["updated_at"],
                     next_payload["started_at"],
@@ -533,7 +1024,8 @@ def save_live_session_state(
                 update session_live_state
                 set run_id = ?, live_session_id = ?, tip_session_id = ?,
                     assistant_message_id = ?, status = ?, pending_approval_json = ?,
-                    last_error = ?, last_event_seq = ?, updated_at = ?,
+                    last_error = ?, last_event_seq = ?, last_workspace_event_seq = ?,
+                    updated_at = ?,
                     started_at = ?, finished_at = ?
                 where user_id = ? and session_id = ?
                 """,
@@ -546,6 +1038,7 @@ def save_live_session_state(
                     pending_approval_json,
                     next_payload["last_error"],
                     next_payload["last_event_seq"],
+                    next_payload["last_workspace_event_seq"],
                     next_payload["updated_at"],
                     next_payload["started_at"],
                     next_payload["finished_at"],
@@ -636,9 +1129,14 @@ def delete_display_user_data(
             "delete from session_event_journal where user_id = ?",
             (normalized_user_id,),
         )
+        receipt_cursor = conn.execute(
+            "delete from turn_submission_receipts where user_id = ?",
+            (normalized_user_id,),
+        )
         conn.commit()
     return {
         "display_messages": int(display_cursor.rowcount or 0),
         "live_states": int(live_cursor.rowcount or 0),
         "events": int(event_cursor.rowcount or 0),
+        "turn_submission_receipts": int(receipt_cursor.rowcount or 0),
     }

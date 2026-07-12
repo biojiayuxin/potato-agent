@@ -113,6 +113,7 @@ def test_chat_mode_submits_prompt_directly() -> None:
             attachments=[],
             existing_messages=[],
             mode="chat",
+            request_id="request-1",
         )
         await _wait_for_calls(bridge, 1)
         await _wait_for_status(db_path, "completed")
@@ -122,6 +123,7 @@ def test_chat_mode_submits_prompt_directly() -> None:
     bridge = _run(scenario())
 
     assert [method for method, _ in bridge.calls] == ["prompt.submit"]
+    assert bridge.run_id == "request-1"
     assert bridge.calls[0][1]["text"] == "hello"
 
     messages = get_display_messages("user-1", "session-1", db_path=db_path)

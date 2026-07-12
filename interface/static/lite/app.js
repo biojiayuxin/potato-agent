@@ -230,13 +230,23 @@ const tuiBridgeReconnectAttemptsBySessionId = new Map();
 const intentionallyClosedTuiBridges = new WeakSet();
 const liveSessionPollingSessionIds = new Set();
 const liveSessionPollTimersBySessionId = new Map();
-const liveSessionPollInFlightBySessionId = new Set();
+const liveSessionPollInFlightBySessionId = new Map();
 const liveSessionPollFailuresBySessionId = new Map();
 const liveSessionPollGenerationBySessionId = new Map();
+const liveSessionSnapshotAcceptedRequestBySessionId = new Map();
 let liveSessionPollGenerationCounter = 0;
+let liveSessionSnapshotRequestCounter = 0;
 let fileTreeRefreshTimer = null;
-let fileTreeRefreshInFlight = false;
+let fileTreeRefreshInFlight = null;
 let fileTreeRefreshPending = false;
+let fileTreeRefreshDeferred = false;
+let fileTreeLastFocusRefreshAt = 0;
+let fileTreeRefreshGeneration = 0;
+let fileTreeChangePollTimer = null;
+let fileTreeChangePollInFlight = null;
+let fileTreeChangePollGeneration = 0;
+let fileTreeAcceptedRevision = null;
+let authSessionGeneration = 0;
 
 const SIDEBAR_WIDTH_KEY = 'lite_sidebar_width';
 const FILES_WIDTH_KEY = 'lite_files_width';
@@ -251,8 +261,14 @@ const TUI_BRIDGE_RECONNECT_BASE_DELAY_MS = 1000;
 const TUI_BRIDGE_RECONNECT_MAX_DELAY_MS = 15000;
 const LIVE_SESSION_POLL_INTERVAL_MS = 2000;
 const LIVE_SESSION_POLL_FAILURE_DELAY_MS = 5000;
+const TURN_RECOVERY_MISSING_RECEIPT_TIMEOUT_MS = 75 * 1000;
+const TURN_RECOVERY_PENDING_RECEIPT_TIMEOUT_MS = 330 * 1000;
+const TURN_SUBMISSION_SOFT_TIMEOUT_MS = 15 * 1000;
 const FILE_TREE_REFRESH_DEBOUNCE_MS = 800;
+const FILE_TREE_FOCUS_REFRESH_MIN_INTERVAL_MS = 5000;
 const FILE_TREE_REFRESH_MAX_CONCURRENCY = 3;
+const FILE_TREE_CHANGE_POLL_INTERVAL_MS = 5000;
+const FILE_TREE_CHANGE_POLL_FAILURE_DELAY_MS = 15000;
 const ATTACHMENT_BLOCK_START = '<potato-files>';
 const ATTACHMENT_BLOCK_END = '</potato-files>';
 const ATTACHMENT_HINT_LINE = 'Use the attachment local paths above if you need to inspect the files.';
@@ -612,13 +628,14 @@ const MODEL_DISPLAY_NAME_OVERRIDES = {
   primary: 'GPT-5.5',
   'gpt-5.5': 'GPT-5.5',
   'gpt-5.5-alt': 'GPT-5.5-alt',
+  'gpt-5.6-sol': 'GPT-5.6-sol',
 };
 
 const MODEL_DISPLAY_ORDER = [
   'GPT-5.5',
   'GPT-5.5-alt',
   'DeepSeek',
-  'Qwen3.7-Max',
+  'GPT-5.6-sol',
 ];
 
 const getModelKeyCandidates = (model) => [
@@ -776,10 +793,12 @@ const normalizeDisplayMessageId = (messageId) => {
   return normalized.startsWith('msg-') ? normalized : `msg-${normalized}`;
 };
 
-const forgetLiveTuiSession = (persistentSessionId) => {
+const forgetLiveTuiSession = (persistentSessionId, { stopPolling = true } = {}) => {
   const persistentId = String(persistentSessionId || '').trim();
   if (!persistentId) return;
-  stopLiveSessionPolling(persistentId);
+  if (stopPolling) {
+    stopLiveSessionPolling(persistentId);
+  }
   const liveIds = new Set(liveTuiSessionAliasesByPersistentId.get(persistentId) || []);
   const primaryLiveId = liveTuiSessionsByPersistentId.get(persistentId) || '';
   if (primaryLiveId) {
@@ -849,6 +868,9 @@ const applyLiveStateToSession = (sessionId, live, { managePolling = true } = {})
   const tipSessionId = String(liveState?.tip_session_id || liveState?.tipSessionId || '').trim();
   const status = String(liveState?.status || '').trim();
   const pendingApproval = liveState?.pending_approval || liveState?.pendingApproval || null;
+  if (managePolling) {
+    invalidateLiveSessionPollingForRunChange(persistentSessionId, liveState);
+  }
 
   const applyLiveSnapshot = (session) => (
     session
@@ -869,7 +891,7 @@ const applyLiveStateToSession = (sessionId, live, { managePolling = true } = {})
   } else if (tipSessionId && ACTIVE_LIVE_SESSION_STATUSES.has(status)) {
     rememberLiveTuiSession(persistentSessionId, tipSessionId);
   } else {
-    forgetLiveTuiSession(persistentSessionId);
+    forgetLiveTuiSession(persistentSessionId, { stopPolling: managePolling });
   }
 
   state.sessions = state.sessions.map((chat) => (
@@ -879,14 +901,9 @@ const applyLiveStateToSession = (sessionId, live, { managePolling = true } = {})
     state.activeSession = applyLiveSnapshot(state.activeSession);
   }
 
-  const shouldPausePollingForApproval = status === 'awaiting_approval' && Boolean(pendingApproval);
   if (ACTIVE_LIVE_SESSION_STATUSES.has(status)) {
     if (managePolling) {
-      if (shouldPausePollingForApproval) {
-        stopLiveSessionPolling(persistentSessionId);
-      } else {
-        startLiveSessionPolling(persistentSessionId);
-      }
+      startLiveSessionPolling(persistentSessionId);
     }
     setSessionBusy(persistentSessionId, true, { transport: 'tui' });
   } else {
@@ -908,14 +925,14 @@ const applyLiveStateToSession = (sessionId, live, { managePolling = true } = {})
 
   if (pendingApproval && status === 'awaiting_approval') {
     setSessionPendingApproval(persistentSessionId, {
-      approvalId: '',
+      approvalId: String(pendingApproval.approval_id || pendingApproval.approvalId || ''),
       command: String(pendingApproval.command || ''),
       description: String(pendingApproval.description || 'Potato Agent needs approval to continue.'),
       patternKey: '',
       patternKeys: [],
       options: [],
     });
-  } else if (status !== 'awaiting_approval') {
+  } else {
     clearSessionPendingApproval(persistentSessionId);
   }
 };
@@ -1183,57 +1200,16 @@ const recoverTuiBridgeAfterDisconnect = async (sessionId) => {
 
   recoveringTuiSessionIds.add(persistentSessionId);
   try {
-    let bridgeReadyBeforeSnapshot = false;
-    try {
-      await ensureTuiBridge();
-      bridgeReadyBeforeSnapshot = true;
-    } catch {
-      // The snapshot fetch below still tells us whether the run already finished.
-    }
-    let session = await updateSessionSnapshot(persistentSessionId, {
-      forceReplaceLiveMessages: true,
-    });
-    let liveState = session?.live || (isViewingSession(persistentSessionId) ? state.activeSession?.live : null);
-    let status = String(liveState?.status || '').trim();
-    if (!ACTIVE_LIVE_SESSION_STATUSES.has(status)) {
-      resetTuiBridgeReconnectState(persistentSessionId);
-      if (isViewingSession(persistentSessionId)) {
-        renderWorkspace();
-      } else {
-        renderChatList();
-      }
-      return;
-    }
-
-    try {
-      await ensureTuiBridge();
-      if (!bridgeReadyBeforeSnapshot) {
-        session = await updateSessionSnapshot(persistentSessionId, {
-          forceReplaceLiveMessages: true,
-        });
-        liveState = session?.live || (isViewingSession(persistentSessionId) ? state.activeSession?.live : null);
-        status = String(liveState?.status || '').trim();
-        if (!ACTIVE_LIVE_SESSION_STATUSES.has(status)) {
-          resetTuiBridgeReconnectState(persistentSessionId);
-          if (isViewingSession(persistentSessionId)) {
-            renderWorkspace();
-          } else {
-            renderChatList();
-          }
-          return;
-        }
-      }
-      resetTuiBridgeReconnectState(persistentSessionId);
-      if (isViewingSession(persistentSessionId)) {
-        renderWorkspace();
-      } else {
-        renderChatList();
-      }
-    } catch {
-      scheduleTuiBridgeRecovery(persistentSessionId);
+    startLiveSessionPolling(persistentSessionId);
+    await fetchLiveSessionSnapshot(persistentSessionId);
+    resetTuiBridgeReconnectState(persistentSessionId);
+    if (isViewingSession(persistentSessionId)) {
+      renderWorkspace();
+    } else {
+      renderChatList();
     }
   } catch {
-    scheduleTuiBridgeRecovery(persistentSessionId);
+    startLiveSessionPolling(persistentSessionId);
   } finally {
     recoveringTuiSessionIds.delete(persistentSessionId);
   }
@@ -1260,10 +1236,10 @@ const handleTuiBridgeClosed = (closedBridge = null) => {
     }
   }
 
-  closeTuiBridge({ suppressRecovery: false });
+  closeTuiBridge({ suppressRecovery: true });
 
   for (const sessionId of sessionsToRecover) {
-    recoverTuiBridgeAfterDisconnect(sessionId).catch(() => {});
+    startLiveSessionPolling(sessionId);
   }
 };
 
@@ -1403,7 +1379,14 @@ const handleTuiBridgeEvent = (message) => {
     if (completedSessionId) {
       window.setTimeout(async () => {
         try {
-          await updateSessionSnapshot(completedSessionId, { preserveLiveMessages: true });
+          await updateSessionSnapshot(completedSessionId, {
+            preserveLiveMessages: true,
+            backgroundRefresh: true,
+            shouldApplySnapshot: (resolvedSessionId) => (
+              resolvedSessionId === completedSessionId
+              && !isSessionBusy(completedSessionId)
+            ),
+          });
           if (isViewingSession(completedSessionId)) {
             syncActiveSessionFromSessions(completedSessionId);
             renderWorkspace();
@@ -1420,14 +1403,18 @@ const handleTuiBridgeEvent = (message) => {
   if (type === 'approval.request') {
     const persistentSessionId = getPersistentSessionIdFromTuiEvent(message);
     setSessionPendingApproval(persistentSessionId, {
-      approvalId: '',
+      approvalId: String(
+        message?.payload?.approval_id
+        || message?.payload?.approvalId
+        || `${String(message?.run_id || '')}:${String(message?.seq || '')}`
+      ),
       command: String(message?.payload?.command || ''),
       description: String(message?.payload?.description || 'Potato Agent needs approval to continue.'),
       patternKey: '',
       patternKeys: [],
       options: [],
     });
-    stopLiveSessionPolling(persistentSessionId);
+    startLiveSessionPolling(persistentSessionId);
     setTuiBridgeStatus('TUI gateway requested approval');
     return;
   }
@@ -2066,19 +2053,49 @@ const submitApprovalDecision = async (choice) => {
   setApprovalSubmitting(true);
 
   const approvalSessionId = String(approval.sessionId || '').trim();
+  const submittedApprovalId = String(approval.approvalId || '').trim();
 
   try {
     const response = await api(`/api/sessions/${encodeURIComponent(approvalSessionId)}/approval`, {
       method: 'POST',
-      body: JSON.stringify({ choice }),
+      body: JSON.stringify({
+        choice,
+        approval_id: submittedApprovalId,
+      }),
     });
     const json = await response.json();
     applyLiveStateToSession(approvalSessionId, json?.live || null);
-    clearSessionPendingApproval(approvalSessionId);
     setApprovalSubmitting(false);
+    startLiveSessionPolling(approvalSessionId);
   } catch (error) {
-    showError(dom.approvalError, String(error.message || 'Approval request failed'));
+    const errorMessage = String(error.message || 'Approval request failed');
+    let reconciled = false;
+    let stillAwaitingSubmittedApproval = true;
+    try {
+      const snapshot = await fetchLiveSessionSnapshot(approvalSessionId);
+      if (snapshot) {
+        reconciled = true;
+        const liveState = snapshot.live;
+        const status = String(liveState?.status || '').trim();
+        const pendingApproval = liveState?.pending_approval || liveState?.pendingApproval || null;
+        const pendingApprovalId = String(
+          pendingApproval?.approval_id || pendingApproval?.approvalId || ''
+        ).trim();
+        stillAwaitingSubmittedApproval = (
+          status === 'awaiting_approval'
+          && Boolean(pendingApproval)
+          && pendingApprovalId === submittedApprovalId
+        );
+      }
+    } catch {}
+
     setApprovalSubmitting(false);
+    if (reconciled && !stillAwaitingSubmittedApproval) {
+      return;
+    }
+
+    startLiveSessionPolling(approvalSessionId);
+    showError(dom.approvalError, errorMessage);
   }
 };
 
@@ -2447,6 +2464,7 @@ const handlePasswordChangeSubmit = async (event) => {
     });
     const json = await response.json();
     if (json?.user) {
+      authSessionGeneration += 1;
       state.user = json.user;
       renderWorkspaceHeader();
     }
@@ -2830,6 +2848,7 @@ const setAuthViewMode = (mode) => {
 };
 
 const resetWorkspaceState = () => {
+  authSessionGeneration += 1;
   stopAllLiveSessionPolling();
   resetTuiBridgeReconnectState();
   closeTuiBridge();
@@ -2866,7 +2885,12 @@ const resetWorkspaceState = () => {
     window.clearTimeout(fileTreeRefreshTimer);
     fileTreeRefreshTimer = null;
   }
+  fileTreeRefreshGeneration += 1;
+  fileTreeRefreshInFlight = null;
   fileTreeRefreshPending = false;
+  fileTreeRefreshDeferred = false;
+  fileTreeLastFocusRefreshAt = 0;
+  stopFileTreeChangePolling();
   state.streamingMessageIds.clear();
   busySessionIds.clear();
   sessionRunTransportById.clear();
@@ -3030,6 +3054,7 @@ const pollSignupJob = async () => {
 };
 
 const api = async (path, options = {}) => {
+  const requestAuthSessionGeneration = authSessionGeneration;
   const headers = new Headers(options.headers || {});
   if (!(options.body instanceof FormData) && !headers.has('Content-Type') && options.body) {
     headers.set('Content-Type', 'application/json');
@@ -3060,6 +3085,7 @@ const api = async (path, options = {}) => {
     }
     if (
       (response.status === 401 || response.status === 403)
+      && requestAuthSessionGeneration === authSessionGeneration
       && (
         payload?.reason === 'idle_timeout'
         || payload?.reason === 'temporary_user_expired'
@@ -3073,7 +3099,10 @@ const api = async (path, options = {}) => {
     ) {
       handleSessionExpired(payload?.message || detail);
     }
-    throw new Error(detail);
+    const requestError = new Error(detail);
+    requestError.status = response.status;
+    requestError.payload = payload;
+    throw requestError;
   }
 
   return response;
@@ -4863,7 +4892,15 @@ const joinPath = (directory, name, type) => {
   return type === 'directory' ? `${base}${name}/` : `${base}${name}`;
 };
 
-const listDirectory = async (path, force = false, { workspaceRoot = state.workspaceRoot } = {}) => {
+const listDirectory = async (
+  path,
+  force = false,
+  {
+    workspaceRoot = state.workspaceRoot,
+    userId = String(state.user?.id || ''),
+    refreshGeneration = fileTreeRefreshGeneration,
+  } = {},
+) => {
   const directory = normalizeDirectory(path);
   if (!force && state.treeCache.has(directory)) {
     return state.treeCache.get(directory);
@@ -4876,13 +4913,20 @@ const listDirectory = async (path, force = false, { workspaceRoot = state.worksp
   if (requestWorkspaceRoot) {
     query.set('root', requestWorkspaceRoot);
   }
-  const json = await api(`/api/files/tree?${query.toString()}`, { method: 'GET' }).then((res) => res.json());
+  const json = await api(`/api/files/tree?${query.toString()}`, {
+    method: 'GET',
+    cache: 'no-store',
+  }).then((res) => res.json());
   const entries = Array.isArray(json?.entries) ? json.entries : [];
   entries.sort((left, right) => {
     if (left.type !== right.type) return left.type === 'directory' ? -1 : 1;
     return left.name.localeCompare(right.name);
   });
-  if (String(state.workspaceRoot || '').trim() === requestWorkspaceRoot) {
+  if (
+    refreshGeneration === fileTreeRefreshGeneration
+    && String(state.user?.id || '') === String(userId || '')
+    && String(state.workspaceRoot || '').trim() === requestWorkspaceRoot
+  ) {
     state.treeCache.set(directory, entries);
   }
   return entries;
@@ -4996,6 +5040,8 @@ const renderTreeNode = async (path, depth = 0) => {
 };
 
 const renderFileTree = async () => {
+  const renderGeneration = fileTreeRefreshGeneration;
+  const renderUserId = String(state.user?.id || '');
   dom.fileTree.innerHTML = '';
   if (!state.currentPath) {
     dom.fileTree.innerHTML = '<div class="empty-state">No workspace directory is available for this user.</div>';
@@ -5010,13 +5056,24 @@ const renderFileTree = async () => {
   const root = normalizeDirectory(state.rootPath || state.currentPath);
   try {
     const tree = await renderTreeNode(root);
+    if (
+      renderGeneration !== fileTreeRefreshGeneration
+      || String(state.user?.id || '') !== renderUserId
+    ) {
+      return;
+    }
     if (!tree.children.length) {
       dom.fileTree.innerHTML = '<div class="empty-state">This directory is empty.</div>';
       return;
     }
     dom.fileTree.append(tree);
   } catch (error) {
-    dom.fileTree.innerHTML = `<div class="error">${escapeHtml(error.message)}</div>`;
+    if (
+      renderGeneration === fileTreeRefreshGeneration
+      && String(state.user?.id || '') === renderUserId
+    ) {
+      dom.fileTree.innerHTML = `<div class="error">${escapeHtml(error.message)}</div>`;
+    }
   }
 };
 
@@ -5026,6 +5083,7 @@ const refreshVisibleFileTree = async () => {
   const userId = String(state.user?.id || '');
   const workspaceRoot = String(state.workspaceRoot || '').trim();
   const root = normalizeDirectory(state.rootPath || state.currentPath || '/');
+  const refreshGeneration = fileTreeRefreshGeneration;
   const scrollTop = dom.fileTree.scrollTop || 0;
   const refreshPaths = getVisibleFileTreeRefreshPaths();
   let rootError = null;
@@ -5034,7 +5092,8 @@ const refreshVisibleFileTree = async () => {
 
   await runWithFileTreeConcurrency(refreshPaths, async (path) => {
     if (
-      !state.user
+      refreshGeneration !== fileTreeRefreshGeneration
+      || !state.user
       || String(state.user?.id || '') !== userId
       || String(state.workspaceRoot || '').trim() !== workspaceRoot
       || normalizeDirectory(state.rootPath || '/') !== root
@@ -5043,8 +5102,21 @@ const refreshVisibleFileTree = async () => {
     }
 
     try {
-      await listDirectory(path, true, { workspaceRoot });
+      await listDirectory(path, true, {
+        workspaceRoot,
+        userId,
+        refreshGeneration,
+      });
     } catch (error) {
+      if (
+        refreshGeneration !== fileTreeRefreshGeneration
+        || !state.user
+        || String(state.user?.id || '') !== userId
+        || String(state.workspaceRoot || '').trim() !== workspaceRoot
+        || normalizeDirectory(state.rootPath || '/') !== root
+      ) {
+        return;
+      }
       if (normalizeDirectory(path) === root) {
         rootError = error;
         return;
@@ -5058,7 +5130,8 @@ const refreshVisibleFileTree = async () => {
   }
 
   if (
-    !state.user
+    refreshGeneration !== fileTreeRefreshGeneration
+    || !state.user
     || String(state.user?.id || '') !== userId
     || String(state.workspaceRoot || '').trim() !== workspaceRoot
     || normalizeDirectory(state.rootPath || '/') !== root
@@ -5073,7 +5146,9 @@ const refreshVisibleFileTree = async () => {
   state.expandedPaths.add(root);
 
   await renderFileTree();
-  dom.fileTree.scrollTop = scrollTop;
+  if (refreshGeneration === fileTreeRefreshGeneration) {
+    dom.fileTree.scrollTop = scrollTop;
+  }
 };
 
 const runFileTreeRefreshNow = async ({ silent = true } = {}) => {
@@ -5083,15 +5158,27 @@ const runFileTreeRefreshNow = async ({ silent = true } = {}) => {
     return;
   }
 
-  fileTreeRefreshInFlight = true;
+  const refreshGeneration = fileTreeRefreshGeneration;
+  const refreshToken = Symbol('file-tree-refresh');
+  fileTreeRefreshInFlight = refreshToken;
   try {
     await refreshVisibleFileTree();
   } catch (error) {
-    if (!silent) {
+    if (
+      !silent
+      && refreshGeneration === fileTreeRefreshGeneration
+      && fileTreeRefreshInFlight === refreshToken
+    ) {
       showChatError(String(error.message || 'Failed to refresh files'));
     }
   } finally {
-    fileTreeRefreshInFlight = false;
+    if (
+      refreshGeneration !== fileTreeRefreshGeneration
+      || fileTreeRefreshInFlight !== refreshToken
+    ) {
+      return;
+    }
+    fileTreeRefreshInFlight = null;
     if (fileTreeRefreshPending) {
       fileTreeRefreshPending = false;
       scheduleFileTreeRefresh('pending');
@@ -5100,7 +5187,12 @@ const runFileTreeRefreshNow = async ({ silent = true } = {}) => {
 };
 
 const scheduleFileTreeRefresh = (reason = '', { delay = FILE_TREE_REFRESH_DEBOUNCE_MS } = {}) => {
-  if (!state.user || !state.currentPath || document.hidden) return;
+  if (!state.user || !state.currentPath) return;
+  if (document.hidden) {
+    fileTreeRefreshDeferred = true;
+    return;
+  }
+  fileTreeRefreshDeferred = false;
   if (fileTreeRefreshTimer) {
     window.clearTimeout(fileTreeRefreshTimer);
   }
@@ -5110,11 +5202,121 @@ const scheduleFileTreeRefresh = (reason = '', { delay = FILE_TREE_REFRESH_DEBOUN
   }, Math.max(0, Number(delay) || 0));
 };
 
+const refreshFileTreeAfterFocus = () => {
+  if (document.hidden || !state.user || !state.currentPath) return;
+  startFileTreeChangePolling();
+  const now = Date.now();
+  const hadDeferredRefresh = fileTreeRefreshDeferred;
+  if (
+    !hadDeferredRefresh
+    && now - fileTreeLastFocusRefreshAt < FILE_TREE_FOCUS_REFRESH_MIN_INTERVAL_MS
+  ) {
+    return;
+  }
+  fileTreeLastFocusRefreshAt = now;
+  fileTreeRefreshDeferred = false;
+  scheduleFileTreeRefresh('focus', {
+    delay: hadDeferredRefresh ? 0 : FILE_TREE_REFRESH_DEBOUNCE_MS,
+  });
+};
+
+function pauseFileTreeChangePolling() {
+  fileTreeChangePollGeneration += 1;
+  if (fileTreeChangePollTimer) {
+    window.clearTimeout(fileTreeChangePollTimer);
+    fileTreeChangePollTimer = null;
+  }
+  fileTreeChangePollInFlight = null;
+}
+
+function stopFileTreeChangePolling() {
+  pauseFileTreeChangePolling();
+  fileTreeAcceptedRevision = null;
+}
+
+function scheduleFileTreeChangePoll(delayMs = FILE_TREE_CHANGE_POLL_INTERVAL_MS) {
+  if (document.hidden || !state.user || !state.currentPath) return;
+  if (fileTreeChangePollTimer || fileTreeChangePollInFlight) return;
+  const generation = fileTreeChangePollGeneration;
+  const timer = window.setTimeout(() => {
+    if (fileTreeChangePollTimer === timer) {
+      fileTreeChangePollTimer = null;
+    }
+    pollFileTreeChangeRevision(generation).catch(() => {});
+  }, Math.max(0, Number(delayMs) || 0));
+  fileTreeChangePollTimer = timer;
+}
+
+function startFileTreeChangePolling() {
+  scheduleFileTreeChangePoll(0);
+}
+
+async function pollFileTreeChangeRevision(generation = fileTreeChangePollGeneration) {
+  if (
+    generation !== fileTreeChangePollGeneration
+    || document.hidden
+    || !state.user
+    || !state.currentPath
+  ) {
+    return;
+  }
+  if (fileTreeChangePollInFlight) return;
+
+  const userId = String(state.user?.id || '');
+  const pollToken = Symbol('file-tree-change-poll');
+  let nextDelay = FILE_TREE_CHANGE_POLL_INTERVAL_MS;
+  fileTreeChangePollInFlight = pollToken;
+  try {
+    const response = await api('/api/files/revision', {
+      method: 'GET',
+      cache: 'no-store',
+    });
+    const json = await response.json();
+    if (
+      generation !== fileTreeChangePollGeneration
+      || fileTreeChangePollInFlight !== pollToken
+      || document.hidden
+      || String(state.user?.id || '') !== userId
+    ) {
+      return;
+    }
+
+    const revision = String(json?.revision || '');
+    const previousRevision = fileTreeAcceptedRevision;
+    fileTreeAcceptedRevision = revision;
+    if (
+      (previousRevision === null && revision)
+      || (previousRevision !== null && revision !== previousRevision)
+    ) {
+      scheduleFileTreeRefresh('workspace.revision');
+    }
+  } catch {
+    nextDelay = FILE_TREE_CHANGE_POLL_FAILURE_DELAY_MS;
+  } finally {
+    if (
+      generation !== fileTreeChangePollGeneration
+      || fileTreeChangePollInFlight !== pollToken
+    ) {
+      return;
+    }
+    fileTreeChangePollInFlight = null;
+    scheduleFileTreeChangePoll(nextDelay);
+  }
+}
+
 const fetchWorkspaceFiles = async () => {
+  const requestAuthSessionGeneration = authSessionGeneration;
+  const requestUserId = String(state.user?.id || '');
   const [configJson, treeJson] = await Promise.all([
     api('/api/files/config', { method: 'GET' }).then((res) => res.json()),
-    api('/api/files/tree', { method: 'GET' }).then((res) => res.json()),
+    api('/api/files/tree', { method: 'GET', cache: 'no-store' }).then((res) => res.json()),
   ]);
+  if (
+    requestAuthSessionGeneration !== authSessionGeneration
+    || String(state.user?.id || '') !== requestUserId
+  ) {
+    return;
+  }
   state.fileBrowserMode = String(configJson?.mode || 'home_only') === 'user_readable'
     ? 'user_readable'
     : 'home_only';
@@ -5125,6 +5327,7 @@ const fetchWorkspaceFiles = async () => {
     path: treeJson?.path || '/',
     entries: Array.isArray(treeJson?.entries) ? treeJson.entries : [],
   });
+  startFileTreeChangePolling();
 };
 
 const openDirectory = async (rawPath) => {
@@ -5285,7 +5488,7 @@ const openSession = async (sessionId) => {
     queueMessageScrollRestore(sessionId);
     renderWorkspace();
     if (ACTIVE_LIVE_SESSION_STATUSES.has(String(liveState?.status || ''))) {
-      recoverTuiBridgeAfterDisconnect(sessionId).catch(() => {});
+      startLiveSessionPolling(sessionId);
     }
     return;
   }
@@ -5317,7 +5520,7 @@ const openSession = async (sessionId) => {
     state.shouldAutoScrollMessages = true;
     renderWorkspace();
     if (ACTIVE_LIVE_SESSION_STATUSES.has(String(liveState?.status || ''))) {
-      recoverTuiBridgeAfterDisconnect(sessionId).catch(() => {});
+      startLiveSessionPolling(sessionId);
     }
   } catch (error) {
     state.sessionHistoryLoading = false;
@@ -5385,12 +5588,17 @@ const updateSessionSnapshot = async (
     preserveLiveMessages = false,
     forceReplaceLiveMessages = false,
     managePolling = true,
+    backgroundRefresh = false,
     shouldApplySnapshot = null,
   } = {},
 ) => {
   if (!sessionId) return null;
 
-  const response = await api(`/api/sessions/${encodeURIComponent(sessionId)}`, { method: 'GET' });
+  const backgroundQuery = backgroundRefresh ? '?background=1' : '';
+  const response = await api(
+    `/api/sessions/${encodeURIComponent(sessionId)}${backgroundQuery}`,
+    { method: 'GET' },
+  );
   const json = await response.json();
   const session = normalizeSessionSnapshot(json?.session || null);
   const serverMessages = Array.isArray(json?.messages)
@@ -5461,6 +5669,7 @@ function stopAllLiveSessionPolling() {
   liveSessionPollInFlightBySessionId.clear();
   liveSessionPollFailuresBySessionId.clear();
   liveSessionPollGenerationBySessionId.clear();
+  liveSessionSnapshotAcceptedRequestBySessionId.clear();
 }
 
 function bumpLiveSessionPollingGeneration(sessionId) {
@@ -5470,6 +5679,26 @@ function bumpLiveSessionPollingGeneration(sessionId) {
   liveSessionPollGenerationBySessionId.set(persistentSessionId, liveSessionPollGenerationCounter);
   return liveSessionPollGenerationCounter;
 }
+
+const invalidateLiveSessionPollingForRunChange = (sessionId, nextLiveState) => {
+  const persistentSessionId = String(sessionId || '').trim();
+  if (!persistentSessionId || !liveSessionPollingSessionIds.has(persistentSessionId)) return;
+  const currentSession = state.sessions.find((session) => session.id === persistentSessionId)
+    || (isViewingSession(persistentSessionId) ? state.activeSession : null);
+  const currentLiveState = currentSession?.live && typeof currentSession.live === 'object'
+    ? currentSession.live
+    : null;
+  const currentRunId = String(currentLiveState?.run_id || currentLiveState?.runId || '').trim();
+  const nextRunId = String(nextLiveState?.run_id || nextLiveState?.runId || '').trim();
+  if (!nextRunId || currentRunId === nextRunId) return;
+  bumpLiveSessionPollingGeneration(persistentSessionId);
+  const existingTimer = liveSessionPollTimersBySessionId.get(persistentSessionId);
+  if (existingTimer) {
+    window.clearTimeout(existingTimer);
+    liveSessionPollTimersBySessionId.delete(persistentSessionId);
+  }
+  scheduleLiveSessionPoll(persistentSessionId, LIVE_SESSION_POLL_INTERVAL_MS);
+};
 
 function getLiveSessionPollingGeneration(sessionId) {
   const persistentSessionId = String(sessionId || '').trim();
@@ -5509,6 +5738,162 @@ function startLiveSessionPolling(sessionId) {
   scheduleLiveSessionPoll(persistentSessionId, LIVE_SESSION_POLL_INTERVAL_MS);
 }
 
+const applyLiveSessionSnapshot = (
+  sessionId,
+  snapshot,
+  {
+    managePolling = true,
+    shouldApplySnapshot = null,
+    expectedCurrentRunId = null,
+    requestToken = 0,
+  } = {},
+) => {
+  const requestedSessionId = String(sessionId || '').trim();
+  const resolvedSessionId = String(snapshot?.session_id || requestedSessionId).trim();
+  if (!resolvedSessionId) return null;
+  const previousSession = state.sessions.find((session) => session.id === resolvedSessionId)
+    || (isViewingSession(resolvedSessionId) ? state.activeSession : null);
+  const previousLiveState = previousSession?.live && typeof previousSession.live === 'object'
+    ? previousSession.live
+    : null;
+  const currentRunId = String(previousLiveState?.run_id || previousLiveState?.runId || '').trim();
+  if (expectedCurrentRunId !== null && currentRunId !== String(expectedCurrentRunId || '').trim()) {
+    return null;
+  }
+  if (typeof shouldApplySnapshot === 'function' && !shouldApplySnapshot(resolvedSessionId)) {
+    return null;
+  }
+
+  const liveState = snapshot?.live && typeof snapshot.live === 'object'
+    ? snapshot.live
+    : null;
+  const incomingRunId = String(liveState?.run_id || liveState?.runId || '').trim();
+  const currentEventSeq = Number(
+    previousLiveState?.last_event_seq || previousLiveState?.lastEventSeq || 0
+  );
+  const incomingEventSeq = Number(liveState?.last_event_seq || liveState?.lastEventSeq || 0);
+  const currentUpdatedAt = Number(previousLiveState?.updated_at || previousLiveState?.updatedAt || 0);
+  const incomingUpdatedAt = Number(liveState?.updated_at || liveState?.updatedAt || 0);
+  const acceptedRequestToken = Number(
+    liveSessionSnapshotAcceptedRequestBySessionId.get(resolvedSessionId) || 0
+  );
+  if (incomingRunId && incomingRunId === currentRunId) {
+    if (incomingEventSeq < currentEventSeq) {
+      return null;
+    }
+    if (incomingEventSeq === currentEventSeq && incomingUpdatedAt < currentUpdatedAt) {
+      return null;
+    }
+    if (
+      incomingEventSeq === currentEventSeq
+      && incomingUpdatedAt === currentUpdatedAt
+      && requestToken > 0
+      && requestToken < acceptedRequestToken
+    ) {
+      return null;
+    }
+  }
+  const runChanged = Boolean(incomingRunId && incomingRunId !== currentRunId);
+  const liveRenderKey = (value) => JSON.stringify([
+    String(value?.run_id || value?.runId || ''),
+    String(value?.status || ''),
+    Number(value?.last_event_seq || value?.lastEventSeq || 0),
+    String(value?.pending_approval?.approval_id || value?.pendingApproval?.approvalId || ''),
+    String(value?.last_error || value?.lastError || ''),
+    String(value?.live_session_id || value?.liveSessionId || ''),
+    String(value?.tip_session_id || value?.tipSessionId || ''),
+    String(value?.assistant_message_id || value?.assistantMessageId || ''),
+    Number(value?.updated_at || value?.updatedAt || 0),
+  ]);
+  const previousMessages = getCachedSessionMessages(resolvedSessionId)
+    || (isViewingSession(resolvedSessionId) ? state.messages : null);
+  const serverMessages = Array.isArray(snapshot?.messages)
+    ? snapshot.messages.map(normalizeMessageForDisplay)
+    : null;
+  const mergedMessages = Array.isArray(serverMessages)
+    ? mergeSnapshotMessagesWithLocalProgress(serverMessages, previousMessages)
+    : null;
+  const snapshotChanged = Array.isArray(serverMessages)
+    || liveRenderKey(previousLiveState) !== liveRenderKey(liveState);
+
+  if (snapshotChanged) {
+    applyLiveStateToSession(resolvedSessionId, liveState, { managePolling });
+    if (Array.isArray(mergedMessages)) {
+      setLiveSessionMessages(resolvedSessionId, mergedMessages);
+      syncStreamingAssistantStateForSession(resolvedSessionId, {
+        liveState,
+        nextMessages: mergedMessages,
+        previousMessages,
+      });
+      if (isViewingSession(resolvedSessionId)) {
+        state.messages = mergedMessages;
+      }
+    }
+  } else if (managePolling && ACTIVE_LIVE_SESSION_STATUSES.has(String(liveState?.status || ''))) {
+    startLiveSessionPolling(resolvedSessionId);
+  }
+
+  if (requestToken > 0) {
+    liveSessionSnapshotAcceptedRequestBySessionId.set(
+      resolvedSessionId,
+      Math.max(acceptedRequestToken, requestToken),
+    );
+  }
+  if (Boolean(snapshot?.file_tree_refresh || snapshot?.fileTreeRefresh)) {
+    scheduleFileTreeRefresh('live.workspace-change');
+  }
+
+  return {
+    sessionId: resolvedSessionId,
+    messages: mergedMessages,
+    live: liveState,
+    changed: snapshotChanged,
+    runChanged,
+  };
+};
+
+const fetchLiveSessionSnapshot = async (
+  sessionId,
+  {
+    managePolling = true,
+    shouldApplySnapshot = null,
+  } = {},
+) => {
+  const persistentSessionId = String(sessionId || '').trim();
+  if (!persistentSessionId) return null;
+  liveSessionSnapshotRequestCounter += 1;
+  const requestToken = liveSessionSnapshotRequestCounter;
+  const cachedSession = state.sessions.find((session) => session.id === persistentSessionId)
+    || (isViewingSession(persistentSessionId) ? state.activeSession : null);
+  const cachedLive = cachedSession?.live && typeof cachedSession.live === 'object'
+    ? cachedSession.live
+    : null;
+  const query = new URLSearchParams();
+  const hasCachedTranscript = state.liveSessionMessages.has(persistentSessionId);
+  const afterRunId = hasCachedTranscript
+    ? String(cachedLive?.run_id || cachedLive?.runId || '').trim()
+    : '';
+  if (afterRunId) {
+    query.set('after_run_id', afterRunId);
+    query.set(
+      'after_event_seq',
+      String(Number(cachedLive?.last_event_seq || cachedLive?.lastEventSeq || 0)),
+    );
+  }
+  const queryString = query.toString();
+  const response = await api(
+    `/api/sessions/${encodeURIComponent(persistentSessionId)}/live${queryString ? `?${queryString}` : ''}`,
+    { method: 'GET' },
+  );
+  const json = await response.json();
+  return applyLiveSessionSnapshot(persistentSessionId, json, {
+    managePolling,
+    shouldApplySnapshot,
+    expectedCurrentRunId: String(cachedLive?.run_id || cachedLive?.runId || '').trim(),
+    requestToken,
+  });
+};
+
 async function pollLiveSessionSnapshot(sessionId, generation = getLiveSessionPollingGeneration(sessionId)) {
   const persistentSessionId = String(sessionId || '').trim();
   if (!persistentSessionId || !state.user) return;
@@ -5519,46 +5904,63 @@ async function pollLiveSessionSnapshot(sessionId, generation = getLiveSessionPol
     return;
   }
 
-  liveSessionPollInFlightBySessionId.add(persistentSessionId);
+  const pollToken = Symbol(persistentSessionId);
+  liveSessionPollInFlightBySessionId.set(persistentSessionId, pollToken);
   try {
-    const session = await updateSessionSnapshot(persistentSessionId, {
-      forceReplaceLiveMessages: true,
+    const snapshot = await fetchLiveSessionSnapshot(persistentSessionId, {
       managePolling: false,
       shouldApplySnapshot: (resolvedSessionId) => (
         resolvedSessionId === persistentSessionId
         && isCurrentLiveSessionPoll(persistentSessionId, generation)
       ),
     });
+    if (!isCurrentLiveSessionPoll(persistentSessionId, generation)) return;
     liveSessionPollFailuresBySessionId.delete(persistentSessionId);
-    if (!session) return;
+    if (!snapshot) return;
 
-    const liveState = session?.live || (isViewingSession(persistentSessionId) ? state.activeSession?.live : null);
+    const liveState = snapshot.live;
     const status = String(liveState?.status || '').trim();
-    const pendingApproval = liveState?.pending_approval || liveState?.pendingApproval || null;
     if (!ACTIVE_LIVE_SESSION_STATUSES.has(status)) {
+      scheduleFileTreeRefresh('live.terminal');
       stopLiveSessionPolling(persistentSessionId);
+      const finalRefreshGeneration = getLiveSessionPollingGeneration(persistentSessionId);
+      if (snapshot.changed) {
+        if (isViewingSession(persistentSessionId)) {
+          renderWorkspace();
+        } else {
+          renderChatList();
+        }
+      }
+      try {
+        await updateSessionSnapshot(persistentSessionId, {
+          forceReplaceLiveMessages: true,
+          backgroundRefresh: true,
+          managePolling: false,
+          shouldApplySnapshot: (resolvedSessionId) => (
+            resolvedSessionId === persistentSessionId
+            && !isSessionBusy(persistentSessionId)
+            && getLiveSessionPollingGeneration(persistentSessionId) === finalRefreshGeneration
+          ),
+        });
+        if (isViewingSession(persistentSessionId)) {
+          syncActiveSessionFromSessions(persistentSessionId);
+          renderWorkspace();
+        } else {
+          renderChatList();
+        }
+      } catch {}
+      return;
+    }
+
+    if (snapshot.changed) {
       if (isViewingSession(persistentSessionId)) {
         renderWorkspace();
       } else {
         renderChatList();
       }
-      return;
     }
-
-    if (status === 'awaiting_approval' && pendingApproval) {
-      stopLiveSessionPolling(persistentSessionId);
-      if (isViewingSession(persistentSessionId)) {
-        renderWorkspace();
-      } else {
-        renderChatList();
-      }
-      return;
-    }
-
-    if (isViewingSession(persistentSessionId)) {
-      renderWorkspace();
-    } else {
-      renderChatList();
+    if (snapshot.runChanged) {
+      bumpLiveSessionPollingGeneration(persistentSessionId);
     }
     scheduleLiveSessionPoll(persistentSessionId, LIVE_SESSION_POLL_INTERVAL_MS);
   } catch {
@@ -5570,7 +5972,9 @@ async function pollLiveSessionSnapshot(sessionId, generation = getLiveSessionPol
       failures > 1 ? LIVE_SESSION_POLL_FAILURE_DELAY_MS : LIVE_SESSION_POLL_INTERVAL_MS
     );
   } finally {
-    liveSessionPollInFlightBySessionId.delete(persistentSessionId);
+    if (liveSessionPollInFlightBySessionId.get(persistentSessionId) === pollToken) {
+      liveSessionPollInFlightBySessionId.delete(persistentSessionId);
+    }
   }
 }
 
@@ -5596,6 +6000,7 @@ const deleteChat = async (chatId, isDraft = false) => {
 
   forgetLiveTuiSession(chatId);
   stopLiveSessionPolling(chatId);
+  liveSessionSnapshotAcceptedRequestBySessionId.delete(chatId);
 
   await api(`/api/sessions/${encodeURIComponent(chatId)}`, { method: 'DELETE' });
   clearLiveSessionMessages(chatId);
@@ -5621,6 +6026,46 @@ const startNewChat = async () => {
   showDraftChat();
   dom.promptInput?.focus();
   return state.draftSession;
+};
+
+const recoverSubmittedTurn = async (requestId) => {
+  const normalizedRequestId = String(requestId || '').trim();
+  if (!normalizedRequestId) return null;
+  let deadline = Date.now() + TURN_RECOVERY_MISSING_RECEIPT_TIMEOUT_MS;
+  let delayMs = 0;
+  let pendingReceiptSeen = false;
+  while (Date.now() <= deadline) {
+    if (delayMs > 0) {
+      await new Promise((resolve) => window.setTimeout(resolve, delayMs));
+    }
+    try {
+      const response = await api(
+        `/api/turns/${encodeURIComponent(normalizedRequestId)}`,
+        { method: 'GET' },
+      );
+      const json = await response.json();
+      const runId = String(json?.live?.run_id || json?.live?.runId || '').trim();
+      if (runId === normalizedRequestId && json?.session?.id) {
+        return json;
+      }
+      if (json?.pending) {
+        const serverDeadline = Number(json?.expires_at || 0) * 1000;
+        deadline = Math.max(
+          deadline,
+          serverDeadline > 0 ? serverDeadline + 15000 : 0,
+          pendingReceiptSeen ? 0 : Date.now() + TURN_RECOVERY_PENDING_RECEIPT_TIMEOUT_MS,
+        );
+        pendingReceiptSeen = true;
+      }
+    } catch (error) {
+      const status = Number(error?.status || 0);
+      if (status && status !== 404 && status !== 408 && status !== 429 && status < 500) {
+        throw error;
+      }
+    }
+    delayMs = delayMs > 0 ? Math.min(Math.round(delayMs * 1.5), 5000) : 750;
+  }
+  return null;
 };
 
 const submitPromptViaTuiBridge = async (prompt) => {
@@ -5708,34 +6153,79 @@ const submitPromptViaTuiBridge = async (prompt) => {
   state.pendingAttachments = [];
   setLiveSessionMessages(currentSessionId, targetMessages);
   setSessionBusy(currentSessionId, true, { transport: 'tui' });
-  const bridgeReadyPromise = ensureTuiBridge().catch(() => null);
   renderWorkspace();
 
   let persistentSessionId = optimisticSessionId;
+  const turnRequestId = uuid();
   try {
     const requestedSessionId = (!state.activeSession || state.activeSession?.isDraft || !optimisticSessionId)
       ? 'draft'
       : optimisticSessionId;
-    const response = await api(`/api/sessions/${encodeURIComponent(requestedSessionId)}/turns`, {
-      method: 'POST',
-      body: JSON.stringify({
-        prompt: trimmedPrompt,
-        mode: submissionMode,
-        attachments: uploadedAttachments.map((item) => ({
-          type: item.type,
-          id: item.id,
-          name: item.name,
-          size: item.size,
-          content_type: item.content_type,
-          localPath: item.localPath,
-        })),
-        draft_title: deriveDraftTitleFromUserMessage({
-          content: trimmedPrompt,
-          files: uploadedAttachments,
-        }),
-      }),
-    });
-    const json = await response.json();
+    let json = null;
+    try {
+      const submissionPromise = (async () => {
+        const response = await api(`/api/sessions/${encodeURIComponent(requestedSessionId)}/turns`, {
+          method: 'POST',
+          body: JSON.stringify({
+            prompt: trimmedPrompt,
+            mode: submissionMode,
+            request_id: turnRequestId,
+            attachments: uploadedAttachments.map((item) => ({
+              type: item.type,
+              id: item.id,
+              name: item.name,
+              size: item.size,
+              content_type: item.content_type,
+              localPath: item.localPath,
+            })),
+            draft_title: deriveDraftTitleFromUserMessage({
+              content: trimmedPrompt,
+              files: uploadedAttachments,
+            }),
+          }),
+        });
+        return response.json();
+      })();
+      const softTimeout = Symbol('turn-submission-soft-timeout');
+      let softTimeoutTimer = null;
+      let firstResult;
+      try {
+        firstResult = await Promise.race([
+          submissionPromise,
+          new Promise((resolve) => {
+            softTimeoutTimer = window.setTimeout(
+              () => resolve(softTimeout),
+              TURN_SUBMISSION_SOFT_TIMEOUT_MS,
+            );
+          }),
+        ]);
+      } finally {
+        if (softTimeoutTimer !== null) {
+          window.clearTimeout(softTimeoutTimer);
+        }
+      }
+      if (firstResult === softTimeout) {
+        submissionPromise.catch(() => {});
+        json = await recoverSubmittedTurn(turnRequestId);
+        if (!json) {
+          const timeoutError = new Error(
+            'Turn submission is still pending. Please retry after reconnecting.'
+          );
+          timeoutError.turnRecoveryAttempted = true;
+          throw timeoutError;
+        }
+      } else {
+        json = firstResult;
+      }
+    } catch (submissionError) {
+      const status = Number(submissionError?.status || 0);
+      const canReconcile = !submissionError?.turnRecoveryAttempted
+        && (!status || status >= 500 || status === 408 || status === 429);
+      if (canReconcile) {
+        json = await recoverSubmittedTurn(turnRequestId);
+      }
+      if (!json) throw submissionError;
+    }
     const nextSession = normalizeSessionSnapshot(
       json?.session
         ? { ...json.session, persistentSessionId: json.session.id }
@@ -5759,6 +6249,8 @@ const submitPromptViaTuiBridge = async (prompt) => {
       busySessionIds.delete(draftSessionId);
     }
 
+    const liveState = json?.live || json?.session?.live || null;
+    invalidateLiveSessionPollingForRunChange(nextSession.id, liveState);
     state.sessions = [nextSession, ...state.sessions.filter((chat) => chat.id !== nextSession.id)];
     state.draftSession = null;
     state.activeSession = nextSession;
@@ -5767,7 +6259,6 @@ const submitPromptViaTuiBridge = async (prompt) => {
     setLiveSessionMessages(nextSession.id, nextMessages);
     state.messages = nextMessages;
 
-    const liveState = json?.live || json?.session?.live || null;
     applyLiveStateToSession(nextSession.id, liveState);
     syncStreamingAssistantStateForSession(nextSession.id, {
       liveState,
@@ -5782,7 +6273,6 @@ const submitPromptViaTuiBridge = async (prompt) => {
         liveSessionId,
         persistentSessionId: nextSession.id,
       });
-      bridgeReadyPromise.catch(() => {});
     }
 
     renderWorkspace();
@@ -6344,6 +6834,20 @@ dom.filePathInput?.addEventListener('keydown', async (event) => {
   if (event.key !== 'Enter' || event.isComposing) return;
   event.preventDefault();
   await openDirectory(dom.filePathInput?.value || '').catch((error) => showChatError(error.message));
+});
+
+window.addEventListener('focus', refreshFileTreeAfterFocus);
+document.addEventListener('visibilitychange', () => {
+  if (document.hidden) {
+    pauseFileTreeChangePolling();
+    if (fileTreeRefreshTimer) {
+      window.clearTimeout(fileTreeRefreshTimer);
+      fileTreeRefreshTimer = null;
+      fileTreeRefreshDeferred = true;
+    }
+    return;
+  }
+  refreshFileTreeAfterFocus();
 });
 
 const handleMobilePanelMediaChange = () => {

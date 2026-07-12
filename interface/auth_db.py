@@ -3,6 +3,7 @@ from __future__ import annotations
 import hmac
 import os
 import sqlite3
+import threading
 import time
 import uuid
 from dataclasses import dataclass
@@ -23,6 +24,9 @@ ROOT_DIR = Path(__file__).resolve().parent
 DEFAULT_AUTH_DB_PATH = Path(
     os.getenv("INTERFACE_AUTH_DB") or (DEFAULT_STATE_DIR / "data" / "interface.db")
 )
+SQLITE_BUSY_TIMEOUT_SECONDS = 30.0
+_AUTH_DB_INIT_LOCK = threading.RLock()
+_AUTH_DB_IDENTITIES: dict[str, tuple[int, int]] = {}
 
 SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS users (
@@ -178,42 +182,74 @@ def _add_column_if_missing(
     conn.execute(f"alter table {table_name} add column {column_name} {definition}")
 
 
+def _database_identity(db_path: Path) -> tuple[int, int] | None:
+    try:
+        stat_result = db_path.stat()
+    except OSError:
+        return None
+    return (int(stat_result.st_dev), int(stat_result.st_ino))
+
+
+def _database_cache_key(db_path: Path) -> str:
+    return str(db_path.expanduser().absolute())
+
+
+def _auth_db_is_initialized(db_path: Path) -> bool:
+    identity = _database_identity(db_path)
+    if identity is None:
+        return False
+    return _AUTH_DB_IDENTITIES.get(_database_cache_key(db_path)) == identity
+
+
 def ensure_auth_db(db_path: Path = DEFAULT_AUTH_DB_PATH) -> Path:
-    ensure_private_directory(db_path.parent, mode=DEFAULT_PRIVATE_WRITABLE_DIR_MODE)
-    with sqlite3.connect(str(db_path)) as conn:
-        conn.executescript(SCHEMA_SQL)
-        _add_column_if_missing(
-            conn,
-            "users",
-            "auth_session_version",
-            "INTEGER NOT NULL DEFAULT 0",
-        )
-        _add_column_if_missing(conn, "signup_jobs", "email_verification_id", "TEXT")
-        _add_column_if_missing(conn, "signup_jobs", "email_verified_at", "INTEGER")
-        for index_name, column_name in (
-            ("idx_signup_jobs_username", "username"),
-            ("idx_signup_jobs_email", "email"),
-        ):
-            row = conn.execute(
-                "select sql from sqlite_master where type = 'index' and name = ? limit 1",
-                (index_name,),
-            ).fetchone()
-            existing_sql = str(row[0] or "") if row is not None else ""
-            desired_marker = "where status in ('pending', 'provisioning')"
-            if desired_marker not in existing_sql.lower():
-                conn.execute(f"drop index if exists {index_name}")
-                conn.execute(
-                    f"create unique index if not exists {index_name} on signup_jobs({column_name}) "
-                    "where status in ('pending', 'provisioning')"
-                )
-        conn.commit()
-    ensure_sqlite_sidecar_modes(db_path)
+    with _AUTH_DB_INIT_LOCK:
+        ensure_private_directory(db_path.parent, mode=DEFAULT_PRIVATE_WRITABLE_DIR_MODE)
+        with sqlite3.connect(
+            str(db_path), timeout=SQLITE_BUSY_TIMEOUT_SECONDS
+        ) as conn:
+            conn.execute(
+                f"PRAGMA busy_timeout = {int(SQLITE_BUSY_TIMEOUT_SECONDS * 1000)}"
+            )
+            conn.executescript(SCHEMA_SQL)
+            _add_column_if_missing(
+                conn,
+                "users",
+                "auth_session_version",
+                "INTEGER NOT NULL DEFAULT 0",
+            )
+            _add_column_if_missing(conn, "signup_jobs", "email_verification_id", "TEXT")
+            _add_column_if_missing(conn, "signup_jobs", "email_verified_at", "INTEGER")
+            for index_name, column_name in (
+                ("idx_signup_jobs_username", "username"),
+                ("idx_signup_jobs_email", "email"),
+            ):
+                row = conn.execute(
+                    "select sql from sqlite_master where type = 'index' and name = ? limit 1",
+                    (index_name,),
+                ).fetchone()
+                existing_sql = str(row[0] or "") if row is not None else ""
+                desired_marker = "where status in ('pending', 'provisioning')"
+                if desired_marker not in existing_sql.lower():
+                    conn.execute(f"drop index if exists {index_name}")
+                    conn.execute(
+                        f"create unique index if not exists {index_name} on signup_jobs({column_name}) "
+                        "where status in ('pending', 'provisioning')"
+                    )
+            conn.commit()
+        ensure_sqlite_sidecar_modes(db_path)
+        identity = _database_identity(db_path)
+        if identity is not None:
+            _AUTH_DB_IDENTITIES[_database_cache_key(db_path)] = identity
     return db_path
 
 
 def connect_auth_db(db_path: Path = DEFAULT_AUTH_DB_PATH) -> sqlite3.Connection:
-    ensure_auth_db(db_path)
-    conn = sqlite3.connect(str(db_path))
+    if not _auth_db_is_initialized(db_path):
+        with _AUTH_DB_INIT_LOCK:
+            if not _auth_db_is_initialized(db_path):
+                ensure_auth_db(db_path)
+    conn = sqlite3.connect(str(db_path), timeout=SQLITE_BUSY_TIMEOUT_SECONDS)
+    conn.execute(f"PRAGMA busy_timeout = {int(SQLITE_BUSY_TIMEOUT_SECONDS * 1000)}")
     conn.row_factory = sqlite3.Row
     return conn
 
