@@ -165,7 +165,6 @@ function renderAssemblyDetail(assembly) {
   const rows = [
     ['Genome Type', categoryLabel(assembly.category)],
     ['Sample', assembly.sample || assembly.id],
-    ['Haplotypes', Array.isArray(assembly.haplotypes) ? assembly.haplotypes.join(', ') : ''],
     ['Reference', `${formatInteger(assembly.refNameCount)} sequences`],
     ['Size', `${formatInteger(assembly.totalBp)} bp`],
     ['Genes', formatInteger(assembly.geneCount)],

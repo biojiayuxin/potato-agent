@@ -53,7 +53,6 @@ def _write_genome_browser_fixture(root: Path) -> None:
                         "annotation": "monoploid/Test/annotation/Test.gff3.bgz",
                         "annotationIndex": "monoploid/Test/annotation/Test.gff3.bgz.tbi",
                         "featureCount": 2,
-                        "haplotypes": ["H1"],
                         "note": "internal note",
                         "sourceReferences": ["/source/Test.fa"],
                         "sourceAnnotations": ["/source/Test.gff3"],
@@ -88,6 +87,26 @@ def test_genome_browser_entry_and_static_paths_are_prefixed() -> None:
         encoding="utf-8"
     )
     assert "background: url('../background.png')" in genome_css
+
+
+def test_genome_browser_viewer_height_follows_jbrowse_content() -> None:
+    genome_css = (REPO_ROOT / "interface/static/genome_browser/styles.css").read_text(
+        encoding="utf-8"
+    )
+
+    assert ".query-panel,\n.viewer-panel" not in genome_css
+    assert "height: clamp(380px, 48vh, 460px);" in genome_css
+    assert "#jbrowse-linear-genome-view {\n  width: 100%;\n}" in genome_css
+    assert ".browser-stage {\n  position: relative;\n  min-width: 0;\n}" in genome_css
+
+
+def test_genome_browser_assembly_detail_omits_haplotypes() -> None:
+    genome_app = (REPO_ROOT / "interface/static/genome_browser/app.js").read_text(
+        encoding="utf-8"
+    )
+
+    assert "Haplotypes" not in genome_app
+    assert "assembly.haplotypes" not in genome_app
 
 
 def test_genome_browser_page_route_serves_static_page() -> None:
@@ -125,6 +144,7 @@ def test_genome_browser_manifest_adds_default_location(monkeypatch, tmp_path) ->
         assert payload["assemblies"][0]["defaultLocation"] == "chr1:1..1000"
         assert payload["assemblies"][0]["geneCount"] == 10
         assert payload["assemblies"][0]["transcriptCount"] == 12
+        assert "haplotypes" not in payload["assemblies"][0]
         assert "note" not in payload["assemblies"][0]
         assert "featureCount" not in payload["assemblies"][0]
     finally:
