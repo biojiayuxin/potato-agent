@@ -484,9 +484,9 @@ $HOME/tmp/wgcna_coexpression_export
 
 ```text
 /srv/wgcna_data/
-  current -> releases/20260707
+  current -> releases/20260713_205139
   releases/
-    20260707/
+    20260713_205139/
       tables/
         networks.tsv
         genes.tsv
@@ -569,14 +569,17 @@ systemctl daemon-reload
 systemctl restart potato-interface.service
 ```
 
-当前 20260707 release 已验证的主表规模：
+当前 20260713_205139 release 已验证的主表规模：
 
 ```text
-genes: 18922
+networks: 5
+genes: 18895
+modules: 85
 network_genes: 60000
+network_gene_kme: 1020000
 coexpression_edges_top: 6000000
-module_overlaps: 476
-shared_coexpression_edges: 570217
+module_overlaps: 504
+shared_coexpression_edges: 551763
 ```
 
 ### 9. 部署 Bulk RNA-Seq 表达查看器数据
