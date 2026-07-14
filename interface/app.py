@@ -105,6 +105,11 @@ from interface.display_store import (
     list_display_session_metas,
     save_display_messages,
 )
+from interface.file_browser_policy import (
+    FileBrowserAccessError,
+    authorize_file_browser_path,
+    normalize_file_browser_mode,
+)
 from interface.mapping import DEFAULT_MAPPING_PATH, HermesTarget, MappingStore
 from interface.mailer import (
     MailerConfigurationError,
@@ -407,9 +412,7 @@ def _attachment_total_size_bytes(attachments: list[dict[str, Any]]) -> int:
 
 
 def _normalized_file_browser_mode() -> str:
-    if FILE_BROWSER_MODE in {"home_only", "user_readable"}:
-        return FILE_BROWSER_MODE
-    return "home_only"
+    return normalize_file_browser_mode(FILE_BROWSER_MODE)
 
 
 def _now_seconds() -> int:
@@ -808,19 +811,20 @@ def _expand_user_directory_input(user: CurrentUser, path: str | None) -> Path:
 
 def _resolve_file_browser_root(user: CurrentUser, requested_root: str | None) -> Path:
     home = _normalize_logical_absolute_path(user.target.home_dir.resolve())
-    if not requested_root:
-        return home
-
-    root = _expand_user_directory_input(user, requested_root)
-    if _normalized_file_browser_mode() == "home_only":
-        try:
-            root.relative_to(home)
-        except ValueError as exc:
-            raise HTTPException(
-                status_code=403,
-                detail="Opening directories outside ~/ is disabled on this deployment",
-            ) from exc
+    root = home if not requested_root else _expand_user_directory_input(user, requested_root)
+    _authorize_file_browser_target(user, root)
     return root
+
+
+def _authorize_file_browser_target(user: CurrentUser, path: Path) -> Path:
+    try:
+        return authorize_file_browser_path(
+            path,
+            home=user.target.home_dir,
+            mode=_normalized_file_browser_mode(),
+        )
+    except FileBrowserAccessError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
 
 
 def _probe_path_as_user(path: Path, *, linux_user: str) -> dict[str, Any]:
@@ -946,6 +950,28 @@ def _list_directory_as_user(
         raise HTTPException(status_code=403, detail="Permission denied for this directory")
     entries = payload.get("entries") if isinstance(payload.get("entries"), list) else []
     return [item for item in entries if isinstance(item, dict)]
+
+
+def _filter_file_browser_entries(
+    user: CurrentUser,
+    directory: Path,
+    entries: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    allowed_entries: list[dict[str, Any]] = []
+    for item in entries:
+        name = str(item.get("name") or "")
+        if not name:
+            continue
+        try:
+            authorize_file_browser_path(
+                directory / name,
+                home=user.target.home_dir,
+                mode=_normalized_file_browser_mode(),
+            )
+        except FileBrowserAccessError:
+            continue
+        allowed_entries.append(item)
+    return allowed_entries
 
 
 def _get_user_workspace_root(user: CurrentUser) -> Path:
@@ -2527,6 +2553,7 @@ def _load_direct_file_preview_info(
 ) -> tuple[dict[str, Any], Path]:
     browser_root = _resolve_file_browser_root(user, root)
     _, target = _resolve_file_browser_target(browser_root, path)
+    target = _authorize_file_browser_target(user, target)
     _assert_user_can_read_file(target, linux_user=user.target.linux_user)
     stat_result = target.stat()
     return (
@@ -4578,6 +4605,7 @@ def _load_direct_file_tree(
 ) -> dict[str, Any]:
     browser_root = _resolve_file_browser_root(user, root)
     relative_path, target = _resolve_file_browser_target(browser_root, path)
+    target = _authorize_file_browser_target(user, target)
     if not browser_root.exists():
         raise HTTPException(status_code=404, detail="Workspace root does not exist")
     _assert_user_can_open_directory(target, linux_user=user.target.linux_user)
@@ -4586,6 +4614,7 @@ def _load_direct_file_tree(
         relative_path=relative_path,
         linux_user=user.target.linux_user,
     )
+    entries = _filter_file_browser_entries(user, target, entries)
     return {
         "root": str(browser_root),
         "path": relative_path,
@@ -4601,6 +4630,7 @@ def _open_direct_file_tree(user: CurrentUser, path: str) -> dict[str, Any]:
         relative_path="",
         linux_user=user.target.linux_user,
     )
+    entries = _filter_file_browser_entries(user, target, entries)
     return {
         "mode": _normalized_file_browser_mode(),
         "root": str(target),
@@ -4618,6 +4648,7 @@ def _resolve_direct_download_target(
 ) -> Path:
     browser_root = _resolve_file_browser_root(user, root)
     _, target = _resolve_file_browser_target(browser_root, path)
+    target = _authorize_file_browser_target(user, target)
     _assert_user_can_read_file(target, linux_user=user.target.linux_user)
     return target
 

@@ -79,8 +79,10 @@ find /srv/bulk_rnaseq -type d -exec chmod 0750 {} + 2>/dev/null || true
 find /srv/bulk_rnaseq -type f -exec chmod 0640 {} + 2>/dev/null || true
 ```
 
-共享服务器或公网部署应使用 `INTERFACE_FILE_BROWSER_MODE=home_only`。只有在可信内网机器上，
-并且你确实希望用户可以浏览 Linux 账号本身有权限读取的任意目录时，才使用 `user_readable`。
+共享服务器或公网部署如果需要在 Files 面板访问共享数据，应使用
+`INTERFACE_FILE_BROWSER_MODE=home_and_public_data`；不需要共享数据时使用 `home_only`。只有在可信
+内网机器上，并且你确实希望用户可以浏览 Linux 账号本身有权限读取的任意目录时，才使用
+`user_readable`。
 
 ## 前置条件
 
@@ -767,7 +769,7 @@ User=potato-interface
 Group=potato-interface
 WorkingDirectory=/srv/potato_agent
 Environment=INTERFACE_SESSION_SECRET=replace-with-long-random-string
-Environment=INTERFACE_FILE_BROWSER_MODE=home_only
+Environment=INTERFACE_FILE_BROWSER_MODE=home_and_public_data
 Environment=INTERFACE_RUNTIME_IDLE_TIMEOUT_SECONDS=1800
 Environment=POTATO_AGENT_MAPPING_PATH=/var/lib/potato-agent/config/users_mapping.yaml
 Environment=INTERFACE_AUTH_DB=/var/lib/potato-agent/data/interface.db

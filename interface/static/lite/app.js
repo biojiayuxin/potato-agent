@@ -69,6 +69,16 @@ const PASSWORD_COMPLEXITY_MESSAGE = (
 const TEMPORARY_USER_NOTICE = (
   'After 30 minutes of inactivity, chat history and workspace data are deleted.'
 );
+const SUPPORTED_FILE_BROWSER_MODES = new Set([
+  'home_only',
+  'home_and_public_data',
+  'user_readable',
+]);
+
+const normalizeFileBrowserMode = (mode) => {
+  const normalized = String(mode || '').trim();
+  return SUPPORTED_FILE_BROWSER_MODES.has(normalized) ? normalized : 'home_only';
+};
 
 const dom = {
   loginView: document.getElementById('login-view'),
@@ -5317,9 +5327,7 @@ const fetchWorkspaceFiles = async () => {
   ) {
     return;
   }
-  state.fileBrowserMode = String(configJson?.mode || 'home_only') === 'user_readable'
-    ? 'user_readable'
-    : 'home_only';
+  state.fileBrowserMode = normalizeFileBrowserMode(configJson?.mode);
   state.homePath = String(configJson?.home || treeJson?.root || state.user?.workspace_root || '').trim();
   renderFileBrowserControls();
   await setFileTreeRoot({

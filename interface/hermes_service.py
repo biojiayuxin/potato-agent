@@ -17,6 +17,7 @@ from urllib import request as urllib_request
 
 import yaml
 
+from interface.file_browser_policy import DEFAULT_PUBLIC_DATA_PATH
 from interface.mapping import HermesTarget, resolve_env_placeholders
 from interface.model_options import (
     DEFAULT_REASONING_EFFORT,
@@ -61,7 +62,6 @@ DEFAULT_BIOINFORMATICS_SKILLS_PATH = (
 MANAGED_PLAN_MODE_SKILLS_DIR_NAME = "plan-mode"
 DEFAULT_PLAN_MODE_SKILLS_PATH = REPO_ROOT / "skills" / MANAGED_PLAN_MODE_SKILLS_DIR_NAME
 PUBLIC_DATA_LINK_NAME = "public_data"
-DEFAULT_PUBLIC_DATA_PATH = Path("/mnt/data/public_data")
 SYSTEMCTL_STOP_TIMEOUT_SECONDS = 120.0
 SYSTEMCTL_QUERY_TIMEOUT_SECONDS = 30.0
 

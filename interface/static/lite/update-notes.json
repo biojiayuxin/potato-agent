@@ -1,6 +1,13 @@
 {
   "updates": [
     {
+      "version": "2026-07-14-001",
+      "title": "Public data files",
+      "date": "July 14, 2026",
+      "summary": "You can now preview and download files in public_data from the workspace file browser.",
+      "items": []
+    },
+    {
       "version": "2026-07-13-001",
       "title": "Faster conversations",
       "date": "July 13, 2026",

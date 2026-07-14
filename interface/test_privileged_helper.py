@@ -2,8 +2,12 @@ from __future__ import annotations
 
 import json
 import subprocess
+from dataclasses import replace
 from pathlib import Path
 
+import pytest
+
+from interface import file_browser_policy
 from interface.mapping import HermesTarget
 from interface import privileged_helper
 
@@ -193,3 +197,52 @@ def test_stop_idle_runtime_cli_rechecks_after_service_probe(
     payload = json.loads(capsys.readouterr().out)
     assert payload == {"ok": True, "stopped": False, "reason": "recent_activity"}
     assert eligibility_calls == 2
+
+
+def test_file_info_allows_only_configured_public_data_in_restricted_modes(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    home = tmp_path / "home"
+    home.mkdir()
+    public_data = tmp_path / "public_data"
+    public_data.mkdir()
+    public_file = public_data / "dataset.tsv"
+    public_file.write_text("gene\tvalue\n", encoding="utf-8")
+    public_link = home / "public_data"
+    public_link.symlink_to(public_data, target_is_directory=True)
+    target = replace(
+        _target(),
+        home_dir=home,
+        hermes_home=home / ".hermes",
+        workdir=home,
+    )
+    monkeypatch.setattr(
+        file_browser_policy,
+        "DEFAULT_PUBLIC_DATA_PATH",
+        public_data,
+    )
+    monkeypatch.setattr(
+        privileged_helper,
+        "_probe_path",
+        lambda checked_target, path: {
+            "exists": True,
+            "is_file": True,
+            "readable": True,
+        },
+    )
+
+    info = privileged_helper._file_info(
+        target,
+        public_link / public_file.name,
+        mode="home_and_public_data",
+    )
+
+    assert info["filename"] == public_file.name
+    assert info["size"] == public_file.stat().st_size
+    with pytest.raises(RuntimeError, match="outside the allowed browser roots"):
+        privileged_helper._file_info(
+            target,
+            public_link / public_file.name,
+            mode="home_only",
+        )

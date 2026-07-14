@@ -17,6 +17,10 @@ if REPO_ROOT.is_dir() and str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from interface.background_jobs import has_active_background_processes
+from interface.file_browser_policy import (
+    FileBrowserAccessError,
+    authorize_file_browser_path,
+)
 from interface.hermes_service import (
     ensure_service_ready,
     install_user_files,
@@ -153,22 +157,18 @@ def _normalize_relative_path(path: str | None) -> str:
 def _resolve_browser_root(target: HermesTarget, root: str | None, *, mode: str) -> Path:
     home = target.home_dir.resolve()
     if not root:
-        return home
-    raw = str(root or "").strip()
-    if raw == "~":
-        resolved = home
-    elif raw.startswith("~/"):
-        resolved = (home / raw[2:]).resolve()
-    elif raw.startswith("/"):
-        resolved = Path(raw).resolve()
+        candidate = home
     else:
-        resolved = (home / raw).resolve()
-    if mode == "home_only":
-        try:
-            resolved.relative_to(home)
-        except ValueError as exc:
-            raise RuntimeError("Opening directories outside ~/ is disabled") from exc
-    return resolved
+        raw = str(root or "").strip()
+        if raw == "~":
+            candidate = home
+        elif raw.startswith("~/"):
+            candidate = home / raw[2:]
+        elif raw.startswith("/"):
+            candidate = Path(raw)
+        else:
+            candidate = home / raw
+    return _authorize_browser_path(target, candidate, mode=mode)
 
 
 def _probe_path(target: HermesTarget, path: Path) -> dict[str, Any]:
@@ -191,7 +191,13 @@ def _probe_path(target: HermesTarget, path: Path) -> dict[str, Any]:
     return json.loads(result.stdout.strip() or "{}")
 
 
-def _list_directory(target: HermesTarget, path: Path, relative_path: str) -> list[dict[str, Any]]:
+def _list_directory(
+    target: HermesTarget,
+    path: Path,
+    relative_path: str,
+    *,
+    mode: str,
+) -> list[dict[str, Any]]:
     script = (
         "import json, os, pathlib, sys\n"
         "target = pathlib.Path(sys.argv[1]).resolve()\n"
@@ -221,11 +227,23 @@ def _list_directory(target: HermesTarget, path: Path, relative_path: str) -> lis
     if error:
         raise RuntimeError(error)
     entries = payload.get("entries") if isinstance(payload.get("entries"), list) else []
-    return [item for item in entries if isinstance(item, dict)]
+    allowed_entries: list[dict[str, Any]] = []
+    for item in entries:
+        if not isinstance(item, dict):
+            continue
+        name = str(item.get("name") or "")
+        if not name:
+            continue
+        try:
+            _authorize_browser_path(target, path / name, mode=mode)
+        except RuntimeError:
+            continue
+        allowed_entries.append(item)
+    return allowed_entries
 
 
 def _cat_file_b64(target: HermesTarget, path: Path, *, mode: str) -> dict[str, Any]:
-    _assert_under_home(target, path, mode=mode)
+    path = _authorize_browser_path(target, path, mode=mode)
     payload = _probe_path(target, path)
     if not payload.get("exists"):
         raise RuntimeError("Requested file does not exist")
@@ -244,17 +262,15 @@ def _cat_file_b64(target: HermesTarget, path: Path, *, mode: str) -> dict[str, A
     return {"content_b64": result.stdout.strip(), "filename": path.name}
 
 
-def _assert_under_home(target: HermesTarget, path: Path, *, mode: str) -> None:
-    if mode != "home_only":
-        return
+def _authorize_browser_path(target: HermesTarget, path: Path, *, mode: str) -> Path:
     try:
-        path.resolve().relative_to(target.home_dir.resolve())
-    except ValueError as exc:
-        raise RuntimeError("Opening files outside ~/ is disabled") from exc
+        return authorize_file_browser_path(path, home=target.home_dir, mode=mode)
+    except FileBrowserAccessError as exc:
+        raise RuntimeError(str(exc)) from exc
 
 
 def _file_info(target: HermesTarget, path: Path, *, mode: str) -> dict[str, Any]:
-    _assert_under_home(target, path, mode=mode)
+    path = _authorize_browser_path(target, path, mode=mode)
     payload = _probe_path(target, path)
     if not payload.get("exists"):
         raise RuntimeError("Requested file does not exist")
@@ -572,6 +588,7 @@ def main() -> int:
             root = _resolve_browser_root(target, args.root, mode=args.mode)
             relative = _normalize_relative_path(args.path)
             path = (root / relative).resolve()
+            path = _authorize_browser_path(target, path, mode=args.mode)
             probe = _probe_path(target, path)
             if not probe.get("exists"):
                 raise RuntimeError("Requested path does not exist")
@@ -579,7 +596,19 @@ def main() -> int:
                 raise RuntimeError("Requested path is not a directory")
             if not (probe.get("readable") and probe.get("enterable")):
                 raise RuntimeError("Permission denied for this directory")
-            return _emit({"ok": True, "root": str(root), "path": relative, "entries": _list_directory(target, path, relative)})
+            return _emit(
+                {
+                    "ok": True,
+                    "root": str(root),
+                    "path": relative,
+                    "entries": _list_directory(
+                        target,
+                        path,
+                        relative,
+                        mode=args.mode,
+                    ),
+                }
+            )
 
         if args.command == "file-download":
             target = _load_target(args.username)
