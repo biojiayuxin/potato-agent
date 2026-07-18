@@ -1425,20 +1425,33 @@ const handleTuiBridgeEvent = (message) => {
 
   if (type === 'approval.request') {
     const persistentSessionId = getPersistentSessionIdFromTuiEvent(message);
-    setSessionPendingApproval(persistentSessionId, {
-      approvalId: String(
-        message?.payload?.approval_id
-        || message?.payload?.approvalId
-        || `${String(message?.run_id || '')}:${String(message?.seq || '')}`
-      ),
-      command: String(message?.payload?.command || ''),
-      description: String(message?.payload?.description || 'Potato Agent needs approval to continue.'),
-      patternKey: '',
-      patternKeys: [],
-      options: [],
-    });
+    if (!sessionNeedsApproval(persistentSessionId)) {
+      setSessionPendingApproval(persistentSessionId, {
+        approvalId: String(
+          message?.payload?.approval_id
+          || message?.payload?.approvalId
+          || `${String(message?.run_id || '')}:${String(message?.seq || '')}`
+        ),
+        command: String(message?.payload?.command || ''),
+        description: String(message?.payload?.description || 'Potato Agent needs approval to continue.'),
+        patternKey: '',
+        patternKeys: [],
+        options: [],
+      });
+    }
     startLiveSessionPolling(persistentSessionId);
     setTuiBridgeStatus('TUI gateway requested approval');
+    return;
+  }
+
+  if (type === 'approval.expired') {
+    const persistentSessionId = getPersistentSessionIdFromTuiEvent(message);
+    const approvalId = String(
+      message?.payload?.approval_id || message?.payload?.approvalId || ''
+    ).trim();
+    clearSessionPendingApproval(persistentSessionId, approvalId);
+    startLiveSessionPolling(persistentSessionId);
+    setTuiBridgeStatus('TUI gateway approval expired');
     return;
   }
 
@@ -1763,21 +1776,35 @@ const setSessionPendingApproval = (sessionId, approval) => {
   renderApprovalModal();
 };
 
-const clearSessionPendingApproval = (sessionId = '') => {
+const clearSessionPendingApproval = (sessionId = '', expectedApprovalId = '') => {
   const normalizedSessionId = String(sessionId || '').trim()
     || String(state.pendingApproval?.sessionId || '').trim();
+  const normalizedApprovalId = String(expectedApprovalId || '').trim();
   if (!normalizedSessionId) {
+    if (normalizedApprovalId) return false;
     state.pendingApproval = null;
     showError(dom.approvalError, '');
     refreshExportButtonState();
     renderApprovalModal();
-    return;
+    return true;
+  }
+  if (normalizedApprovalId) {
+    const currentApproval = pendingApprovalsBySessionId.get(normalizedSessionId);
+    if (
+      !currentApproval
+      || String(currentApproval.approvalId || '').trim() !== normalizedApprovalId
+    ) {
+      return false;
+    }
   }
   pendingApprovalsBySessionId.delete(normalizedSessionId);
   syncActiveSessionUiState();
-  showError(dom.approvalError, '');
+  if (getActivePersistentSessionId() === normalizedSessionId) {
+    showError(dom.approvalError, '');
+  }
   refreshExportButtonState();
   renderApprovalModal();
+  return true;
 };
 
 const autoResizePromptInput = () => {
@@ -2145,6 +2172,11 @@ const isRetryableApprovalError = (error) => {
   return !status || status === 408 || status === 429 || status >= 500;
 };
 
+const isApprovalNoLongerPendingError = (error) => (
+  Number(error?.status || 0) === 409
+  && /approval request is no longer pending/i.test(String(error?.message || ''))
+);
+
 const approvalRequestWithTimeout = async (sessionId, approvalId, choice) => {
   const controller = new AbortController();
   let timedOut = false;
@@ -2228,6 +2260,11 @@ const submitApprovalDecision = async (choice) => {
         startLiveSessionPolling(approvalSessionId);
         return;
       } catch (error) {
+        if (isApprovalNoLongerPendingError(error)) {
+          clearSessionPendingApproval(approvalSessionId, submittedApprovalId);
+          startLiveSessionPolling(approvalSessionId);
+          return;
+        }
         lastError = error;
       }
 

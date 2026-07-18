@@ -82,10 +82,10 @@ runtime 在 `HERMES_RUNTIME_PROFILE_PATH` 缺失或 provider/API mode 不在 all
 当前生产状态：
 
 ```text
-release:      /opt/potato-hermes-lite/releases/20260718T034917Z-0.16.0-potato.lite.3-fa84c4f3
+release:      /opt/potato-hermes-lite/releases/20260718T082412Z-0.16.0-potato.lite.4-2ce0fef7
 current:      /opt/potato-hermes-lite/current
-version:      0.16.0+potato.lite.3
-wheel SHA256: fa84c4f33ceb2a98acf6e55d631ecc08a211740bb24e04184694e33f7765dbce
+version:      0.16.0+potato.lite.4
+wheel SHA256: 2ce0fef7ea82b95c6b63e8baea2e365a3ceea4171c2c8645b90272ecdb975481
 ```
 
 11 个 mapped unit 和 Interface gateway Python 均已切到 Lite；初步实际用户验收已通过，目前仍处于观察和
@@ -198,6 +198,10 @@ rsync -a --delete \
   --exclude '__pycache__/' \
   --exclude '*.pyc' \
   --exclude '*.pyo' \
+  --exclude '*.egg-info/' \
+  --exclude 'build/' \
+  --exclude 'dist/' \
+  --exclude 'node_modules/' \
   --exclude '*.db' \
   --exclude '*.sqlite' \
   --exclude '*.sqlite3' \
@@ -699,7 +703,6 @@ rsync -a \
   --exclude '/interface/data/' \
   --exclude '/hermes-agent/' \
   --exclude '/packaging/hermes/' \
-  --exclude '/hermes-lite/build/' \
   "$REPO/" "$CODE_SOURCE/"
 
 chown -R root:root "$CODE_SOURCE"

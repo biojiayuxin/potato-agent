@@ -607,7 +607,11 @@ def _start_agent_build(sid: str, session: dict) -> None:
                 )
 
                 register_gateway_notify(
-                    key, lambda data: _emit("approval.request", sid, data)
+                    key,
+                    lambda data: _emit("approval.request", sid, data),
+                    lifecycle_cb=lambda event_type, data: _emit(
+                        event_type, sid, data
+                    ),
                 )
                 notify_registered = True
                 load_permanent_allowlist()
@@ -1436,6 +1440,9 @@ def _sync_session_key_after_compress(
             register_gateway_notify(
                 new_session_id,
                 lambda data: _emit("approval.request", sid, data),
+                lifecycle_cb=lambda event_type, data: _emit(
+                    event_type, sid, data
+                ),
             )
         except Exception:
             pass
@@ -2487,7 +2494,11 @@ def _init_session(sid: str, key: str, agent, history: list, cols: int = 80):
     try:
         from tools.approval import register_gateway_notify, load_permanent_allowlist
 
-        register_gateway_notify(key, lambda data: _emit("approval.request", sid, data))
+        register_gateway_notify(
+            key,
+            lambda data: _emit("approval.request", sid, data),
+            lifecycle_cb=lambda event_type, data: _emit(event_type, sid, data),
+        )
         load_permanent_allowlist()
     except Exception:
         pass

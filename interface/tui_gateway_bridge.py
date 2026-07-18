@@ -69,6 +69,8 @@ _DEFAULT_STARTUP_TIMEOUT_SECONDS = 60.0
 _EVENT_LISTENER_TIMEOUT_SECONDS = 180.0
 _EVENT_LISTENER_RETRY_DELAYS_SECONDS = (0.0, 0.1, 0.5)
 LOGGER = logging.getLogger("potato_interface.tui_gateway_bridge")
+_run_in_thread = asyncio.to_thread
+_foreground_lease_sleep = asyncio.sleep
 
 
 def _startup_timeout_seconds() -> float:
@@ -795,7 +797,7 @@ class TuiGatewayBridge:
         retry_delay = 0.1
         while True:
             try:
-                await asyncio.to_thread(
+                await _run_in_thread(
                     finish_runtime_lease,
                     lease_id,
                     user_id=self.user_id,
@@ -809,7 +811,7 @@ class TuiGatewayBridge:
                     lease_id,
                     self.user_id,
                 )
-                await asyncio.sleep(retry_delay)
+                await _foreground_lease_sleep(retry_delay)
                 retry_delay = min(retry_delay * 2, 5.0)
 
         with self._foreground_leases_lock:
@@ -834,9 +836,9 @@ class TuiGatewayBridge:
     ) -> None:
         try:
             while True:
-                await asyncio.sleep(max(interval_seconds, 1))
+                await _foreground_lease_sleep(max(interval_seconds, 1))
                 try:
-                    renewed = await asyncio.to_thread(
+                    renewed = await _run_in_thread(
                         heartbeat_runtime_lease,
                         lease_id,
                         ttl_seconds=ttl_seconds,

@@ -99,18 +99,18 @@ PYTHONDONTWRITEBYTECODE=1 /opt/hermes-agent-venv/bin/python3 -B -m pytest \
 
 mock-provider E2E 使用临时 `HOME/HERMES_HOME` 和本机 HTTP endpoint，已覆盖
 `prompt.submit -> message.complete`、`session.resume`、流式 interrupt 和危险 terminal command 的 approval
-deny；同时覆盖 `codex_responses` 的真实 stdio gateway 调用链，以及终止事件 `response.output=null` 时的
-流式重建。它不访问真实 provider 或生产数据。
+deny/timeout；timeout 用例还验证迟到授权被拒绝且命令未执行。同时覆盖 `codex_responses` 的真实 stdio
+gateway 调用链，以及终止事件 `response.output=null` 时的流式重建。它不访问真实 provider 或生产数据。
 
 ## 4. 生产迁移状态
 
 2026-07-17 已完成全量 Lite 切换；2026-07-18 部署审批链路热修复：
 
 ```text
-release:       /opt/potato-hermes-lite/releases/20260718T034917Z-0.16.0-potato.lite.3-fa84c4f3
+release:       /opt/potato-hermes-lite/releases/20260718T082412Z-0.16.0-potato.lite.4-2ce0fef7
 current:       /opt/potato-hermes-lite/current
-version:       0.16.0+potato.lite.3
-wheel SHA256:  fa84c4f33ceb2a98acf6e55d631ecc08a211740bb24e04184694e33f7765dbce
+version:       0.16.0+potato.lite.4
+wheel SHA256:  2ce0fef7ea82b95c6b63e8baea2e365a3ceea4171c2c8645b90272ecdb975481
 profile SHA256: 976592bc66c27bfdf596e25fe556d7fc19c09d4d23da436298670fe574d691ec
 ```
 

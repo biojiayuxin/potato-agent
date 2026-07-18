@@ -395,6 +395,7 @@ class GatewayProcess(AbstractContextManager["GatewayProcess"]):
         provider: MockProvider,
         *,
         api_mode: str = "chat_completions",
+        gateway_timeout: int | None = None,
     ) -> None:
         self.root = root
         self.home = root / "home"
@@ -426,6 +427,11 @@ class GatewayProcess(AbstractContextManager["GatewayProcess"]):
                     "  environment_probe: false",
                     "approvals:",
                     "  mode: manual",
+                    *(
+                        [f"  gateway_timeout: {gateway_timeout}"]
+                        if gateway_timeout is not None
+                        else []
+                    ),
                     "terminal:",
                     f"  cwd: {self.work}",
                     "  timeout: 5",
@@ -824,3 +830,58 @@ def test_approval_deny_prevents_dangerous_terminal_command(tmp_path: Path) -> No
                 provider.state.requests[1]["messages"], ensure_ascii=False
             )
             assert "BLOCKED" in follow_up
+
+
+def test_approval_timeout_emits_expiration_and_rejects_late_response(
+    tmp_path: Path,
+) -> None:
+    protected = tmp_path / "timeout-must-survive"
+    protected.mkdir()
+    marker = protected / "marker.txt"
+    marker.write_text("preserve me", encoding="utf-8")
+    command = f"rm -rf {protected}"
+
+    with MockProvider(
+        [
+            {"kind": "tool", "command": command},
+            {"kind": "text", "text": "The approval expired."},
+        ]
+    ) as provider:
+        with GatewayProcess(
+            tmp_path / "gateway",
+            provider,
+            gateway_timeout=1,
+        ) as gateway:
+            sid = _create_session(gateway)["session_id"]
+            assert gateway.rpc(
+                "prompt.submit",
+                {"session_id": sid, "text": "try the protected command"},
+            ) == {"status": "streaming"}
+
+            approval = _payload(
+                gateway.wait_event("approval.request", session_id=sid, timeout=20.0)
+            )
+            expired = _payload(
+                gateway.wait_event("approval.expired", session_id=sid, timeout=10.0)
+            )
+            assert expired["approval_id"] == approval["approval_id"]
+            assert expired["outcome"] == "timeout"
+            assert marker.read_text(encoding="utf-8") == "preserve me"
+
+            late = gateway.rpc(
+                "approval.respond",
+                {
+                    "session_id": sid,
+                    "choice": "once",
+                    "approval_id": approval["approval_id"],
+                },
+                timeout=10.0,
+            )
+            assert late["resolved"] == 0
+
+            complete = _payload(
+                gateway.wait_event("message.complete", session_id=sid, timeout=20.0)
+            )
+            assert complete["status"] == "complete"
+            assert complete["text"] == "The approval expired."
+            assert marker.read_text(encoding="utf-8") == "preserve me"

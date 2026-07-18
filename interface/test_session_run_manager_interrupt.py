@@ -105,6 +105,52 @@ def test_interrupt_marks_live_state_final_and_done() -> None:
     assert assistant["done"] is True
 
 
+def test_late_interrupt_does_not_overwrite_completed_state() -> None:
+    db_path = Path(tempfile.mkdtemp(prefix="potato-run-manager-late-interrupt-")) / "interface.db"
+    os.environ["INTERFACE_AUTH_DB"] = str(db_path)
+
+    from interface.display_store import get_live_session_state, save_live_session_state
+    from interface.session_run_manager import SessionRunManager
+    from interface.tui_gateway_bridge import TuiGatewayBridgeError
+
+    save_live_session_state(
+        "user-1",
+        "session-1",
+        run_id="run-1",
+        live_session_id="live-1",
+        assistant_message_id="assistant-1",
+        status="completed",
+        pending_approval=None,
+        last_error="",
+        last_event_seq=8,
+        finished_at=1,
+        db_path=db_path,
+    )
+
+    class UnexpectedRpcBridge:
+        async def rpc(self, method: str, params: dict) -> dict:
+            raise AssertionError("a terminal session must not reach the gateway")
+
+    manager = SessionRunManager(db_path=db_path)
+    try:
+        _run(
+            manager.interrupt_run(
+                bridge=UnexpectedRpcBridge(),  # type: ignore[arg-type]
+                user_id="user-1",
+                session_id="session-1",
+            )
+        )
+    except TuiGatewayBridgeError as exc:
+        assert "no longer active" in str(exc)
+    else:
+        raise AssertionError("a completed session accepted a late interrupt")
+
+    live_state = get_live_session_state("user-1", "session-1", db_path=db_path)
+    assert live_state is not None
+    assert live_state["status"] == "completed"
+    assert live_state["finished_at"] == 1
+
+
 def test_late_delta_after_interrupt_does_not_reopen_live_state() -> None:
     db_path = Path(tempfile.mkdtemp(prefix="potato-run-manager-late-delta-")) / "interface.db"
     os.environ["INTERFACE_AUTH_DB"] = str(db_path)

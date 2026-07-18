@@ -40,6 +40,38 @@ def test_approval_submission_is_owned_by_exact_request() -> None:
     assert "if (!isActiveApprovalSubmission(submission)) return" in source
 
 
+def test_expired_approval_clears_only_the_matching_request() -> None:
+    source = LITE_APP_PATH.read_text(encoding="utf-8")
+    request_branch = source.split("if (type === 'approval.request') {", 1)[1].split(
+        "if (type === 'approval.expired') {", 1
+    )[0]
+    expired_branch = source.split("if (type === 'approval.expired') {", 1)[1].split(
+        "if (type === 'tool.progress') {", 1
+    )[0]
+    clear_helper = source.split("const clearSessionPendingApproval =", 1)[1].split(
+        "const autoResizePromptInput", 1
+    )[0]
+
+    assert "if (!sessionNeedsApproval(persistentSessionId))" in request_branch
+    assert "message?.payload?.approval_id" in expired_branch
+    assert "clearSessionPendingApproval(persistentSessionId, approvalId)" in expired_branch
+    assert "expectedApprovalId" in clear_helper
+    assert "pendingApprovalsBySessionId.get(normalizedSessionId)" in clear_helper
+    assert "currentApproval.approvalId" in clear_helper
+    assert "!== normalizedApprovalId" in clear_helper
+
+
+def test_stale_approval_409_is_an_exact_request_terminal_state() -> None:
+    source = LITE_APP_PATH.read_text(encoding="utf-8")
+    submit_branch = source.split("const submitApprovalDecision =", 1)[1].split(
+        "const stopAuthPolling", 1
+    )[0]
+
+    assert "Number(error?.status || 0) === 409" in source
+    assert "/approval request is no longer pending/i" in source
+    assert "clearSessionPendingApproval(approvalSessionId, submittedApprovalId)" in submit_branch
+
+
 def test_stale_turn_failure_cannot_replace_authoritative_messages() -> None:
     source = LITE_APP_PATH.read_text(encoding="utf-8")
 
@@ -60,4 +92,4 @@ def test_gateway_exit_clears_active_approval_and_cache_is_busted() -> None:
     assert "pendingApprovalsBySessionId.clear()" in gateway_exit_branch
     assert "syncActiveSessionUiState()" in gateway_exit_branch
     assert "renderApprovalModal()" in gateway_exit_branch
-    assert "app.js?v=20260718-approval-network-recovery" in index
+    assert "app.js?v=20260718-approval-expiration-recovery" in index

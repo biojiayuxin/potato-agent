@@ -591,19 +591,27 @@ class _ApprovalEntry:
 
 _gateway_queues: dict[str, list] = {}        # session_key → [_ApprovalEntry, …]
 _gateway_notify_cbs: dict[str, object] = {}  # session_key → callable(approval_data)
+_gateway_lifecycle_cbs: dict[str, object] = {}  # session_key → callable(event_type, data)
 _gateway_resolved: dict[str, dict[str, str]] = {}  # session_key → approval_id → choice
 
 
-def register_gateway_notify(session_key: str, cb) -> None:
+def register_gateway_notify(session_key: str, cb, *, lifecycle_cb=None) -> None:
     """Register a per-session callback for sending approval requests to the user.
 
     The callback signature is ``cb(approval_data: dict) -> None`` where
     *approval_data* contains ``command``, ``description``, and
     ``pattern_keys``.  The callback bridges sync→async (runs in the agent
     thread, must schedule the actual send on the event loop).
+
+    ``lifecycle_cb``, when provided, receives ``(event_type, approval_data)``
+    for terminal lifecycle transitions such as ``approval.expired``.
     """
     with _lock:
         _gateway_notify_cbs[session_key] = cb
+        if lifecycle_cb is None:
+            _gateway_lifecycle_cbs.pop(session_key, None)
+        else:
+            _gateway_lifecycle_cbs[session_key] = lifecycle_cb
 
 
 def unregister_gateway_notify(session_key: str) -> None:
@@ -614,6 +622,7 @@ def unregister_gateway_notify(session_key: str) -> None:
     """
     with _lock:
         _gateway_notify_cbs.pop(session_key, None)
+        _gateway_lifecycle_cbs.pop(session_key, None)
         entries = _gateway_queues.pop(session_key, [])
         _gateway_resolved.pop(session_key, None)
     for entry in entries:
@@ -670,13 +679,12 @@ def resolve_gateway_approval(session_key: str, choice: str,
             _gateway_queues.pop(session_key, None)
         resolved = _gateway_resolved.setdefault(session_key, {})
         for entry in targets:
+            entry.result = normalized_choice
             resolved[entry.approval_id] = normalized_choice
+            entry.event.set()
         while len(resolved) > 256:
             resolved.pop(next(iter(resolved)))
 
-    for entry in targets:
-        entry.result = normalized_choice
-        entry.event.set()
     return len(targets)
 
 
@@ -1227,20 +1235,38 @@ def _await_gateway_decision(session_key: str, notify_cb, approval_data: dict,
     _now = time.monotonic()
     _deadline = _now + max(timeout, 0)
     _activity_state = {"last_touch": _now, "start": _now}
-    resolved = False
     while True:
         _remaining = _deadline - time.monotonic()
         if _remaining <= 0:
             break
         if entry.event.wait(timeout=min(1.0, _remaining)):
-            resolved = True
             break
         if touch_activity_if_due is not None:
             touch_activity_if_due(_activity_state, "waiting for user approval")
 
-    _drop_entry()
+    timed_out = False
+    with _lock:
+        choice = entry.result
+        if choice is None:
+            queue = _gateway_queues.get(session_key, [])
+            if entry in queue:
+                queue.remove(entry)
+                timed_out = True
+                if not queue:
+                    _gateway_queues.pop(session_key, None)
+        lifecycle_cb = (
+            _gateway_lifecycle_cbs.get(session_key) if timed_out else None
+        )
 
-    choice = entry.result
+    resolved = choice is not None
+    if timed_out and lifecycle_cb is not None:
+        try:
+            lifecycle_cb(
+                "approval.expired",
+                {**entry.data, "outcome": "timeout"},
+            )
+        except Exception as exc:
+            logger.warning("Gateway approval expiration notify failed: %s", exc)
     # Normalize outcome for the post hook. Unresolved (timeout) and None both
     # mean the user never responded; report that explicitly so plugins can
     # distinguish timeout from explicit deny.

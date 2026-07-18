@@ -267,7 +267,7 @@ def test_stale_approval_token_is_rejected_before_gateway_rpc(tmp_path) -> None:
         raise AssertionError("stale approval token was accepted")
 
 
-def test_zero_resolved_approvals_keeps_pending_state(tmp_path) -> None:
+def test_zero_resolved_approvals_clear_stale_pending_state(tmp_path) -> None:
     db_path = tmp_path / "interface.db"
     _save_pending_approval(db_path)
 
@@ -295,8 +295,312 @@ def test_zero_resolved_approvals_keeps_pending_state(tmp_path) -> None:
         "user-1", "session-1", db_path=db_path
     )
     assert live_state is not None
+    assert live_state["status"] == "running"
+    assert live_state["pending_approval"] is None
+
+
+def test_approval_expiration_clears_matching_request(tmp_path) -> None:
+    db_path = tmp_path / "interface.db"
+    _save_pending_approval(db_path)
+
+    class Bridge:
+        user_id = "user-1"
+
+    asyncio.run(
+        SessionRunManager(db_path=db_path).handle_bridge_event(
+            Bridge(),  # type: ignore[arg-type]
+            {
+                "type": "approval.expired",
+                "session_id": "live-1",
+                "persistent_session_id": "session-1",
+                "run_id": "run-1",
+                "seq": 8,
+                "payload": {
+                    "approval_id": "run-1:7",
+                    "outcome": "timeout",
+                },
+            },
+        )
+    )
+
+    live_state = get_live_session_state(
+        "user-1", "session-1", db_path=db_path
+    )
+    assert live_state is not None
+    assert live_state["status"] == "running"
+    assert live_state["pending_approval"] is None
+    assert live_state["last_event_seq"] == 8
+
+
+def test_approval_expiration_removes_only_the_exact_queued_request(tmp_path) -> None:
+    db_path = tmp_path / "interface.db"
+    queue = [
+        {
+            "approval_id": "run-1:7",
+            "command": "first",
+            "description": "First",
+        },
+        {
+            "approval_id": "run-1:8",
+            "command": "second",
+            "description": "Second",
+        },
+    ]
+    save_live_session_state(
+        "user-1",
+        "session-1",
+        run_id="run-1",
+        live_session_id="live-1",
+        assistant_message_id="assistant-1",
+        status="awaiting_approval",
+        pending_approval={**queue[0], "queue": queue},
+        last_event_seq=8,
+        db_path=db_path,
+    )
+
+    class Bridge:
+        user_id = "user-1"
+
+    async def expire(approval_id: str, seq: int) -> None:
+        await SessionRunManager(db_path=db_path).handle_bridge_event(
+            Bridge(),  # type: ignore[arg-type]
+            {
+                "type": "approval.expired",
+                "session_id": "live-1",
+                "persistent_session_id": "session-1",
+                "run_id": "run-1",
+                "seq": seq,
+                "payload": {"approval_id": approval_id, "outcome": "timeout"},
+            },
+        )
+
+    asyncio.run(expire("run-1:8", 9))
+    live_state = get_live_session_state(
+        "user-1", "session-1", db_path=db_path
+    )
+    assert live_state is not None
     assert live_state["status"] == "awaiting_approval"
     assert live_state["pending_approval"]["approval_id"] == "run-1:7"
+    assert len(live_state["pending_approval"]["queue"]) == 1
+
+    asyncio.run(expire("unknown-token", 10))
+    live_state = get_live_session_state(
+        "user-1", "session-1", db_path=db_path
+    )
+    assert live_state is not None
+    assert live_state["pending_approval"]["approval_id"] == "run-1:7"
+
+
+def test_approval_response_and_expiration_share_state_lock(tmp_path) -> None:
+    db_path = tmp_path / "interface.db"
+    queue = [
+        {
+            "approval_id": "run-1:7",
+            "command": "first",
+            "description": "First",
+        },
+        {
+            "approval_id": "run-1:8",
+            "command": "second",
+            "description": "Second",
+        },
+    ]
+    save_live_session_state(
+        "user-1",
+        "session-1",
+        run_id="run-1",
+        live_session_id="live-1",
+        assistant_message_id="assistant-1",
+        status="awaiting_approval",
+        pending_approval={**queue[0], "queue": queue},
+        last_event_seq=8,
+        db_path=db_path,
+    )
+
+    class Bridge:
+        user_id = "user-1"
+
+        def __init__(self) -> None:
+            self.rpc_started = asyncio.Event()
+            self.release_rpc = asyncio.Event()
+
+        async def rpc(self, method: str, params: dict) -> dict:
+            self.rpc_started.set()
+            await self.release_rpc.wait()
+            return {"resolved": 1}
+
+    async def scenario() -> None:
+        bridge = Bridge()
+        manager = SessionRunManager(db_path=db_path)
+        response_task = asyncio.create_task(
+            manager.respond_to_approval(
+                bridge=bridge,  # type: ignore[arg-type]
+                user_id="user-1",
+                session_id="session-1",
+                choice="once",
+                approval_id="run-1:7",
+            )
+        )
+        await bridge.rpc_started.wait()
+        expiration_task = asyncio.create_task(
+            manager.handle_bridge_event(
+                bridge,  # type: ignore[arg-type]
+                {
+                    "type": "approval.expired",
+                    "session_id": "live-1",
+                    "persistent_session_id": "session-1",
+                    "run_id": "run-1",
+                    "seq": 9,
+                    "payload": {
+                        "approval_id": "run-1:8",
+                        "outcome": "timeout",
+                    },
+                },
+            )
+        )
+        await asyncio.sleep(0)
+        assert not expiration_task.done()
+        bridge.release_rpc.set()
+        await asyncio.gather(response_task, expiration_task)
+
+    asyncio.run(scenario())
+
+    live_state = get_live_session_state(
+        "user-1", "session-1", db_path=db_path
+    )
+    assert live_state is not None
+    assert live_state["status"] == "running"
+    assert live_state["pending_approval"] is None
+
+
+def test_approval_expiration_cannot_reopen_an_interrupted_run(tmp_path) -> None:
+    db_path = tmp_path / "interface.db"
+    _save_pending_approval(db_path)
+
+    class Bridge:
+        user_id = "user-1"
+
+        def __init__(self) -> None:
+            self.rpc_started = asyncio.Event()
+            self.release_rpc = asyncio.Event()
+
+        async def rpc(self, method: str, params: dict) -> dict:
+            assert method == "session.interrupt"
+            self.rpc_started.set()
+            await self.release_rpc.wait()
+            return {"status": "interrupted"}
+
+    async def scenario() -> None:
+        bridge = Bridge()
+        manager = SessionRunManager(db_path=db_path)
+        interrupt_task = asyncio.create_task(
+            manager.interrupt_run(
+                bridge=bridge,  # type: ignore[arg-type]
+                user_id="user-1",
+                session_id="session-1",
+            )
+        )
+        await bridge.rpc_started.wait()
+        expiration_task = asyncio.create_task(
+            manager.handle_bridge_event(
+                bridge,  # type: ignore[arg-type]
+                {
+                    "type": "approval.expired",
+                    "session_id": "live-1",
+                    "persistent_session_id": "session-1",
+                    "run_id": "run-1",
+                    "seq": 8,
+                    "payload": {
+                        "approval_id": "run-1:7",
+                        "outcome": "timeout",
+                    },
+                },
+            )
+        )
+        await asyncio.sleep(0)
+        assert not expiration_task.done()
+        bridge.release_rpc.set()
+        await asyncio.gather(interrupt_task, expiration_task)
+
+    asyncio.run(scenario())
+
+    live_state = get_live_session_state(
+        "user-1", "session-1", db_path=db_path
+    )
+    assert live_state is not None
+    assert live_state["status"] == "interrupted"
+    assert live_state["pending_approval"] is None
+
+
+def test_late_message_start_cannot_reopen_an_interrupted_run(
+    tmp_path, monkeypatch
+) -> None:
+    db_path = tmp_path / "interface.db"
+    save_live_session_state(
+        "user-1",
+        "session-1",
+        run_id="run-1",
+        live_session_id="live-1",
+        assistant_message_id="assistant-1",
+        status="starting",
+        pending_approval=None,
+        last_event_seq=0,
+        db_path=db_path,
+    )
+
+    class Bridge:
+        user_id = "user-1"
+
+        async def rpc(self, method: str, params: dict) -> dict:
+            assert method == "session.interrupt"
+            assert params == {"session_id": "live-1"}
+            return {"status": "interrupted"}
+
+    async def scenario() -> None:
+        bridge = Bridge()
+        manager = SessionRunManager(db_path=db_path)
+        event_journal_started = asyncio.Event()
+        release_event_journal = asyncio.Event()
+        original_append = manager._append_session_event
+
+        async def delayed_append(*args, **kwargs) -> None:
+            if kwargs.get("event_type") == "message.start":
+                event_journal_started.set()
+                await release_event_journal.wait()
+            await original_append(*args, **kwargs)
+
+        monkeypatch.setattr(manager, "_append_session_event", delayed_append)
+        late_event_task = asyncio.create_task(
+            manager.handle_bridge_event(
+                bridge,  # type: ignore[arg-type]
+                {
+                    "type": "message.start",
+                    "session_id": "live-1",
+                    "persistent_session_id": "session-1",
+                    "run_id": "run-1",
+                    "seq": 1,
+                    "payload": {},
+                },
+            )
+        )
+        await event_journal_started.wait()
+
+        await manager.interrupt_run(
+            bridge=bridge,  # type: ignore[arg-type]
+            user_id="user-1",
+            session_id="session-1",
+        )
+        release_event_journal.set()
+        await late_event_task
+
+    asyncio.run(scenario())
+
+    live_state = get_live_session_state(
+        "user-1", "session-1", db_path=db_path
+    )
+    assert live_state is not None
+    assert live_state["status"] == "interrupted"
+    assert live_state["pending_approval"] is None
 
 
 def test_approval_response_advances_fifo_queue(tmp_path) -> None:

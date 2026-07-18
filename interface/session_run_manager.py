@@ -6,6 +6,7 @@ import inspect
 import json
 import time
 import uuid
+import weakref
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Awaitable, Callable
@@ -138,6 +139,22 @@ def _serialize_pending_approval(
     }
 
 
+def _remove_pending_approval(
+    pending_approval: Any,
+    approval_id: str,
+) -> tuple[bool, list[dict[str, str]]]:
+    normalized_approval_id = str(approval_id or "").strip()
+    queue = _pending_approval_queue(pending_approval)
+    if not normalized_approval_id:
+        return False, queue
+    remaining = [
+        item
+        for item in queue
+        if item.get("approval_id") != normalized_approval_id
+    ]
+    return len(remaining) != len(queue), remaining
+
+
 def _tool_progress_preview(event_type: str, payload: dict[str, Any]) -> str:
     if event_type == "tool.start":
         preview = (
@@ -216,7 +233,9 @@ class SessionRunManager:
         self._flush_tasks: dict[tuple[str, str], asyncio.Task[None]] = {}
         self._flush_events: dict[tuple[str, str], asyncio.Event] = {}
         self._lock = asyncio.Lock()
-        self._approval_response_locks: dict[tuple[str, str], asyncio.Lock] = {}
+        self._approval_state_locks: weakref.WeakValueDictionary[
+            tuple[str, str], asyncio.Lock
+        ] = weakref.WeakValueDictionary()
         self._bridge_event_locks: dict[str, asyncio.Lock] = {}
         self._workspace_change_revisions: dict[str, str] = {}
 
@@ -480,20 +499,28 @@ class SessionRunManager:
         text: str,
         mode: str = "chat",
     ) -> None:
-        await self._save_live_session_state(
-            context.user_id,
-            context.session_id,
-            run_id=context.run_id,
-            live_session_id=live_session_id,
-            tip_session_id=str(
-                (await self._get_live_session_state(context.user_id, context.session_id) or {}).get("tip_session_id")
-                or ""
-            ),
-            assistant_message_id=context.assistant_message_id,
-            status="starting",
-            pending_approval=None,
-            last_error="",
+        approval_lock = self._approval_state_locks.setdefault(
+            (context.user_id, context.session_id), asyncio.Lock()
         )
+        async with approval_lock:
+            live_state = await self._get_mutable_live_state(
+                context, live_session_id
+            )
+            if live_state is None:
+                return
+            await self._save_live_session_state(
+                context.user_id,
+                context.session_id,
+                run_id=context.run_id,
+                live_session_id=self._state_live_session_id(
+                    live_state, live_session_id
+                ),
+                tip_session_id=str(live_state.get("tip_session_id") or ""),
+                assistant_message_id=context.assistant_message_id,
+                status="starting",
+                pending_approval=None,
+                last_error="",
+            )
         try:
             submission_text = text
             if mode == "plan":
@@ -519,11 +546,19 @@ class SessionRunManager:
                 },
             )
         except Exception as exc:
-            await self._mark_failed(
-                context=context,
-                live_session_id=live_session_id,
-                error_message=str(exc),
-            )
+            async with approval_lock:
+                live_state = await self._get_mutable_live_state(
+                    context, live_session_id
+                )
+                if live_state is None:
+                    return
+                await self._mark_failed(
+                    context=context,
+                    live_session_id=self._state_live_session_id(
+                        live_state, live_session_id
+                    ),
+                    error_message=str(exc),
+                )
 
     async def interrupt_run(
         self,
@@ -532,21 +567,51 @@ class SessionRunManager:
         user_id: str,
         session_id: str,
     ) -> dict[str, Any]:
-        live_state = await self._get_live_session_state(user_id, session_id)
-        if live_state is None:
-            raise TuiGatewayBridgeError("session not found")
-        live_session_id = str(live_state.get("live_session_id") or "").strip()
-        if not live_session_id:
-            raise TuiGatewayBridgeError("no live session is attached to this conversation")
-        run_id = str(live_state.get("run_id") or "")
-        assistant_message_id = str(live_state.get("assistant_message_id") or "")
-        seq = int(live_state.get("last_event_seq") or 0)
-        try:
-            result = await bridge.rpc("session.interrupt", {"session_id": live_session_id})
-        except TuiGatewayBridgeError as exc:
-            if "session not found" not in str(exc).lower():
-                raise
-            await self._mark_failed(
+        approval_lock = self._approval_state_locks.setdefault(
+            (user_id, session_id), asyncio.Lock()
+        )
+        async with approval_lock:
+            live_state = await self._get_live_session_state(user_id, session_id)
+            if live_state is None:
+                raise TuiGatewayBridgeError("session not found")
+            if str(live_state.get("status") or "").strip() in FINAL_LIVE_STATUSES:
+                raise TuiGatewayBridgeError("session is no longer active")
+            live_session_id = str(live_state.get("live_session_id") or "").strip()
+            if not live_session_id:
+                raise TuiGatewayBridgeError(
+                    "no live session is attached to this conversation"
+                )
+            run_id = str(live_state.get("run_id") or "")
+            assistant_message_id = str(live_state.get("assistant_message_id") or "")
+            seq = int(live_state.get("last_event_seq") or 0)
+            try:
+                result = await bridge.rpc(
+                    "session.interrupt", {"session_id": live_session_id}
+                )
+            except TuiGatewayBridgeError as exc:
+                if "session not found" not in str(exc).lower():
+                    raise
+                await self._mark_failed(
+                    context=SessionRunContext(
+                        user_id=user_id,
+                        session_id=session_id,
+                        run_id=run_id,
+                        assistant_message_id=assistant_message_id,
+                    ),
+                    live_session_id=live_session_id,
+                    error_message=STALE_GATEWAY_SESSION_ERROR,
+                    seq=seq,
+                )
+                return {"status": "failed", "message": STALE_GATEWAY_SESSION_ERROR}
+            await self._append_session_event(
+                user_id,
+                session_id,
+                run_id=run_id,
+                seq=seq,
+                event_type="session.interrupt",
+                payload={"result": result},
+            )
+            await self._mark_interrupted(
                 context=SessionRunContext(
                     user_id=user_id,
                     session_id=session_id,
@@ -554,29 +619,9 @@ class SessionRunManager:
                     assistant_message_id=assistant_message_id,
                 ),
                 live_session_id=live_session_id,
-                error_message=STALE_GATEWAY_SESSION_ERROR,
                 seq=seq,
             )
-            return {"status": "failed", "message": STALE_GATEWAY_SESSION_ERROR}
-        await self._append_session_event(
-            user_id,
-            session_id,
-            run_id=run_id,
-            seq=seq,
-            event_type="session.interrupt",
-            payload={"result": result},
-        )
-        await self._mark_interrupted(
-            context=SessionRunContext(
-                user_id=user_id,
-                session_id=session_id,
-                run_id=run_id,
-                assistant_message_id=assistant_message_id,
-            ),
-            live_session_id=live_session_id,
-            seq=seq,
-        )
-        return result
+            return result
 
     async def respond_to_approval(
         self,
@@ -588,7 +633,7 @@ class SessionRunManager:
         approval_id: str,
     ) -> dict[str, Any]:
         normalized_approval_id = str(approval_id or "").strip()
-        approval_lock = self._approval_response_locks.setdefault(
+        approval_lock = self._approval_state_locks.setdefault(
             (user_id, session_id), asyncio.Lock()
         )
         async with approval_lock:
@@ -622,8 +667,6 @@ class SessionRunManager:
                 resolved_count = int(result.get("resolved", 0))
             except (TypeError, ValueError):
                 resolved_count = 0
-            if resolved_count <= 0:
-                raise TuiGatewayBridgeError("approval request is no longer pending")
 
             latest_live_state = await self._get_live_session_state(user_id, session_id)
             original_run_id = str(live_state.get("run_id") or "")
@@ -634,20 +677,22 @@ class SessionRunManager:
                 and str(latest_live_state.get("status") or "")
                 not in FINAL_LIVE_STATUSES
             ):
-                latest_queue = _pending_approval_queue(
-                    latest_live_state.get("pending_approval")
+                removed, remaining_queue = _remove_pending_approval(
+                    latest_live_state.get("pending_approval"),
+                    normalized_approval_id,
                 )
-                if (
-                    latest_queue
-                    and latest_queue[0].get("approval_id")
-                    == normalized_approval_id
-                ):
-                    remaining_queue = latest_queue[1:]
+                if removed:
                     await self._save_live_session_state(
                         user_id,
                         session_id,
                         run_id=original_run_id,
-                        live_session_id=live_session_id,
+                        live_session_id=str(
+                            latest_live_state.get("live_session_id")
+                            or live_session_id
+                        ),
+                        tip_session_id=str(
+                            latest_live_state.get("tip_session_id") or ""
+                        ),
                         assistant_message_id=str(
                             latest_live_state.get("assistant_message_id") or ""
                         ),
@@ -663,6 +708,8 @@ class SessionRunManager:
                             or original_event_seq
                         ),
                     )
+            if resolved_count <= 0:
+                raise TuiGatewayBridgeError("approval request is no longer pending")
             await self._append_session_event(
                 user_id,
                 session_id,
@@ -718,10 +765,11 @@ class SessionRunManager:
         if (
             live_state is not None
             and str(live_state.get("status") or "").strip() in FINAL_LIVE_STATUSES
-            and event_type != "message.complete"
         ):
             return
-        state_live_session_id = self._state_live_session_id(live_state, live_session_id)
+        approval_lock = self._approval_state_locks.setdefault(
+            (context.user_id, context.session_id), asyncio.Lock()
+        )
         if event_type == "approval.request":
             payload["approval_id"] = (
                 str(payload.get("approval_id") or "").strip()
@@ -738,87 +786,179 @@ class SessionRunManager:
         )
 
         if event_type == "message.start":
-            await self._save_live_session_state(
-                context.user_id,
-                context.session_id,
-                run_id=context.run_id,
-                live_session_id=state_live_session_id,
-                tip_session_id=str((live_state or {}).get("tip_session_id") or ""),
-                assistant_message_id=context.assistant_message_id,
-                status="running",
-                pending_approval=None,
-                last_error="",
-                last_event_seq=seq,
-                started_at=now_seconds(),
-                finished_at=0,
-            )
+            async with approval_lock:
+                latest_live_state = await self._get_mutable_live_state(
+                    context, live_session_id
+                )
+                if latest_live_state is None:
+                    return
+                await self._save_live_session_state(
+                    context.user_id,
+                    context.session_id,
+                    run_id=context.run_id,
+                    live_session_id=self._state_live_session_id(
+                        latest_live_state, live_session_id
+                    ),
+                    tip_session_id=str(
+                        latest_live_state.get("tip_session_id") or ""
+                    ),
+                    assistant_message_id=context.assistant_message_id,
+                    status="running",
+                    pending_approval=None,
+                    last_error="",
+                    last_event_seq=seq,
+                    started_at=now_seconds(),
+                    finished_at=0,
+                )
             await self._request_flush(context)
             return
 
         if event_type == "message.delta":
-            await self._append_delta(context, payload, seq, state_live_session_id)
+            async with approval_lock:
+                latest_live_state = await self._get_mutable_live_state(
+                    context, live_session_id
+                )
+                if latest_live_state is None:
+                    return
+                await self._append_delta(
+                    context,
+                    payload,
+                    seq,
+                    self._state_live_session_id(
+                        latest_live_state, live_session_id
+                    ),
+                )
             return
 
         if event_type in {"tool.progress", "tool.start", "tool.complete"}:
-            await self._append_progress(
-                context,
-                payload,
-                seq,
-                state_live_session_id,
-                event_type=event_type,
-            )
+            async with approval_lock:
+                latest_live_state = await self._get_mutable_live_state(
+                    context, live_session_id
+                )
+                if latest_live_state is None:
+                    return
+                await self._append_progress(
+                    context,
+                    payload,
+                    seq,
+                    self._state_live_session_id(
+                        latest_live_state, live_session_id
+                    ),
+                    event_type=event_type,
+                )
             return
 
         if event_type == "approval.request":
             approval_id = str(payload.get("approval_id") or "")
-            approval_queue = _pending_approval_queue(
-                (live_state or {}).get("pending_approval")
-            )
-            if not any(
-                item.get("approval_id") == approval_id for item in approval_queue
-            ):
-                approval_queue.append(
-                    {
-                        "approval_id": approval_id,
-                        "command": str(payload.get("command") or ""),
-                        "description": str(
-                            payload.get("description")
-                            or "Hermes needs approval to continue."
-                        ),
-                    }
+            async with approval_lock:
+                latest_live_state = await self._get_mutable_live_state(
+                    context, live_session_id
                 )
-            await self._save_live_session_state(
-                context.user_id,
-                context.session_id,
-                run_id=context.run_id,
-                live_session_id=state_live_session_id,
-                tip_session_id=str((live_state or {}).get("tip_session_id") or ""),
-                assistant_message_id=context.assistant_message_id,
-                status="awaiting_approval",
-                pending_approval=_serialize_pending_approval(approval_queue),
-                last_error="",
-                last_event_seq=seq,
-            )
+                if latest_live_state is None:
+                    return
+                approval_queue = _pending_approval_queue(
+                    latest_live_state.get("pending_approval")
+                )
+                if not any(
+                    item.get("approval_id") == approval_id
+                    for item in approval_queue
+                ):
+                    approval_queue.append(
+                        {
+                            "approval_id": approval_id,
+                            "command": str(payload.get("command") or ""),
+                            "description": str(
+                                payload.get("description")
+                                or "Hermes needs approval to continue."
+                            ),
+                        }
+                    )
+                await self._save_live_session_state(
+                    context.user_id,
+                    context.session_id,
+                    run_id=context.run_id,
+                    live_session_id=self._state_live_session_id(
+                        latest_live_state, live_session_id
+                    ),
+                    tip_session_id=str(
+                        latest_live_state.get("tip_session_id") or ""
+                    ),
+                    assistant_message_id=context.assistant_message_id,
+                    status="awaiting_approval",
+                    pending_approval=_serialize_pending_approval(approval_queue),
+                    last_error="",
+                    last_event_seq=seq,
+                )
+            await self._request_flush(context)
+            return
+
+        if event_type == "approval.expired":
+            approval_id = str(payload.get("approval_id") or "").strip()
+            async with approval_lock:
+                latest_live_state = await self._get_mutable_live_state(
+                    context, live_session_id
+                )
+                if latest_live_state is None:
+                    return
+                removed, remaining_queue = _remove_pending_approval(
+                    latest_live_state.get("pending_approval"),
+                    approval_id,
+                )
+                if not removed:
+                    return
+                await self._save_live_session_state(
+                    context.user_id,
+                    context.session_id,
+                    run_id=context.run_id,
+                    live_session_id=self._state_live_session_id(
+                        latest_live_state, live_session_id
+                    ),
+                    tip_session_id=str(
+                        latest_live_state.get("tip_session_id") or ""
+                    ),
+                    assistant_message_id=context.assistant_message_id,
+                    status="awaiting_approval" if remaining_queue else "running",
+                    pending_approval=_serialize_pending_approval(remaining_queue),
+                    last_error=str(latest_live_state.get("last_error") or ""),
+                    last_event_seq=seq,
+                )
             await self._request_flush(context)
             return
 
         if event_type == "message.complete":
-            live_state = await self._reconcile_tip(context)
-            await self._complete_message(
-                context,
-                payload,
-                seq,
-                self._state_live_session_id(live_state, live_session_id),
-            )
+            async with approval_lock:
+                latest_live_state = await self._get_mutable_live_state(
+                    context, live_session_id
+                )
+                if latest_live_state is None:
+                    return
+                reconciled_live_state = await self._reconcile_tip_locked(context)
+                await self._complete_message(
+                    context,
+                    payload,
+                    seq,
+                    self._state_live_session_id(
+                        reconciled_live_state or latest_live_state,
+                        live_session_id,
+                    ),
+                )
             return
 
         if event_type == "error":
-            await self._mark_failed(
-                context=context,
-                live_session_id=state_live_session_id,
-                error_message=str(payload.get("message") or "Unknown bridge error"),
-                seq=seq,
-            )
+            async with approval_lock:
+                latest_live_state = await self._get_mutable_live_state(
+                    context, live_session_id
+                )
+                if latest_live_state is None:
+                    return
+                await self._mark_failed(
+                    context=context,
+                    live_session_id=self._state_live_session_id(
+                        latest_live_state, live_session_id
+                    ),
+                    error_message=str(payload.get("message") or "Unknown bridge error"),
+                    seq=seq,
+                )
 
     async def _resolve_context(
         self,
@@ -949,6 +1089,26 @@ class SessionRunManager:
         return normalized_event_live_session_id in {
             item for item in (current_live_session_id, tip_session_id) if item
         }
+
+    async def _get_mutable_live_state(
+        self,
+        context: SessionRunContext,
+        event_live_session_id: str,
+    ) -> dict[str, Any] | None:
+        live_state = await self._get_live_session_state(
+            context.user_id, context.session_id
+        )
+        if not isinstance(live_state, dict):
+            return None
+        if str(live_state.get("run_id") or "") != context.run_id:
+            return None
+        if str(live_state.get("status") or "").strip() in FINAL_LIVE_STATUSES:
+            return None
+        if event_live_session_id and not self._event_matches_live_state(
+            live_state, event_live_session_id
+        ):
+            return None
+        return live_state
 
     def _state_live_session_id(
         self,
@@ -1206,16 +1366,24 @@ class SessionRunManager:
             if key in seen_contexts:
                 continue
             seen_contexts.add(key)
-            live_state = await self._get_live_session_state(context.user_id, context.session_id)
-            status = str((live_state or {}).get("status") or "")
-            if status in FINAL_LIVE_STATUSES:
-                continue
-            await self._mark_failed(
-                context=context,
-                live_session_id=live_session_id,
-                error_message=str(payload.get("message") or "tui_gateway process exited"),
-                seq=int((live_state or {}).get("last_event_seq") or 0),
+            approval_lock = self._approval_state_locks.setdefault(
+                key, asyncio.Lock()
             )
+            async with approval_lock:
+                live_state = await self._get_live_session_state(
+                    context.user_id, context.session_id
+                )
+                status = str((live_state or {}).get("status") or "")
+                if status in FINAL_LIVE_STATUSES:
+                    continue
+                await self._mark_failed(
+                    context=context,
+                    live_session_id=live_session_id,
+                    error_message=str(
+                        payload.get("message") or "tui_gateway process exited"
+                    ),
+                    seq=int((live_state or {}).get("last_event_seq") or 0),
+                )
 
     async def _resolve_tip_session_id(self, context: SessionRunContext) -> str | None:
         if self._tip_resolver is None:
@@ -1231,36 +1399,54 @@ class SessionRunManager:
         user_id: str,
         session_id: str,
     ) -> dict[str, Any] | None:
-        live_state = await self._get_live_session_state(user_id, session_id)
-        if live_state is None:
-            return None
-        if str(live_state.get("status") or "").strip() in FINAL_LIVE_STATUSES:
-            return live_state
-
-        run_id = str(live_state.get("run_id") or "").strip()
-        assistant_message_id = str(live_state.get("assistant_message_id") or "").strip()
-        if not run_id or not assistant_message_id:
-            return live_state
-
-        context = SessionRunContext(
-            user_id=user_id,
-            session_id=session_id,
-            run_id=run_id,
-            assistant_message_id=assistant_message_id,
+        approval_lock = self._approval_state_locks.setdefault(
+            (user_id, session_id), asyncio.Lock()
         )
-        async with self._lock:
-            self._run_contexts_by_session_id[(user_id, session_id)] = context
-            live_session_id = str(live_state.get("live_session_id") or "").strip()
-            if live_session_id:
-                self._run_contexts_by_live_session_id[(user_id, live_session_id)] = context
-            self._ensure_flush_task_locked(context)
-        return await self._reconcile_tip(context) or live_state
+        async with approval_lock:
+            live_state = await self._get_live_session_state(user_id, session_id)
+            if live_state is None:
+                return None
+            if str(live_state.get("status") or "").strip() in FINAL_LIVE_STATUSES:
+                return live_state
+
+            run_id = str(live_state.get("run_id") or "").strip()
+            assistant_message_id = str(
+                live_state.get("assistant_message_id") or ""
+            ).strip()
+            if not run_id or not assistant_message_id:
+                return live_state
+
+            context = SessionRunContext(
+                user_id=user_id,
+                session_id=session_id,
+                run_id=run_id,
+                assistant_message_id=assistant_message_id,
+            )
+            async with self._lock:
+                self._run_contexts_by_session_id[(user_id, session_id)] = context
+                live_session_id = str(
+                    live_state.get("live_session_id") or ""
+                ).strip()
+                if live_session_id:
+                    self._run_contexts_by_live_session_id[
+                        (user_id, live_session_id)
+                    ] = context
+                self._ensure_flush_task_locked(context)
+            return await self._reconcile_tip_locked(context) or live_state
 
     async def _reconcile_tip(self, context: SessionRunContext) -> dict[str, Any] | None:
-        live_state = await self._get_live_session_state(context.user_id, context.session_id)
+        approval_lock = self._approval_state_locks.setdefault(
+            (context.user_id, context.session_id), asyncio.Lock()
+        )
+        async with approval_lock:
+            return await self._reconcile_tip_locked(context)
+
+    async def _reconcile_tip_locked(
+        self,
+        context: SessionRunContext,
+    ) -> dict[str, Any] | None:
+        live_state = await self._get_mutable_live_state(context, "")
         if live_state is None:
-            return None
-        if str(live_state.get("status") or "").strip() in FINAL_LIVE_STATUSES:
             return None
 
         try:
@@ -1435,16 +1621,22 @@ class SessionRunManager:
             if key in seen_contexts:
                 continue
             seen_contexts.add(key)
-            live_state = await self._get_live_session_state(context.user_id, context.session_id)
-            status = str((live_state or {}).get("status") or "")
-            if status in FINAL_LIVE_STATUSES:
-                continue
-            await self._mark_failed(
-                context=context,
-                live_session_id=live_session_id,
-                error_message="interface shutdown before the run completed",
-                seq=int((live_state or {}).get("last_event_seq") or 0),
+            approval_lock = self._approval_state_locks.setdefault(
+                key, asyncio.Lock()
             )
+            async with approval_lock:
+                live_state = await self._get_live_session_state(
+                    context.user_id, context.session_id
+                )
+                status = str((live_state or {}).get("status") or "")
+                if status in FINAL_LIVE_STATUSES:
+                    continue
+                await self._mark_failed(
+                    context=context,
+                    live_session_id=live_session_id,
+                    error_message="interface shutdown before the run completed",
+                    seq=int((live_state or {}).get("last_event_seq") or 0),
+                )
 
         async with self._lock:
             tasks = list(self._flush_tasks.values())
@@ -1452,6 +1644,7 @@ class SessionRunManager:
             self._flush_events.clear()
             self._run_contexts_by_session_id.clear()
             self._run_contexts_by_live_session_id.clear()
+            self._approval_state_locks.clear()
         for task in tasks:
             task.cancel()
         for task in tasks:

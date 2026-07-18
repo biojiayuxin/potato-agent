@@ -56,15 +56,18 @@ available.
 Focused tests live in `tests/`, `tests_packaging/`, and `tests_e2e/`. The mock
 provider E2E starts the real stdio gateway with isolated `HOME` and
 `HERMES_HOME`; it covers prompt completion, resume, interrupt, and approval
-denial without contacting a real provider.
+denial and expiration without contacting a real provider. The expiration case
+also verifies that a late response is rejected and the guarded command is not
+executed.
 
 ## Deployment Status
 
 Production runs immutable Lite releases through
 `/opt/potato-hermes-lite/current`. The current release is
-`0.16.0+potato.lite.3`; its approval protocol carries an exact request ID from
-the Lite waiter through Gateway, Interface, and the browser so a lost HTTP
-response can be retried without resolving another queued approval. Do not
+`0.16.0+potato.lite.4`; its approval protocol carries an exact request ID from
+the Lite waiter through Gateway, Interface, and the browser, and emits an
+`approval.expired` lifecycle event when that exact waiter times out. A lost or
+late HTTP response cannot resolve or leave behind another queued approval. Do not
 delete `hermes-agent/` or the legacy venv until the observation and rollback
 retention period has passed. User `HERMES_HOME`, session databases, mappings,
 and Interface databases are external state and must never be removed as part

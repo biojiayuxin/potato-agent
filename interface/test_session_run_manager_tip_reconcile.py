@@ -223,9 +223,83 @@ def test_snapshot_reconcile_remembers_compressed_tip_alias() -> None:
     assert ("session-tip", "session-root", "run-1") in bridge.remembered
 
 
+def test_tip_reconcile_and_interrupt_share_live_state_lock() -> None:
+    db_path = Path(tempfile.mkdtemp(prefix="potato-run-manager-tip-lock-")) / "interface.db"
+    os.environ["INTERFACE_AUTH_DB"] = str(db_path)
+
+    from interface.display_store import get_live_session_state, save_live_session_state
+    from interface.session_run_manager import SessionRunManager
+
+    save_live_session_state(
+        "user-1",
+        "session-root",
+        run_id="run-1",
+        live_session_id="live-1",
+        tip_session_id="session-root",
+        assistant_message_id="assistant-1",
+        status="running",
+        pending_approval=None,
+        last_error="",
+        last_event_seq=2,
+        db_path=db_path,
+    )
+
+    class InterruptBridge(_Bridge):
+        async def rpc(self, method: str, params: dict) -> dict:
+            assert method == "session.interrupt"
+            assert params == {"session_id": "live-1"}
+            return {"status": "interrupted"}
+
+    async def scenario() -> None:
+        tip_resolution_started = asyncio.Event()
+        release_tip_resolution = asyncio.Event()
+
+        async def resolve_tip(user_id: str, session_id: str) -> str:
+            assert user_id == "user-1"
+            assert session_id == "session-root"
+            tip_resolution_started.set()
+            await release_tip_resolution.wait()
+            return "session-tip"
+
+        bridge = InterruptBridge()
+        manager = SessionRunManager(
+            tip_resolver=resolve_tip,
+            db_path=db_path,
+        )
+        await manager.attach_bridge(bridge)  # type: ignore[arg-type]
+        reconcile_task = asyncio.create_task(
+            manager.reconcile_active_session_tip("user-1", "session-root")
+        )
+        await tip_resolution_started.wait()
+        interrupt_task = asyncio.create_task(
+            manager.interrupt_run(
+                bridge=bridge,  # type: ignore[arg-type]
+                user_id="user-1",
+                session_id="session-root",
+            )
+        )
+        await asyncio.sleep(0)
+        assert not interrupt_task.done()
+
+        release_tip_resolution.set()
+        reconciled = await reconcile_task
+        assert reconciled is not None
+        assert reconciled["tip_session_id"] == "session-tip"
+        await interrupt_task
+        await manager.shutdown()
+
+    _run(scenario())
+
+    live_state = get_live_session_state("user-1", "session-root", db_path=db_path)
+    assert live_state is not None
+    assert live_state["status"] == "interrupted"
+    assert live_state["tip_session_id"] == "session-tip"
+
+
 def run() -> None:
     test_tip_reconcile_keeps_late_child_events_on_root_transcript()
     test_snapshot_reconcile_remembers_compressed_tip_alias()
+    test_tip_reconcile_and_interrupt_share_live_state_lock()
 
 
 if __name__ == "__main__":

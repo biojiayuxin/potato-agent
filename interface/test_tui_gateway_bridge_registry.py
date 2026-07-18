@@ -489,7 +489,10 @@ async def test_foreground_lease_heartbeat_retries_transient_error(monkeypatch) -
     bridge = TuiGatewayBridge(user_id="user-1", target=None)  # type: ignore[arg-type]
     calls = 0
 
-    async def fake_sleep(_seconds: float) -> None:
+    async def run_inline(func, /, *args, **kwargs):
+        return func(*args, **kwargs)
+
+    async def skip_sleep(_seconds: float) -> None:
         return None
 
     def fake_heartbeat(lease_id: str, *, ttl_seconds: int) -> bool:
@@ -499,14 +502,13 @@ async def test_foreground_lease_heartbeat_retries_transient_error(monkeypatch) -
             raise RuntimeError("database is locked")
         return False
 
-    monkeypatch.setattr("interface.tui_gateway_bridge.asyncio.sleep", fake_sleep)
-    monkeypatch.setattr(
-        "interface.tui_gateway_bridge.heartbeat_runtime_lease",
-        fake_heartbeat,
-    )
+    method_globals = TuiGatewayBridge._foreground_chat_lease_heartbeat.__globals__
+    monkeypatch.setitem(method_globals, "heartbeat_runtime_lease", fake_heartbeat)
+    monkeypatch.setitem(method_globals, "_run_in_thread", run_inline)
+    monkeypatch.setitem(method_globals, "_foreground_lease_sleep", skip_sleep)
 
     await bridge._foreground_chat_lease_heartbeat(
-        "lease-1", ttl_seconds=90, interval_seconds=15
+        "lease-1", ttl_seconds=90, interval_seconds=1
     )
 
     assert calls == 2
@@ -520,6 +522,12 @@ async def test_foreground_lease_finish_retries_before_forgetting_lease(monkeypat
     bridge._foreground_leases["live-1"] = ("lease-1", heartbeat_task)
     calls = 0
 
+    async def run_inline(func, /, *args, **kwargs):
+        return func(*args, **kwargs)
+
+    async def skip_sleep(_seconds: float) -> None:
+        return None
+
     def fake_finish(lease_id: str, *, user_id: str) -> bool:
         nonlocal calls
         calls += 1
@@ -529,10 +537,10 @@ async def test_foreground_lease_finish_retries_before_forgetting_lease(monkeypat
             raise RuntimeError("database is locked")
         return True
 
-    monkeypatch.setattr(
-        "interface.tui_gateway_bridge.finish_runtime_lease", fake_finish
-    )
-
+    method_globals = TuiGatewayBridge._finish_foreground_lease.__globals__
+    monkeypatch.setitem(method_globals, "finish_runtime_lease", fake_finish)
+    monkeypatch.setitem(method_globals, "_run_in_thread", run_inline)
+    monkeypatch.setitem(method_globals, "_foreground_lease_sleep", skip_sleep)
     await bridge._release_foreground_lease("live-1")
 
     assert calls == 2
