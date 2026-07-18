@@ -260,6 +260,7 @@ let fileTreeChangePollInFlight = null;
 let fileTreeChangePollGeneration = 0;
 let fileTreeAcceptedRevision = null;
 let authSessionGeneration = 0;
+let workspacePathNavigationGeneration = 0;
 
 const SIDEBAR_WIDTH_KEY = 'lite_sidebar_width';
 const FILES_WIDTH_KEY = 'lite_files_width';
@@ -286,6 +287,7 @@ const FILE_TREE_FOCUS_REFRESH_MIN_INTERVAL_MS = 5000;
 const FILE_TREE_REFRESH_MAX_CONCURRENCY = 3;
 const FILE_TREE_CHANGE_POLL_INTERVAL_MS = 5000;
 const FILE_TREE_CHANGE_POLL_FAILURE_DELAY_MS = 15000;
+const WORKSPACE_DATA_PATH_PREFIX = '/mnt/data/';
 const ATTACHMENT_BLOCK_START = '<potato-files>';
 const ATTACHMENT_BLOCK_END = '</potato-files>';
 const ATTACHMENT_HINT_LINE = 'Use the attachment local paths above if you need to inspect the files.';
@@ -3046,6 +3048,7 @@ const setAuthViewMode = (mode) => {
 
 const resetWorkspaceState = () => {
   authSessionGeneration += 1;
+  workspacePathNavigationGeneration += 1;
   stopAllLiveSessionPolling();
   resetTuiBridgeReconnectState();
   closeTuiBridge();
@@ -3347,6 +3350,7 @@ const sanitizeRenderedHtml = (html) => {
 
   for (const element of elements) {
     const tag = element.tagName.toLowerCase();
+    let workspacePath = '';
 
     if (blockedTags.has(tag)) {
       element.remove();
@@ -3369,7 +3373,10 @@ const sanitizeRenderedHtml = (html) => {
       }
 
       if (tag === 'a' && name === 'href') {
-        if (!/^https?:\/\//i.test(value) && !/^mailto:/i.test(value)) {
+        if (isWorkspaceDataPath(value)) {
+          workspacePath = decodeWorkspacePathHref(value);
+          element.removeAttribute(attr.name);
+        } else if (!/^https?:\/\//i.test(value) && !/^mailto:/i.test(value)) {
           element.removeAttribute(attr.name);
         }
         continue;
@@ -3382,13 +3389,162 @@ const sanitizeRenderedHtml = (html) => {
       element.removeAttribute(attr.name);
     }
 
-    if (tag === 'a' && element.getAttribute('href')) {
+    if (tag === 'a' && workspacePath) {
+      configureWorkspacePathLink(element, workspacePath);
+    } else if (tag === 'a' && element.getAttribute('href')) {
       element.setAttribute('target', '_blank');
       element.setAttribute('rel', 'noopener noreferrer');
     }
   }
 
   return template.innerHTML;
+};
+
+const isWorkspaceDataPath = (value) => (
+  String(value || '').trim().startsWith(WORKSPACE_DATA_PATH_PREFIX)
+);
+
+const decodeWorkspacePathHref = (value) => {
+  const path = String(value || '').trim();
+  try {
+    return decodeURIComponent(path);
+  } catch {
+    return path;
+  }
+};
+
+const configureWorkspacePathLink = (link, path) => {
+  const normalizedPath = String(path || '').trim();
+  link.href = '#';
+  link.dataset.workspacePath = normalizedPath;
+  link.setAttribute('data-workspace-path', normalizedPath);
+  link.removeAttribute('target');
+  link.removeAttribute('rel');
+  link.title = 'Open in workspace';
+  return link;
+};
+
+const createWorkspacePathLink = (path, label = path) => {
+  const link = document.createElement('a');
+  link.textContent = label;
+  return configureWorkspacePathLink(link, path);
+};
+
+const trimBareWorkspacePath = (candidate) => {
+  let path = String(candidate || '').replace(/[.,;:!?，。；：！？、…]+$/u, '');
+  const bracketPairs = new Map([
+    [')', '('],
+    [']', '['],
+    ['}', '{'],
+    ['）', '（'],
+    ['］', '［'],
+    ['｝', '｛'],
+    ['】', '【'],
+    ['》', '《'],
+    ['〉', '〈'],
+    ['」', '「'],
+    ['』', '『'],
+    ['”', '“'],
+    ['’', '‘'],
+  ]);
+
+  while (path && bracketPairs.has(path.at(-1))) {
+    const closing = path.at(-1);
+    const opening = bracketPairs.get(closing);
+    const openingCount = [...path].filter((char) => char === opening).length;
+    const closingCount = [...path].filter((char) => char === closing).length;
+    if (closingCount <= openingCount) break;
+    path = path.slice(0, -1);
+  }
+  return path;
+};
+
+const replaceBareWorkspacePaths = (textNode) => {
+  const source = String(textNode.nodeValue || '');
+  const pattern = /\/mnt\/data\/[^\s<>"'`]+/gu;
+  const matches = [...source.matchAll(pattern)];
+  if (!matches.length) return;
+
+  const fragment = document.createDocumentFragment();
+  let offset = 0;
+  for (const match of matches) {
+    const matchedText = String(match[0] || '');
+    const path = trimBareWorkspacePath(matchedText);
+    if (!path) continue;
+    const start = Number(match.index || 0);
+    fragment.append(document.createTextNode(source.slice(offset, start)));
+    fragment.append(createWorkspacePathLink(path));
+    fragment.append(document.createTextNode(matchedText.slice(path.length)));
+    offset = start + matchedText.length;
+  }
+  fragment.append(document.createTextNode(source.slice(offset)));
+  textNode.replaceWith(fragment);
+};
+
+const replaceInlineCodeWorkspacePath = (textNode) => {
+  const source = String(textNode.nodeValue || '');
+  const path = source.trim();
+  if (!isWorkspaceDataPath(path) || /[\r\n]/u.test(path)) return false;
+
+  const leading = source.slice(0, source.length - source.trimStart().length);
+  const trailing = source.slice(source.trimEnd().length);
+  const fragment = document.createDocumentFragment();
+  if (leading) fragment.append(document.createTextNode(leading));
+  fragment.append(createWorkspacePathLink(path));
+  if (trailing) fragment.append(document.createTextNode(trailing));
+  textNode.replaceWith(fragment);
+  return true;
+};
+
+const replaceFencedCodeWorkspacePathLines = (textNode) => {
+  const source = String(textNode.nodeValue || '');
+  const parts = source.split(/(\r?\n)/u);
+  if (!parts.some((part) => isWorkspaceDataPath(part.trim()))) return false;
+
+  const fragment = document.createDocumentFragment();
+  for (const part of parts) {
+    const path = part.trim();
+    if (!isWorkspaceDataPath(path)) {
+      fragment.append(document.createTextNode(part));
+      continue;
+    }
+
+    const leading = part.slice(0, part.length - part.trimStart().length);
+    const trailing = part.slice(part.trimEnd().length);
+    if (leading) fragment.append(document.createTextNode(leading));
+    fragment.append(createWorkspacePathLink(path));
+    if (trailing) fragment.append(document.createTextNode(trailing));
+  }
+  textNode.replaceWith(fragment);
+  return true;
+};
+
+const linkifyWorkspacePaths = (container) => {
+  if (!container) return;
+  const walker = document.createTreeWalker(container, NodeFilter.SHOW_TEXT);
+  const textNodes = [];
+  while (walker.nextNode()) {
+    textNodes.push(walker.currentNode);
+  }
+
+  for (const textNode of textNodes) {
+    const parent = textNode.parentElement;
+    if (!parent || parent.closest('a')) continue;
+    if (parent.tagName === 'CODE' && replaceInlineCodeWorkspacePath(textNode)) continue;
+    if (
+      parent.tagName === 'CODE'
+      && parent.closest('pre')
+      && replaceFencedCodeWorkspacePathLines(textNode)
+    ) continue;
+    if (parent.closest('pre') || parent.tagName === 'PRE') continue;
+    replaceBareWorkspacePaths(textNode);
+  }
+};
+
+const removeWorkspacePathLinks = (container) => {
+  for (const link of container?.querySelectorAll('a[data-workspace-path]') || []) {
+    link.replaceWith(document.createTextNode(link.textContent || ''));
+  }
 };
 
 const renderMarkdown = (text) => {
@@ -4215,6 +4371,11 @@ const renderMessages = () => {
       streamingIndicator.classList.remove('inline', 'footer');
     } else {
       content.innerHTML = getRenderedMessageContentHtml(message);
+      if (message.role === 'assistant') {
+        linkifyWorkspacePaths(content);
+      } else {
+        removeWorkspacePathLinks(content);
+      }
       if (isStreaming && hasVisibleContent) {
         streamingIndicator.hidden = false;
         streamingIndicator.classList.remove('inline');
@@ -4770,7 +4931,10 @@ const createWorkspaceTabButton = ({ id, title, closeable = false }) => {
   label.textContent = title;
   button.append(label);
 
-  button.addEventListener('click', () => setActiveWorkspaceTab(id));
+  button.addEventListener('click', () => {
+    invalidateWorkspacePathNavigation();
+    setActiveWorkspaceTab(id);
+  });
 
   if (closeable) {
     const close = document.createElement('span');
@@ -4782,6 +4946,7 @@ const createWorkspaceTabButton = ({ id, title, closeable = false }) => {
     close.addEventListener('click', (event) => {
       event.preventDefault();
       event.stopPropagation();
+      invalidateWorkspacePathNavigation();
       closeFilePreviewTab(id);
     });
     button.append(close);
@@ -4956,6 +5121,35 @@ const getParentDirectory = (path) => {
   return index <= 0 ? '/' : normalizeDirectory(trimmed.slice(0, index));
 };
 
+const normalizeAbsoluteWorkspacePath = (path) => {
+  const rawPath = String(path || '').trim();
+  if (!isWorkspaceDataPath(rawPath)) return '';
+  const normalized = rawPath.replace(/\/{2,}/g, '/');
+  return normalized.length > 1 ? normalized.replace(/\/+$/g, '') : normalized;
+};
+
+const splitAbsoluteWorkspacePath = (path) => {
+  const absolutePath = normalizeAbsoluteWorkspacePath(path);
+  if (!absolutePath) return null;
+  const separatorIndex = absolutePath.lastIndexOf('/');
+  if (separatorIndex < 0) return null;
+  return {
+    absolutePath,
+    parentPath: separatorIndex === 0 ? '/' : absolutePath.slice(0, separatorIndex),
+    name: absolutePath.slice(separatorIndex + 1),
+  };
+};
+
+const getRelativePathWithinRoot = (absolutePath, rootPath) => {
+  const target = String(absolutePath || '').replace(/\/{2,}/g, '/').replace(/\/+$/g, '') || '/';
+  const root = String(rootPath || '').replace(/\/{2,}/g, '/').replace(/\/+$/g, '') || '/';
+  const targetParts = target.split('/').filter(Boolean);
+  if (targetParts.some((part) => part === '.' || part === '..')) return null;
+  if (target === root) return '';
+  if (root === '/' && target.startsWith('/')) return target.slice(1);
+  return target.startsWith(`${root}/`) ? target.slice(root.length + 1) : null;
+};
+
 const isSameOrDescendantDirectory = (path, directory) => {
   const normalizedPath = normalizeDirectory(path);
   const normalizedDirectory = normalizeDirectory(directory);
@@ -5022,6 +5216,22 @@ const runWithFileTreeConcurrency = async (items, worker) => {
   await Promise.all(workers);
 };
 
+const getFileTreeDirectoryChain = (targetPath, rootPath = state.rootPath || '/') => {
+  const root = normalizeDirectory(rootPath || '/');
+  const target = normalizeDirectory(targetPath || root);
+  const rootParts = root.split('/').filter(Boolean);
+  const targetParts = target.split('/').filter(Boolean);
+  if (rootParts.some((part, index) => targetParts[index] !== part)) return [];
+
+  const paths = [root];
+  let current = root;
+  for (const part of targetParts.slice(rootParts.length)) {
+    current = joinPath(current, part, 'directory');
+    paths.push(current);
+  }
+  return paths;
+};
+
 const getDisplayDirectoryPath = () => {
   const workspaceRoot = String(state.workspaceRoot || state.user?.workspace_root || '').trim();
   if (!workspaceRoot) {
@@ -5071,7 +5281,18 @@ const renderFilePathDisplay = () => {
   }
 };
 
+const invalidateFileTreeRootRequests = () => {
+  if (fileTreeRefreshTimer) {
+    window.clearTimeout(fileTreeRefreshTimer);
+    fileTreeRefreshTimer = null;
+  }
+  fileTreeRefreshGeneration += 1;
+  fileTreeRefreshInFlight = null;
+  fileTreeRefreshPending = false;
+};
+
 const setFileTreeRoot = async ({ root, path = '', entries = null }) => {
+  invalidateFileTreeRootRequests();
   state.workspaceRoot = String(root || state.workspaceRoot || state.user?.workspace_root || '').trim();
   state.rootPath = normalizeDirectory(path || '/');
   state.currentPath = state.rootPath;
@@ -5147,11 +5368,15 @@ const renderTreeNode = async (path, depth = 0) => {
 
   for (const entry of entries) {
     const nodePath = joinPath(path, entry.name, entry.type);
+    const treeNodePath = entry.type === 'directory'
+      ? normalizeDirectory(nodePath)
+      : String(nodePath).replace(/\\/g, '/');
     const item = document.createElement('li');
     item.className = 'tree-node';
 
     const row = document.createElement('div');
     row.className = 'tree-row';
+    row.setAttribute('data-tree-path', treeNodePath);
 
     let toggleOrSpacer;
     if (entry.type === 'directory') {
@@ -5160,16 +5385,20 @@ const renderTreeNode = async (path, depth = 0) => {
       toggle.className = 'tree-toggle';
       toggle.textContent = state.expandedPaths.has(nodePath) ? '▾' : '▸';
       toggle.addEventListener('click', async () => {
+        const navigation = beginWorkspacePathNavigation();
         if (state.expandedPaths.has(nodePath)) {
           state.expandedPaths.delete(nodePath);
           renderFileTree();
         } else {
           try {
             await listDirectory(nodePath);
+            if (!isWorkspacePathNavigationCurrent(navigation)) return;
             state.expandedPaths.add(nodePath);
             renderFileTree();
           } catch (error) {
-            showChatError(error.message);
+            if (isWorkspacePathNavigationCurrent(navigation)) {
+              showChatError(error.message);
+            }
           }
         }
       });
@@ -5183,6 +5412,7 @@ const renderTreeNode = async (path, depth = 0) => {
     const label = document.createElement('button');
     label.type = 'button';
     label.className = 'tree-label';
+    label.setAttribute('data-tree-path', treeNodePath);
     label.textContent = `${entry.type === 'directory' ? '📁' : '📄'} ${entry.name}`;
     if (entry.type === 'directory' && normalizeDirectory(nodePath) === normalizeDirectory(state.currentPath)) {
       label.classList.add('active');
@@ -5197,14 +5427,18 @@ const renderTreeNode = async (path, depth = 0) => {
       label.classList.add('active');
     }
     label.addEventListener('click', async () => {
+      const navigation = beginWorkspacePathNavigation();
       if (entry.type === 'directory') {
         try {
           await listDirectory(nodePath);
+          if (!isWorkspacePathNavigationCurrent(navigation)) return;
           state.currentPath = normalizeDirectory(nodePath);
           state.expandedPaths.add(normalizeDirectory(nodePath));
           renderFileTree();
         } catch (error) {
-          showChatError(error.message);
+          if (isWorkspacePathNavigationCurrent(navigation)) {
+            showChatError(error.message);
+          }
         }
         return;
       }
@@ -5240,6 +5474,8 @@ const renderTreeNode = async (path, depth = 0) => {
 const renderFileTree = async () => {
   const renderGeneration = fileTreeRefreshGeneration;
   const renderUserId = String(state.user?.id || '');
+  const renderWorkspaceRoot = String(state.workspaceRoot || '').trim();
+  const renderRootPath = normalizeDirectory(state.rootPath || state.currentPath || '/');
   dom.fileTree.innerHTML = '';
   if (!state.currentPath) {
     dom.fileTree.innerHTML = '<div class="empty-state">No workspace directory is available for this user.</div>';
@@ -5251,12 +5487,14 @@ const renderFileTree = async () => {
   }
 
   renderFilePathDisplay();
-  const root = normalizeDirectory(state.rootPath || state.currentPath);
+  const root = renderRootPath;
   try {
     const tree = await renderTreeNode(root);
     if (
       renderGeneration !== fileTreeRefreshGeneration
       || String(state.user?.id || '') !== renderUserId
+      || String(state.workspaceRoot || '').trim() !== renderWorkspaceRoot
+      || normalizeDirectory(state.rootPath || state.currentPath || '/') !== renderRootPath
     ) {
       return;
     }
@@ -5269,6 +5507,8 @@ const renderFileTree = async () => {
     if (
       renderGeneration === fileTreeRefreshGeneration
       && String(state.user?.id || '') === renderUserId
+      && String(state.workspaceRoot || '').trim() === renderWorkspaceRoot
+      && normalizeDirectory(state.rootPath || state.currentPath || '/') === renderRootPath
     ) {
       dom.fileTree.innerHTML = `<div class="error">${escapeHtml(error.message)}</div>`;
     }
@@ -5505,6 +5745,7 @@ async function pollFileTreeChangeRevision(generation = fileTreeChangePollGenerat
 const fetchWorkspaceFiles = async () => {
   const requestAuthSessionGeneration = authSessionGeneration;
   const requestUserId = String(state.user?.id || '');
+  const requestWorkspacePathNavigationGeneration = workspacePathNavigationGeneration;
   const [configJson, treeJson] = await Promise.all([
     api('/api/files/config', { method: 'GET' }).then((res) => res.json()),
     api('/api/files/tree', { method: 'GET', cache: 'no-store' }).then((res) => res.json()),
@@ -5512,6 +5753,7 @@ const fetchWorkspaceFiles = async () => {
   if (
     requestAuthSessionGeneration !== authSessionGeneration
     || String(state.user?.id || '') !== requestUserId
+    || requestWorkspacePathNavigationGeneration !== workspacePathNavigationGeneration
   ) {
     return;
   }
@@ -5523,7 +5765,18 @@ const fetchWorkspaceFiles = async () => {
     path: treeJson?.path || '/',
     entries: Array.isArray(treeJson?.entries) ? treeJson.entries : [],
   });
+  if (requestWorkspacePathNavigationGeneration !== workspacePathNavigationGeneration) return;
   startFileTreeChangePolling();
+};
+
+const fetchOpenedDirectory = async (rawPath) => {
+  const requestedPath = String(rawPath || '').trim();
+  if (!requestedPath) {
+    throw new Error('Enter a directory path to open.');
+  }
+  return api(`/api/files/open?path=${encodeURIComponent(requestedPath)}`, {
+    method: 'GET',
+  }).then((res) => res.json());
 };
 
 const openDirectory = async (rawPath) => {
@@ -5532,16 +5785,231 @@ const openDirectory = async (rawPath) => {
     showChatError('Enter a directory path to open.');
     return;
   }
-  const json = await api(`/api/files/open?path=${encodeURIComponent(requestedPath)}`, { method: 'GET' }).then((res) => res.json());
-  await setFileTreeRoot({
-    root: json?.root || requestedPath,
-    path: json?.path || '/',
-    entries: Array.isArray(json?.entries) ? json.entries : [],
-  });
+  const navigation = beginWorkspacePathNavigation();
+  try {
+    const json = await fetchOpenedDirectory(requestedPath);
+    if (!isWorkspacePathNavigationCurrent(navigation)) return;
+    await setFileTreeRoot({
+      root: json?.root || requestedPath,
+      path: json?.path || '/',
+      entries: Array.isArray(json?.entries) ? json.entries : [],
+    });
+    if (!isWorkspacePathNavigationCurrent(navigation)) return;
+    if (dom.filePathInput) {
+      dom.filePathInput.value = String(json?.opened_path || requestedPath);
+    }
+    renderFilePathDisplay();
+  } catch (error) {
+    if (!isWorkspacePathNavigationCurrent(navigation)) return;
+    throw error;
+  }
+};
+
+const invalidateWorkspacePathNavigation = () => {
+  workspacePathNavigationGeneration += 1;
+};
+
+const beginWorkspacePathNavigation = () => {
+  invalidateFileTreeRootRequests();
+  return {
+    generation: ++workspacePathNavigationGeneration,
+    authGeneration: authSessionGeneration,
+    userId: String(state.user?.id || ''),
+    sessionId: String(state.activeSessionId || ''),
+  };
+};
+
+const isWorkspacePathNavigationCurrent = (navigation) => Boolean(
+  navigation
+  && navigation.generation === workspacePathNavigationGeneration
+  && navigation.authGeneration === authSessionGeneration
+  && navigation.userId === String(state.user?.id || '')
+  && navigation.sessionId === String(state.activeSessionId || '')
+);
+
+const getWorkspacePathUnavailableError = () => new Error(
+  'Unable to open this workspace path. It may not exist or you may not have access.'
+);
+
+const probeWorkspacePath = async (path) => {
+  const parts = splitAbsoluteWorkspacePath(path);
+  if (!parts?.name) throw getWorkspacePathUnavailableError();
+
+  const directoryProbe = fetchOpenedDirectory(parts.absolutePath);
+  const fileProbe = api(buildFilePreviewMetaUrl(parts.name, parts.parentPath), {
+    method: 'GET',
+  }).then((res) => res.json());
+  const [directoryResult, fileResult] = await Promise.allSettled([
+    directoryProbe,
+    fileProbe,
+  ]);
+
+  if (directoryResult.status === 'fulfilled' && fileResult.status !== 'fulfilled') {
+    return {
+      ...parts,
+      type: 'directory',
+      directory: directoryResult.value,
+    };
+  }
+  if (fileResult.status === 'fulfilled' && directoryResult.status !== 'fulfilled') {
+    const meta = fileResult.value || {};
+    return {
+      ...parts,
+      type: 'file',
+      meta,
+      entry: {
+        name: meta.filename || parts.name,
+        type: 'file',
+        size: Number(meta.size || 0),
+        modified: Number(meta.modified || 0),
+      },
+    };
+  }
+  throw getWorkspacePathUnavailableError();
+};
+
+const getTreePathFromRelative = (relativePath, type) => {
+  const parts = String(relativePath || '').split('/').filter(Boolean);
+  let treePath = normalizeDirectory(state.rootPath || '/');
+  for (const [index, part] of parts.entries()) {
+    const isLast = index === parts.length - 1;
+    treePath = joinPath(treePath, part, isLast ? type : 'directory');
+  }
+  return type === 'directory' ? normalizeDirectory(treePath) : treePath.replace(/\/+$/g, '');
+};
+
+const scrollFileTreePathIntoView = (path, type) => {
+  if (!dom.fileTree) return;
+  const targetPath = type === 'directory'
+    ? normalizeDirectory(path)
+    : String(path || '').replace(/\\/g, '/');
+  const row = [...dom.fileTree.querySelectorAll('.tree-row[data-tree-path]')]
+    .find((candidate) => candidate.getAttribute('data-tree-path') === targetPath);
+  row?.scrollIntoView({ block: 'nearest', inline: 'nearest' });
+};
+
+const revealWorkspaceTreePath = async ({
+  relativePath,
+  type,
+  entry = null,
+  navigation,
+}) => {
+  const targetPath = getTreePathFromRelative(relativePath, type);
+  const directoryPath = type === 'directory'
+    ? normalizeDirectory(targetPath)
+    : getParentDirectory(targetPath);
+  const directoryChain = getFileTreeDirectoryChain(directoryPath);
+  if (!directoryChain.length) return false;
+
+  const entriesByDirectory = new Map();
+  for (const path of directoryChain) {
+    const entries = await listDirectory(path, true);
+    if (!isWorkspacePathNavigationCurrent(navigation)) return false;
+    entriesByDirectory.set(normalizeDirectory(path), entries);
+  }
+
+  if (type === 'directory' && directoryPath !== normalizeDirectory(state.rootPath || '/')) {
+    const parentPath = getParentDirectory(directoryPath);
+    const directoryName = String(relativePath || '').split('/').filter(Boolean).at(-1) || '';
+    const parentEntries = entriesByDirectory.get(normalizeDirectory(parentPath)) || [];
+    if (!parentEntries.some((candidate) => (
+      candidate?.type === 'directory' && candidate?.name === directoryName
+    ))) {
+      return false;
+    }
+  }
+
+  for (const path of directoryChain) {
+    state.expandedPaths.add(normalizeDirectory(path));
+  }
+  state.currentPath = directoryPath;
+
+  if (type === 'file') {
+    const parentEntries = entriesByDirectory.get(normalizeDirectory(directoryPath)) || [];
+    const fileName = String(relativePath || '').split('/').filter(Boolean).at(-1) || '';
+    const treeEntry = parentEntries.find((candidate) => (
+      candidate?.type === 'file' && candidate?.name === fileName
+    ));
+    openFilePreview(targetPath, treeEntry || entry);
+  }
+
+  await renderFileTree();
+  if (!isWorkspacePathNavigationCurrent(navigation)) return false;
+  scrollFileTreePathIntoView(targetPath, type);
+  if (type === 'directory') {
+    openMobilePanel('files');
+  }
+  return true;
+};
+
+const updateOpenedDirectoryPath = (path) => {
   if (dom.filePathInput) {
-    dom.filePathInput.value = String(json?.opened_path || requestedPath);
+    dom.filePathInput.value = String(path || '');
   }
   renderFilePathDisplay();
+};
+
+const openWorkspacePathFromMessage = async (rawPath) => {
+  const absolutePath = normalizeAbsoluteWorkspacePath(rawPath);
+  if (!absolutePath) throw getWorkspacePathUnavailableError();
+  const navigation = beginWorkspacePathNavigation();
+
+  try {
+    const probe = await probeWorkspacePath(absolutePath);
+    if (!isWorkspacePathNavigationCurrent(navigation)) return;
+
+    const relativePath = getRelativePathWithinRoot(
+      probe.absolutePath,
+      state.workspaceRoot,
+    );
+    if (relativePath !== null) {
+      const revealed = await revealWorkspaceTreePath({
+        relativePath,
+        type: probe.type,
+        entry: probe.entry || null,
+        navigation,
+      });
+      if (!isWorkspacePathNavigationCurrent(navigation) || revealed) return;
+    }
+
+    if (probe.type === 'directory') {
+      const directory = probe.directory || {};
+      await setFileTreeRoot({
+        root: directory.root || probe.absolutePath,
+        path: directory.path || '/',
+        entries: Array.isArray(directory.entries) ? directory.entries : [],
+      });
+      if (!isWorkspacePathNavigationCurrent(navigation)) return;
+      updateOpenedDirectoryPath(directory.opened_path || directory.root || probe.absolutePath);
+      openMobilePanel('files');
+      return;
+    }
+
+    const parentDirectory = await fetchOpenedDirectory(probe.parentPath);
+    if (!isWorkspacePathNavigationCurrent(navigation)) return;
+    await setFileTreeRoot({
+      root: parentDirectory?.root || probe.parentPath,
+      path: parentDirectory?.path || '/',
+      entries: Array.isArray(parentDirectory?.entries) ? parentDirectory.entries : [],
+    });
+    if (!isWorkspacePathNavigationCurrent(navigation)) return;
+    updateOpenedDirectoryPath(
+      parentDirectory?.opened_path || parentDirectory?.root || probe.parentPath,
+    );
+
+    const parentEntries = Array.isArray(parentDirectory?.entries) ? parentDirectory.entries : [];
+    const treeEntry = parentEntries.find((candidate) => (
+      candidate?.type === 'file' && candidate?.name === probe.name
+    ));
+    const treePath = joinPath(state.rootPath || '/', probe.name, 'file');
+    openFilePreview(treePath, treeEntry || probe.entry || null);
+    await renderFileTree();
+    if (!isWorkspacePathNavigationCurrent(navigation)) return;
+    scrollFileTreePathIntoView(treePath, 'file');
+  } catch (error) {
+    if (!isWorkspacePathNavigationCurrent(navigation)) return;
+    throw error;
+  }
 };
 
 const fetchModels = async () => {
@@ -7056,6 +7524,27 @@ dom.messages?.addEventListener('scroll', () => {
   saveActiveSessionScrollPosition();
 });
 
+dom.messages?.addEventListener('click', async (event) => {
+  const target = event.target instanceof Element
+    ? event.target.closest('a[data-workspace-path]')
+    : null;
+  if (!target || !dom.messages.contains(target)) return;
+  event.preventDefault();
+  if (target.getAttribute('aria-busy') === 'true') return;
+
+  const path = String(target.dataset.workspacePath || '').trim();
+  if (!isWorkspaceDataPath(path)) return;
+  target.setAttribute('aria-busy', 'true');
+  showChatError('');
+  try {
+    await openWorkspacePathFromMessage(path);
+  } catch (error) {
+    showChatError(String(error.message || 'Failed to open workspace path'));
+  } finally {
+    target.removeAttribute('aria-busy');
+  }
+});
+
 dom.sendButton.addEventListener('click', async (event) => {
   if (!state.isSending) return;
   event.preventDefault();
@@ -7077,6 +7566,7 @@ dom.sendButton.addEventListener('click', async (event) => {
 });
 
 dom.refreshFilesButton.addEventListener('click', async () => {
+  const navigation = beginWorkspacePathNavigation();
   if (fileTreeRefreshTimer) {
     window.clearTimeout(fileTreeRefreshTimer);
     fileTreeRefreshTimer = null;
@@ -7085,7 +7575,11 @@ dom.refreshFilesButton.addEventListener('click', async () => {
   const refreshPromise = state.currentPath
     ? runFileTreeRefreshNow({ silent: false })
     : fetchWorkspaceFiles();
-  await refreshPromise.catch((error) => showChatError(error.message));
+  await refreshPromise.catch((error) => {
+    if (isWorkspacePathNavigationCurrent(navigation)) {
+      showChatError(error.message);
+    }
+  });
 });
 
 dom.fileHomeButton?.addEventListener('click', async () => {

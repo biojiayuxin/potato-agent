@@ -92,4 +92,4 @@ def test_gateway_exit_clears_active_approval_and_cache_is_busted() -> None:
     assert "pendingApprovalsBySessionId.clear()" in gateway_exit_branch
     assert "syncActiveSessionUiState()" in gateway_exit_branch
     assert "renderApprovalModal()" in gateway_exit_branch
-    assert "app.js?v=20260718-approval-expiration-recovery" in index
+    assert "app.js?v=20260718-workspace-path-links-fenced" in index

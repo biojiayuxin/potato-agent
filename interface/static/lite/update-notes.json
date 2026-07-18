@@ -1,6 +1,16 @@
 {
   "updates": [
     {
+      "version": "2026-07-19-001",
+      "title": "Hermes and navigation",
+      "date": "July 19, 2026",
+      "summary": "",
+      "items": [
+        "Greatly streamlined the Hermes codebase.",
+        "Added quick directory and file navigation."
+      ]
+    },
+    {
       "version": "2026-07-14-001",
       "title": "Public data files",
       "date": "July 14, 2026",
