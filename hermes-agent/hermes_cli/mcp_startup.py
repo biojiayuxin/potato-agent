@@ -27,6 +27,12 @@ def start_background_mcp_discovery(*, logger, thread_name: str) -> None:
     """Spawn one shared background MCP discovery thread for this process."""
     global _mcp_discovery_started, _mcp_discovery_thread
 
+    from runtime_profile import get_runtime_profile
+
+    profile = get_runtime_profile()
+    if profile is not None and not profile.mcp_enabled:
+        return
+
     with _mcp_discovery_lock:
         if _mcp_discovery_started:
             return

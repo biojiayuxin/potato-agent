@@ -1,6 +1,7 @@
 """Tests for acp_adapter.server — HermesACPAgent ACP server."""
 
 import asyncio
+import builtins
 import os
 from types import SimpleNamespace
 from unittest.mock import MagicMock, AsyncMock, patch
@@ -1720,6 +1721,51 @@ class TestRegisterSessionMcpServers:
         # Should not raise
         await agent._register_session_mcp_servers(state, None)
         await agent._register_session_mcp_servers(state, [])
+
+    @pytest.mark.asyncio
+    async def test_profile_disabled_mcp_does_not_import_or_mutate_agent(
+        self, agent, mock_manager, monkeypatch
+    ):
+        """A sealed runtime profile rejects ACP-provided MCP servers early."""
+        from acp.schema import McpServerStdio
+
+        state = mock_manager.create_session(cwd="/tmp")
+        initial_toolsets = ["hermes-acp"]
+        initial_tools = [{"function": {"name": "terminal"}}]
+        initial_tool_names = {"terminal"}
+        state.agent.enabled_toolsets = initial_toolsets
+        state.agent.disabled_toolsets = None
+        state.agent.tools = initial_tools
+        state.agent.valid_tool_names = initial_tool_names
+        state.agent._invalidate_system_prompt = MagicMock()
+
+        server = McpServerStdio(
+            name="blocked",
+            command="/bin/test",
+            args=[],
+            env=[],
+        )
+        imported_mcp_modules = []
+        real_import = builtins.__import__
+
+        def track_mcp_import(name, *args, **kwargs):
+            if name == "tools.mcp_tool":
+                imported_mcp_modules.append(name)
+            return real_import(name, *args, **kwargs)
+
+        monkeypatch.setattr(
+            "acp_adapter.server.get_runtime_profile",
+            lambda: SimpleNamespace(mcp_enabled=False),
+        )
+        monkeypatch.setattr(builtins, "__import__", track_mcp_import)
+
+        await agent._register_session_mcp_servers(state, [server])
+
+        assert imported_mcp_modules == []
+        assert state.agent.enabled_toolsets is initial_toolsets
+        assert state.agent.tools is initial_tools
+        assert state.agent.valid_tool_names is initial_tool_names
+        state.agent._invalidate_system_prompt.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_registers_stdio_servers(self, agent, mock_manager):

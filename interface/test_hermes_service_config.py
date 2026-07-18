@@ -145,6 +145,46 @@ def test_build_config_data_defaults_approvals_to_smart() -> None:
     assert data["approvals"]["mode"] == DEFAULT_APPROVAL_MODE
 
 
+def test_build_config_data_applies_runtime_profile_after_user_overrides() -> None:
+    target = replace(
+        _target(),
+        config_overrides={
+            "platform_toolsets": {"cli": ["hermes-cli"]},
+            "security": {"allow_lazy_installs": True},
+            "terminal": {"backend": "docker"},
+            "browser": {
+                "cloud_provider": "browser-use",
+                "cdp_url": "http://remote.example:9222",
+                "engine": "lightpanda",
+            },
+            "memory": {"provider": "honcho"},
+            "context": {"engine": "lcm"},
+            "gateway": {
+                "platforms": {"telegram": {"enabled": True}},
+                "bind": "127.0.0.1",
+            },
+            "mcp_servers": {"example": {"command": "server"}},
+            "plugins": {"enabled": ["example"]},
+            "agent": {"disabled_toolsets": ["memory"]},
+        },
+    )
+
+    data = build_config_data({"hermes": {}}, target)
+
+    assert data["platform_toolsets"]["cli"][-1] == "no_mcp"
+    assert data["security"]["allow_lazy_installs"] is False
+    assert data["terminal"]["backend"] == "local"
+    assert data["browser"]["cloud_provider"] == "local"
+    assert data["browser"]["cdp_url"] == ""
+    assert data["browser"]["engine"] == "chrome"
+    assert data["memory"]["provider"] == ""
+    assert data["context"]["engine"] == "compressor"
+    assert data["gateway"] == {"platforms": {}, "bind": "127.0.0.1"}
+    assert data["mcp_servers"] == {}
+    assert data["plugins"]["enabled"] == []
+    assert "memory" in data["agent"]["disabled_toolsets"]
+
+
 def test_build_config_data_allows_global_approval_mode_override() -> None:
     data = build_config_data(
         {
@@ -222,6 +262,130 @@ def test_build_systemd_unit_hides_interface_paths() -> None:
     assert "InaccessiblePaths=-/srv/potato_agent" in unit
     assert "InaccessiblePaths=-/var/lib/potato-agent" in unit
     assert "InaccessiblePaths=-/opt/interface-env" in unit
+
+
+@pytest.mark.parametrize(
+    ("hermes_config", "error"),
+    [
+        (
+            {"service": {"restart": "no\nUser=root\nExecStartPost=/usr/bin/true"}},
+            "control characters",
+        ),
+        ({"service": {"restart": "sometimes"}}, "must be one of"),
+        (
+            {"service": {"description_template": "Hermes\nUser=root"}},
+            "control characters",
+        ),
+        (
+            {"service": {"description_template": "Hermes\u2028User=root"}},
+            "control characters",
+        ),
+        ({"executable": "/usr/local/bin/hermes\nExecStartPost=/bin/true"}, "control"),
+        (
+            {"service": {"inaccessible_paths": ["/srv/data\nReadWritePaths=/"]}},
+            "control",
+        ),
+    ],
+)
+def test_build_systemd_unit_rejects_directive_injection(
+    hermes_config, error
+) -> None:
+    with pytest.raises(RuntimeError, match=error):
+        build_systemd_unit({"hermes": hermes_config}, _target())
+
+
+def test_build_systemd_unit_injects_runtime_profile_guards(monkeypatch) -> None:
+    unit = build_systemd_unit(
+        {"hermes": {"runtime_profile_path": "/opt/potato/profile.yaml"}},
+        _target(),
+    )
+
+    assert "Environment=HERMES_DISABLE_LAZY_INSTALLS=1" in unit
+    assert "Environment=HERMES_SKIP_NODE_BOOTSTRAP=1" in unit
+    assert "Environment=HERMES_DISABLE_GATEWAY_PLATFORMS=1" in unit
+    assert "Environment=HERMES_DISABLE_MCP=1" in unit
+    assert "Environment=HERMES_DISABLE_CRON=1" in unit
+    assert "Environment=HERMES_DISABLE_KANBAN=1" in unit
+    assert "Environment=TERMINAL_ENV=local" in unit
+    assert "Environment=AGENT_BROWSER_ENGINE=chrome" in unit
+    assert "Environment=BROWSER_CDP_URL=" in unit
+    assert "Environment=CAMOFOX_URL=" in unit
+    assert (
+        "Environment=HERMES_BUNDLED_SKILLS="
+        "/opt/potato-hermes-lite/current/share/hermes/skills"
+    ) in unit
+    assert (
+        "Environment=HERMES_OPTIONAL_SKILLS="
+        "/opt/potato-hermes-lite/current/share/hermes/optional-skills"
+    ) in unit
+    assert (
+        "Environment=HERMES_AGENT_BROWSER_BIN_DIR="
+        "/opt/potato-hermes-lite/current/browser/bin"
+    ) in unit
+    assert (
+        "Environment=AGENT_BROWSER_EXECUTABLE_PATH="
+        "/opt/potato-hermes-lite/current/browser/chrome/chrome-linux64/chrome"
+    ) in unit
+    assert "Environment=HERMES_RUNTIME_PROFILE_PATH=/opt/potato/profile.yaml" in unit
+
+
+def test_build_systemd_unit_accepts_configured_runtime_profile_path(
+    monkeypatch,
+) -> None:
+    monkeypatch.delenv("HERMES_RUNTIME_PROFILE_PATH", raising=False)
+
+    unit = build_systemd_unit(
+        {"hermes": {"runtime_profile_path": "/opt/potato/release/profile.yaml"}},
+        _target(),
+    )
+
+    assert (
+        "Environment=HERMES_RUNTIME_PROFILE_PATH=/opt/potato/release/profile.yaml"
+        in unit
+    )
+
+
+def test_build_systemd_unit_accepts_resolved_loopback_cdp() -> None:
+    unit = build_systemd_unit(
+        {
+            "hermes": {
+                "browser_cdp_url": (
+                    "ws://127.0.0.1:9222/devtools/browser/local"
+                )
+            }
+        },
+        _target(),
+    )
+
+    assert (
+        "Environment=BROWSER_CDP_URL="
+        "ws://127.0.0.1:9222/devtools/browser/local"
+    ) in unit
+
+
+def test_build_systemd_unit_uses_required_default_profile_path(monkeypatch) -> None:
+    monkeypatch.delenv("HERMES_RUNTIME_PROFILE_PATH", raising=False)
+
+    unit = build_systemd_unit({"hermes": {}}, _target())
+
+    assert "Environment=HERMES_DISABLE_LAZY_INSTALLS=1" in unit
+    assert "Environment=HERMES_SKIP_NODE_BOOTSTRAP=1" in unit
+    assert "Environment=HERMES_DISABLE_GATEWAY_PLATFORMS=1" in unit
+    assert "Environment=HERMES_DISABLE_MCP=1" in unit
+    assert "Environment=HERMES_DISABLE_CRON=1" in unit
+    assert "Environment=HERMES_DISABLE_KANBAN=1" in unit
+    assert "Environment=TERMINAL_ENV=local" in unit
+    assert "Environment=AGENT_BROWSER_ENGINE=chrome" in unit
+    assert "Environment=BROWSER_CDP_URL=" in unit
+    assert "Environment=CAMOFOX_URL=" in unit
+    assert "Environment=HERMES_BUNDLED_SKILLS=" in unit
+    assert "Environment=HERMES_OPTIONAL_SKILLS=" in unit
+    assert "Environment=HERMES_AGENT_BROWSER_BIN_DIR=" in unit
+    assert "Environment=AGENT_BROWSER_EXECUTABLE_PATH=" in unit
+    assert (
+        "Environment=HERMES_RUNTIME_PROFILE_PATH="
+        "/opt/potato-hermes-lite/current/config/runtime-profile.yaml"
+    ) in unit
 
 
 def test_build_systemd_unit_prioritizes_agent_runtime() -> None:

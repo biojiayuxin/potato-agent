@@ -13,6 +13,7 @@ from typing import Any
 import yaml
 
 from interface.mapping import HermesTarget
+from interface.hermes_profile import apply_runtime_profile
 from interface.model_proxy_config import (
     get_model_proxy_base_url,
     local_model_proxy_token,
@@ -30,8 +31,6 @@ DEFAULT_MODEL_API_MODE = "codex_responses"
 DEFAULT_REASONING_EFFORT = "xhigh"
 VALID_REASONING_EFFORTS = ("none", "minimal", "low", "medium", "high", "xhigh")
 VALID_API_MODES = {
-    "anthropic_messages",
-    "bedrock_converse",
     "chat_completions",
     "codex_responses",
 }
@@ -214,6 +213,10 @@ def model_option_from_mapping(entry: dict[str, Any], *, path: str) -> ModelOptio
         )
     if not provider:
         provider = DEFAULT_MODEL_PROVIDER
+    if provider != DEFAULT_MODEL_PROVIDER:
+        raise ModelOptionsError(
+            f"{path}.provider must be {DEFAULT_MODEL_PROVIDER!r}."
+        )
 
     return ModelOption(
         id=option_id,
@@ -417,7 +420,7 @@ def _patch_user_hermes_config(
     patched.pop("fallback_providers", None)
     patched.pop("fallback_model", None)
     _strip_api_keys_outside_model(patched, protected_model=model)
-    return patched
+    return apply_runtime_profile(patched)
 
 
 def strip_openai_api_key_env(existing: str | None) -> str:

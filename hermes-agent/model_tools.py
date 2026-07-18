@@ -29,7 +29,8 @@ import threading
 import time
 from typing import Dict, Any, List, Optional, Tuple
 
-from tools.registry import discover_builtin_tools, registry
+from runtime_profile import get_runtime_profile
+from tools.registry import ensure_builtin_tools, registry
 from toolsets import resolve_toolset, validate_toolset
 
 logger = logging.getLogger(__name__)
@@ -177,7 +178,7 @@ def _run_async(coro):
 # Tool Discovery  (importing each module triggers its registry.register calls)
 # =============================================================================
 
-discover_builtin_tools()
+ensure_builtin_tools()
 
 # MCP tool discovery (external MCP servers from config) used to run here as
 # a module-level side effect.  It was removed because discover_mcp_tools()
@@ -193,11 +194,12 @@ discover_builtin_tools()
 #   - acp_adapter/server.py     -> asyncio.to_thread on session init
 
 # Plugin tool discovery (user/project/pip plugins)
-try:
-    from hermes_cli.plugins import discover_plugins
-    discover_plugins()
-except Exception as e:
-    logger.debug("Plugin discovery failed: %s", e)
+if get_runtime_profile() is None:
+    try:
+        from hermes_cli.plugins import discover_plugins
+        discover_plugins()
+    except Exception as e:
+        logger.debug("Plugin discovery failed: %s", e)
 
 
 # =============================================================================
@@ -207,6 +209,20 @@ except Exception as e:
 TOOL_TO_TOOLSET_MAP: Dict[str, str] = registry.get_tool_to_toolset_map()
 
 TOOLSET_REQUIREMENTS: Dict[str, dict] = registry.get_toolset_requirements()
+
+_compat_registry_generation = registry._generation
+
+
+def _refresh_compat_registry_maps() -> None:
+    """Refresh legacy dictionaries in place when incremental discovery mutates."""
+    global _compat_registry_generation
+    if _compat_registry_generation == registry._generation:
+        return
+    TOOL_TO_TOOLSET_MAP.clear()
+    TOOL_TO_TOOLSET_MAP.update(registry.get_tool_to_toolset_map())
+    TOOLSET_REQUIREMENTS.clear()
+    TOOLSET_REQUIREMENTS.update(registry.get_toolset_requirements())
+    _compat_registry_generation = registry._generation
 
 # Resolved tool names from the last get_tool_definitions() call.
 # Used by code_execution_tool to know which tools are available in this session.
@@ -285,6 +301,14 @@ def get_tool_definitions(
     Returns:
         Filtered list of OpenAI-format tool definitions.
     """
+    profile = get_runtime_profile()
+    if profile is not None:
+        enabled_toolsets = profile.constrain_enabled_toolsets(enabled_toolsets)
+        disabled_toolsets = profile.merge_disabled_toolsets(disabled_toolsets)
+
+    ensure_builtin_tools(enabled_toolsets, disabled_toolsets)
+    _refresh_compat_registry_maps()
+
     # Fast path: memoized result when the caller doesn't need stdout prints.
     # The cache key captures every argument-level input; the registry
     # generation captures registry mutations (MCP refresh, plugin load).
@@ -397,6 +421,13 @@ def _compute_tool_definitions(
     # needed; plugins respect enabled_toolsets / disabled_toolsets like any
     # other toolset.
 
+    profile = get_runtime_profile()
+    if profile is not None:
+        # Final name-level ceiling. This also removes tools co-registered by an
+        # allowed module (for example video_analyze from vision_tools) and the
+        # browser toolset's upstream web_search convenience member.
+        tools_to_include.intersection_update(profile.expected_tool_set)
+
     # Ask the registry for schemas (only returns tools whose check_fn passes)
     filtered_tools = registry.get_definitions(tools_to_include, quiet=quiet_mode)
 
@@ -500,25 +531,26 @@ def _compute_tool_definitions(
     # This is deliberately the last step before returning — sanitization
     # has already normalized schemas, and the assembly is idempotent in
     # case some caller invokes get_tool_definitions twice.
-    try:
-        from tools.tool_search import assemble_tool_defs, load_config as _load_ts_config
-        ts_cfg = _load_ts_config()
-        if not skip_tool_search_assembly and ts_cfg.enabled != "off":
-            context_length = _resolve_active_context_length()
-            assembly = assemble_tool_defs(
-                filtered_tools,
-                context_length=context_length,
-                config=ts_cfg,
-            )
-            if assembly.activated and not quiet_mode:
-                print(
-                    f"🔎 Tool Search: {assembly.deferred_count} MCP/plugin tools deferred "
-                    f"(~{assembly.deferred_tokens} tokens) behind tool_search/describe/call. "
-                    f"Threshold ~{assembly.threshold_tokens} tokens."
+    if profile is None:
+        try:
+            from tools.tool_search import assemble_tool_defs, load_config as _load_ts_config
+            ts_cfg = _load_ts_config()
+            if not skip_tool_search_assembly and ts_cfg.enabled != "off":
+                context_length = _resolve_active_context_length()
+                assembly = assemble_tool_defs(
+                    filtered_tools,
+                    context_length=context_length,
+                    config=ts_cfg,
                 )
-            filtered_tools = assembly.tool_defs
-    except Exception as e:  # pragma: no cover — never break tool loading
-        logger.warning("Tool search assembly skipped: %s", e)
+                if assembly.activated and not quiet_mode:
+                    print(
+                        f"🔎 Tool Search: {assembly.deferred_count} MCP/plugin tools deferred "
+                        f"(~{assembly.deferred_tokens} tokens) behind tool_search/describe/call. "
+                        f"Threshold ~{assembly.threshold_tokens} tokens."
+                    )
+                filtered_tools = assembly.tool_defs
+        except Exception as e:  # pragma: no cover — never break tool loading
+            logger.warning("Tool search assembly skipped: %s", e)
 
     return filtered_tools
 
@@ -900,6 +932,13 @@ def handle_function_call(
     Returns:
         Function result as a JSON string.
     """
+    profile = get_runtime_profile()
+    if profile is not None and function_name not in profile.expected_tool_set:
+        return json.dumps(
+            {"error": f"Tool disabled by runtime profile: {function_name}"},
+            ensure_ascii=False,
+        )
+
     # Coerce string arguments to their schema-declared types (e.g. "42"→42)
     function_args = coerce_tool_args(function_name, function_args)
     if not isinstance(function_args, dict):
@@ -1193,24 +1232,29 @@ def handle_function_call(
 
 def get_all_tool_names() -> List[str]:
     """Return all registered tool names."""
+    _refresh_compat_registry_maps()
     return registry.get_all_tool_names()
 
 
 def get_toolset_for_tool(tool_name: str) -> Optional[str]:
     """Return the toolset a tool belongs to."""
+    _refresh_compat_registry_maps()
     return registry.get_toolset_for_tool(tool_name)
 
 
 def get_available_toolsets() -> Dict[str, dict]:
     """Return toolset availability info for UI display."""
+    _refresh_compat_registry_maps()
     return registry.get_available_toolsets()
 
 
 def check_toolset_requirements() -> Dict[str, bool]:
     """Return {toolset: available_bool} for every registered toolset."""
+    _refresh_compat_registry_maps()
     return registry.check_toolset_requirements()
 
 
 def check_tool_availability(quiet: bool = False) -> Tuple[List[str], List[dict]]:
     """Return (available_toolsets, unavailable_info)."""
+    _refresh_compat_registry_maps()
     return registry.check_tool_availability(quiet=quiet)

@@ -120,6 +120,54 @@ def test_prepare_agent_startup_skips_mcp_bootstrap_for_tui_chat(monkeypatch):
     assert mcp_startup._mcp_discovery_thread is None
 
 
+def test_runtime_profile_skips_all_cli_mcp_startup_before_import(monkeypatch):
+    import runtime_profile
+
+    calls = {"mcp": 0}
+    monkeypatch.setattr(
+        runtime_profile,
+        "get_runtime_profile",
+        lambda: types.SimpleNamespace(mcp_enabled=False),
+    )
+    monkeypatch.setitem(
+        sys.modules,
+        "hermes_cli.plugins",
+        types.SimpleNamespace(discover_plugins=lambda: None),
+    )
+    monkeypatch.setitem(
+        sys.modules,
+        "hermes_cli.config",
+        types.SimpleNamespace(load_config=lambda: {}),
+    )
+    monkeypatch.setitem(
+        sys.modules,
+        "agent.shell_hooks",
+        types.SimpleNamespace(register_from_config=lambda *_a, **_k: None),
+    )
+    monkeypatch.setitem(
+        sys.modules,
+        "tools.mcp_tool",
+        types.SimpleNamespace(
+            discover_mcp_tools=lambda: calls.__setitem__("mcp", calls["mcp"] + 1)
+        ),
+    )
+    monkeypatch.setattr(
+        mcp_startup,
+        "_has_configured_mcp_servers",
+        lambda: (_ for _ in ()).throw(AssertionError("MCP config was read")),
+    )
+
+    main_mod._prepare_agent_startup(_agent_args())
+    mcp_startup.start_background_mcp_discovery(
+        logger=types.SimpleNamespace(debug=lambda *_a, **_k: None),
+        thread_name="blocked-mcp-discovery",
+    )
+
+    assert calls["mcp"] == 0
+    assert mcp_startup._mcp_discovery_started is False
+    assert mcp_startup._mcp_discovery_thread is None
+
+
 def test_cli_get_tool_definitions_briefly_waits_for_fast_mcp_thread(monkeypatch):
     thread = threading.Thread(target=lambda: time.sleep(0.05), daemon=True)
     thread.start()

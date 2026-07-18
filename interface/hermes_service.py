@@ -5,6 +5,7 @@ import fcntl
 import json
 import os
 import pwd
+import re
 import shutil
 import stat
 import subprocess
@@ -18,6 +19,11 @@ from urllib import request as urllib_request
 import yaml
 
 from interface.file_browser_policy import DEFAULT_PUBLIC_DATA_PATH
+from interface.hermes_profile import (
+    DEFAULT_HERMES_LITE_EXECUTABLE,
+    apply_runtime_profile,
+    runtime_profile_environment,
+)
 from interface.mapping import HermesTarget, resolve_env_placeholders
 from interface.model_options import (
     DEFAULT_REASONING_EFFORT,
@@ -32,7 +38,7 @@ from interface.model_proxy_config import (
 
 ROOT_DIR = Path(__file__).resolve().parent
 REPO_ROOT = ROOT_DIR.parent
-DEFAULT_HERMES_BIN = "/usr/local/bin/hermes"
+DEFAULT_HERMES_BIN = str(DEFAULT_HERMES_LITE_EXECUTABLE)
 DEFAULT_SERVICE_RESTART = "always"
 DEFAULT_SERVICE_RESTART_SEC = 3
 DEFAULT_TERMINAL_TIMEOUT = 180
@@ -64,6 +70,39 @@ DEFAULT_PLAN_MODE_SKILLS_PATH = REPO_ROOT / "skills" / MANAGED_PLAN_MODE_SKILLS_
 PUBLIC_DATA_LINK_NAME = "public_data"
 SYSTEMCTL_STOP_TIMEOUT_SECONDS = 120.0
 SYSTEMCTL_QUERY_TIMEOUT_SECONDS = 30.0
+VALID_SERVICE_RESTART_VALUES = frozenset(
+    {
+        "no",
+        "on-success",
+        "on-failure",
+        "on-abnormal",
+        "on-watchdog",
+        "on-abort",
+        "always",
+    }
+)
+_SYSTEMD_ACCOUNT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_.-]*\$?$")
+
+
+def _systemd_scalar(value: Any, field: str, *, allow_whitespace: bool = False) -> str:
+    rendered = str(value)
+    if not rendered:
+        raise RuntimeError(f"{field} must not be empty.")
+    if (
+        len(rendered.splitlines()) != 1
+        or any(ord(character) < 32 or ord(character) == 127 for character in rendered)
+    ):
+        raise RuntimeError(f"{field} must not contain control characters.")
+    if not allow_whitespace and any(character.isspace() for character in rendered):
+        raise RuntimeError(f"{field} must not contain whitespace.")
+    return rendered
+
+
+def _systemd_absolute_path(value: Any, field: str) -> str:
+    rendered = _systemd_scalar(value, field)
+    if not Path(rendered).is_absolute():
+        raise RuntimeError(f"{field} must be an absolute path.")
+    return rendered
 
 
 def _run_command(
@@ -313,30 +352,72 @@ def build_config_data(config: dict[str, Any], user: HermesTarget) -> dict[str, A
     data.pop("fallback_providers", None)
     data.pop("fallback_model", None)
     _strip_api_keys_outside_model(data, protected_model=model if isinstance(model, dict) else None)
-    return data
+    return apply_runtime_profile(data)
 
 
 def build_systemd_unit(config: dict[str, Any], user: HermesTarget) -> str:
     hermes_cfg = config.get("hermes") or {}
     service_cfg = hermes_cfg.get("service") or {}
-    description_template = str(
-        service_cfg.get("description_template") or "Hermes Agent for {display_name}"
+    description_template = _systemd_scalar(
+        service_cfg.get("description_template") or "Hermes Agent for {display_name}",
+        "hermes.service.description_template",
+        allow_whitespace=True,
     )
-    restart = str(service_cfg.get("restart") or DEFAULT_SERVICE_RESTART)
+    restart = _systemd_scalar(
+        service_cfg.get("restart") or DEFAULT_SERVICE_RESTART,
+        "hermes.service.restart",
+    )
+    if restart not in VALID_SERVICE_RESTART_VALUES:
+        raise RuntimeError(
+            "hermes.service.restart must be one of: "
+            + ", ".join(sorted(VALID_SERVICE_RESTART_VALUES))
+        )
     restart_sec = int(service_cfg.get("restart_sec") or DEFAULT_SERVICE_RESTART_SEC)
     timeout_stop_sec = _systemd_timeout_stop_sec(config, user)
-    hermes_bin = str(hermes_cfg.get("executable") or DEFAULT_HERMES_BIN)
+    hermes_bin = _systemd_absolute_path(
+        hermes_cfg.get("executable") or DEFAULT_HERMES_BIN,
+        "hermes.executable",
+    )
     inaccessible_paths = service_cfg.get("inaccessible_paths")
     if inaccessible_paths is None:
         inaccessible_paths = DEFAULT_INACCESSIBLE_PATHS
     if not isinstance(inaccessible_paths, (list, tuple)):
         inaccessible_paths = DEFAULT_INACCESSIBLE_PATHS
 
-    rendered_description = description_template.format(
-        username=user.username,
-        display_name=user.display_name,
-        linux_user=user.linux_user,
+    rendered_description = _systemd_scalar(
+        description_template.format(
+            username=user.username,
+            display_name=user.display_name,
+            linux_user=user.linux_user,
+        ),
+        "rendered service description",
+        allow_whitespace=True,
     )
+    linux_user = _systemd_scalar(user.linux_user, "target.linux_user")
+    if _SYSTEMD_ACCOUNT_RE.fullmatch(linux_user) is None:
+        raise RuntimeError("target.linux_user is not a valid systemd account name.")
+    home_dir = _systemd_absolute_path(user.home_dir, "target.home_dir")
+    hermes_home = _systemd_absolute_path(user.hermes_home, "target.hermes_home")
+    inaccessible_path_values = [
+        _systemd_absolute_path(path, "hermes.service.inaccessible_paths[]")
+        for path in inaccessible_paths
+        if str(path).strip()
+    ]
+    configured_profile_path = hermes_cfg.get("runtime_profile_path")
+    if configured_profile_path is not None and not isinstance(
+        configured_profile_path, (str, os.PathLike)
+    ):
+        raise RuntimeError("hermes.runtime_profile_path must be a filesystem path.")
+    runtime_env = runtime_profile_environment(
+        profile_path=configured_profile_path,
+        browser_cdp_url=str(hermes_cfg.get("browser_cdp_url") or ""),
+    )
+    runtime_profile_lines = []
+    if "HERMES_RUNTIME_PROFILE_PATH" in runtime_env:
+        runtime_profile_lines.append(
+            "Environment=HERMES_RUNTIME_PROFILE_PATH="
+            f"{runtime_env['HERMES_RUNTIME_PROFILE_PATH']}"
+        )
     return "\n".join(
         [
             "[Unit]",
@@ -345,19 +426,33 @@ def build_systemd_unit(config: dict[str, Any], user: HermesTarget) -> str:
             "",
             "[Service]",
             "Type=simple",
-            f"User={user.linux_user}",
-            f"Group={user.linux_user}",
-            f"WorkingDirectory={user.home_dir}",
-            f"Environment=HOME={user.home_dir}",
-            f"Environment=HERMES_HOME={user.hermes_home}",
+            f"User={linux_user}",
+            f"Group={linux_user}",
+            f"WorkingDirectory={home_dir}",
+            f"Environment=HOME={home_dir}",
+            f"Environment=HERMES_HOME={hermes_home}",
+            f"Environment=HERMES_DISABLE_LAZY_INSTALLS={runtime_env['HERMES_DISABLE_LAZY_INSTALLS']}",
+            f"Environment=HERMES_SKIP_NODE_BOOTSTRAP={runtime_env['HERMES_SKIP_NODE_BOOTSTRAP']}",
+            f"Environment=HERMES_DISABLE_GATEWAY_PLATFORMS={runtime_env['HERMES_DISABLE_GATEWAY_PLATFORMS']}",
+            f"Environment=HERMES_DISABLE_MCP={runtime_env['HERMES_DISABLE_MCP']}",
+            f"Environment=HERMES_DISABLE_CRON={runtime_env['HERMES_DISABLE_CRON']}",
+            f"Environment=HERMES_DISABLE_KANBAN={runtime_env['HERMES_DISABLE_KANBAN']}",
+            f"Environment=TERMINAL_ENV={runtime_env['TERMINAL_ENV']}",
+            f"Environment=AGENT_BROWSER_ENGINE={runtime_env['AGENT_BROWSER_ENGINE']}",
+            f"Environment=BROWSER_CDP_URL={runtime_env['BROWSER_CDP_URL']}",
+            f"Environment=CAMOFOX_URL={runtime_env['CAMOFOX_URL']}",
+            f"Environment=HERMES_BUNDLED_SKILLS={runtime_env['HERMES_BUNDLED_SKILLS']}",
+            f"Environment=HERMES_OPTIONAL_SKILLS={runtime_env['HERMES_OPTIONAL_SKILLS']}",
+            f"Environment=HERMES_AGENT_BROWSER_BIN_DIR={runtime_env['HERMES_AGENT_BROWSER_BIN_DIR']}",
+            f"Environment=AGENT_BROWSER_EXECUTABLE_PATH={runtime_env['AGENT_BROWSER_EXECUTABLE_PATH']}",
+            *runtime_profile_lines,
             f"ExecStart={hermes_bin} gateway run --replace",
             *AGENT_SERVICE_PRIORITY_DIRECTIVES,
             "PrivateTmp=yes",
             "NoNewPrivileges=yes",
             *[
                 f"InaccessiblePaths=-{path}"
-                for path in inaccessible_paths
-                if str(path).strip()
+                for path in inaccessible_path_values
             ],
             f"Restart={restart}",
             f"RestartSec={restart_sec}",

@@ -96,6 +96,14 @@ from urllib.parse import urlparse
 logger = logging.getLogger(__name__)
 
 
+def _mcp_disabled_by_runtime_profile() -> bool:
+    """Return whether process policy forbids all MCP activity."""
+    from runtime_profile import get_runtime_profile
+
+    profile = get_runtime_profile()
+    return profile is not None and not profile.mcp_enabled
+
+
 # ---------------------------------------------------------------------------
 # Stdio subprocess stderr redirection
 # ---------------------------------------------------------------------------
@@ -1235,6 +1243,9 @@ class MCPServerTask:
         After the initial ``await`` (list_tools), all mutations are synchronous
         — atomic from the event loop's perspective.
         """
+        if _mcp_disabled_by_runtime_profile():
+            return
+
         from tools.registry import registry
 
         async with self._refresh_lock:
@@ -1743,7 +1754,7 @@ class MCPServerTask:
 
     async def _discover_tools(self):
         """Discover tools from the connected session."""
-        if self.session is None:
+        if _mcp_disabled_by_runtime_profile() or self.session is None:
             return
         async with self._rpc_lock:
             tools_result = await self.session.list_tools()
@@ -1759,6 +1770,11 @@ class MCPServerTask:
         Includes automatic reconnection with exponential backoff if the
         connection drops unexpectedly (unless shutdown was requested).
         """
+        if _mcp_disabled_by_runtime_profile():
+            self._error = RuntimeError("MCP is disabled by the runtime profile")
+            self._ready.set()
+            return
+
         self._config = config
         self.tool_timeout = config.get("timeout", _DEFAULT_TOOL_TIMEOUT)
         self._auth_type = (config.get("auth") or "").lower().strip()
@@ -1940,6 +1956,9 @@ class MCPServerTask:
 
     async def start(self, config: dict):
         """Create the background Task and wait until ready (or failed)."""
+        if _mcp_disabled_by_runtime_profile():
+            raise RuntimeError("MCP is disabled by the runtime profile")
+
         self._task = asyncio.ensure_future(self.run(config))
         await self._ready.wait()
         if self._error:
@@ -2446,6 +2465,9 @@ def _mcp_loop_exception_handler(loop, context):
 
 def _ensure_mcp_loop():
     """Start the background event loop thread if not already running."""
+    if _mcp_disabled_by_runtime_profile():
+        raise RuntimeError("MCP is disabled by the runtime profile")
+
     global _mcp_loop, _mcp_thread
     with _lock:
         if _mcp_loop is not None and _mcp_loop.is_running():
@@ -2471,6 +2493,11 @@ def _run_on_mcp_loop(coro_or_factory, timeout: float = 30):
     Poll in short intervals so the calling agent thread can honor user
     interrupts while the MCP work is still running on the background loop.
     """
+    if _mcp_disabled_by_runtime_profile():
+        if asyncio.iscoroutine(coro_or_factory):
+            coro_or_factory.close()
+        raise RuntimeError("MCP is disabled by the runtime profile")
+
     from tools.interrupt import is_interrupted
     from agent.async_utils import safe_schedule_threadsafe
 
@@ -2550,6 +2577,9 @@ def _load_mcp_config() -> Dict[str, dict]:
     ``${ENV_VAR}`` placeholders in string values are resolved from
     ``os.environ`` (which includes ``~/.hermes/.env`` loaded at startup).
     """
+    if _mcp_disabled_by_runtime_profile():
+        return {}
+
     try:
         from hermes_cli.config import load_config
         config = load_config()
@@ -2583,6 +2613,9 @@ async def _connect_server(name: str, config: dict) -> MCPServerTask:
         ImportError: if HTTP transport is needed but not available.
         Exception: on connection or initialization failure.
     """
+    if _mcp_disabled_by_runtime_profile():
+        raise RuntimeError("MCP is disabled by the runtime profile")
+
     server = MCPServerTask(name)
     await server.start(config)
     return server
@@ -3364,6 +3397,9 @@ def _register_server_tools(name: str, server: MCPServerTask, config: dict) -> Li
     Returns:
         List of registered prefixed tool names.
     """
+    if _mcp_disabled_by_runtime_profile():
+        return []
+
     from tools.registry import registry
 
     registered_names: List[str] = []
@@ -3503,6 +3539,9 @@ def register_mcp_servers(servers: Dict[str, dict]) -> List[str]:
     Returns:
         List of all currently registered MCP tool names.
     """
+    if _mcp_disabled_by_runtime_profile():
+        return []
+
     if not _MCP_AVAILABLE:
         logger.debug("MCP SDK not available -- skipping explicit MCP registration")
         return []
@@ -3598,6 +3637,9 @@ def discover_mcp_tools() -> List[str]:
     Returns:
         List of all registered MCP tool names.
     """
+    if _mcp_disabled_by_runtime_profile():
+        return []
+
     if not _MCP_AVAILABLE:
         logger.debug("MCP SDK not available -- skipping MCP tool discovery")
         return []
@@ -3646,7 +3688,7 @@ def is_mcp_tool_parallel_safe(tool_name: str) -> bool:
 
     Returns False for non-MCP tools or tools from servers without the flag.
     """
-    if not tool_name.startswith("mcp_"):
+    if _mcp_disabled_by_runtime_profile() or not tool_name.startswith("mcp_"):
         return False
     with _lock:
         server_name = _mcp_tool_server_names.get(tool_name)
@@ -3659,6 +3701,9 @@ def get_mcp_status() -> List[dict]:
     Returns a list of dicts with keys: name, transport, tools, connected.
     Includes both successfully connected servers and configured-but-failed ones.
     """
+    if _mcp_disabled_by_runtime_profile():
+        return []
+
     result: List[dict] = []
 
     # Get configured servers from config
@@ -3710,6 +3755,9 @@ def probe_mcp_server_tools() -> Dict[str, List[tuple]]:
         Dict mapping server name to list of (tool_name, description) tuples.
         Servers that fail to connect are omitted from the result.
     """
+    if _mcp_disabled_by_runtime_profile():
+        return {}
+
     if not _MCP_AVAILABLE:
         return {}
 
@@ -3772,6 +3820,9 @@ def shutdown_mcp_servers():
     the anyio cancel-scope cleanup happens in the same Task that opened it.
     All servers are shut down in parallel via ``asyncio.gather``.
     """
+    if _mcp_disabled_by_runtime_profile():
+        return
+
     with _lock:
         servers_snapshot = list(_servers.values())
 
@@ -3834,6 +3885,9 @@ def _kill_orphaned_mcp_children(include_active: bool = False) -> None:
     used only at final shutdown, after the MCP event loop has stopped and no
     sessions can still be in flight.
     """
+    if _mcp_disabled_by_runtime_profile():
+        return
+
     import signal as _signal
 
     with _lock:

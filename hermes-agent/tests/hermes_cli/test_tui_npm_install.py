@@ -152,6 +152,31 @@ def test_rebuild_when_tui_source_newer_than_bundle(tmp_path: Path, main_mod) -> 
     assert main_mod._tui_need_rebuild(tmp_path) is True
 
 
+def test_runtime_policy_blocks_tui_npm_install(
+    tmp_path: Path, main_mod, monkeypatch, capsys
+) -> None:
+    import runtime_profile
+
+    monkeypatch.delenv("HERMES_TUI_DIR", raising=False)
+    monkeypatch.delenv("TERMUX_VERSION", raising=False)
+    monkeypatch.setattr(runtime_profile, "automatic_installs_disabled", lambda: True)
+    monkeypatch.setattr(main_mod, "_ensure_tui_node", lambda: None)
+    monkeypatch.setattr(main_mod, "_find_bundled_tui", lambda: None)
+    monkeypatch.setattr(main_mod, "_tui_need_npm_install", lambda _root: True)
+    monkeypatch.setattr(main_mod.shutil, "which", lambda name: f"/bin/{name}")
+    monkeypatch.setattr(
+        main_mod.subprocess,
+        "run",
+        lambda *_a, **_k: (_ for _ in ()).throw(AssertionError("npm ran")),
+    )
+
+    with pytest.raises(SystemExit) as exc:
+        main_mod._make_tui_argv(tmp_path, tui_dev=False)
+
+    assert exc.value.code == 1
+    assert "automatic npm install is disabled" in capsys.readouterr().err
+
+
 def test_make_tui_argv_skips_build_only_on_termux_when_fresh(
     tmp_path: Path, main_mod, monkeypatch
 ) -> None:

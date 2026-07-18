@@ -45,6 +45,7 @@ import subprocess
 from pathlib import Path
 from typing import Optional, Dict, Any, List
 
+from runtime_profile import get_runtime_profile
 from utils import env_var_enabled
 
 logger = logging.getLogger(__name__)
@@ -65,8 +66,11 @@ from tools.interrupt import is_interrupted, _interrupt_event  # noqa: F401 — r
 # Custom Singularity Environment with more space
 # =============================================================================
 
-# Singularity helpers (scratch dir, SIF cache) now live in tools/environments/singularity.py
-from tools.environments.singularity import _get_scratch_dir
+def _get_scratch_dir():
+    """Load Singularity scratch helpers only when cleanup code needs them."""
+    from tools.environments.singularity import _get_scratch_dir as _impl
+
+    return _impl()
 from tools.tool_backend_helpers import (
     coerce_modal_mode,
     has_direct_modal_credentials,
@@ -817,15 +821,24 @@ def _transform_sudo_command(command: str | None) -> tuple[str | None, str | None
     return command, None
 
 
-# Environment classes now live in tools/environments/
+# The local backend is the only eager environment import. Other backends are
+# loaded in their selection branches so a local-only runtime stays lean.
 from tools.environments.local import LocalEnvironment as _LocalEnvironment
-from tools.environments.singularity import SingularityEnvironment as _SingularityEnvironment
-from tools.environments.ssh import SSHEnvironment as _SSHEnvironment
-from tools.environments.docker import DockerEnvironment as _DockerEnvironment
-from tools.environments.modal import ModalEnvironment as _ModalEnvironment
-from tools.environments.managed_modal import ManagedModalEnvironment as _ManagedModalEnvironment
-from tools.managed_tool_gateway import is_managed_tool_gateway_ready
+# Test-patchable compatibility surfaces. ``None`` means import the real class
+# lazily in the selected backend branch.
+_DockerEnvironment = None
+_SingularityEnvironment = None
+_SSHEnvironment = None
+_ModalEnvironment = None
+_ManagedModalEnvironment = None
 import sys
+
+
+def is_managed_tool_gateway_ready(tool_name: str) -> bool:
+    """Lazy compatibility wrapper for the managed-gateway readiness probe."""
+    from tools.managed_tool_gateway import is_managed_tool_gateway_ready as _impl
+
+    return _impl(tool_name)
 
 
 # Tool description for LLM
@@ -1064,7 +1077,12 @@ def _get_env_config() -> Dict[str, Any]:
     """Get terminal environment configuration from environment variables."""
     # Default image with Python and Node.js for maximum compatibility
     default_image = "nikolaik/python-nodejs:python3.11-nodejs20"
-    env_type = os.getenv("TERMINAL_ENV", "local")
+    runtime_profile = get_runtime_profile()
+    env_type = (
+        runtime_profile.terminal_backend
+        if runtime_profile is not None
+        else os.getenv("TERMINAL_ENV", "local")
+    )
     
     mount_docker_cwd = os.getenv("TERMINAL_DOCKER_MOUNT_CWD_TO_WORKSPACE", "false").lower() in {"true", "1", "yes"}
 
@@ -1192,6 +1210,13 @@ def _create_environment(env_type: str, image: str, cwd: str, timeout: int,
     Returns:
         Environment instance with execute() method
     """
+    runtime_profile = get_runtime_profile()
+    if runtime_profile is not None and env_type != runtime_profile.terminal_backend:
+        raise ValueError(
+            f"Terminal backend {env_type!r} is disabled by runtime profile "
+            f"{runtime_profile.name!r}"
+        )
+
     cc = container_config or {}
     cpu = cc.get("container_cpu", 1)
     memory = cc.get("container_memory", 5120)
@@ -1206,6 +1231,10 @@ def _create_environment(env_type: str, image: str, cwd: str, timeout: int,
         return _LocalEnvironment(cwd=cwd, timeout=timeout)
     
     elif env_type == "docker":
+        docker_environment = _DockerEnvironment
+        if docker_environment is None:
+            from tools.environments.docker import DockerEnvironment as docker_environment
+
         # One-shot orphan reaper: clean up labeled containers left behind by
         # prior Hermes processes that hit SIGKILL / OOM / a closed terminal
         # before the atexit cleanup hook could run.  Gated to once per
@@ -1213,7 +1242,7 @@ def _create_environment(env_type: str, image: str, cwd: str, timeout: int,
         # subagents, RL benchmarks) don't run the reaper N times.
         # Disable via ``terminal.docker_orphan_reaper: false`` (issue #20561).
         _maybe_reap_docker_orphans(cc)
-        return _DockerEnvironment(
+        return docker_environment(
             image=image, cwd=cwd, timeout=timeout,
             cpu=cpu, memory=memory, disk=disk,
             persistent_filesystem=persistent, task_id=task_id,
@@ -1228,13 +1257,24 @@ def _create_environment(env_type: str, image: str, cwd: str, timeout: int,
         )
     
     elif env_type == "singularity":
-        return _SingularityEnvironment(
+        singularity_environment = _SingularityEnvironment
+        if singularity_environment is None:
+            from tools.environments.singularity import SingularityEnvironment as singularity_environment
+
+        return singularity_environment(
             image=image, cwd=cwd, timeout=timeout,
             cpu=cpu, memory=memory, disk=disk,
             persistent_filesystem=persistent, task_id=task_id,
         )
     
     elif env_type == "modal":
+        managed_modal_environment = _ManagedModalEnvironment
+        modal_environment = _ModalEnvironment
+        if managed_modal_environment is None:
+            from tools.environments.managed_modal import ManagedModalEnvironment as managed_modal_environment
+        if modal_environment is None:
+            from tools.environments.modal import ModalEnvironment as modal_environment
+
         sandbox_kwargs = {}
         if cpu > 0:
             sandbox_kwargs["cpu"] = cpu
@@ -1251,7 +1291,7 @@ def _create_environment(env_type: str, image: str, cwd: str, timeout: int,
         modal_state = _get_modal_backend_state(cc.get("modal_mode"))
 
         if modal_state["selected_backend"] == "managed":
-            return _ManagedModalEnvironment(
+            return managed_modal_environment(
                 image=image, cwd=cwd, timeout=timeout,
                 modal_sandbox_kwargs=sandbox_kwargs,
                 persistent_filesystem=persistent, task_id=task_id,
@@ -1286,7 +1326,7 @@ def _create_environment(env_type: str, image: str, cwd: str, timeout: int,
                 )
             raise ValueError(message)
 
-        return _ModalEnvironment(
+        return modal_environment(
             image=image, cwd=cwd, timeout=timeout,
             modal_sandbox_kwargs=sandbox_kwargs,
             persistent_filesystem=persistent, task_id=task_id,
@@ -1302,9 +1342,13 @@ def _create_environment(env_type: str, image: str, cwd: str, timeout: int,
         )
 
     elif env_type == "ssh":
+        ssh_environment = _SSHEnvironment
+        if ssh_environment is None:
+            from tools.environments.ssh import SSHEnvironment as ssh_environment
+
         if not ssh_config or not ssh_config.get("host") or not ssh_config.get("user"):
             raise ValueError("SSH environment requires ssh_host and ssh_user to be configured")
-        return _SSHEnvironment(
+        return ssh_environment(
             host=ssh_config["host"],
             user=ssh_config["user"],
             port=ssh_config.get("port", 22),

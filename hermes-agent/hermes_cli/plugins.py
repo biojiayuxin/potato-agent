@@ -47,6 +47,7 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Set, Union
 
 from hermes_constants import get_hermes_home
+from runtime_profile import get_runtime_profile
 from utils import env_var_enabled
 from hermes_cli.config import cfg_get
 from hermes_cli.middleware import OBSERVER_SCHEMA_VERSION, VALID_MIDDLEWARE
@@ -1072,6 +1073,7 @@ class PluginManager:
         self._discovered = True
 
         manifests: List[PluginManifest] = []
+        runtime_profile = get_runtime_profile()
 
         # 1. Bundled plugins (<repo>/plugins/<name>/)
         #
@@ -1095,8 +1097,11 @@ class PluginManager:
         )
         logger.debug("  bundled (top-level): %d manifest(s)", len(bundled))
         manifests.extend(bundled)
-        bundled_platforms = self._scan_directory(
-            repo_plugins / "platforms", source="bundled"
+        bundled_platforms = (
+            []
+            if runtime_profile is not None
+            and "platform" in runtime_profile.forbidden_plugin_kinds
+            else self._scan_directory(repo_plugins / "platforms", source="bundled")
         )
         logger.debug("  bundled/platforms: %d manifest(s)", len(bundled_platforms))
         manifests.extend(bundled_platforms)
@@ -1104,12 +1109,22 @@ class PluginManager:
         # 2. User plugins (~/.hermes/plugins/)
         user_dir = get_hermes_home() / "plugins"
         logger.debug("Scanning user plugins: %s", user_dir)
-        user_manifests = self._scan_directory(user_dir, source="user")
+        user_manifests = (
+            []
+            if runtime_profile is not None and not runtime_profile.allow_user_plugins
+            else self._scan_directory(user_dir, source="user")
+        )
         logger.debug("  user: %d manifest(s)", len(user_manifests))
         manifests.extend(user_manifests)
 
         # 3. Project plugins (./.hermes/plugins/)
-        if _env_enabled("HERMES_ENABLE_PROJECT_PLUGINS"):
+        if (
+            _env_enabled("HERMES_ENABLE_PROJECT_PLUGINS")
+            and not (
+                runtime_profile is not None
+                and not runtime_profile.allow_project_plugins
+            )
+        ):
             project_dir = Path.cwd() / ".hermes" / "plugins"
             logger.debug("Scanning project plugins: %s", project_dir)
             project_manifests = self._scan_directory(project_dir, source="project")
@@ -1121,7 +1136,12 @@ class PluginManager:
             )
 
         # 4. Pip / entry-point plugins
-        ep_manifests = self._scan_entry_points()
+        ep_manifests = (
+            []
+            if runtime_profile is not None
+            and not runtime_profile.allow_entrypoint_plugins
+            else self._scan_entry_points()
+        )
         logger.debug("  entrypoints: %d manifest(s)", len(ep_manifests))
         manifests.extend(ep_manifests)
 
@@ -1139,6 +1159,17 @@ class PluginManager:
             winners[manifest.key or manifest.name] = manifest
         for manifest in winners.values():
             lookup_key = manifest.key or manifest.name
+
+            if runtime_profile is not None and not runtime_profile.allows_plugin(
+                source=manifest.source,
+                kind=manifest.kind,
+                key=lookup_key,
+            ):
+                loaded = LoadedPlugin(manifest=manifest, enabled=False)
+                loaded.error = "blocked by runtime profile"
+                self._plugins[lookup_key] = loaded
+                logger.debug("Skipping runtime-profile-blocked plugin '%s'", lookup_key)
+                continue
 
             # Explicit disable always wins (matches on key or on legacy
             # bare name for back-compat with existing user configs).
@@ -1333,6 +1364,8 @@ class PluginManager:
                     "Plugin %s: unknown kind '%s' (valid: %s); treating as 'standalone'",
                     key, raw_kind, ", ".join(sorted(_VALID_PLUGIN_KINDS)),
                 )
+                if get_runtime_profile() is not None:
+                    return None
                 kind = "standalone"
 
             # Auto-coerce user-installed memory providers to kind="exclusive"
@@ -1431,6 +1464,17 @@ class PluginManager:
 
     def _load_plugin(self, manifest: PluginManifest) -> None:
         """Import a plugin module and call its ``register(ctx)`` function."""
+        runtime_profile = get_runtime_profile()
+        lookup_key = manifest.key or manifest.name
+        if runtime_profile is not None and not runtime_profile.allows_plugin(
+            source=manifest.source,
+            kind=manifest.kind,
+            key=lookup_key,
+        ):
+            loaded = LoadedPlugin(manifest=manifest, enabled=False)
+            loaded.error = "blocked by runtime profile"
+            self._plugins[lookup_key] = loaded
+            return
         loaded = LoadedPlugin(manifest=manifest)
         logger.debug(
             "Loading plugin '%s' (source=%s, kind=%s, path=%s)",

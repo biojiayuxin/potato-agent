@@ -1,0 +1,64 @@
+[build-system]
+requires = ["setuptools==82.0.1"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "potato-hermes-lite"
+version = "0.16.0+potato.lite.3"
+description = "Profile-sealed Hermes runtime for Potato Agent"
+readme = "README.md"
+requires-python = ">=3.11,<3.14"
+license = "MIT"
+license-files = ["LICENSE"]
+dependencies = [
+  "openai==2.24.0",
+  "python-dotenv==1.2.2",
+  "httpx[socks]==0.28.1",
+  "pyyaml==6.0.3",
+  "requests==2.33.0",
+  "Pillow==12.2.0",
+  "psutil==7.2.2",
+  "ptyprocess==0.7.0; sys_platform != 'win32'",
+  "PyJWT[crypto]==2.12.1",
+  "ruamel.yaml==0.18.17",
+  "websockets==15.0.1",
+]
+
+[project.scripts]
+hermes = "potato_hermes_lite.cli:main"
+
+[tool.setuptools]
+include-package-data = false
+py-modules = [
+  "run_agent",
+  "model_tools",
+  "runtime_profile",
+  "toolsets",
+  "hermes_bootstrap",
+  "hermes_constants",
+  "hermes_logging",
+  "hermes_state",
+  "hermes_time",
+  "utils",
+]
+
+[tool.setuptools.data-files]
+locales = ["locales/*.yaml"]
+
+[tool.setuptools.package-data]
+plugins = ["model-providers/custom/__init__.py", "model-providers/custom/plugin.yaml"]
+
+[tool.setuptools.packages.find]
+include = [
+  "potato_hermes_lite",
+  "agent", "agent.*",
+  "tools", "tools.*",
+  "hermes_cli",
+  "gateway", "gateway.*",
+  "tui_gateway",
+  "providers", "providers.*",
+  "plugins",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

@@ -116,3 +116,56 @@ class TestGetCdpOverride:
 
         assert resolved == WS_URL
         mock_get.assert_called_once_with(VERSION_URL, timeout=10)
+
+    def test_profile_accepts_only_resolved_loopback_websocket(self, monkeypatch):
+        import tools.browser_tool as browser_tool
+
+        local_ws = "ws://127.0.0.1:9222/devtools/browser/local"
+        monkeypatch.setattr(browser_tool, "_runtime_profile", object())
+        monkeypatch.setenv("BROWSER_CDP_URL", local_ws)
+
+        with patch(
+            "tools.browser_tool.requests.get",
+            side_effect=AssertionError("profile CDP must not probe HTTP"),
+        ), patch(
+            "hermes_cli.config.read_raw_config",
+            side_effect=AssertionError("profile CDP must not read persistent config"),
+        ):
+            assert browser_tool._get_cdp_override() == local_ws
+
+        ipv6_ws = "wss://[::1]:9223/devtools/page/local"
+        monkeypatch.setenv("BROWSER_CDP_URL", ipv6_ws)
+        assert browser_tool._get_cdp_override() == ipv6_ws
+
+    def test_profile_rejects_remote_http_and_unresolved_cdp_urls(self, monkeypatch):
+        import tools.browser_tool as browser_tool
+
+        monkeypatch.setattr(browser_tool, "_runtime_profile", object())
+        for value in (
+            "ws://localhost:9222/devtools/browser/unresolved",
+            "ws://example.com:9222/devtools/browser/remote",
+            "http://127.0.0.1:9222",
+            "ws://127.0.0.1:9222",
+            "ws://127.0.0.1/devtools/browser/no-port",
+            "ws://127.0.0.1:9222/other/path",
+            "ws://127.0.0.1:9222/devtools/browser/local?token=test",
+            "ws://127.0.0.1:not-a-port/devtools/browser/local",
+            "ws://user@127.0.0.1:9222/devtools/browser/local",
+        ):
+            monkeypatch.setenv("BROWSER_CDP_URL", value)
+            with patch(
+                "tools.browser_tool.requests.get",
+                side_effect=AssertionError("rejected CDP URL triggered a probe"),
+            ):
+                assert browser_tool._get_cdp_override() == ""
+
+    def test_profile_ignores_persistent_cdp_config(self, monkeypatch):
+        import tools.browser_tool as browser_tool
+
+        monkeypatch.setattr(browser_tool, "_runtime_profile", object())
+        monkeypatch.delenv("BROWSER_CDP_URL", raising=False)
+        with patch(
+            "hermes_cli.config.read_raw_config",
+            side_effect=AssertionError("profile CDP read persistent config"),
+        ):
+            assert browser_tool._get_cdp_override() == ""

@@ -1,0 +1,2 @@
+# Patch order is duplicated in upstream.yaml and must match exactly.
+# Empty is valid while downstream changes are carried by the checkout.

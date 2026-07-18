@@ -51,6 +51,7 @@ Usage:
 
 import atexit
 import functools
+import ipaddress
 import json
 import logging
 import os
@@ -64,8 +65,10 @@ import time
 import requests
 from typing import Dict, Any, Optional, List, Tuple, Union
 from pathlib import Path
+from urllib.parse import urlsplit
 from agent.auxiliary_client import call_llm
 from hermes_constants import get_hermes_home
+from runtime_profile import get_runtime_profile
 from utils import env_int, is_truthy_value
 from hermes_cli.config import cfg_get
 
@@ -89,24 +92,37 @@ except Exception:
 # and into ``plugins/browser/<vendor>/``. The dispatcher consults the
 # registry; the legacy class names are re-exported below as backward-compat
 # shims for callers that import them from this module.
-from agent.browser_provider import BrowserProvider as CloudBrowserProvider  # noqa: F401  (legacy alias)
-from agent.browser_registry import (  # noqa: F401  (test-patchable surface)
-    get_provider as _registry_get_browser_provider,
-)
-from plugins.browser.browserbase.provider import (  # noqa: F401  (legacy import surface)
-    BrowserbaseBrowserProvider as BrowserbaseProvider,
-)
-from plugins.browser.browser_use.provider import (  # noqa: F401
-    BrowserUseBrowserProvider as BrowserUseProvider,
-)
-from plugins.browser.firecrawl.provider import (  # noqa: F401
-    FirecrawlBrowserProvider as FirecrawlProvider,
-)
+_runtime_profile = get_runtime_profile()
+if _runtime_profile is None:
+    from agent.browser_provider import BrowserProvider as CloudBrowserProvider  # noqa: F401  (legacy alias)
+    from agent.browser_registry import (  # noqa: F401  (test-patchable surface)
+        get_provider as _registry_get_browser_provider,
+    )
+    from plugins.browser.browserbase.provider import (  # noqa: F401  (legacy import surface)
+        BrowserbaseBrowserProvider as BrowserbaseProvider,
+    )
+    from plugins.browser.browser_use.provider import (  # noqa: F401
+        BrowserUseBrowserProvider as BrowserUseProvider,
+    )
+    from plugins.browser.firecrawl.provider import (  # noqa: F401
+        FirecrawlBrowserProvider as FirecrawlProvider,
+    )
+else:
+    # Potato profiles pin browser execution to the local agent-browser path.
+    # Keep names defined for type annotations and test-patchable compatibility
+    # without importing any cloud provider package.
+    CloudBrowserProvider = Any  # type: ignore[misc,assignment]
+    BrowserbaseProvider = BrowserUseProvider = FirecrawlProvider = None
+
+    def _registry_get_browser_provider(_name):
+        return None
 from tools.tool_backend_helpers import normalize_browser_cloud_provider
 # Camofox local anti-detection browser backend (optional).
 # When CAMOFOX_URL is set, all browser operations route through the
 # camofox REST API instead of the agent-browser CLI.
 try:
+    if _runtime_profile is not None:
+        raise ImportError
     from tools.browser_camofox import is_camofox_mode as _is_camofox_mode
 except ImportError:
     _is_camofox_mode = lambda: False  # noqa: E731
@@ -281,6 +297,40 @@ def _resolve_cdp_override(cdp_url: str) -> str:
     return raw
 
 
+def _profile_local_cdp_override(raw_url: str) -> str:
+    """Return an already-resolved loopback CDP WebSocket URL.
+
+    Profile mode permits a live local Chromium connection, but never performs
+    HTTP discovery or DNS resolution. A non-empty path distinguishes a real
+    DevTools WebSocket endpoint from a bare host/port that would require a
+    ``/json/version`` probe.
+    """
+    raw_url = str(raw_url or "").strip()
+    try:
+        parsed = urlsplit(raw_url)
+        hostname = (parsed.hostname or "").lower()
+        # Accessing ``port`` validates malformed/non-numeric authorities.
+        port = parsed.port
+        if parsed.scheme.lower() not in {"ws", "wss"}:
+            return ""
+        if not hostname or parsed.username is not None or parsed.password is not None:
+            return ""
+        if port is None or not parsed.path.startswith("/devtools/"):
+            return ""
+        if parsed.query or parsed.fragment:
+            return ""
+        try:
+            # Require a literal loopback address so this code never defers
+            # destination resolution to DNS or /etc/hosts.
+            if not ipaddress.ip_address(hostname).is_loopback:
+                return ""
+        except ValueError:
+            return ""
+    except (TypeError, ValueError):
+        return ""
+    return raw_url
+
+
 def _get_cdp_override() -> str:
     """Return a normalized CDP URL override, or empty string.
 
@@ -293,6 +343,8 @@ def _get_cdp_override() -> str:
     endpoint.
     """
     env_override = os.environ.get("BROWSER_CDP_URL", "").strip()
+    if _runtime_profile is not None:
+        return _profile_local_cdp_override(env_override)
     if env_override:
         return _resolve_cdp_override(env_override)
 
@@ -420,11 +472,15 @@ def _stop_cdp_supervisor(task_id: str) -> None:
 # wins. This keeps the test surface stable while letting third-party
 # plugins drop in under ``~/.hermes/plugins/browser/<vendor>/``.
 
-_PROVIDER_REGISTRY: Dict[str, type] = {
-    "browserbase": BrowserbaseProvider,
-    "browser-use": BrowserUseProvider,
-    "firecrawl": FirecrawlProvider,
-}
+_PROVIDER_REGISTRY: Dict[str, type] = (
+    {
+        "browserbase": BrowserbaseProvider,
+        "browser-use": BrowserUseProvider,
+        "firecrawl": FirecrawlProvider,
+    }
+    if _runtime_profile is None
+    else {}
+)
 # Frozen copy of the import-time _PROVIDER_REGISTRY, used by
 # ``_is_legacy_provider_registry_overridden`` to detect test-time
 # monkeypatching. NEVER mutate this dict.
@@ -504,6 +560,10 @@ def _get_cloud_provider() -> Optional[CloudBrowserProvider]:
     ``_is_legacy_provider_registry_overridden``.
     """
     global _cached_cloud_provider, _cloud_provider_resolved
+    if _runtime_profile is not None:
+        _cached_cloud_provider = None
+        _cloud_provider_resolved = True
+        return None
     if _cloud_provider_resolved:
         return _cached_cloud_provider
 
@@ -649,6 +709,10 @@ def _get_browser_engine() -> str:
     renderer (no screenshots).
     """
     global _cached_browser_engine, _browser_engine_resolved
+    if _runtime_profile is not None:
+        _cached_browser_engine = "chrome"
+        _browser_engine_resolved = True
+        return _cached_browser_engine
     if _browser_engine_resolved:
         return _cached_browser_engine
 
@@ -1816,7 +1880,9 @@ def _find_agent_browser() -> str:
     npx_path = shutil.which("npx")
     if not npx_path and extended_path:
         npx_path = shutil.which("npx", path=extended_path)
-    if npx_path:
+    from runtime_profile import automatic_installs_disabled
+
+    if npx_path and not automatic_installs_disabled():
         _cached_agent_browser = "npx agent-browser"
         _agent_browser_resolved = True
         return _cached_agent_browser

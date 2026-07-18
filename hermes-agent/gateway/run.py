@@ -828,6 +828,9 @@ def _home_target_env_var(platform_name: str) -> str:
     registry via ``cron.scheduler._resolve_home_env_var``, then falls back
     to ``<PLATFORM>_HOME_CHANNEL`` for unknown names.
     """
+    if _gateway_subsystem_disabled(_DISABLE_CRON_ENV):
+        return f"{platform_name.upper()}_HOME_CHANNEL"
+
     from cron.scheduler import _resolve_home_env_var
 
     resolved = _resolve_home_env_var(platform_name)
@@ -879,6 +882,37 @@ from dotenv import load_dotenv  # noqa: F401  # backward-compat for tests that m
 from hermes_cli.env_loader import load_hermes_dotenv
 _env_path = _hermes_home / '.env'
 load_hermes_dotenv(hermes_home=_hermes_home, project_env=Path(__file__).resolve().parents[1] / '.env')
+
+
+_DISABLE_GATEWAY_PLATFORMS_ENV = "HERMES_DISABLE_GATEWAY_PLATFORMS"
+_DISABLE_MCP_ENV = "HERMES_DISABLE_MCP"
+_DISABLE_CRON_ENV = "HERMES_DISABLE_CRON"
+_DISABLE_KANBAN_ENV = "HERMES_DISABLE_KANBAN"
+
+
+def _gateway_subsystem_disabled(env_var: str) -> bool:
+    """Return whether a generic-gateway subsystem is blocked by policy."""
+    if is_truthy_value(os.getenv(env_var), default=False):
+        return True
+    from runtime_profile import get_runtime_profile
+
+    profile = get_runtime_profile()
+    if profile is None:
+        return False
+    if env_var == _DISABLE_GATEWAY_PLATFORMS_ENV:
+        return "platform" in profile.forbidden_plugin_kinds
+    if env_var == _DISABLE_MCP_ENV:
+        return not profile.mcp_enabled
+    toolset = {
+        _DISABLE_CRON_ENV: "cronjob",
+        _DISABLE_KANBAN_ENV: "kanban",
+    }.get(env_var)
+    if toolset is None:
+        raise ValueError(f"unknown gateway subsystem policy: {env_var}")
+    return (
+        toolset not in profile.enabled_toolsets
+        or toolset in profile.disabled_toolsets
+    )
 
 
 def _reload_runtime_env_preserving_config_authority() -> None:
@@ -4630,10 +4664,17 @@ class GatewayRunner(GatewayKanbanWatchersMixin, GatewaySlashCommandsMixin):
         enabled_platform_count = 0
         startup_nonretryable_errors: list[str] = []
         startup_retryable_errors: list[str] = []
+        gateway_platforms_disabled = _gateway_subsystem_disabled(
+            _DISABLE_GATEWAY_PLATFORMS_ENV
+        )
+        if gateway_platforms_disabled:
+            logger.info("Messaging platform adapters are disabled by runtime policy")
         
         # Initialize and connect each configured platform
         for platform, platform_config in self.config.platforms.items():
             if not platform_config.enabled:
+                continue
+            if gateway_platforms_disabled:
                 continue
             enabled_platform_count += 1
             
@@ -4896,22 +4937,25 @@ class GatewayRunner(GatewayKanbanWatchersMixin, GatewaySlashCommandsMixin):
         # Start background kanban notifier — delivers `completed`, `blocked`,
         # `spawn_auto_blocked`, and `crashed` events to gateway subscribers
         # so human-in-the-loop workflows hear back without polling.
-        asyncio.create_task(self._kanban_notifier_watcher())
+        if not _gateway_subsystem_disabled(_DISABLE_KANBAN_ENV):
+            asyncio.create_task(self._kanban_notifier_watcher())
 
         # Start background kanban dispatcher — spawns workers for ready
         # tasks. Gated by `kanban.dispatch_in_gateway` (default True).
         # When false, users run `hermes kanban daemon` externally or
         # simply don't use kanban; this loop becomes a no-op.
-        asyncio.create_task(self._kanban_dispatcher_watcher())
+        if not _gateway_subsystem_disabled(_DISABLE_KANBAN_ENV):
+            asyncio.create_task(self._kanban_dispatcher_watcher())
 
         # Start background reconnection watcher for platforms that failed at startup
-        if self._failed_platforms:
-            logger.info(
-                "Starting reconnection watcher for %d failed platform(s): %s",
-                len(self._failed_platforms),
-                ", ".join(p.value for p in self._failed_platforms),
-            )
-        asyncio.create_task(self._platform_reconnect_watcher())
+        if not gateway_platforms_disabled:
+            if self._failed_platforms:
+                logger.info(
+                    "Starting reconnection watcher for %d failed platform(s): %s",
+                    len(self._failed_platforms),
+                    ", ".join(p.value for p in self._failed_platforms),
+                )
+            asyncio.create_task(self._platform_reconnect_watcher())
 
         # Start background handoff watcher — picks up CLI sessions marked
         # handoff_state='pending' in state.db and re-binds them to the
@@ -5869,6 +5913,13 @@ class GatewayRunner(GatewayKanbanWatchersMixin, GatewaySlashCommandsMixin):
         Checks the platform_registry first (plugin adapters), then falls
         through to the built-in if/elif chain for core platforms.
         """
+        if _gateway_subsystem_disabled(_DISABLE_GATEWAY_PLATFORMS_ENV):
+            logger.debug(
+                "Skipping %s adapter creation: messaging platforms disabled by runtime policy",
+                platform.value,
+            )
+            return None
+
         if hasattr(config, "extra") and isinstance(config.extra, dict):
             config.extra.setdefault(
                 "group_sessions_per_user",
@@ -10662,6 +10713,9 @@ class GatewayRunner(GatewayKanbanWatchersMixin, GatewaySlashCommandsMixin):
         wrapper can invoke the same path whether the user confirmed via
         button, text reply, or has the confirm gate disabled.
         """
+        if _gateway_subsystem_disabled(_DISABLE_MCP_ENV):
+            return "MCP is disabled by runtime policy."
+
         loop = asyncio.get_running_loop()
         try:
             from tools.mcp_tool import shutdown_mcp_servers, discover_mcp_tools, _servers, _lock
@@ -15556,6 +15610,10 @@ def _start_cron_ticker(stop_event: threading.Event, adapters=None, loop=None, in
     image/audio/document cache + expired ``hermes debug share`` pastes
     once per hour.
     """
+    if _gateway_subsystem_disabled(_DISABLE_CRON_ENV):
+        logger.info("Cron ticker is disabled by runtime policy")
+        return
+
     from cron.scheduler import tick as cron_tick
     from gateway.platforms.base import cleanup_image_cache, cleanup_document_cache
     from hermes_cli.debug import _sweep_expired_pastes
@@ -16005,12 +16063,13 @@ async def start_gateway(config: Optional[GatewayConfig] = None, replace: bool = 
     # internally; calling it from the loop thread would freeze platform
     # heartbeats (Discord shard, Telegram polling) until it returned.
     # See #16856.
-    try:
-        from tools.mcp_tool import discover_mcp_tools
-        _loop = asyncio.get_running_loop()
-        await _loop.run_in_executor(None, discover_mcp_tools)
-    except Exception as e:
-        logger.debug("MCP tool discovery failed: %s", e)
+    if not _gateway_subsystem_disabled(_DISABLE_MCP_ENV):
+        try:
+            from tools.mcp_tool import discover_mcp_tools
+            _loop = asyncio.get_running_loop()
+            await _loop.run_in_executor(None, discover_mcp_tools)
+        except Exception as e:
+            logger.debug("MCP tool discovery failed: %s", e)
 
     # Start the gateway
     success = await runner.start()
@@ -16023,15 +16082,18 @@ async def start_gateway(config: Optional[GatewayConfig] = None, replace: bool = 
     
     # Start background cron ticker so scheduled jobs fire automatically.
     # Pass the event loop so cron delivery can use live adapters (E2EE support).
-    cron_stop = threading.Event()
-    cron_thread = threading.Thread(
-        target=_start_cron_ticker,
-        args=(cron_stop,),
-        kwargs={"adapters": runner.adapters, "loop": asyncio.get_running_loop()},
-        daemon=True,
-        name="cron-ticker",
-    )
-    cron_thread.start()
+    cron_stop: Optional[threading.Event] = None
+    cron_thread: Optional[threading.Thread] = None
+    if not _gateway_subsystem_disabled(_DISABLE_CRON_ENV):
+        cron_stop = threading.Event()
+        cron_thread = threading.Thread(
+            target=_start_cron_ticker,
+            args=(cron_stop,),
+            kwargs={"adapters": runner.adapters, "loop": asyncio.get_running_loop()},
+            daemon=True,
+            name="cron-ticker",
+        )
+        cron_thread.start()
     
     # Wait for shutdown
     await runner.wait_for_shutdown()
@@ -16042,19 +16104,21 @@ async def start_gateway(config: Optional[GatewayConfig] = None, replace: bool = 
         return False
     
     # Stop cron ticker cleanly
-    cron_stop.set()
-    cron_thread.join(timeout=5)
+    if cron_stop is not None and cron_thread is not None:
+        cron_stop.set()
+        cron_thread.join(timeout=5)
 
     # Stop the planned-stop watcher (daemon=True so this is belt-and-suspenders).
     _planned_stop_watcher_stop.set()
     _planned_stop_watcher_thread.join(timeout=2)
 
     # Close MCP server connections
-    try:
-        from tools.mcp_tool import shutdown_mcp_servers
-        shutdown_mcp_servers()
-    except Exception:
-        pass
+    if not _gateway_subsystem_disabled(_DISABLE_MCP_ENV):
+        try:
+            from tools.mcp_tool import shutdown_mcp_servers
+            shutdown_mcp_servers()
+        except Exception:
+            pass
 
     if runner.exit_code is not None:
         raise SystemExit(runner.exit_code)

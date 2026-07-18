@@ -233,6 +233,8 @@ const busySessionIds = new Set();
 const sessionRunTransportById = new Map();
 const sessionAbortControllersById = new Map();
 const pendingApprovalsBySessionId = new Map();
+let approvalSubmissionCounter = 0;
+let activeApprovalSubmission = null;
 const interruptingSessionIds = new Set();
 const recoveringTuiSessionIds = new Set();
 const tuiBridgeReconnectTimersBySessionId = new Map();
@@ -244,6 +246,7 @@ const liveSessionPollInFlightBySessionId = new Map();
 const liveSessionPollFailuresBySessionId = new Map();
 const liveSessionPollGenerationBySessionId = new Map();
 const liveSessionSnapshotAcceptedRequestBySessionId = new Map();
+const confirmedTurnRequestIdsBySessionId = new Map();
 let liveSessionPollGenerationCounter = 0;
 let liveSessionSnapshotRequestCounter = 0;
 let fileTreeRefreshTimer = null;
@@ -274,6 +277,10 @@ const LIVE_SESSION_POLL_FAILURE_DELAY_MS = 5000;
 const TURN_RECOVERY_MISSING_RECEIPT_TIMEOUT_MS = 75 * 1000;
 const TURN_RECOVERY_PENDING_RECEIPT_TIMEOUT_MS = 330 * 1000;
 const TURN_SUBMISSION_SOFT_TIMEOUT_MS = 15 * 1000;
+const APPROVAL_REQUEST_TIMEOUT_MS = 8 * 1000;
+const APPROVAL_RECONCILE_TIMEOUT_MS = 5 * 1000;
+const APPROVAL_REQUEST_MAX_ATTEMPTS = 2;
+const APPROVAL_REQUEST_RETRY_DELAY_MS = 500;
 const FILE_TREE_REFRESH_DEBOUNCE_MS = 800;
 const FILE_TREE_FOCUS_REFRESH_MIN_INTERVAL_MS = 5000;
 const FILE_TREE_REFRESH_MAX_CONCURRENCY = 3;
@@ -1323,10 +1330,12 @@ const handleTuiBridgeEvent = (message) => {
         busySessionIds.delete(sessionId);
         sessionRunTransportById.delete(sessionId);
         sessionAbortControllersById.delete(sessionId);
-        pendingApprovalsBySessionId.delete(sessionId);
       }
     }
+    pendingApprovalsBySessionId.clear();
+    syncActiveSessionUiState();
     refreshComposerBusyState();
+    refreshExportButtonState();
     renderChatList();
     renderApprovalModal();
     setTuiBridgeStatus('TUI gateway exited');
@@ -1336,6 +1345,10 @@ const handleTuiBridgeEvent = (message) => {
   if (type === 'message.start') {
     const liveSessionId = String(message?.session_id || '').trim();
     const persistentSessionId = getPersistentSessionIdFromTuiEvent(message);
+    const turnRequestId = String(message?.run_id || message?.runId || '').trim();
+    if (persistentSessionId && turnRequestId) {
+      confirmedTurnRequestIdsBySessionId.set(persistentSessionId, turnRequestId);
+    }
     if (liveSessionId && persistentSessionId) {
       rememberLiveTuiSession(persistentSessionId, liveSessionId);
       if (isViewingSession(persistentSessionId)) {
@@ -2017,17 +2030,70 @@ const handleTemporaryConfirmKeydown = (event) => {
   return true;
 };
 
-const setApprovalSubmitting = (submitting) => {
+const APPROVAL_BUTTONS = [
+  ['once', () => dom.approvalAllowOnce, 'Allow once'],
+  ['session', () => dom.approvalAllowSession, 'Allow for session'],
+  ['always', () => dom.approvalAllowAlways, 'Always allow'],
+  ['deny', () => dom.approvalDeny, 'Deny'],
+];
+
+const setApprovalSubmitting = (submitting, choice = '', activeLabel = 'Submitting...') => {
   state.approvalSubmitting = submitting;
-  const buttons = [
-    dom.approvalAllowOnce,
-    dom.approvalAllowSession,
-    dom.approvalAllowAlways,
-    dom.approvalDeny,
-  ].filter(Boolean);
-  for (const button of buttons) {
-    button.disabled = submitting;
+  if (dom.approvalModal) {
+    dom.approvalModal.setAttribute('aria-busy', submitting ? 'true' : 'false');
   }
+  for (const [buttonChoice, getButton, idleLabel] of APPROVAL_BUTTONS) {
+    const button = getButton();
+    if (!button) continue;
+    button.disabled = submitting;
+    button.textContent = submitting && buttonChoice === choice ? activeLabel : idleLabel;
+  }
+};
+
+const approvalMatchesSubmission = (approval, submission) => (
+  Boolean(approval && submission)
+  && String(approval.sessionId || '').trim() === submission.sessionId
+  && String(approval.approvalId || '').trim() === submission.approvalId
+);
+
+const isActiveApprovalSubmission = (submission) => (
+  activeApprovalSubmission === submission
+  && approvalMatchesSubmission(state.pendingApproval, submission)
+);
+
+const beginApprovalSubmission = (approval, choice) => {
+  if (activeApprovalSubmission || !approval?.sessionId || !approval?.approvalId) {
+    return null;
+  }
+  const submission = {
+    id: ++approvalSubmissionCounter,
+    sessionId: String(approval.sessionId).trim(),
+    approvalId: String(approval.approvalId).trim(),
+    choice,
+    label: 'Submitting...',
+  };
+  activeApprovalSubmission = submission;
+  setApprovalSubmitting(true, choice, submission.label);
+  return submission;
+};
+
+const updateApprovalSubmission = (submission, label) => {
+  if (!isActiveApprovalSubmission(submission)) return false;
+  submission.label = label;
+  setApprovalSubmitting(true, submission.choice, label);
+  return true;
+};
+
+const finishApprovalSubmission = (submission) => {
+  if (activeApprovalSubmission !== submission) return false;
+  activeApprovalSubmission = null;
+  setApprovalSubmitting(false);
+  return true;
+};
+
+const invalidateApprovalSubmission = () => {
+  activeApprovalSubmission = null;
+  setApprovalSubmitting(false);
 };
 
 const renderApprovalModal = () => {
@@ -2037,8 +2103,22 @@ const renderApprovalModal = () => {
       dom.approvalModal.hidden = true;
     }
     showError(dom.approvalError, '');
-    setApprovalSubmitting(false);
+    invalidateApprovalSubmission();
     return;
+  }
+
+  if (
+    activeApprovalSubmission
+    && !approvalMatchesSubmission(approval, activeApprovalSubmission)
+  ) {
+    invalidateApprovalSubmission();
+    showError(dom.approvalError, '');
+  } else if (activeApprovalSubmission) {
+    setApprovalSubmitting(
+      true,
+      activeApprovalSubmission.choice,
+      activeApprovalSubmission.label,
+    );
   }
 
   if (dom.approvalModal) {
@@ -2056,56 +2136,126 @@ const clearPendingApproval = () => {
   clearSessionPendingApproval();
 };
 
-const submitApprovalDecision = async (choice) => {
-  const approval = state.pendingApproval;
-  if (!approval?.sessionId || state.approvalSubmitting) return;
-  showError(dom.approvalError, '');
-  setApprovalSubmitting(true);
+const waitForApprovalRetry = () => new Promise((resolve) => {
+  window.setTimeout(resolve, APPROVAL_REQUEST_RETRY_DELAY_MS);
+});
 
-  const approvalSessionId = String(approval.sessionId || '').trim();
-  const submittedApprovalId = String(approval.approvalId || '').trim();
+const isRetryableApprovalError = (error) => {
+  const status = Number(error?.status || 0);
+  return !status || status === 408 || status === 429 || status >= 500;
+};
 
+const approvalRequestWithTimeout = async (sessionId, approvalId, choice) => {
+  const controller = new AbortController();
+  let timedOut = false;
+  const timer = window.setTimeout(() => {
+    timedOut = true;
+    controller.abort();
+  }, APPROVAL_REQUEST_TIMEOUT_MS);
   try {
-    const response = await api(`/api/sessions/${encodeURIComponent(approvalSessionId)}/approval`, {
+    return await api(`/api/sessions/${encodeURIComponent(sessionId)}/approval`, {
       method: 'POST',
+      signal: controller.signal,
       body: JSON.stringify({
         choice,
-        approval_id: submittedApprovalId,
+        approval_id: approvalId,
       }),
     });
-    const json = await response.json();
-    applyLiveStateToSession(approvalSessionId, json?.live || null);
-    setApprovalSubmitting(false);
-    startLiveSessionPolling(approvalSessionId);
   } catch (error) {
-    const errorMessage = String(error.message || 'Approval request failed');
-    let reconciled = false;
-    let stillAwaitingSubmittedApproval = true;
-    try {
-      const snapshot = await fetchLiveSessionSnapshot(approvalSessionId);
-      if (snapshot) {
-        reconciled = true;
-        const liveState = snapshot.live;
-        const status = String(liveState?.status || '').trim();
-        const pendingApproval = liveState?.pending_approval || liveState?.pendingApproval || null;
-        const pendingApprovalId = String(
-          pendingApproval?.approval_id || pendingApproval?.approvalId || ''
-        ).trim();
-        stillAwaitingSubmittedApproval = (
-          status === 'awaiting_approval'
-          && Boolean(pendingApproval)
-          && pendingApprovalId === submittedApprovalId
-        );
-      }
-    } catch {}
+    if (timedOut || error?.name === 'AbortError') {
+      const timeoutError = new Error('Approval request timed out');
+      timeoutError.code = 'approval_request_timeout';
+      throw timeoutError;
+    }
+    throw error;
+  } finally {
+    window.clearTimeout(timer);
+  }
+};
 
-    setApprovalSubmitting(false);
-    if (reconciled && !stillAwaitingSubmittedApproval) {
-      return;
+const reconcileApprovalDecision = async (sessionId, approvalId) => {
+  const controller = new AbortController();
+  const timer = window.setTimeout(
+    () => controller.abort(),
+    APPROVAL_RECONCILE_TIMEOUT_MS,
+  );
+  try {
+    const snapshot = await fetchLiveSessionSnapshot(sessionId, {
+      signal: controller.signal,
+    });
+    if (!snapshot) return null;
+    const liveState = snapshot.live;
+    const status = String(liveState?.status || '').trim();
+    const pendingApproval = liveState?.pending_approval || liveState?.pendingApproval || null;
+    const pendingApprovalId = String(
+      pendingApproval?.approval_id || pendingApproval?.approvalId || ''
+    ).trim();
+    return !(
+      status === 'awaiting_approval'
+      && Boolean(pendingApproval)
+      && pendingApprovalId === approvalId
+    );
+  } catch {
+    return null;
+  } finally {
+    window.clearTimeout(timer);
+  }
+};
+
+const submitApprovalDecision = async (choice) => {
+  const approval = state.pendingApproval;
+  if (!approval?.sessionId || !approval?.approvalId || activeApprovalSubmission) return;
+  showError(dom.approvalError, '');
+  const submission = beginApprovalSubmission(approval, choice);
+  if (!submission) return;
+
+  const approvalSessionId = submission.sessionId;
+  const submittedApprovalId = submission.approvalId;
+  let lastError = null;
+
+  try {
+    for (let attempt = 1; attempt <= APPROVAL_REQUEST_MAX_ATTEMPTS; attempt += 1) {
+      if (!isActiveApprovalSubmission(submission)) return;
+      try {
+        const response = await approvalRequestWithTimeout(
+          approvalSessionId,
+          submittedApprovalId,
+          choice,
+        );
+        const json = await response.json();
+        if (!isActiveApprovalSubmission(submission)) return;
+        applyLiveStateToSession(approvalSessionId, json?.live || null);
+        startLiveSessionPolling(approvalSessionId);
+        return;
+      } catch (error) {
+        lastError = error;
+      }
+
+      const reconciled = await reconcileApprovalDecision(
+        approvalSessionId,
+        submittedApprovalId,
+      );
+      if (reconciled === true) return;
+      if (!isActiveApprovalSubmission(submission)) return;
+      if (
+        attempt >= APPROVAL_REQUEST_MAX_ATTEMPTS
+        || !isRetryableApprovalError(lastError)
+      ) {
+        break;
+      }
+      if (!updateApprovalSubmission(submission, 'Retrying...')) return;
+      await waitForApprovalRetry();
     }
 
+    if (!isActiveApprovalSubmission(submission)) return;
     startLiveSessionPolling(approvalSessionId);
-    showError(dom.approvalError, errorMessage);
+    const detail = String(lastError?.message || 'Approval request failed');
+    showError(
+      dom.approvalError,
+      `${detail}. Check the connection and try again.`,
+    );
+  } finally {
+    finishApprovalSubmission(submission);
   }
 };
 
@@ -2876,6 +3026,7 @@ const resetWorkspaceState = () => {
   state.pendingSessionPromise = null;
   state.shouldAutoScrollMessages = true;
   state.liveSessionMessages.clear();
+  confirmedTurnRequestIdsBySessionId.clear();
   state.sessionScrollPositions.clear();
   state.pendingMessageScrollRestore = null;
   state.messages = [];
@@ -2911,7 +3062,7 @@ const resetWorkspaceState = () => {
   state.isSending = false;
   state.pendingApproval = null;
   state.mobileOverlayPanel = null;
-  state.approvalSubmitting = false;
+  invalidateApprovalSubmission();
   state.passwordChangeSubmitting = false;
   state.passwordResetSubmitting = false;
   if (dom.passwordModal) {
@@ -5865,6 +6016,7 @@ const fetchLiveSessionSnapshot = async (
   {
     managePolling = true,
     shouldApplySnapshot = null,
+    signal = undefined,
   } = {},
 ) => {
   const persistentSessionId = String(sessionId || '').trim();
@@ -5891,7 +6043,7 @@ const fetchLiveSessionSnapshot = async (
   const queryString = query.toString();
   const response = await api(
     `/api/sessions/${encodeURIComponent(persistentSessionId)}/live${queryString ? `?${queryString}` : ''}`,
-    { method: 'GET' },
+    { method: 'GET', signal },
   );
   const json = await response.json();
   return applyLiveSessionSnapshot(persistentSessionId, json, {
@@ -6074,6 +6226,55 @@ const recoverSubmittedTurn = async (requestId) => {
     delayMs = delayMs > 0 ? Math.min(Math.round(delayMs * 1.5), 5000) : 750;
   }
   return null;
+};
+
+const getLiveStateForSession = (sessionId) => {
+  const normalizedSessionId = String(sessionId || '').trim();
+  if (!normalizedSessionId) return null;
+  if (state.activeSessionId === normalizedSessionId && state.activeSession?.live) {
+    return state.activeSession.live;
+  }
+  return state.sessions.find((session) => session.id === normalizedSessionId)?.live || null;
+};
+
+const findConfirmedTurnSessionId = (requestId, preferredSessionId = '') => {
+  const normalizedRequestId = String(requestId || '').trim();
+  if (!normalizedRequestId) return '';
+  const preferred = String(preferredSessionId || '').trim();
+  const candidates = new Set([
+    preferred,
+    ...confirmedTurnRequestIdsBySessionId.keys(),
+    ...state.sessions.map((session) => String(session.id || '').trim()),
+  ]);
+  for (const sessionId of candidates) {
+    if (!sessionId) continue;
+    if (confirmedTurnRequestIdsBySessionId.get(sessionId) === normalizedRequestId) {
+      return sessionId;
+    }
+    const liveState = getLiveStateForSession(sessionId);
+    const liveRunId = String(liveState?.run_id || liveState?.runId || '').trim();
+    if (liveRunId === normalizedRequestId) return sessionId;
+  }
+  return '';
+};
+
+const stillOwnsOptimisticAssistant = (sessionId, messages, assistantMessageId) => {
+  const currentMessages = getSessionMessagesBuffer(sessionId);
+  return (
+    currentMessages === messages
+    && currentMessages.some((message) => (
+      String(message?.id || '').trim() === String(assistantMessageId || '').trim()
+    ))
+  );
+};
+
+const getTurnSubmissionFailureMessage = (error) => {
+  const status = Number(error?.status || 0);
+  const detail = String(error?.message || error || '').trim();
+  if (!status && /failed to fetch|networkerror|network request|load failed/i.test(detail)) {
+    return 'Connection interrupted before the turn could be confirmed. Check this conversation before retrying.';
+  }
+  return detail || 'Turn submission failed';
 };
 
 const submitPromptViaTuiBridge = async (prompt) => {
@@ -6285,12 +6486,29 @@ const submitPromptViaTuiBridge = async (prompt) => {
 
     renderWorkspace();
   } catch (error) {
+    const failureSessionId = String(persistentSessionId || currentSessionId || '').trim();
+    const confirmedSessionId = findConfirmedTurnSessionId(
+      turnRequestId,
+      failureSessionId,
+    );
+    if (confirmedSessionId) {
+      startLiveSessionPolling(confirmedSessionId);
+      return;
+    }
+    if (!stillOwnsOptimisticAssistant(
+      failureSessionId,
+      targetMessages,
+      assistantMessage.id,
+    )) {
+      if (failureSessionId) startLiveSessionPolling(failureSessionId);
+      return;
+    }
     state.streamingMessageIds.delete(assistantMessage.id);
     assistantMessage.done = true;
     assistantMessage.timestamp = nowSeconds();
-    assistantMessage.content = `[Error] ${String(error.message || error)}`;
-    setLiveSessionMessages(persistentSessionId || currentSessionId, targetMessages);
-    setSessionBusy(persistentSessionId || currentSessionId, false);
+    assistantMessage.content = `[Error] ${getTurnSubmissionFailureMessage(error)}`;
+    setLiveSessionMessages(failureSessionId, targetMessages);
+    setSessionBusy(failureSessionId, false);
     if (draftSessionId && persistentSessionId && draftSessionId !== persistentSessionId) {
       setSessionBusy(draftSessionId, false);
     }
@@ -6749,13 +6967,13 @@ dom.modelSelect?.addEventListener('change', (event) => {
   switchActiveModel(event.target.value).catch((error) => showChatError(error.message));
 });
 
-dom.composerForm.addEventListener('submit', async (event) => {
+dom.composerForm.addEventListener('submit', (event) => {
   event.preventDefault();
   if (state.isSending) return;
   const prompt = dom.promptInput.value;
   dom.promptInput.value = '';
   autoResizePromptInput();
-  await submitPromptViaTuiBridge(prompt);
+  submitPromptViaTuiBridge(prompt).catch(() => {});
 });
 
 dom.attachButton.addEventListener('click', () => {

@@ -1756,13 +1756,18 @@ def _run_job_impl(job: dict) -> tuple[bool, str, str, Optional[str]]:
         # register_mcp_servers(). Non-fatal on failure: a broken MCP server
         # shouldn't kill an otherwise-working cron job. See #4219.
         try:
-            from tools.mcp_tool import discover_mcp_tools
-            _mcp_tools = discover_mcp_tools()
-            if _mcp_tools:
-                logger.info(
-                    "Job '%s': %d MCP tool(s) available",
-                    job_id, len(_mcp_tools),
-                )
+            from runtime_profile import get_runtime_profile
+
+            runtime_profile = get_runtime_profile()
+            if runtime_profile is None or runtime_profile.mcp_enabled:
+                from tools.mcp_tool import discover_mcp_tools
+
+                _mcp_tools = discover_mcp_tools()
+                if _mcp_tools:
+                    logger.info(
+                        "Job '%s': %d MCP tool(s) available",
+                        job_id, len(_mcp_tools),
+                    )
         except Exception as _mcp_exc:
             logger.warning(
                 "Job '%s': MCP initialization failed (non-fatal): %s",
@@ -2215,8 +2220,13 @@ def tick(verbose: bool = True, adapters=None, loop=None, sync: bool = True) -> i
         # reaped.
         def _sweep_mcp_orphans() -> None:
             try:
-                from tools.mcp_tool import _kill_orphaned_mcp_children
-                _kill_orphaned_mcp_children()
+                from runtime_profile import get_runtime_profile
+
+                runtime_profile = get_runtime_profile()
+                if runtime_profile is None or runtime_profile.mcp_enabled:
+                    from tools.mcp_tool import _kill_orphaned_mcp_children
+
+                    _kill_orphaned_mcp_children()
             except Exception as _e:
                 logger.debug("Post-tick MCP orphan cleanup failed: %s", _e)
 

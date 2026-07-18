@@ -21,8 +21,11 @@ Git checkout 里。
   在线查询使用 PostgreSQL 数据库 `potato_wgcna`。
 - Bulk RNA-Seq 表达查看器入口：`/bulk-rnaseq`；运行数据库放在
   `/srv/bulk_rnaseq/current/bulk_rnaseq.sqlite`，从公开整理结果目录构建只读 SQLite。
-- Hermes 源码安装目录：`/opt/hermes-agent-src`。
-- Hermes Python 环境：`/opt/hermes-agent-venv`。
+- 新 Hermes 源码和构建入口：仓库内的 `hermes-lite/`。
+- 当前 immutable 运行时：`/opt/potato-hermes-lite/current`；精确版本和 wheel hash 见下方
+  “Hermes Lite 运行时”章节。
+- `/opt/hermes-agent-src` 和 `/opt/hermes-agent-venv` 已不参与在线进程，仅在实际用户验收和观察期完成前
+  保留作 legacy 回滚来源。
 - interface Python 环境：`/opt/interface-env`。
 
 如果确实不能使用 `/var/lib/potato-agent`，可以用 `POTATO_AGENT_STATE_DIR` 指向其它状态根目录；
@@ -31,6 +34,63 @@ Git checkout 里。
 interface 进程不应该以 root 运行。需要 root 的动作由 privileged helper 完成，包括创建用户、
 安装或启停每用户 Hermes service、读取每用户 Hermes session 数据库、按目标 Linux 用户权限
 处理文件浏览和下载上传。
+
+## Hermes Lite 运行时
+
+[`hermes-lite/`](hermes-lite/) 是 Potato Hermes 唯一的新产品源码、构建输入和运行入口。完整的
+[`hermes-agent/`](hermes-agent/) 以及 [`packaging/hermes/`](packaging/hermes/) 只保留为 upstream 审计和
+回滚资料；新 release 不得从它们导入模块、editable install 或生成 wheel。Interface 只启动 Lite wheel 中的
+`python -m tui_gateway.entry`；每用户 unit 使用的 `hermes gateway run --replace` 只是 systemd 前台兼容
+guard，不会启动上游消息平台 gateway。
+
+Lite 源码中的主要边界如下：
+
+| 路径 | 职责 |
+| --- | --- |
+| `potato_hermes_lite/` | 最小 CLI、运行时 guard、附件和 skills 边界 |
+| `agent/`、`tools/`、`providers/` | 从 Hermes 保留的核心 agent loop、允许的工具和 provider 基础设施 |
+| `tui_gateway/` | Potato Web 使用的 stdio RPC gateway |
+| `runtime-profile.yaml` | provider、API mode、工具、plugin、MCP 和自动安装的 fail-closed 策略 |
+| `manifests/` | 精确 source/wheel inventory、依赖、入口、浏览器资产、工具和 forbidden path 合约 |
+| `scripts/` | 隔离验证、可复现构建、inactive 安装、状态指纹和生产切换 |
+| `tests*` | Lite 单测、打包边界测试和真实 stdio gateway mock E2E |
+
+保留的产品能力：
+
+- Potato Web 的 create/resume/prompt/interrupt/approval/command RPC 和 message/tool/error 流式事件；
+- `custom` model provider，以及 `codex_responses`、`chat_completions` 两种 API mode；
+- terminal/process、文件、现有模型视觉链路、本地 browser、skills、代码执行、todo、内置 memory、
+  session search 和 delegation；
+- 现有图片附件、approval 和 interrupt 契约。Lite 不再额外增加原生图片协议，也不增加
+  `clarify`、`sudo`、`secret` 网页交互。
+
+物理删除或由 profile 禁用的能力：
+
+- 完整 Hermes CLI/TUI、dashboard、ACP、cron、kanban、MoA、MCP 和消息平台 gateway；
+- web/search、外部 provider adapter、媒体生成、voice、computer use 和运行时自动依赖安装；
+- user/project/entry-point plugin，以及 Lite 不支持的 Codex App Server 运行面。
+
+profile 最多允许 27 个模型工具。27 是逻辑上限，不是每次请求的固定数量：availability check 可以隐藏
+当前不可用的 `vision_analyze`、`browser_cdp`、`browser_dialog` 等工具，但请求不能增加清单外工具。在线
+runtime 在 `HERMES_RUNTIME_PROFILE_PATH` 缺失或 provider/API mode 不在 allowlist 时 fail closed，不回退到
+完整 Hermes。source/wheel inventory 漂移和 forbidden path/import 则由 verifier/build 门禁阻止候选 release
+生成；它们不是在线进程的持续完整性监控。
+
+用户数据不属于任何源码或 release。`HERMES_HOME`、用户工作目录、mapping、Interface 数据库和托管 skills
+始终保留在外部路径；构建和切换 release 不得复制、清空或重建这些数据。
+
+当前生产状态：
+
+```text
+release:      /opt/potato-hermes-lite/releases/20260718T034917Z-0.16.0-potato.lite.3-fa84c4f3
+current:      /opt/potato-hermes-lite/current
+version:      0.16.0+potato.lite.3
+wheel SHA256: fa84c4f33ceb2a98acf6e55d631ecc08a211740bb24e04184694e33f7765dbce
+```
+
+11 个 mapped unit 和 Interface gateway Python 均已切到 Lite；初步实际用户验收已通过，目前仍处于观察和
+legacy 回滚保留期。完整工具清单、迁移证据和删除门禁见
+[`HERMES_SLIMMING_PLAN.md`](HERMES_SLIMMING_PLAN.md)。
 
 ## 安全边界
 
@@ -126,21 +186,48 @@ MAMBA_ROOT_PREFIX: $HOME/.micromamba
 
 ### 1. 同步代码到 `/srv/potato_agent`
 
+本步骤只用于空主机初装。已有生产环境不要直接对 `/srv/potato_agent` 运行这条 `rsync --delete`；应使用后文
+的 inactive release + `cutover_lite_production.sh` 流程，让脚本先备份代码、记录服务状态并比较用户状态指纹。
+
 ```bash
 mkdir -p /srv/potato_agent
 rsync -a --delete \
   --exclude '.git/' \
+  --exclude '.pytest_cache/' \
+  --exclude '.ruff_cache/' \
   --exclude '__pycache__/' \
+  --exclude '*.pyc' \
+  --exclude '*.pyo' \
+  --exclude '*.db' \
+  --exclude '*.sqlite' \
+  --exclude '*.sqlite3' \
+  --exclude '.env' \
+  --exclude 'hermes-agent/' \
+  --exclude 'packaging/hermes/' \
+  --exclude 'hermes-lite/build/' \
   --exclude 'interface/data/' \
   --exclude 'users_mapping.yaml' \
   ./ /srv/potato_agent/
 cd /srv/potato_agent
 ```
 
-同步后确认 Hermes 源码自带的旧 `plan` 技能已被删除，避免覆盖托管的 `plan-mode` 技能：
+同步结果不得包含 legacy Hermes 或运行时状态：
 
 ```bash
-test ! -e /srv/potato_agent/hermes-agent/skills/software-development/plan/SKILL.md
+test ! -d /srv/potato_agent/hermes-agent
+test ! -e /srv/potato_agent/users_mapping.yaml
+find /srv/potato_agent -type f \
+  \( -name '*.db' -o -name '*.sqlite' -o -name '*.sqlite3' -o -name '.env' \
+     -o -name '*.pyc' -o -name '*.pyo' \) -print
+```
+
+最后一条命令应无输出。mapping、Interface 数据库和所有用户 `HERMES_HOME` 必须在 `/var/lib` 或用户 home
+等外部状态路径中，不能通过源码同步创建。
+
+同步后确认 Lite 源码自带的旧 `plan` 技能已被删除，避免覆盖托管的 `plan-mode` 技能：
+
+```bash
+test ! -e /srv/potato_agent/hermes-lite/skills/software-development/plan/SKILL.md
 ```
 
 ### 2. 创建服务用户和状态目录
@@ -207,7 +294,7 @@ source /etc/profile.d/micromamba.sh
 ### 4. 安装系统 Python GO/KEGG 分析依赖
 
 GO 富集和 KEGG 分析脚本会从用户 shell、Slurm 作业或 skill 脚本里直接调用系统默认
-`python3`。新部署不能只把这些包安装到 `/opt/interface-env` 或 `/opt/hermes-agent-venv`，必须保证
+`python3`。新部署不能只把这些包安装到 `/opt/interface-env` 或 Hermes runtime venv，必须保证
 普通 Linux 用户运行 `/usr/bin/python3` 时可以直接 `import`。
 
 在 Ubuntu 24.04 上，下面的 pip 安装会写入系统 Python 可见的
@@ -380,27 +467,342 @@ crispor-add-genome --baseDir "$HOME/crispor_genomes" fasta genome.fa \
 crispor --genomeDir "$HOME/crispor_genomes" genomeId targets.fa guides.tsv -o offs.tsv -p NGG --mm 4
 ```
 
-### 6. 安装 Hermes 运行时
+### 6. 构建和安装 Hermes Lite 运行时
+
+#### 6.1 准备独立构建环境
+
+Lite 生产 venv 故意不安装 `setuptools`、`packaging`、pytest 等构建依赖，不能用
+`/opt/potato-hermes-lite/current/venv` 构建下一版。当前服务器在 legacy 观察期内可以临时使用
+`/opt/hermes-agent-venv/bin/python3` 作为依赖提供者，但旧源码树绝不能进入 `PYTHONPATH` 或 wheel 输入。
+全新机器应建立独立 build venv：
 
 ```bash
-mkdir -p /opt/hermes-agent-src
-rsync -a --delete /srv/potato_agent/hermes-agent/ /opt/hermes-agent-src/
+python3 -m venv /opt/potato-hermes-lite-build-env
+BUILD_PYTHON=/opt/potato-hermes-lite-build-env/bin/python3
 
-python3 -m venv /opt/hermes-agent-venv
-/opt/hermes-agent-venv/bin/pip install --upgrade pip
-/opt/hermes-agent-venv/bin/pip install -e "/opt/hermes-agent-src[all]"
-
-ln -sf /opt/hermes-agent-venv/bin/hermes /usr/local/bin/hermes
-/usr/local/bin/hermes --version
+"$BUILD_PYTHON" -m pip install --upgrade pip
+mapfile -t lite_requirements < <(
+  "$BUILD_PYTHON" -c \
+    'import json; print(*json.load(open("hermes-lite/manifests/direct-dependencies.json"))["requirements"], sep="\n")'
+)
+"$BUILD_PYTHON" -m pip install \
+  setuptools==82.0.1 wheel packaging pytest \
+  "${lite_requirements[@]}"
 ```
 
-每用户 Hermes service 默认使用 `/usr/local/bin/hermes`。
+在当前过渡服务器上也可以只设置：
 
-Hermes 0.16.0 的 gateway 重启流程默认会等待 `agent.restart_drain_timeout=180` 秒完成
-drain。Potato Agent 生成的每用户 systemd unit 默认写入 `TimeoutStopSec=210`，也就是
-`restart_drain_timeout + 30` 秒。若在全局 `hermes.config_overrides.agent.restart_drain_timeout`
-或用户 `config_overrides.agent.restart_drain_timeout` 中覆盖该值，生成的 unit 会按覆盖值加
-30 秒计算；只有显式设置 `hermes.service.timeout_stop_sec` 时才使用手写值。
+```bash
+BUILD_PYTHON=/opt/hermes-agent-venv/bin/python3
+```
+
+`hermes-lite/manifests/source-inventory.json` 和 `wheel-inventory.json` 是经过审查的精确 hash、size、mode
+allowlist。普通构建只能验证它们；不能为了消除 verifier 报错就运行 `--write-source-inventory` 或
+`--write-wheel-inventory`。真正修改 Lite 产品源码时，应先提升 Lite 版本、审查源码差异，再按维护者流程更新
+两份 inventory 并检查重复构建的 wheel SHA。
+
+#### 6.2 准备 clean browser assets
+
+可部署 release 必须给 builder 传 `--browser-assets`。资产根是一个真实目录，布局至少包含：
+
+```text
+browser/bin/agent-browser
+browser/chrome/chrome-linux64/chrome
+browser/chrome/chrome-linux64/chrome_sandbox
+```
+
+版本、下载地址、archive size 和 SHA256 以
+[`hermes-lite/manifests/browser-assets.json`](hermes-lite/manifests/browser-assets.json) 为准。Chrome archive
+必须在解压前核对 size 和 SHA；`agent-browser` 必须来自可信发布资产。builder 会再次检查 agent-browser hash
+以及两个可执行文件的 `--version`。
+
+资产树只能包含上游的 `chrome_sandbox`，不能预先包含 `chrome-sandbox`。installer 会在 immutable release
+中创建后者的 root-owned hardlink 并设置 `04755`；这是明确的 SUID 信任边界。不要直接把已安装的
+`/opt/potato-hermes-lite/current` 传给 builder：它既是 symlink，内容中也已经有 `chrome-sandbox`。
+升级现有 Lite 时，可以先从当前 release 复制一份 clean tree：
+
+```bash
+BROWSER_ASSETS=/var/tmp/potato-hermes-lite-browser-assets
+test ! -e "$BROWSER_ASSETS"
+test ! -L "$BROWSER_ASSETS"
+install -d -o root -g root -m 0755 "$BROWSER_ASSETS/browser"
+rsync -a --exclude 'chrome-sandbox' \
+  "$(readlink -f /opt/potato-hermes-lite/current)/browser/" \
+  "$BROWSER_ASSETS/browser/"
+test -x "$BROWSER_ASSETS/browser/bin/agent-browser"
+test -x "$BROWSER_ASSETS/browser/chrome/chrome-linux64/chrome"
+test -f "$BROWSER_ASSETS/browser/chrome/chrome-linux64/chrome_sandbox"
+test ! -e "$BROWSER_ASSETS/browser/chrome/chrome-linux64/chrome-sandbox"
+```
+
+#### 6.3 测试、隔离验证和重复构建
+
+Lite 单测与 packaging 测试有各自的 `conftest.py`，必须分开运行：
+
+```bash
+PYTHONDONTWRITEBYTECODE=1 "$BUILD_PYTHON" -B -m pytest \
+  -q -p no:cacheprovider -c /dev/null hermes-lite/tests
+
+PYTHONDONTWRITEBYTECODE=1 "$BUILD_PYTHON" -B -m pytest \
+  -q -p no:cacheprovider -c /dev/null hermes-lite/tests_packaging
+
+PYTHONDONTWRITEBYTECODE=1 "$BUILD_PYTHON" -B -m pytest \
+  -q -p no:cacheprovider -c /dev/null \
+  hermes-lite/tests_e2e/test_mock_provider_e2e.py
+
+PYTHONDONTWRITEBYTECODE=1 "$BUILD_PYTHON" -B \
+  hermes-lite/scripts/verify_lite.py --python "$BUILD_PYTHON"
+```
+
+verifier 使用 `python -S -B -P`，只注入 Lite tree 和明确的 dependency site-packages，并检查固定依赖、
+console entrypoint、27 工具上限、forbidden paths/imports 和关键模块 origin。正式发布建议从相同输入独立构建
+两次并比较 wheel；manifest 的创建时间可以不同，wheel 内容必须一致：
+
+```bash
+BUILD_ROOT=/var/tmp/potato-hermes-lite-build-$(date -u +%Y%m%dT%H%M%SZ)
+RELEASE_A=$BUILD_ROOT/release-a
+RELEASE_B=$BUILD_ROOT/release-b
+test ! -e "$BUILD_ROOT"
+test ! -L "$BUILD_ROOT"
+install -d -o root -g root -m 0755 "$BUILD_ROOT"
+
+"$BUILD_PYTHON" -B hermes-lite/scripts/build_lite_release.py \
+  --dry-run \
+  --python "$BUILD_PYTHON" \
+  --browser-assets "$BROWSER_ASSETS"
+
+"$BUILD_PYTHON" -B hermes-lite/scripts/build_lite_release.py \
+  --python "$BUILD_PYTHON" \
+  --browser-assets "$BROWSER_ASSETS" \
+  --output "$RELEASE_A"
+
+"$BUILD_PYTHON" -B hermes-lite/scripts/build_lite_release.py \
+  --python "$BUILD_PYTHON" \
+  --browser-assets "$BROWSER_ASSETS" \
+  --output "$RELEASE_B"
+
+sha256sum "$RELEASE_A"/wheel/*.whl "$RELEASE_B"/wheel/*.whl
+cmp "$RELEASE_A"/wheel/*.whl "$RELEASE_B"/wheel/*.whl
+```
+
+`--output` 和可选的 `--work-dir` 必须位于 `/opt`、`/srv` 和源码树之外，且目标不能预先存在。build 只生成
+候选 release，不创建生产 venv、不切换 symlink、不重启服务，也不读取或写入用户状态。
+
+#### 6.4 准备离线 wheelhouse 并安装 inactive release
+
+installer 全程使用 `--no-index`。wheelhouse 必须针对目标机器的 Python 版本和平台，包含 Lite wheel 的全部
+直接及传递依赖：
+
+```bash
+WHEELHOUSE=$BUILD_ROOT/wheelhouse
+install -d -o root -g root -m 0755 "$WHEELHOUSE"
+"$BUILD_PYTHON" -m pip download --only-binary=:all: \
+  --dest "$WHEELHOUSE" "$RELEASE_A"/wheel/*.whl
+find "$WHEELHOUSE" -maxdepth 1 -type f ! -name '*.whl' -print
+```
+
+最后一条命令应无输出。直接依赖已固定，但传递依赖不是长期 lock；应归档并审查本次 wheelhouse，以及安装后
+release 内的 `config/installed-distributions.json`。
+
+release、wheelhouse 和后文的 code staging 在交给 root 脚本前必须归 root 所有且不可由普通用户写入：
+
+```bash
+chown -R root:root "$BUILD_ROOT" "$BROWSER_ASSETS"
+chmod -R go-w "$BUILD_ROOT" "$BROWSER_ASSETS"
+install -o root -g root -m 0755 \
+  hermes-lite/scripts/install_lite_release.sh \
+  "$BUILD_ROOT/install_lite_release.sh"
+```
+
+从构建 manifest 生成从未使用过的 release ID；时间戳避免同一版本的失败安装复用旧目录，version 中的 `+`
+需要替换为 release ID 允许的 `-`：
+
+```bash
+RELEASE_VERSION=$(
+  "$BUILD_PYTHON" -c \
+    'import json,sys; print(json.load(open(sys.argv[1]))["project"]["version"])' \
+    "$RELEASE_A/manifest.json"
+)
+WHEEL_SHA=$(
+  "$BUILD_PYTHON" -c \
+    'import json,sys; print(json.load(open(sys.argv[1]))["wheel"]["sha256"])' \
+    "$RELEASE_A/manifest.json"
+)
+RELEASE_ID="$(date -u +%Y%m%dT%H%M%SZ)-${RELEASE_VERSION//+/-}-${WHEEL_SHA:0:8}"
+printf 'release id: %s\n' "$RELEASE_ID"
+
+sudo "$BUILD_ROOT/install_lite_release.sh" \
+  "$RELEASE_A" "$RELEASE_ID" "$WHEELHOUSE"
+```
+
+`install_lite_release.sh` 会检查 manifest 的项目元数据及其指定的 wheel、runtime profile、agent-browser SHA
+和 Chrome version，建立独立 venv、离线安装、执行 `pip check`、拒绝 `hermes-agent` 泄漏、检查关键模块
+origin，并创建 root-owned immutable release：
+
+```text
+/opt/potato-hermes-lite/releases/<release-id>
+```
+
+此时 release 仍是 inactive：脚本不修改 `current`、不重启服务、不接触 mapping、Interface 数据库或任何
+`HERMES_HOME`。如果 venv 或 pip 阶段失败，可能留下 incomplete final 目录；确认它未被 `current` 引用后再
+人工处理，不能直接复用同一个 release ID。
+
+#### 6.5 空主机首次激活
+
+本小节只适用于没有旧 runtime、没有 mapped 用户数据，并且 `current` 与 `/usr/local/bin/hermes` 都不存在的
+空主机。任何路径已经存在时都不要用 `ln -sf` 覆盖，应改走下一小节的受保护 cutover。
+
+```bash
+test ! -e /opt/potato-hermes-lite/current
+test ! -L /opt/potato-hermes-lite/current
+test ! -e /usr/local/bin/hermes
+test ! -L /usr/local/bin/hermes
+
+ln -s "/opt/potato-hermes-lite/releases/$RELEASE_ID" \
+  /opt/potato-hermes-lite/current
+ln -s /opt/potato-hermes-lite/current/venv/bin/hermes \
+  /usr/local/bin/hermes
+```
+
+随后继续安装 Interface、privileged helper 和 systemd unit，再 provision 用户。Interface unit 的
+`INTERFACE_TUI_GATEWAY_PYTHON` 必须是 `/opt/potato-hermes-lite/current/venv/bin/python3`，每用户 unit 的
+executable、skills、browser 和 runtime profile 也必须指向 current release。
+
+#### 6.6 已有生产环境的受保护切换
+
+`cutover_lite_production.sh` 只适用于已有生产：要求现有 `/usr/local/bin/hermes` 是 symlink、mapping 至少有
+一个用户、全部 mapped unit 已存在，并且 inactive release 已由上一小节安装完成。切换会停止 Interface 和
+切换前 active 的 Hermes 服务，应安排维护窗口并先完成独立数据备份。状态指纹用于证明切换期间零变化，
+不是备份；它不读取用户 workdir，`.hermes/home` 只做 metadata tree 摘要。
+
+不能把 dirty checkout 直接作为 `CODE_SOURCE`。先创建全新的 root-owned staging，排除 legacy 源码、状态、
+缓存和生成文件：
+
+```bash
+REPO=$PWD
+CODE_SOURCE=$BUILD_ROOT/code-source
+test ! -e "$CODE_SOURCE"
+install -d -o root -g root -m 0755 "$CODE_SOURCE"
+rsync -a \
+  --exclude '/.git/' \
+  --exclude '/.codex-tmp/' \
+  --exclude '/.pytest_cache/' \
+  --exclude '/.ruff_cache/' \
+  --exclude '__pycache__/' \
+  --exclude '*.pyc' \
+  --exclude '*.pyo' \
+  --exclude '*.db' \
+  --exclude '*.sqlite' \
+  --exclude '*.sqlite3' \
+  --exclude '.env' \
+  --exclude '/users_mapping.yaml' \
+  --exclude '/interface/data/' \
+  --exclude '/hermes-agent/' \
+  --exclude '/packaging/hermes/' \
+  --exclude '/hermes-lite/build/' \
+  "$REPO/" "$CODE_SOURCE/"
+
+chown -R root:root "$CODE_SOURCE"
+chmod -R go-w "$CODE_SOURCE"
+test -f "$CODE_SOURCE/interface/app.py"
+test ! -e "$CODE_SOURCE/hermes-agent"
+test ! -e "$CODE_SOURCE/users_mapping.yaml"
+test -z "$(find "$CODE_SOURCE" -type l -print -quit)"
+test -z "$(find "$CODE_SOURCE" -type f \
+  \( -name '*.db' -o -name '*.sqlite' -o -name '*.sqlite3' -o \
+     -name '.env' -o -name '*.pyc' -o -name '*.pyo' \) -print -quit)"
+```
+
+根据当次受保护 mapping 人工核对 mapped user 数。`11` 只是当前生产值，不能机械沿用：
+
+```bash
+MAPPING=/var/lib/potato-agent/config/users_mapping.yaml
+EXPECTED_USER_COUNT=$(
+  /opt/interface-env/bin/python -c \
+    'import sys,yaml; print(len((yaml.safe_load(open(sys.argv[1])) or {}).get("users") or []))' \
+    "$MAPPING"
+)
+printf 'reviewed mapped users: %s\n' "$EXPECTED_USER_COUNT"
+```
+
+人工确认数量、inactive release 和独立备份后执行：
+
+```bash
+sudo "$CODE_SOURCE/hermes-lite/scripts/cutover_lite_production.sh" \
+  "$CODE_SOURCE" "$RELEASE_ID" "$EXPECTED_USER_COUNT"
+```
+
+cutover 会：
+
+- 备份 mapping、全部 mapped unit、旧 `current`/`hermes` target、Interface drop-in 和被覆盖的代码；
+- 记录切换前 active 的服务，只停止并最终恢复这些服务，原本 inactive 的 unit 保持 inactive；
+- 停止写入方后采集 mapping、Interface data 和 mapped `HERMES_HOME` 指纹；
+- overlay 新代码，原子切换 `current` 与 `/usr/local/bin/hermes`，刷新既有 unit 集；
+- 再次采集并比较指纹，要求 `added`、`changed`、`removed` 全为空；
+- 检查 `/health`、进程使用的新 release、无 `slash_worker`、`pip check` 和 CLI help。
+
+备份写入 root-only 的
+`/var/backups/potato-agent/hermes-lite-cutover/<timestamp>-<release-id>`。切换开始后的错误、中断或终止信号会
+恢复旧 unit、drop-in、symlink、被覆盖文件和原 active 服务；但 overlay 新增的代码文件不会自动删除，因此
+这不是整个代码树的完整原样回滚。成功后的人工回滚也没有独立的一键脚本，必须保留旧 immutable release、
+旧源码/venv 和对应 backup，在维护窗口中按 backup 受控执行。
+
+#### 6.7 部署后验证
+
+使用 cutover 输出的 backup 路径设置 `BACKUP`，然后检查：
+
+```bash
+readlink -f /opt/potato-hermes-lite/current
+readlink -f /usr/local/bin/hermes
+/opt/potato-hermes-lite/current/venv/bin/pip check
+/opt/potato-hermes-lite/current/venv/bin/python3 -I -c \
+  'import agent.codex_runtime, pathlib, potato_hermes_lite, tui_gateway.entry; \
+   print(potato_hermes_lite.__version__); \
+   print(pathlib.Path(agent.codex_runtime.__file__).resolve()); \
+   print(pathlib.Path(tui_gateway.entry.__file__).resolve())'
+
+systemctl is-active potato-interface.service
+curl -fsS http://127.0.0.1:3000/health
+HERMES_UNIT=hermes-REPLACE_WITH_MAPPED_USER.service
+systemctl status "$HERMES_UNIT" --no-pager
+
+pgrep -af '[s]lash_worker|/opt/[h]ermes-agent|[h]ermes-agent-src'
+cat "$BACKUP/result.txt"
+cat "$BACKUP/state-compare.json"
+```
+
+`pgrep` 应无输出，`result.txt` 应为 `complete`，状态比较应为
+`{"added": [], "changed": [], "removed": []}`。同时确认 Interface 进程中的
+`INTERFACE_TUI_GATEWAY_PYTHON` 和切换前 active 的用户服务 cmdline 都来自新 release。
+
+最后从 Web Interface 完成 create/resume、模型切换、图片、skills、interrupt、approval 和 browser 实测。
+不要在同一个 mapped Linux 用户下并行手工启动 `tui_gateway.entry`；它具有单实例语义，可能替换正在运行的
+gateway guard。任何带 `--delete` 的命令都不得指向 mapping、Interface data、`HERMES_HOME` 或用户 workdir。
+
+#### 6.8 浏览器 CDP 可选配置
+
+immutable release 安装到 `/opt/potato-hermes-lite/releases/<release-id>`，并由
+`/opt/potato-hermes-lite/current` 指向当前版本。若另有 root 管理的本地 Chromium CDP supervisor，可提供
+已经解析好的 loopback WebSocket；Interface 不会通过 HTTP 探测 `/json/version`：
+
+```yaml
+hermes:
+  runtime_profile_path: /opt/potato-hermes-lite/current/config/runtime-profile.yaml
+  browser_cdp_url: ws://127.0.0.1:9222/devtools/browser/<browser-id>
+```
+
+`browser_cdp_url` 只接受无认证、无 query、使用字面量 loopback IP 的 `ws://`/`wss://` DevTools endpoint；
+`localhost` 不会触发 DNS 或 hosts 解析。未配置时保持为空，因此 `browser_cdp` 和 `browser_dialog` 不会通过
+真实 availability check。它们与 `vision_analyze` 等工具允许按运行环境动态隐藏；27 项始终只是逻辑上限。
+
+新的每用户 Hermes service 默认使用 `/opt/potato-hermes-lite/current/venv/bin/hermes`。现有生产 mapping 保留
+`/usr/local/bin/hermes` 兼容入口，但该 symlink 必须解析到 Lite current venv，不能再指向 legacy venv。
+
+Hermes 0.16.0 的 gateway 重启流程默认会等待 `agent.restart_drain_timeout=180` 秒完成 drain。Potato Agent
+生成的每用户 systemd unit 默认写入 `TimeoutStopSec=210`，也就是 `restart_drain_timeout + 30` 秒。若在全局
+`hermes.config_overrides.agent.restart_drain_timeout` 或用户
+`config_overrides.agent.restart_drain_timeout` 中覆盖该值，生成的 unit 会按覆盖值加 30 秒计算；只有显式设置
+`hermes.service.timeout_stop_sec` 时才使用手写值。
 
 ### 7. 部署空间转录组查看器数据
 
@@ -778,7 +1180,7 @@ Environment=POTATO_AGENT_MAPPING_PATH=/var/lib/potato-agent/config/users_mapping
 Environment=INTERFACE_AUTH_DB=/var/lib/potato-agent/data/interface.db
 Environment=INTERFACE_ARCHIVE_DB=/var/lib/potato-agent/data/archive.db
 Environment=INTERFACE_PRIVILEGED_HELPER=/usr/local/libexec/potato-agent-privileged-helper
-Environment=INTERFACE_TUI_GATEWAY_PYTHON=/opt/hermes-agent-venv/bin/python3
+Environment=INTERFACE_TUI_GATEWAY_PYTHON=/opt/potato-hermes-lite/current/venv/bin/python3
 Environment=SPATIAL_VIEWER_DATA_ROOT=/srv/spatial_data/current
 Environment=WGCNA_DATABASE_URL=postgresql:///potato_wgcna?host=/var/run/postgresql
 Environment=BULK_RNASEQ_DB_PATH=/srv/bulk_rnaseq/current/bulk_rnaseq.sqlite
@@ -876,124 +1278,65 @@ systemd unit。安装 runtime 文件时会在用户 home 下创建 `public_data`
 `/mnt/data/public_data`；共享数据目录的读写权限由该目录自身权限控制，开通流程不会修改它。
 Hermes service 默认保持 disabled，用户进入 workspace 时再按需启动。
 
-## 从旧部署升级
+## 升级已有部署
 
-旧部署如果把 `users_mapping.yaml` 或 `interface/data/*.db` 放在仓库目录下，按下面流程迁移。
+自动 Lite cutover 只支持状态边界已经稳定的生产环境。开始前必须同时满足：
 
-### 1. 停止服务
+- mapping 位于 `/var/lib/potato-agent/config/users_mapping.yaml`，Interface 数据库位于
+  `/var/lib/potato-agent/data/`，且 systemd 实际使用这些路径；
+- 每个 mapped 用户的 `HERMES_HOME` 和 workdir 都在源码树外；
+- mapping 至少包含一个用户，全部 mapped unit 已存在，`/usr/local/bin/hermes` 是 symlink；
+- 已完成独立、可恢复的数据备份，而不是只依赖 cutover 的状态指纹。
 
-```bash
-systemctl stop potato-interface.service 2>/dev/null || true
-systemctl list-units 'hermes-*.service' --no-legend --plain \
-  | awk '{print $1}' \
-  | xargs -r systemctl stop
-```
+如果 mapping、任一 Interface DB 或其 WAL/SHM 仍在 `/srv/potato_agent`，或者新旧位置同时存在状态，这属于
+单独的旧状态迁移，不得与 Lite release 切换合并执行。本 README 不提供危险的文件复制捷径：迁移必须在
+维护窗口记录原 active 服务、确认所有写入方已停止，使用 SQLite backup API 先生成并校验完整私有 staging，
+再把 mapping 和全部数据库作为一个受控事务发布；任何失败都必须撤销新路径/drop-in 并恢复原 active 集合。
+完成迁移、Web 验收和独立回滚验证后，才能继续下面的 Lite cutover。
 
-### 2. 备份旧状态
+不要对已有生产重复“全新部署”中的 `rsync --delete`，也不要直接把 dirty checkout 覆盖到
+`/srv/potato_agent`。
 
-```bash
-backup_dir=/root/potato-agent-backup-$(date +%Y%m%d-%H%M%S)
-mkdir -p "$backup_dir"
+### 1. 构建、安装并切换 Lite release
 
-cp -a /srv/potato_agent/users_mapping.yaml "$backup_dir/" 2>/dev/null || true
-cp -a /srv/potato_agent/interface/data "$backup_dir/interface-data" 2>/dev/null || true
-cp -a /etc/systemd/system/potato-interface.service "$backup_dir/" 2>/dev/null || true
-```
+按以下顺序执行，不能跳过中间的 inactive 状态：
 
-### 3. 把状态文件迁移到 `/var/lib/potato-agent`
+1. 按 6.1 至 6.3 小节准备独立 build venv、clean browser assets，并完成 Lite 测试、隔离 verifier 和
+   两次确定性构建。
+2. 按 6.4 小节准备完整离线 wheelhouse，并用 `install_lite_release.sh` 安装一个新的 inactive release ID。
+3. 按 6.6 小节生成全新的 root-owned `CODE_SOURCE`，人工核对 mapped user 数，完成独立数据备份后运行
+   `cutover_lite_production.sh`。
+4. 按 6.7 小节检查 symlink、模块 origin、服务进程、`pip check`、健康状态、cutover 结果和状态指纹差异。
 
-```bash
-mkdir -p /var/lib/potato-agent/config /var/lib/potato-agent/data
+cutover 脚本会自行记录 active 服务、停止写入方、切换并只恢复原来 active 的服务，不要提前手工停止服务。
+已有 mapped 用户不需要重新创建，也不应为了 runtime 升级运行 `provision-user`；该命令会改写用户配置、
+skills 和 unit，范围大于 release 切换。
 
-if [ -f /srv/potato_agent/users_mapping.yaml ]; then
-  cp -a /srv/potato_agent/users_mapping.yaml /var/lib/potato-agent/config/users_mapping.yaml
-fi
+### 2. 仅刷新每用户 unit 模板
 
-if [ ! -s /var/lib/potato-agent/config/users_mapping.yaml ]; then
-  printf 'users: []\n' >/var/lib/potato-agent/config/users_mapping.yaml
-fi
-
-if [ -f /srv/potato_agent/interface/data/interface.db ]; then
-  cp -a /srv/potato_agent/interface/data/interface.db /var/lib/potato-agent/data/interface.db
-fi
-
-if [ -f /srv/potato_agent/interface/data/archive.db ]; then
-  cp -a /srv/potato_agent/interface/data/archive.db /var/lib/potato-agent/data/archive.db
-fi
-
-chown root:potato-interface /var/lib/potato-agent /var/lib/potato-agent/config
-chown root:potato-interface /var/lib/potato-agent/config/users_mapping.yaml
-chown potato-interface:potato-interface /var/lib/potato-agent/data
-chown potato-interface:potato-interface /var/lib/potato-agent/data/*.db 2>/dev/null || true
-
-chmod 0750 /var/lib/potato-agent /var/lib/potato-agent/config
-chmod 0700 /var/lib/potato-agent/data
-chmod 0640 /var/lib/potato-agent/config/users_mapping.yaml
-chmod 0600 /var/lib/potato-agent/data/*.db 2>/dev/null || true
-```
-
-确认新部署正常后，删除仓库目录下的旧状态文件，避免以后同步代码时再次暴露。
-
-### 4. 重新安装运行时和服务
-
-重复全新部署中的这些步骤：
-
-- 同步代码到 `/srv/potato_agent`
-- 安装 micromamba
-- 安装系统 Python GO/KEGG 分析依赖
-- 安装 sgRNA Design 共享依赖
-- 安装 Hermes 运行时
-- 安装 interface 运行时
-- 安装 privileged helper
-- 安装 `potato-interface.service`
-
-然后重载 systemd 并重启 interface：
+如果 release 和用户 runtime 文件都不变，只需要刷新 unit 模板，先只读检查渲染差异，再显式应用。下面的
+数量占位符必须替换为当次从受保护 mapping 读取并人工核对的值：
 
 ```bash
-systemctl daemon-reload
-systemctl restart potato-interface.service
-```
+EXPECTED_USER_COUNT='REPLACE_WITH_REVIEWED_COUNT'
 
-如果 Hermes 运行时或每用户 systemd unit 模板发生变化，正在运行的 Hermes gateway 也需要在合适
-窗口重启：
-
-```bash
-systemctl restart hermes-alice.service
-```
-
-已有映射用户不需要重新创建。如果允许重写该用户的 Hermes runtime 文件和 unit，可以对每个 mapped
-username 执行：
-
-```bash
-/usr/local/libexec/potato-agent-privileged-helper provision-user --username alice
-```
-
-`provision-user` 会按当前 mapping 重写该用户的 `.hermes/config.yaml`、`.hermes/.env`、技能文件和
-systemd unit；如果只需要刷新 unit 模板，不要用它。只重写每用户 systemd unit 时，用仓库代码生成
-unit，然后再重启需要继续在线的 Hermes service：
-
-```bash
 PYTHONPATH=/srv/potato_agent \
 POTATO_AGENT_MAPPING_PATH=/var/lib/potato-agent/config/users_mapping.yaml \
-/opt/interface-env/bin/python - <<'PY'
-from pathlib import Path
+/opt/interface-env/bin/python /srv/potato_agent/refresh_hermes_systemd_units.py \
+  --all --expect-count "$EXPECTED_USER_COUNT" --require-existing-set
 
-from interface.hermes_service import build_systemd_unit
-from interface.mapping import DEFAULT_MAPPING_PATH, MappingStore, load_mapping
-
-config = load_mapping(DEFAULT_MAPPING_PATH, resolve_env=True)
-for target in MappingStore(DEFAULT_MAPPING_PATH).load_targets():
-    unit_path = Path("/etc/systemd/system") / target.systemd_service
-    unit_path.write_text(build_systemd_unit(config, target), encoding="utf-8")
-    unit_path.chmod(0o644)
-    print(unit_path)
-PY
-systemctl daemon-reload
-systemctl restart hermes-alice.service
+PYTHONPATH=/srv/potato_agent \
+POTATO_AGENT_MAPPING_PATH=/var/lib/potato-agent/config/users_mapping.yaml \
+/opt/interface-env/bin/python /srv/potato_agent/refresh_hermes_systemd_units.py \
+  --apply --all --expect-count "$EXPECTED_USER_COUNT" --require-existing-set
 ```
 
-升级到 Hermes 0.16.0 时需要刷新每用户 unit，确保 gateway unit 至少有
-`TimeoutStopSec=restart_drain_timeout + 30`；默认部署应显示为 `TimeoutStopSec=210`。
+只读检查发现 drift 时返回 `1`，无 drift 返回 `0`；校验或安全边界失败返回 `2`。`--apply` 会验证全部候选、
+备份旧 unit、执行原子逐文件替换并 reload systemd，但不会重启服务，也不会读写用户 home、Hermes config、
+session、数据库或 skills。应用后只在维护窗口重启需要加载新 unit 且原本在线的服务。
+
+Hermes 0.16.0 gateway 默认使用 180 秒 drain；生成的 unit 应为 `TimeoutStopSec=210`。如果 mapping 中覆盖
+`restart_drain_timeout`，则应为覆盖值加 30 秒。
 
 ## 日常运维
 
@@ -1043,16 +1386,36 @@ export POTATO_AGENT_MAPPING_PATH=/var/lib/potato-agent/config/users_mapping.yaml
 
 ## 验证
 
-代码变更后运行 interface 测试：
+Interface 代码变更后运行 interface 测试：
 
 ```bash
 cd /srv/potato_agent
 /opt/interface-env/bin/python -m pytest interface/test_*.py
 ```
 
+Hermes Lite 源码、profile、manifest 或构建脚本变更后，还必须使用 6.1 小节的 `BUILD_PYTHON` 分开运行
+Lite 单测、packaging 测试、mock gateway E2E 和隔离 verifier：
+
+```bash
+PYTHONDONTWRITEBYTECODE=1 "$BUILD_PYTHON" -B -m pytest \
+  -q -p no:cacheprovider -c /dev/null hermes-lite/tests
+PYTHONDONTWRITEBYTECODE=1 "$BUILD_PYTHON" -B -m pytest \
+  -q -p no:cacheprovider -c /dev/null hermes-lite/tests_packaging
+PYTHONDONTWRITEBYTECODE=1 "$BUILD_PYTHON" -B -m pytest \
+  -q -p no:cacheprovider -c /dev/null \
+  hermes-lite/tests_e2e/test_mock_provider_e2e.py
+PYTHONDONTWRITEBYTECODE=1 "$BUILD_PYTHON" -B \
+  hermes-lite/scripts/verify_lite.py --python "$BUILD_PYTHON"
+```
+
+不要把两个 pytest 目录合并成一次调用；它们使用不同的 `conftest.py` 边界。release 构建仍需按 6.3 小节
+完成 dry run 和两次 wheel SHA 比较。生产切换后还需完整执行 6.7 小节，不以单元测试代替 runtime origin、
+服务进程和受保护状态检查。
+
 检查网页服务：
 
 ```bash
+curl -fsS http://127.0.0.1:3000/health | python3 -m json.tool >/dev/null
 curl -fsS http://127.0.0.1:3000/lite >/dev/null
 curl -fsS http://127.0.0.1:3000/spatial >/dev/null
 curl -fsS http://127.0.0.1:3000/api/spatial/datasets | python3 -m json.tool >/dev/null

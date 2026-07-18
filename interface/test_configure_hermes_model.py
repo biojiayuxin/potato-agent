@@ -432,10 +432,15 @@ fallback_providers:
         "api_mode": "codex_responses",
         "context_length": 1050000,
     }
-    assert data["agent"] == {"reasoning_effort": "xhigh"}
+    assert data["agent"]["reasoning_effort"] == "xhigh"
+    assert "web" in data["agent"]["disabled_toolsets"]
     assert data["auxiliary"]["compression"]["context_length"] == 1050000
-    assert data["auxiliary"]["summarizer"] == {"model": "custom-summary"}
-    assert data["memory"] == {"enabled": True}
+    assert data["auxiliary"]["summarizer"]["model"] == "custom-summary"
+    assert data["auxiliary"]["summarizer"]["provider"] == "custom"
+    assert data["auxiliary"]["summarizer"]["base_url"] == ""
+    assert data["auxiliary"]["summarizer"]["api_key"] == ""
+    assert data["auxiliary"]["summarizer"]["fallback_chain"] == []
+    assert data["memory"] == {"enabled": True, "provider": ""}
     assert data["tools"] == {"filesystem": True}
     assert data["terminal"] == {"backend": "local", "timeout": 300}
     assert "fallback_providers" not in data
@@ -596,7 +601,7 @@ fallback_providers:
     data = yaml.safe_load(config_path.read_text(encoding="utf-8"))
     assert "fallback_providers" not in data
     assert "fallback_model" not in data
-    assert data["memory"] == {"enabled": True}
+    assert data["memory"] == {"enabled": True, "provider": ""}
 
 
 def test_apply_model_config_to_users_does_not_wait_for_legacy_models_endpoint(

@@ -524,7 +524,9 @@ def test_put_active_model_updates_user_config(monkeypatch) -> None:
             "context_length": 500000,
             "api_mode": "codex_responses",
         }
-        assert config["agent"] == {"reasoning_effort": "xhigh"}
+        assert config["agent"]["reasoning_effort"] == "xhigh"
+        assert "clarify" in config["agent"]["disabled_toolsets"]
+        assert config["platform_toolsets"]["cli"][-1] == "no_mcp"
         assert (hermes_home / ".env").read_text(encoding="utf-8") == ""
     finally:
         client.close()

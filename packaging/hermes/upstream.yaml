@@ -1,0 +1,29 @@
+schema_version: 2
+reference_kind: candidate
+provenance_status: unverified
+provenance_note: >-
+  The candidate archive is internally verified, but it does not reproduce the
+  vendored bf97bf9 tree. Release builds remain blocked until a matching upstream
+  commit and a complete downstream patch series are recorded.
+repository: https://github.com/NousResearch/hermes-agent
+tag: v2026.6.5
+commit: 3c231eb3979ab9c57d5cd6d02f1d577a3b718b43
+tree: 1a22929c135c539935fd7884608ad5e0abc15c7c
+archive_url: https://codeload.github.com/NousResearch/hermes-agent/tar.gz/3c231eb3979ab9c57d5cd6d02f1d577a3b718b43
+archive_sha256: c36c4b4a205b09673a6bc742c2c4361bac6e92139e795378a4335422458c3a43
+upstream_version: 0.16.0
+python: 3.12.3
+# Hash of uv.lock inside the candidate archive, not the current checkout.
+uv_lock_sha256: 4684393e8ac81c3f3476d66b37734401b852a4b54bbef029de2317da05ff6cc0
+vendored_baseline_commit: bf97bf9dfcdd95a53baecb5302c49318919b7730
+vendored_tree: 9f321af599131747f293f943ec11b269d653251e
+vendored_uv_lock_sha256: 924d52509b4c76664aefef09ffc18474cd4adb9f794d6fb7d2c7b7cae8b103fa
+potato_revision: 1
+patch_series: []
+baseline_attestation:
+  status: pending
+  statement_sha256: null
+replay_attestation:
+  status: pending
+  statement_sha256: null
+fully_patched_release_tree: null

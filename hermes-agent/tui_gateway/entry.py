@@ -233,14 +233,20 @@ def main():
     # wasted.  Check the config first (cheap) and only spawn the discovery
     # thread when there's actually MCP work to do, so the import cost stays
     # off the path entirely for the common case.
-    try:
-        from hermes_cli.config import read_raw_config
-        _mcp_servers = (read_raw_config() or {}).get("mcp_servers")
-        _has_mcp_servers = isinstance(_mcp_servers, dict) and len(_mcp_servers) > 0
-    except Exception:
-        # Be conservative: if we can't decide, fall back to attempting
-        # discovery (still backgrounded, so it can't block startup).
-        _has_mcp_servers = True
+    from runtime_profile import get_runtime_profile
+
+    _runtime_profile = get_runtime_profile()
+    if _runtime_profile is not None and not _runtime_profile.mcp_enabled:
+        _has_mcp_servers = False
+    else:
+        try:
+            from hermes_cli.config import read_raw_config
+            _mcp_servers = (read_raw_config() or {}).get("mcp_servers")
+            _has_mcp_servers = isinstance(_mcp_servers, dict) and len(_mcp_servers) > 0
+        except Exception:
+            # Be conservative: if we can't decide, fall back to attempting
+            # discovery (still backgrounded, so it can't block startup).
+            _has_mcp_servers = True
     if _has_mcp_servers:
         def _discover_mcp_background() -> None:
             try:

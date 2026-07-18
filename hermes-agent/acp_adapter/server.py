@@ -74,6 +74,7 @@ from acp_adapter.permissions import make_approval_callback
 from acp_adapter.provenance import session_provenance_meta
 from acp_adapter.session import SessionManager, SessionState, _expand_acp_enabled_toolsets
 from acp_adapter.tools import build_tool_complete, build_tool_start
+from runtime_profile import get_runtime_profile
 
 logger = logging.getLogger(__name__)
 
@@ -792,6 +793,9 @@ class HermesACPAgent(acp.Agent):
     ) -> None:
         """Register ACP-provided MCP servers and refresh the agent tool surface."""
         if not mcp_servers:
+            return
+        runtime_profile = get_runtime_profile()
+        if runtime_profile is not None and not runtime_profile.mcp_enabled:
             return
 
         try:

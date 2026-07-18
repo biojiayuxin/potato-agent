@@ -2253,6 +2253,11 @@ button.stretch {
   grid-template-columns: repeat(4, minmax(0, 1fr));
 }
 
+.approval-actions button:disabled {
+  cursor: wait;
+  opacity: 0.58;
+}
+
 .password-actions {
   grid-template-columns: repeat(2, minmax(0, 1fr));
 }

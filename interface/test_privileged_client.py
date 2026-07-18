@@ -8,7 +8,7 @@ from pathlib import Path
 import pytest
 
 from interface.mapping import HermesTarget
-from interface.privileged_client import PrivilegedClient
+from interface.privileged_client import PrivilegedClient, build_direct_tui_gateway_command
 
 
 def test_privileged_client_uses_helper_when_not_root(monkeypatch) -> None:
@@ -76,6 +76,134 @@ def test_tui_gateway_command_uses_exec_helper_when_not_root(monkeypatch) -> None
         "--username",
         "alice",
     ]
+
+
+def test_tui_gateway_helper_command_does_not_accept_profile_override(monkeypatch) -> None:
+    monkeypatch.setattr("interface.privileged_client.os.geteuid", lambda: 1000)
+    monkeypatch.setenv(
+        "INTERFACE_PRIVILEGED_HELPER",
+        "/usr/local/libexec/potato-agent-privileged-helper",
+    )
+    target = HermesTarget(
+        username="alice",
+        email="alice@example.com",
+        display_name="Alice",
+        linux_user="hmx_alice",
+        home_dir=Path("/home/hmx_alice"),
+        hermes_home=Path("/home/hmx_alice/.hermes"),
+        workdir=Path("/home/hmx_alice"),
+        api_server_host="127.0.0.1",
+        api_port=8655,
+        api_key="sk-user",
+        api_server_model_name="Hermes",
+        systemd_service="hermes-alice.service",
+        extra_env={},
+        config_overrides={},
+    )
+
+    command = PrivilegedClient().tui_gateway_command(target)
+
+    assert command == [
+        "sudo",
+        "-n",
+        "/usr/local/libexec/potato-agent-privileged-helper",
+        "tui-gateway",
+        "--username",
+        "alice",
+    ]
+
+
+def test_direct_tui_gateway_command_injects_runtime_profile_guards(monkeypatch) -> None:
+    target = HermesTarget(
+        username="alice",
+        email="alice@example.com",
+        display_name="Alice",
+        linux_user="hmx_alice",
+        home_dir=Path("/home/hmx_alice"),
+        hermes_home=Path("/home/hmx_alice/.hermes"),
+        workdir=Path("/home/hmx_alice"),
+        api_server_host="127.0.0.1",
+        api_port=8655,
+        api_key="sk-user",
+        api_server_model_name="Hermes",
+        systemd_service="hermes-alice.service",
+        extra_env={},
+        config_overrides={},
+        runtime_profile_path=Path("/opt/potato/profile.yaml"),
+        browser_cdp_url="ws://127.0.0.1:9222/devtools/browser/local",
+    )
+
+    command = build_direct_tui_gateway_command(target)
+
+    assert "HERMES_DISABLE_LAZY_INSTALLS=1" in command
+    assert "HERMES_SKIP_NODE_BOOTSTRAP=1" in command
+    assert "HERMES_DISABLE_GATEWAY_PLATFORMS=1" in command
+    assert "HERMES_DISABLE_MCP=1" in command
+    assert "HERMES_DISABLE_CRON=1" in command
+    assert "HERMES_DISABLE_KANBAN=1" in command
+    assert "TERMINAL_ENV=local" in command
+    assert "AGENT_BROWSER_ENGINE=chrome" in command
+    assert (
+        "BROWSER_CDP_URL=ws://127.0.0.1:9222/devtools/browser/local"
+        in command
+    )
+    assert "CAMOFOX_URL=" in command
+    assert (
+        "HERMES_BUNDLED_SKILLS=/opt/potato-hermes-lite/current/share/hermes/skills"
+        in command
+    )
+    assert (
+        "HERMES_OPTIONAL_SKILLS=/opt/potato-hermes-lite/current/share/hermes/optional-skills"
+        in command
+    )
+    assert (
+        "HERMES_AGENT_BROWSER_BIN_DIR=/opt/potato-hermes-lite/current/browser/bin"
+        in command
+    )
+    assert (
+        "AGENT_BROWSER_EXECUTABLE_PATH="
+        "/opt/potato-hermes-lite/current/browser/chrome/chrome-linux64/chrome"
+        in command
+    )
+    assert "HERMES_RUNTIME_PROFILE_PATH=/opt/potato/profile.yaml" in command
+
+
+def test_direct_tui_gateway_command_uses_required_default_profile(monkeypatch) -> None:
+    monkeypatch.delenv("HERMES_RUNTIME_PROFILE_PATH", raising=False)
+    target = HermesTarget(
+        username="alice",
+        email="alice@example.com",
+        display_name="Alice",
+        linux_user="hmx_alice",
+        home_dir=Path("/home/hmx_alice"),
+        hermes_home=Path("/home/hmx_alice/.hermes"),
+        workdir=Path("/home/hmx_alice"),
+        api_server_host="127.0.0.1",
+        api_port=8655,
+        api_key="sk-user",
+        api_server_model_name="Hermes",
+        systemd_service="hermes-alice.service",
+        extra_env={},
+        config_overrides={},
+    )
+
+    command = build_direct_tui_gateway_command(target)
+
+    assert "HERMES_DISABLE_LAZY_INSTALLS=1" in command
+    assert "HERMES_SKIP_NODE_BOOTSTRAP=1" in command
+    assert "HERMES_DISABLE_GATEWAY_PLATFORMS=1" in command
+    assert "HERMES_DISABLE_MCP=1" in command
+    assert "HERMES_DISABLE_CRON=1" in command
+    assert "HERMES_DISABLE_KANBAN=1" in command
+    assert "TERMINAL_ENV=local" in command
+    assert "AGENT_BROWSER_ENGINE=chrome" in command
+    assert "BROWSER_CDP_URL=" in command
+    assert "CAMOFOX_URL=" in command
+    assert "/opt/potato-hermes-lite/current/venv/bin/python3" in command
+    assert (
+        "HERMES_RUNTIME_PROFILE_PATH=/opt/potato-hermes-lite/current/config/runtime-profile.yaml"
+        in command
+    )
 
 
 def test_has_active_background_processes_uses_helper_when_not_root(monkeypatch) -> None:

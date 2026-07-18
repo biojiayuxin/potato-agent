@@ -11,6 +11,11 @@ from typing import Any
 
 import yaml
 
+from interface.hermes_profile import (
+    DEFAULT_ACTIVATION_RUNTIME_PROFILE_PATH,
+    activation_runtime_profile_path,
+    local_browser_cdp_url,
+)
 from interface.secure_paths import (
     DEFAULT_MAPPING_FILE_MODE,
     DEFAULT_STATE_DIR,
@@ -72,6 +77,8 @@ class HermesTarget:
     systemd_service: str
     extra_env: dict[str, str]
     config_overrides: dict[str, Any]
+    runtime_profile_path: Path = DEFAULT_ACTIVATION_RUNTIME_PROFILE_PATH
+    browser_cdp_url: str = ""
 
     @property
     def api_base_url(self) -> str:
@@ -228,6 +235,11 @@ def _build_target(config: dict[str, Any], raw_user: dict[str, Any]) -> HermesTar
         raw_user.get("systemd_service")
         or f"hermes-{slugify_username(username)}.service"
     ).strip()
+    configured_runtime_profile = (
+        hermes_cfg["runtime_profile_path"]
+        if "runtime_profile_path" in hermes_cfg
+        else None
+    )
 
     return HermesTarget(
         username=username,
@@ -247,6 +259,12 @@ def _build_target(config: dict[str, Any], raw_user: dict[str, Any]) -> HermesTar
             for key, value in {**global_extra_env, **user_extra_env}.items()
         },
         config_overrides=deepcopy(config_overrides),
+        runtime_profile_path=activation_runtime_profile_path(
+            configured_runtime_profile
+        ),
+        browser_cdp_url=local_browser_cdp_url(
+            hermes_cfg.get("browser_cdp_url")
+        ),
     )
 
 

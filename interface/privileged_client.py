@@ -10,6 +10,10 @@ from pathlib import Path
 from typing import Any
 
 from interface.background_jobs import has_active_background_processes
+from interface.hermes_profile import (
+    DEFAULT_HERMES_LITE_PYTHON,
+    runtime_profile_environment,
+)
 from interface.hermes_service import (
     ensure_service_ready,
     install_user_files,
@@ -51,7 +55,33 @@ class FileDownload:
 
 
 def build_direct_tui_gateway_command(target: HermesTarget) -> list[str]:
-    python_bin = os.getenv("INTERFACE_TUI_GATEWAY_PYTHON") or "/opt/hermes-agent-venv/bin/python3"
+    python_bin = os.getenv("INTERFACE_TUI_GATEWAY_PYTHON") or str(
+        DEFAULT_HERMES_LITE_PYTHON
+    )
+    runtime_env = runtime_profile_environment(
+        profile_path=target.runtime_profile_path,
+        browser_cdp_url=target.browser_cdp_url,
+    )
+    runtime_env_args = [
+        f"HERMES_DISABLE_LAZY_INSTALLS={runtime_env['HERMES_DISABLE_LAZY_INSTALLS']}",
+        f"HERMES_SKIP_NODE_BOOTSTRAP={runtime_env['HERMES_SKIP_NODE_BOOTSTRAP']}",
+        f"HERMES_DISABLE_GATEWAY_PLATFORMS={runtime_env['HERMES_DISABLE_GATEWAY_PLATFORMS']}",
+        f"HERMES_DISABLE_MCP={runtime_env['HERMES_DISABLE_MCP']}",
+        f"HERMES_DISABLE_CRON={runtime_env['HERMES_DISABLE_CRON']}",
+        f"HERMES_DISABLE_KANBAN={runtime_env['HERMES_DISABLE_KANBAN']}",
+        f"TERMINAL_ENV={runtime_env['TERMINAL_ENV']}",
+        f"AGENT_BROWSER_ENGINE={runtime_env['AGENT_BROWSER_ENGINE']}",
+        f"BROWSER_CDP_URL={runtime_env['BROWSER_CDP_URL']}",
+        f"CAMOFOX_URL={runtime_env['CAMOFOX_URL']}",
+        f"HERMES_BUNDLED_SKILLS={runtime_env['HERMES_BUNDLED_SKILLS']}",
+        f"HERMES_OPTIONAL_SKILLS={runtime_env['HERMES_OPTIONAL_SKILLS']}",
+        f"HERMES_AGENT_BROWSER_BIN_DIR={runtime_env['HERMES_AGENT_BROWSER_BIN_DIR']}",
+        f"AGENT_BROWSER_EXECUTABLE_PATH={runtime_env['AGENT_BROWSER_EXECUTABLE_PATH']}",
+    ]
+    if "HERMES_RUNTIME_PROFILE_PATH" in runtime_env:
+        runtime_env_args.append(
+            f"HERMES_RUNTIME_PROFILE_PATH={runtime_env['HERMES_RUNTIME_PROFILE_PATH']}"
+        )
     return [
         "runuser",
         "-u",
@@ -63,6 +93,7 @@ def build_direct_tui_gateway_command(target: HermesTarget) -> list[str]:
         f"TERMINAL_CWD={target.workdir}",
         f"PATH={os.environ.get('PATH', '')}",
         "PYTHONUNBUFFERED=1",
+        *runtime_env_args,
         python_bin,
         "-m",
         "tui_gateway.entry",
@@ -462,7 +493,9 @@ class PrivilegedClient:
         if self._can_call_directly():
             return build_direct_tui_gateway_command(target)
         else:
-            return self.helper_exec_command(["tui-gateway", "--username", target.username])
+            return self.helper_exec_command(
+                ["tui-gateway", "--username", target.username]
+            )
 
 
 privileged_client = PrivilegedClient()

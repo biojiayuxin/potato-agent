@@ -3647,6 +3647,13 @@ def _configure_mcp_tools_interactive(config: dict):
     a per-server curses checklist.  Writes changes back as ``tools.exclude``
     entries in config.yaml.
     """
+    from runtime_profile import get_runtime_profile
+
+    runtime_profile = get_runtime_profile()
+    if runtime_profile is not None and not runtime_profile.mcp_enabled:
+        _print_info("MCP is disabled by the runtime profile.")
+        return
+
     from hermes_cli.curses_ui import curses_checklist
 
     mcp_servers = config.get("mcp_servers") or {}

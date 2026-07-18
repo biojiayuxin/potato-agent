@@ -49,6 +49,76 @@ def test_exec_tui_gateway_chdirs_to_target_workdir(monkeypatch) -> None:
     assert binary == "runuser"
     assert command[:4] == ["runuser", "-u", "hmx_alice", "--"]
     assert "TERMINAL_CWD=/home/hmx_alice" in command
+    assert "HERMES_DISABLE_LAZY_INSTALLS=1" in command
+    assert "HERMES_SKIP_NODE_BOOTSTRAP=1" in command
+    assert "HERMES_DISABLE_GATEWAY_PLATFORMS=1" in command
+    assert "HERMES_DISABLE_MCP=1" in command
+    assert "HERMES_DISABLE_CRON=1" in command
+    assert "HERMES_DISABLE_KANBAN=1" in command
+    assert "TERMINAL_ENV=local" in command
+    assert "AGENT_BROWSER_ENGINE=chrome" in command
+    assert "BROWSER_CDP_URL=" in command
+    assert "CAMOFOX_URL=" in command
+    assert (
+        "HERMES_BUNDLED_SKILLS=/opt/potato-hermes-lite/current/share/hermes/skills"
+        in command
+    )
+    assert (
+        "HERMES_OPTIONAL_SKILLS=/opt/potato-hermes-lite/current/share/hermes/optional-skills"
+        in command
+    )
+    assert (
+        "HERMES_AGENT_BROWSER_BIN_DIR=/opt/potato-hermes-lite/current/browser/bin"
+        in command
+    )
+    assert (
+        "AGENT_BROWSER_EXECUTABLE_PATH="
+        "/opt/potato-hermes-lite/current/browser/chrome/chrome-linux64/chrome"
+        in command
+    )
+    assert "/opt/potato-hermes-lite/current/venv/bin/python3" in command
+
+
+def test_helper_tui_gateway_command_injects_explicit_profile_path(monkeypatch) -> None:
+    command = privileged_helper._tui_gateway_command(
+        replace(
+            _target(),
+            runtime_profile_path=Path("/opt/potato/profile.yaml"),
+            browser_cdp_url="ws://127.0.0.1:9222/devtools/browser/local",
+        )
+    )
+
+    assert "HERMES_DISABLE_LAZY_INSTALLS=1" in command
+    assert "HERMES_SKIP_NODE_BOOTSTRAP=1" in command
+    assert "HERMES_DISABLE_GATEWAY_PLATFORMS=1" in command
+    assert "HERMES_DISABLE_MCP=1" in command
+    assert "HERMES_DISABLE_CRON=1" in command
+    assert "HERMES_DISABLE_KANBAN=1" in command
+    assert "TERMINAL_ENV=local" in command
+    assert "AGENT_BROWSER_ENGINE=chrome" in command
+    assert (
+        "BROWSER_CDP_URL=ws://127.0.0.1:9222/devtools/browser/local"
+        in command
+    )
+    assert "CAMOFOX_URL=" in command
+    assert (
+        "HERMES_BUNDLED_SKILLS=/opt/potato-hermes-lite/current/share/hermes/skills"
+        in command
+    )
+    assert (
+        "HERMES_OPTIONAL_SKILLS=/opt/potato-hermes-lite/current/share/hermes/optional-skills"
+        in command
+    )
+    assert (
+        "HERMES_AGENT_BROWSER_BIN_DIR=/opt/potato-hermes-lite/current/browser/bin"
+        in command
+    )
+    assert (
+        "AGENT_BROWSER_EXECUTABLE_PATH="
+        "/opt/potato-hermes-lite/current/browser/chrome/chrome-linux64/chrome"
+        in command
+    )
+    assert "HERMES_RUNTIME_PROFILE_PATH=/opt/potato/profile.yaml" in command
 
 
 def test_session_db_rpc_source_is_passed_without_repo_path(monkeypatch) -> None:

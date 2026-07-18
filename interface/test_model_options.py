@@ -153,6 +153,20 @@ def test_normalize_rejects_invalid_model_options() -> None:
     with pytest.raises(ModelOptionsError, match="Duplicate"):
         normalize_model_options(duplicate)
 
+    forbidden_provider = yaml.safe_load(yaml.safe_dump(base))
+    forbidden_provider["hermes"]["model_options"]["options"][0][
+        "provider"
+    ] = "openrouter"
+    with pytest.raises(ModelOptionsError, match="provider must be 'custom'"):
+        normalize_model_options(forbidden_provider)
+
+    forbidden_transport = yaml.safe_load(yaml.safe_dump(base))
+    forbidden_transport["hermes"]["model_options"]["options"][0][
+        "api_mode"
+    ] = "anthropic_messages"
+    with pytest.raises(ModelOptionsError, match="api_mode must be one of"):
+        normalize_model_options(forbidden_transport)
+
 
 def test_patch_user_active_model_updates_model_to_proxy_and_scrubs_env(monkeypatch, tmp_path) -> None:
     target = _target(tmp_path)
@@ -233,7 +247,9 @@ fallback_providers:
     }
     assert data["auxiliary"]["compression"]["context_length"] == 500000
     assert data["terminal"] == {"backend": "local"}
-    assert data["agent"] == {"reasoning_effort": "xhigh"}
+    assert data["agent"]["reasoning_effort"] == "xhigh"
+    assert "clarify" in data["agent"]["disabled_toolsets"]
+    assert data["platform_toolsets"]["cli"][-1] == "no_mcp"
     assert data["display"] == {"compact": True}
     assert "fallback_providers" not in data
     assert (target.hermes_home / ".env").read_text(encoding="utf-8") == "FOO=bar\n"
@@ -297,8 +313,11 @@ auxiliary:
     assert data["model"]["api_mode"] == "codex_responses"
     assert "context_length" not in data["model"]
     assert "context_length" not in data["auxiliary"]["compression"]
-    assert data["auxiliary"]["summarizer"] == {"model": "summary"}
-    assert data["agent"] == {"reasoning_effort": "xhigh"}
+    assert data["auxiliary"]["summarizer"]["model"] == "summary"
+    assert data["auxiliary"]["summarizer"]["provider"] == "custom"
+    assert data["auxiliary"]["summarizer"]["fallback_chain"] == []
+    assert data["agent"]["reasoning_effort"] == "xhigh"
+    assert "web" in data["agent"]["disabled_toolsets"]
 
 
 def test_active_model_matching_accepts_proxy_route_name(tmp_path) -> None:

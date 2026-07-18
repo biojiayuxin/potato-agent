@@ -1,0 +1,95 @@
+schema_version: 1
+name: potato
+revision: 1
+
+toolsets:
+  enabled:
+    - terminal
+    - file
+    - vision
+    - browser
+    - skills
+    - code_execution
+    - todo
+    - memory
+    - session_search
+    - delegation
+  disabled:
+    - web
+    - search
+    - x_search
+    - clarify
+    - cronjob
+    - kanban
+    - moa
+    - tts
+    - image_gen
+    - video
+    - video_gen
+    - computer_use
+    - messaging
+    - homeassistant
+    - discord
+    - discord_admin
+    - yuanbao
+    - feishu_doc
+    - feishu_drive
+    - spotify
+
+expected_tools:
+  - terminal
+  - process
+  - read_file
+  - write_file
+  - patch
+  - search_files
+  - vision_analyze
+  - browser_navigate
+  - browser_snapshot
+  - browser_click
+  - browser_type
+  - browser_scroll
+  - browser_back
+  - browser_press
+  - browser_get_images
+  - browser_vision
+  - browser_console
+  - browser_cdp
+  - browser_dialog
+  - skills_list
+  - skill_view
+  - skill_manage
+  - execute_code
+  - todo
+  - memory
+  - session_search
+  - delegate_task
+
+plugins:
+  allow_user: false
+  allow_project: false
+  allow_entrypoint: false
+  allowed_general_keys: []
+  forbidden_kinds:
+    - platform
+
+providers:
+  model:
+    - custom
+  api_modes:
+    - codex_responses
+    - chat_completions
+  browser: local
+  memory: builtin
+  context_engine: compressor
+  web: []
+
+mcp:
+  enabled: false
+
+runtime:
+  allow_lazy_installs: false
+  lsp_enabled: true
+  lsp_install_strategy: manual
+  terminal_backend: local
+  skills_dependency_strategy: user_managed

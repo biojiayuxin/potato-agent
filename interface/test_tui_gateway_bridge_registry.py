@@ -4,6 +4,7 @@ import asyncio
 import json
 import signal
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -129,6 +130,48 @@ class _DummyBridge:
     async def close(self) -> None:
         self.close_calls += 1
         self._closed = True
+
+
+def test_bridge_environment_injects_runtime_profile_guards(monkeypatch) -> None:
+    bridge = TuiGatewayBridge(
+        user_id="user-1",
+        target=SimpleNamespace(
+            home_dir=Path("/home/hmx_alice"),
+            hermes_home=Path("/home/hmx_alice/.hermes"),
+            workdir=Path("/home/hmx_alice/work"),
+            runtime_profile_path=Path("/opt/potato/profile.yaml"),
+            browser_cdp_url="ws://127.0.0.1:9222/devtools/browser/local",
+        ),
+    )
+
+    env = bridge._build_env()
+
+    assert env["HERMES_DISABLE_LAZY_INSTALLS"] == "1"
+    assert env["HERMES_SKIP_NODE_BOOTSTRAP"] == "1"
+    assert env["HERMES_DISABLE_GATEWAY_PLATFORMS"] == "1"
+    assert env["HERMES_DISABLE_MCP"] == "1"
+    assert env["HERMES_DISABLE_CRON"] == "1"
+    assert env["HERMES_DISABLE_KANBAN"] == "1"
+    assert env["TERMINAL_ENV"] == "local"
+    assert env["AGENT_BROWSER_ENGINE"] == "chrome"
+    assert (
+        env["BROWSER_CDP_URL"]
+        == "ws://127.0.0.1:9222/devtools/browser/local"
+    )
+    assert env["CAMOFOX_URL"] == ""
+    assert env["HERMES_BUNDLED_SKILLS"] == (
+        "/opt/potato-hermes-lite/current/share/hermes/skills"
+    )
+    assert env["HERMES_OPTIONAL_SKILLS"] == (
+        "/opt/potato-hermes-lite/current/share/hermes/optional-skills"
+    )
+    assert env["HERMES_AGENT_BROWSER_BIN_DIR"] == (
+        "/opt/potato-hermes-lite/current/browser/bin"
+    )
+    assert env["AGENT_BROWSER_EXECUTABLE_PATH"] == (
+        "/opt/potato-hermes-lite/current/browser/chrome/chrome-linux64/chrome"
+    )
+    assert env["HERMES_RUNTIME_PROFILE_PATH"] == "/opt/potato/profile.yaml"
 
 
 @pytest.mark.asyncio

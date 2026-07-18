@@ -1281,6 +1281,12 @@ def _load_tool_progress_mode() -> str:
 
 
 def _load_enabled_toolsets() -> list[str] | None:
+    from runtime_profile import get_runtime_profile
+
+    runtime_profile = get_runtime_profile()
+    if runtime_profile is not None:
+        return list(runtime_profile.enabled_toolsets)
+
     explicit = [
         item.strip()
         for item in os.environ.get("HERMES_TUI_TOOLSETS", "").split(",")
@@ -1405,6 +1411,24 @@ def _load_enabled_toolsets() -> list[str] | None:
                 flush=True,
             )
         return None
+
+
+def _load_disabled_toolsets() -> list[str] | None:
+    """Return config denies plus the immutable runtime-profile deny list."""
+    disabled: set[str] = set()
+    try:
+        cfg = _load_cfg()
+        agent_cfg = cfg.get("agent") if isinstance(cfg, dict) else None
+        if isinstance(agent_cfg, dict):
+            disabled.update(str(item) for item in agent_cfg.get("disabled_toolsets") or ())
+    except Exception:
+        pass
+    from runtime_profile import get_runtime_profile
+
+    runtime_profile = get_runtime_profile()
+    if runtime_profile is not None:
+        disabled.update(runtime_profile.disabled_toolsets)
+    return sorted(disabled) or None
 
 
 def _session_tool_progress_mode(sid: str) -> str:
@@ -1871,9 +1895,15 @@ def _session_info(agent, session: dict | None = None) -> dict:
     except Exception:
         pass
     try:
-        from tools.mcp_tool import get_mcp_status
+        from runtime_profile import get_runtime_profile
 
-        info["mcp_servers"] = get_mcp_status()
+        runtime_profile = get_runtime_profile()
+        if runtime_profile is not None and not runtime_profile.mcp_enabled:
+            info["mcp_servers"] = []
+        else:
+            from tools.mcp_tool import get_mcp_status
+
+            info["mcp_servers"] = get_mcp_status()
     except Exception:
         info["mcp_servers"] = []
     try:
@@ -2397,6 +2427,8 @@ def _background_agent_kwargs(agent, task_id: str) -> dict:
         "max_iterations": _cfg_max_turns(cfg, 25),
         "enabled_toolsets": getattr(agent, "enabled_toolsets", None)
         or _load_enabled_toolsets(),
+        "disabled_toolsets": getattr(agent, "disabled_toolsets", None)
+        or _load_disabled_toolsets(),
         "quiet_mode": True,
         "verbose_logging": False,
         "ephemeral_system_prompt": getattr(agent, "ephemeral_system_prompt", None)
@@ -2668,6 +2700,7 @@ def _make_agent(
         reasoning_config=_load_reasoning_config(),
         service_tier=_load_service_tier(),
         enabled_toolsets=_load_enabled_toolsets(),
+        disabled_toolsets=_load_disabled_toolsets(),
         platform="tui",
         session_id=session_id or key,
         session_db=session_db if session_db is not None else _get_db(),
@@ -6327,6 +6360,11 @@ def _(rid, params: dict) -> dict:
 def _(rid, params: dict) -> dict:
     session = _sessions.get(params.get("session_id", ""))
     try:
+        from runtime_profile import get_runtime_profile
+
+        runtime_profile = get_runtime_profile()
+        if runtime_profile is not None and not runtime_profile.mcp_enabled:
+            return _err(rid, 5032, "MCP is disabled by the runtime profile")
         # Gate: /reload-mcp invalidates the prompt cache for this session.
         # Respect the ``approvals.mcp_reload_confirm`` config toggle — if
         # set (default true) AND the caller did not pass ``confirm=true``

@@ -1,0 +1,17 @@
+{
+  "roots": {
+    "optional-skills": {
+      "byte_count": 5688728,
+      "directory_count": 209,
+      "file_count": 394,
+      "tree_sha256": "9a4f94725bd9fc559fb6561efb8efb9d5c0184a73e981d33477f34403f53a2a6"
+    },
+    "skills": {
+      "byte_count": 6080244,
+      "directory_count": 164,
+      "file_count": 466,
+      "tree_sha256": "2002648a9a75e2b955df5b86d4dbf6dc1d2e280b75014ad773f53363a679d90d"
+    }
+  },
+  "schema_version": 1
+}

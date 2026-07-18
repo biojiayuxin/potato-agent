@@ -14,6 +14,7 @@ from urllib.parse import urlparse
 
 import yaml
 
+from interface.hermes_profile import apply_runtime_profile
 from interface.hermes_service import DEFAULT_HERMES_BIN, DEFAULT_TERMINAL_TIMEOUT
 from interface.hermes_service import (
     build_config_data,
@@ -838,7 +839,7 @@ def _patch_user_hermes_config(
     patched.pop("fallback_providers", None)
     patched.pop("fallback_model", None)
     _strip_api_keys_outside_model(patched, protected_model=model)
-    return patched
+    return apply_runtime_profile(patched)
 
 
 def apply_user_runtime_model_patch(

@@ -17,6 +17,7 @@ from typing import Any, Awaitable, Callable
 
 from fastapi import WebSocket
 
+from interface.hermes_profile import runtime_profile_environment
 from interface.mapping import HermesTarget
 from interface.privileged_client import privileged_client
 from interface.runtime_state import (
@@ -339,6 +340,12 @@ class TuiGatewayBridge:
         env["HERMES_HOME"] = str(self.target.hermes_home)
         env["TERMINAL_CWD"] = str(self.target.workdir)
         env["PYTHONUNBUFFERED"] = "1"
+        env.update(
+            runtime_profile_environment(
+                profile_path=self.target.runtime_profile_path,
+                browser_cdp_url=self.target.browser_cdp_url,
+            )
+        )
         return env
 
     async def add_subscriber(self, websocket: WebSocket) -> None:

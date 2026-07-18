@@ -615,6 +615,7 @@ class SessionRunManager:
                 {
                     "session_id": live_session_id,
                     "choice": choice,
+                    "approval_id": normalized_approval_id,
                 },
             )
             try:
@@ -722,7 +723,10 @@ class SessionRunManager:
             return
         state_live_session_id = self._state_live_session_id(live_state, live_session_id)
         if event_type == "approval.request":
-            payload["approval_id"] = f"{context.run_id}:{seq}"
+            payload["approval_id"] = (
+                str(payload.get("approval_id") or "").strip()
+                or f"{context.run_id}:{seq}"
+            )
 
         await self._append_session_event(
             context.user_id,

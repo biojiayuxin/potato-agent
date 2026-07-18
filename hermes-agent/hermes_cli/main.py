@@ -1479,6 +1479,10 @@ def _ensure_tui_node() -> None:
         return
     if os.environ.get("HERMES_SKIP_NODE_BOOTSTRAP"):
         return
+    from runtime_profile import automatic_installs_disabled
+
+    if automatic_installs_disabled():
+        return
 
     helper = PROJECT_ROOT / "scripts" / "lib" / "node-bootstrap.sh"
     if not helper.is_file():
@@ -1588,10 +1592,21 @@ def _make_tui_argv(tui_dir: Path, tui_dev: bool) -> tuple[list[str], Path]:
     skip_install_for_fresh_termux_bundle = (
         termux_startup and not tui_dev and not termux_need_rebuild
     )
-    if (
+    need_npm_install = (
         not skip_install_for_fresh_termux_bundle
         and _tui_need_npm_install(tui_dir)
-    ):
+    )
+    if need_npm_install:
+        from runtime_profile import automatic_installs_disabled
+
+        if automatic_installs_disabled():
+            print(
+                "TUI dependencies are missing or out of date, and automatic "
+                "npm install is disabled by runtime policy.",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+
         npm = _node_bin("npm")
         if not os.environ.get("HERMES_QUIET"):
             print("Installing TUI dependencies…")
@@ -12758,17 +12773,21 @@ def _prepare_agent_startup(args) -> None:
             "plugin discovery failed at CLI startup",
             exc_info=True,
         )
-    _run_inline_mcp_discovery = True
-    if _is_tui_chat_launch(args):
+    from runtime_profile import get_runtime_profile
+
+    runtime_profile = get_runtime_profile()
+    mcp_disabled = runtime_profile is not None and not runtime_profile.mcp_enabled
+    _run_inline_mcp_discovery = not mcp_disabled
+    if not mcp_disabled and _is_tui_chat_launch(args):
         # The TUI launcher hands off to a dedicated startup path that already
         # backgrounds MCP discovery with a bounded join before the first tool
         # snapshot.
         _run_inline_mcp_discovery = False
-    elif _command_has_dedicated_mcp_startup(args):
+    elif not mcp_disabled and _command_has_dedicated_mcp_startup(args):
         # These entrypoints already do their own MCP startup later on the real
         # runtime path (gateway executor, ACP launcher, cron job runner).
         _run_inline_mcp_discovery = False
-    elif _should_background_mcp_startup(args):
+    elif not mcp_disabled and _should_background_mcp_startup(args):
         try:
             from hermes_cli.mcp_startup import start_background_mcp_discovery
 
@@ -13078,6 +13097,13 @@ def cmd_plugins(args):
 
 
 def cmd_mcp(args):
+    from runtime_profile import get_runtime_profile
+
+    runtime_profile = get_runtime_profile()
+    if runtime_profile is not None and not runtime_profile.mcp_enabled:
+        print("MCP is disabled by the runtime profile.")
+        return
+
     from hermes_cli.mcp_config import mcp_command
 
     mcp_command(args)

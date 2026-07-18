@@ -1,0 +1,6 @@
+{
+  "project_scripts": {
+    "hermes": "potato_hermes_lite.cli:main"
+  },
+  "schema_version": 1
+}

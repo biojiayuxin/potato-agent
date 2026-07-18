@@ -973,8 +973,13 @@ def _run_cleanup():
     except Exception:
         pass
     try:
-        from tools.mcp_tool import shutdown_mcp_servers
-        shutdown_mcp_servers()
+        from runtime_profile import get_runtime_profile
+
+        runtime_profile = get_runtime_profile()
+        if runtime_profile is None or runtime_profile.mcp_enabled:
+            from tools.mcp_tool import shutdown_mcp_servers
+
+            shutdown_mcp_servers()
     except BaseException:
         pass
     # Close cached auxiliary LLM clients (sync + async) so that
@@ -8767,6 +8772,12 @@ class HermesCLI(CLICommandsMixin):
         known state.  When a change is detected, triggers _reload_mcp() and
         informs the user so they know the tool list has been refreshed.
         """
+        from runtime_profile import get_runtime_profile
+
+        runtime_profile = get_runtime_profile()
+        if runtime_profile is not None and not runtime_profile.mcp_enabled:
+            return
+
         import yaml as _yaml
 
         CONFIG_WATCH_INTERVAL = 5.0  # seconds between config.yaml stat() calls
@@ -8951,6 +8962,13 @@ class HermesCLI(CLICommandsMixin):
         without this prompt), Cancel.  Gated by
         ``approvals.mcp_reload_confirm`` — default on.
         """
+        from runtime_profile import get_runtime_profile
+
+        runtime_profile = get_runtime_profile()
+        if runtime_profile is not None and not runtime_profile.mcp_enabled:
+            print("MCP is disabled by the runtime profile.")
+            return
+
         # Gate check — respects prior "Always Approve" clicks.
         try:
             cfg = load_cli_config()
@@ -9011,6 +9029,13 @@ class HermesCLI(CLICommandsMixin):
         After reconnecting, refreshes the agent's tool list so the model
         sees the updated tools on the next turn.
         """
+        from runtime_profile import get_runtime_profile
+
+        runtime_profile = get_runtime_profile()
+        if runtime_profile is not None and not runtime_profile.mcp_enabled:
+            print("MCP is disabled by the runtime profile.")
+            return
+
         try:
             from tools.mcp_tool import shutdown_mcp_servers, discover_mcp_tools, _servers, _lock
 

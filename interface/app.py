@@ -110,6 +110,7 @@ from interface.file_browser_policy import (
     authorize_file_browser_path,
     normalize_file_browser_mode,
 )
+from interface.hermes_profile import DEFAULT_HERMES_LITE_PYTHON
 from interface.mapping import DEFAULT_MAPPING_PATH, HermesTarget, MappingStore
 from interface.mailer import (
     MailerConfigurationError,
@@ -307,12 +308,12 @@ EMAIL_VERIFICATION_TTL_SECONDS = 10 * 60
 EMAIL_VERIFICATION_RESEND_COOLDOWN_SECONDS = 60
 EMAIL_VERIFICATION_EMAIL_HOURLY_LIMIT = 5
 EMAIL_VERIFICATION_IP_HOURLY_LIMIT = 20
-HERMES_SRC = REPO_ROOT / "hermes-agent"
+HERMES_SRC = REPO_ROOT / "hermes-lite"
 if str(HERMES_SRC) not in sys.path:
     sys.path.insert(0, str(HERMES_SRC))
 
 DEFAULT_SESSION_DB_PYTHON = (
-    os.getenv("INTERFACE_TUI_GATEWAY_PYTHON") or "/opt/hermes-agent-venv/bin/python3"
+    os.getenv("INTERFACE_TUI_GATEWAY_PYTHON") or str(DEFAULT_HERMES_LITE_PYTHON)
 )
 USER_SESSION_DB_RPC_PATH = ROOT_DIR / "session_db_rpc.py"
 USER_SESSION_DB_RPC_SOURCE = USER_SESSION_DB_RPC_PATH.read_text(encoding="utf-8")

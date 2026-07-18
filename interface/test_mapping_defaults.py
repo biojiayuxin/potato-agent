@@ -47,3 +47,33 @@ def test_build_target_defaults_missing_home_fields_to_configured_home_base(
     assert target.home_dir == expected_home
     assert target.hermes_home == expected_home / ".hermes"
     assert target.workdir == expected_home
+    assert target.runtime_profile_path == mapping.Path(
+        "/opt/potato-hermes-lite/current/config/runtime-profile.yaml"
+    )
+
+
+def test_build_target_propagates_runtime_profile_path(tmp_path) -> None:
+    mapping_path = tmp_path / "users_mapping.yaml"
+    mapping_path.write_text(
+        "hermes:\n"
+        "  runtime_profile_path: /opt/potato/releases/r1/config/runtime-profile.yaml\n"
+        "  browser_cdp_url: ws://127.0.0.1:9222/devtools/browser/local\n"
+        "users:\n"
+        "  - username: alice\n"
+        "    email: alice@example.com\n"
+        "    linux_user: hmx_alice\n"
+        "    api_port: 9001\n"
+        "    api_key: sk-alice\n",
+        encoding="utf-8",
+    )
+
+    target = mapping.MappingStore(mapping_path).get_target_by_username("alice")
+
+    assert target is not None
+    assert target.runtime_profile_path == mapping.Path(
+        "/opt/potato/releases/r1/config/runtime-profile.yaml"
+    )
+    assert (
+        target.browser_cdp_url
+        == "ws://127.0.0.1:9222/devtools/browser/local"
+    )

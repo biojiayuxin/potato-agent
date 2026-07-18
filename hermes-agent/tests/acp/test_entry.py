@@ -1,6 +1,8 @@
 """Tests for acp_adapter.entry startup wiring."""
 
+import builtins
 import sys
+from types import SimpleNamespace
 
 import acp
 import pytest
@@ -21,6 +23,33 @@ def test_main_enables_unstable_protocol(monkeypatch):
     entry.main([])
 
     assert calls["kwargs"]["use_unstable_protocol"] is True
+
+
+def test_main_skips_mcp_import_when_runtime_profile_disables_it(monkeypatch):
+    imported_mcp_modules = []
+    real_import = builtins.__import__
+
+    def track_mcp_import(name, *args, **kwargs):
+        if name == "tools.mcp_tool":
+            imported_mcp_modules.append(name)
+        return real_import(name, *args, **kwargs)
+
+    async def fake_run_agent(agent, **kwargs):
+        return None
+
+    monkeypatch.setattr(entry, "_setup_logging", lambda: None)
+    monkeypatch.setattr(entry, "_load_env", lambda: None)
+    monkeypatch.setattr(
+        entry,
+        "get_runtime_profile",
+        lambda: SimpleNamespace(mcp_enabled=False),
+    )
+    monkeypatch.setattr(acp, "run_agent", fake_run_agent)
+    monkeypatch.setattr(builtins, "__import__", track_mcp_import)
+
+    entry.main([])
+
+    assert imported_mcp_modules == []
 
 
 def test_main_version_prints_without_starting_server(monkeypatch, capsys):

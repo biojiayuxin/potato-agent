@@ -93,6 +93,17 @@ class TestGetBrowserEngine:
             assert _get_browser_engine() == "lightpanda"
             mock_read.assert_called_once()
 
+    def test_runtime_profile_forces_chrome_without_reading_config(self, monkeypatch):
+        import tools.browser_tool as bt
+
+        monkeypatch.setattr(bt, "_runtime_profile", object())
+        monkeypatch.setenv("AGENT_BROWSER_ENGINE", "lightpanda")
+        with patch(
+            "hermes_cli.config.read_raw_config",
+            side_effect=AssertionError("profile engine read config"),
+        ):
+            assert bt._get_browser_engine() == "chrome"
+
 
 # ---------------------------------------------------------------------------
 # _should_inject_engine

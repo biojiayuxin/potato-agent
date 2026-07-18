@@ -1,0 +1,17 @@
+{
+  "agent_browser": {
+    "path": "browser/bin/agent-browser",
+    "sha256": "8784dc259abf72ee04e751b45677d956387af50c99aec5dcd7a41a9bc498e3c3",
+    "version": "0.26.0"
+  },
+  "chrome_for_testing": {
+    "archive": {
+      "sha256": "ae8736ac28bc69278551500f219fc749575648263c43ec5990749eff43b9fcf8",
+      "size": 193282658,
+      "url": "https://storage.googleapis.com/chrome-for-testing-public/151.0.7922.34/linux64/chrome-linux64.zip"
+    },
+    "path": "browser/chrome/chrome-linux64/chrome",
+    "version": "151.0.7922.34"
+  },
+  "schema_version": 1
+}

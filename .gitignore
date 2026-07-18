@@ -2,6 +2,8 @@ AGENTS.md
 opencode.jsonc
 __pycache__/
 **/__pycache__/
+hermes-lite/build/
+hermes-lite/*.egg-info/
 
 # Local deployment/runtime state
 hermes-agent/.mailmap

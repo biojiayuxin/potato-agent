@@ -631,8 +631,15 @@ def build_welcome_banner(console: "Console", model: str, cwd: str,
 
     # MCP Servers section (only if configured)
     try:
-        from tools.mcp_tool import get_mcp_status
-        mcp_status = get_mcp_status()
+        from runtime_profile import get_runtime_profile
+
+        runtime_profile = get_runtime_profile()
+        if runtime_profile is not None and not runtime_profile.mcp_enabled:
+            mcp_status = []
+        else:
+            from tools.mcp_tool import get_mcp_status
+
+            mcp_status = get_mcp_status()
     except Exception:
         mcp_status = []
 

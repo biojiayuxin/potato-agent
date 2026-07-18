@@ -80,6 +80,48 @@ def test_consecutive_approval_events_are_persisted_fifo(tmp_path) -> None:
     ]
 
 
+def test_lite_approval_id_is_preserved_from_gateway_event(tmp_path) -> None:
+    db_path = tmp_path / "interface.db"
+    save_live_session_state(
+        "user-1",
+        "session-1",
+        run_id="run-1",
+        live_session_id="live-1",
+        assistant_message_id="assistant-1",
+        status="running",
+        pending_approval=None,
+        last_event_seq=6,
+        db_path=db_path,
+    )
+
+    class Bridge:
+        user_id = "user-1"
+
+    asyncio.run(
+        SessionRunManager(db_path=db_path).handle_bridge_event(
+            Bridge(),  # type: ignore[arg-type]
+            {
+                "type": "approval.request",
+                "session_id": "live-1",
+                "persistent_session_id": "session-1",
+                "run_id": "run-1",
+                "seq": 7,
+                "payload": {
+                    "approval_id": "lite-token-1",
+                    "command": "echo ok",
+                    "description": "Approve",
+                },
+            },
+        )
+    )
+
+    live_state = get_live_session_state(
+        "user-1", "session-1", db_path=db_path
+    )
+    assert live_state is not None
+    assert live_state["pending_approval"]["approval_id"] == "lite-token-1"
+
+
 def test_approval_response_moves_unchanged_request_back_to_running(tmp_path) -> None:
     db_path = tmp_path / "interface.db"
     _save_pending_approval(db_path)
@@ -114,7 +156,11 @@ def test_approval_response_does_not_reopen_a_completed_run(tmp_path) -> None:
     class CompletingBridge:
         async def rpc(self, method: str, params: dict) -> dict:
             assert method == "approval.respond"
-            assert params == {"session_id": "live-1", "choice": "once"}
+            assert params == {
+                "session_id": "live-1",
+                "choice": "once",
+                "approval_id": "run-1:7",
+            }
             save_live_session_state(
                 "user-1",
                 "session-1",

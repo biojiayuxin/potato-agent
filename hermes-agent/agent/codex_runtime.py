@@ -428,6 +428,10 @@ def run_codex_stream(agent, api_kwargs: dict, client: Any = None, on_first_delta
     payload shape — we never let the SDK reconstruct a typed object from
     the terminal event's ``output`` field.
     """
+    from runtime_profile import validate_profile_request_boundary
+
+    validate_profile_request_boundary(api_kwargs, api_mode="codex_responses")
+
     import httpx as _httpx
 
     active_client = client or agent._ensure_primary_openai_client(reason="codex_stream_direct")
@@ -456,6 +460,10 @@ def run_codex_stream(agent, api_kwargs: dict, client: Any = None, on_first_delta
 
         stream_kwargs = dict(api_kwargs)
         stream_kwargs["stream"] = True
+        validate_profile_request_boundary(
+            stream_kwargs,
+            api_mode="codex_responses",
+        )
 
         try:
             event_stream = active_client.responses.create(**stream_kwargs)

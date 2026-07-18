@@ -111,6 +111,10 @@ def ensure_dependency(
         return False
     if check():
         return True
+    from runtime_profile import automatic_installs_disabled
+
+    if automatic_installs_disabled():
+        return False
 
     script, shell = _find_install_script()
     if script is None:
