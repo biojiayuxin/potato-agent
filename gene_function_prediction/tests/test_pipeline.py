@@ -25,7 +25,6 @@ from gene_function_prediction.run_pipeline import (
     load_maize_index,
     read_gene_list,
     rice_gene_symbols,
-    run_json_command,
     summarize_expression,
     validate_arabidopsis_source,
     validate_arabidopsis_gene_names,
@@ -43,24 +42,20 @@ class PipelineTests(unittest.TestCase):
         self.assertEqual(args.plantconnectome_max_entities, 10)
         self.assertEqual(args.plantconnectome_max_edges, 5)
         self.assertFalse(hasattr(args, "plantconnectome_llm_edges"))
-
-    def test_json_command_can_accept_explicit_not_found_exit_code(self):
-        completed = SimpleNamespace(
-            returncode=3,
-            stdout=json.dumps({"status": "not_found"}),
-            stderr="",
-        )
-        with patch(
-            "gene_function_prediction.run_pipeline.subprocess.run",
-            return_value=completed,
+        self.assertFalse(hasattr(args, "arabidopsis_script"))
+        for name in (
+            "potato_gene_script",
+            "potato_rag_script",
+            "literature_script",
         ):
-            result = run_json_command(
-                ["python3", "query.py", "plant"],
-                timeout=1,
-                attempts=1,
-                accepted_returncodes={0, 3},
-            )
-        self.assertEqual(result["status"], "not_found")
+            self.assertFalse(hasattr(args, name))
+        for name in (
+            "potato_gene_base_url",
+            "potato_rag_base_url",
+            "pubmed_api_base_url",
+        ):
+            self.assertTrue(hasattr(args, name))
+            self.assertTrue(getattr(args, name))
 
     def test_gene_ids_are_kept_as_provided(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -583,17 +578,15 @@ class PipelineTests(unittest.TestCase):
         return result
 
     @staticmethod
-    def _arabidopsis_pipeline(script):
+    def _arabidopsis_pipeline():
         pipeline = Pipeline.__new__(Pipeline)
         pipeline.args = SimpleNamespace(
             source_timeout=1,
             source_retries=0,
             plantconnectome_max_entities=10,
             plantconnectome_max_edges=5,
-            arabidopsis_script=script,
             force_sources=False,
         )
-        pipeline._script_hashes = {str(script): "script-hash"}
         pipeline.source_call = Mock(side_effect=PipelineTests._passthrough_source_call)
         pipeline.llm_call = Mock(
             side_effect=AssertionError("gene-name filter LLM must not be called")
@@ -605,23 +598,22 @@ class PipelineTests(unittest.TestCase):
 
     def test_arabidopsis_zero_names_skips_filter_plant_and_pubmed(self):
         target = "AT1G01010"
-        script = Path("/tmp/query_arabidopsis_gene_search.py")
-        pipeline = self._arabidopsis_pipeline(script)
-        commands = []
+        pipeline = self._arabidopsis_pipeline()
 
-        def command_result(command, **_kwargs):
-            commands.append((command[2], command[3]))
-            self.assertEqual(command[2], "tair")
-            return self._arabidopsis_tair_result(target, [])
-
-        with patch(
-            "gene_function_prediction.run_pipeline.run_json_command",
-            side_effect=command_result,
+        with (
+            patch(
+                "gene_function_prediction.run_pipeline.fetch_arabidopsis_tair",
+                return_value=self._arabidopsis_tair_result(target, []),
+            ) as fetch_tair,
+            patch(
+                "gene_function_prediction.run_pipeline.fetch_plantconnectome"
+            ) as fetch_plant,
         ):
             record = pipeline.process_arabidopsis(target)
 
         self.assertEqual(record["status"], "ok")
-        self.assertEqual(commands, [("tair", target)])
+        fetch_tair.assert_called_once()
+        fetch_plant.assert_not_called()
         pipeline.llm_call.assert_not_called()
         pipeline.pubmed.assert_not_called()
         payload = pipeline._species_summary.call_args.args[2]
@@ -632,19 +624,14 @@ class PipelineTests(unittest.TestCase):
     def test_arabidopsis_one_name_skips_filter_and_queries_both_sources(self):
         target = "AT4G25480"
         name = "CBF3"
-        script = Path("/tmp/query_arabidopsis_gene_search.py")
-        pipeline = self._arabidopsis_pipeline(script)
+        pipeline = self._arabidopsis_pipeline()
         events = []
 
-        def command_result(command, **_kwargs):
-            mode, query_name = command[2], command[3]
-            if mode == "tair":
-                return self._arabidopsis_tair_result(target, [name])
-            self.assertEqual(
-                command[command.index("--max-entities") + 1],
-                "10",
-            )
-            self.assertEqual(command[command.index("--max-edges") + 1], "5")
+        def plant_result(
+            query_name, max_entities, max_edges, _timeout, _retries, _deadline
+        ):
+            self.assertEqual(max_entities, 10)
+            self.assertEqual(max_edges, 5)
             events.append(f"plant:{query_name}")
             return self._arabidopsis_plant_result(query_name)
 
@@ -653,9 +640,15 @@ class PipelineTests(unittest.TestCase):
             return {"query": query, "papers": []}
 
         pipeline.pubmed = Mock(side_effect=pubmed_result)
-        with patch(
-            "gene_function_prediction.run_pipeline.run_json_command",
-            side_effect=command_result,
+        with (
+            patch(
+                "gene_function_prediction.run_pipeline.fetch_arabidopsis_tair",
+                return_value=self._arabidopsis_tair_result(target, [name]),
+            ),
+            patch(
+                "gene_function_prediction.run_pipeline.fetch_plantconnectome",
+                side_effect=plant_result,
+            ),
         ):
             record = pipeline.process_arabidopsis(target)
 
@@ -682,14 +675,10 @@ class PipelineTests(unittest.TestCase):
             "DREB1A",
         ]
         selected_names = ["CBF3", "DREB1A"]
-        script = Path("/tmp/query_arabidopsis_gene_search.py")
-        pipeline = self._arabidopsis_pipeline(script)
+        pipeline = self._arabidopsis_pipeline()
         events = []
 
-        def command_result(command, **_kwargs):
-            mode, query_name = command[2], command[3]
-            if mode == "tair":
-                return self._arabidopsis_tair_result(target, candidates)
+        def plant_result(query_name, *_args):
             events.append(f"plant:{query_name}")
             return self._arabidopsis_plant_result(query_name)
 
@@ -713,9 +702,15 @@ class PipelineTests(unittest.TestCase):
 
         pipeline.llm_call = Mock(side_effect=filter_names)
         pipeline.pubmed = Mock(side_effect=pubmed_result)
-        with patch(
-            "gene_function_prediction.run_pipeline.run_json_command",
-            side_effect=command_result,
+        with (
+            patch(
+                "gene_function_prediction.run_pipeline.fetch_arabidopsis_tair",
+                return_value=self._arabidopsis_tair_result(target, candidates),
+            ),
+            patch(
+                "gene_function_prediction.run_pipeline.fetch_plantconnectome",
+                side_effect=plant_result,
+            ),
         ):
             record = pipeline.process_arabidopsis(target)
 
@@ -752,28 +747,27 @@ class PipelineTests(unittest.TestCase):
     def test_arabidopsis_empty_filter_result_skips_plant_and_pubmed(self):
         target = "AT4G25480"
         candidates = ["ATCBF3", "CBF3"]
-        script = Path("/tmp/query_arabidopsis_gene_search.py")
-        pipeline = self._arabidopsis_pipeline(script)
-        commands = []
-
-        def command_result(command, **_kwargs):
-            commands.append((command[2], command[3]))
-            self.assertEqual(command[2], "tair")
-            return self._arabidopsis_tair_result(target, candidates)
+        pipeline = self._arabidopsis_pipeline()
 
         def filter_names(*args, **kwargs):
             validator = args[6] if len(args) > 6 else kwargs["validator"]
             return validator({"gene_names": []})
 
         pipeline.llm_call = Mock(side_effect=filter_names)
-        with patch(
-            "gene_function_prediction.run_pipeline.run_json_command",
-            side_effect=command_result,
+        with (
+            patch(
+                "gene_function_prediction.run_pipeline.fetch_arabidopsis_tair",
+                return_value=self._arabidopsis_tair_result(target, candidates),
+            ) as fetch_tair,
+            patch(
+                "gene_function_prediction.run_pipeline.fetch_plantconnectome"
+            ) as fetch_plant,
         ):
             record = pipeline.process_arabidopsis(target)
 
         self.assertEqual(record["status"], "ok")
-        self.assertEqual(commands, [("tair", target)])
+        fetch_tair.assert_called_once()
+        fetch_plant.assert_not_called()
         pipeline.llm_call.assert_called_once()
         pipeline.pubmed.assert_not_called()
         payload = pipeline._species_summary.call_args.args[2]
@@ -791,12 +785,7 @@ class PipelineTests(unittest.TestCase):
     def test_arabidopsis_gene_name_filter_failure_stops_downstream_queries(self):
         target = "AT4G25480"
         candidates = ["ATCBF3", "CBF3"]
-        script = Path("/tmp/query_arabidopsis_gene_search.py")
-        pipeline = self._arabidopsis_pipeline(script)
-
-        def command_result(command, **_kwargs):
-            self.assertEqual(command[2], "tair")
-            return self._arabidopsis_tair_result(target, candidates)
+        pipeline = self._arabidopsis_pipeline()
 
         pipeline.llm_call = Mock(side_effect=RuntimeError("provider unavailable"))
         pipeline._species_summary = Mock(
@@ -804,9 +793,14 @@ class PipelineTests(unittest.TestCase):
         )
         with tempfile.TemporaryDirectory() as directory:
             pipeline.evidence_dir = Path(directory)
-            with patch(
-                "gene_function_prediction.run_pipeline.run_json_command",
-                side_effect=command_result,
+            with (
+                patch(
+                    "gene_function_prediction.run_pipeline.fetch_arabidopsis_tair",
+                    return_value=self._arabidopsis_tair_result(target, candidates),
+                ),
+                patch(
+                    "gene_function_prediction.run_pipeline.fetch_plantconnectome"
+                ) as fetch_plant,
             ):
                 record = pipeline.process_arabidopsis(target)
 
@@ -814,20 +808,17 @@ class PipelineTests(unittest.TestCase):
         self.assertEqual(
             record["blocking_errors"][0]["stage"], "llm:arabidopsis_gene_names"
         )
+        fetch_plant.assert_not_called()
         pipeline.pubmed.assert_not_called()
         pipeline._species_summary.assert_not_called()
 
     def test_arabidopsis_plant_not_found_still_queries_pubmed(self):
         target = "AT4G25480"
         name = "CBF3"
-        script = Path("/tmp/query_arabidopsis_gene_search.py")
-        pipeline = self._arabidopsis_pipeline(script)
+        pipeline = self._arabidopsis_pipeline()
         events = []
 
-        def command_result(command, **_kwargs):
-            mode, query_name = command[2], command[3]
-            if mode == "tair":
-                return self._arabidopsis_tair_result(target, [name])
+        def plant_result(query_name, *_args):
             events.append(f"plant:{query_name}")
             return self._arabidopsis_plant_result(query_name, status="not_found")
 
@@ -836,9 +827,15 @@ class PipelineTests(unittest.TestCase):
             return {"query": query, "papers": []}
 
         pipeline.pubmed = Mock(side_effect=pubmed_result)
-        with patch(
-            "gene_function_prediction.run_pipeline.run_json_command",
-            side_effect=command_result,
+        with (
+            patch(
+                "gene_function_prediction.run_pipeline.fetch_arabidopsis_tair",
+                return_value=self._arabidopsis_tair_result(target, [name]),
+            ),
+            patch(
+                "gene_function_prediction.run_pipeline.fetch_plantconnectome",
+                side_effect=plant_result,
+            ),
         ):
             record = pipeline.process_arabidopsis(target)
 
@@ -852,13 +849,7 @@ class PipelineTests(unittest.TestCase):
     def test_arabidopsis_pubmed_failure_records_failed_query_name(self):
         target = "AT4G25480"
         name = "CBF3"
-        script = Path("/tmp/query_arabidopsis_gene_search.py")
-        pipeline = self._arabidopsis_pipeline(script)
-
-        def command_result(command, **_kwargs):
-            if command[2] == "tair":
-                return self._arabidopsis_tair_result(target, [name])
-            return self._arabidopsis_plant_result(command[3])
+        pipeline = self._arabidopsis_pipeline()
 
         pipeline.pubmed = Mock(side_effect=SourceError("PubMed unavailable"))
         pipeline._species_summary = Mock(
@@ -866,9 +857,17 @@ class PipelineTests(unittest.TestCase):
         )
         with tempfile.TemporaryDirectory() as directory:
             pipeline.evidence_dir = Path(directory)
-            with patch(
-                "gene_function_prediction.run_pipeline.run_json_command",
-                side_effect=command_result,
+            with (
+                patch(
+                    "gene_function_prediction.run_pipeline.fetch_arabidopsis_tair",
+                    return_value=self._arabidopsis_tair_result(target, [name]),
+                ),
+                patch(
+                    "gene_function_prediction.run_pipeline.fetch_plantconnectome",
+                    side_effect=lambda query_name, *_args: self._arabidopsis_plant_result(
+                        query_name
+                    ),
+                ),
             ):
                 record = pipeline.process_arabidopsis(target)
 
@@ -965,17 +964,14 @@ class PipelineTests(unittest.TestCase):
 
     def test_arabidopsis_retry_reuses_tair_cache_after_plant_failure(self):
         target = "AT1G01010"
-        script = Path("/tmp/query_arabidopsis_gene_search.py")
         pipeline = Pipeline.__new__(Pipeline)
         pipeline.args = SimpleNamespace(
             source_timeout=1,
             source_retries=0,
             plantconnectome_max_entities=10,
             plantconnectome_max_edges=5,
-            arabidopsis_script=script,
             force_sources=False,
         )
-        pipeline._script_hashes = {str(script): "script-hash"}
         pipeline._cache_lock_guard = threading.Lock()
         pipeline._cache_locks = {}
         pipeline.record_error = Mock()
@@ -983,20 +979,20 @@ class PipelineTests(unittest.TestCase):
         pipeline._species_summary = Mock(return_value={"status": "ok"})
         calls = []
 
-        def source_result(command, **kwargs):
-            mode = command[2]
-            query_name = command[3]
-            calls.append((mode, query_name))
-            if mode == "tair":
-                return {
-                    "status": "ok",
-                    "tair": {
-                        "selected": {
-                            "gene_id": target,
-                            "other_names": ["TEST1"],
-                        }
-                    },
-                }
+        def tair_result(query_target, *_args):
+            calls.append(("tair", query_target))
+            return {
+                "status": "ok",
+                "tair": {
+                    "selected": {
+                        "gene_id": target,
+                        "other_names": ["TEST1"],
+                    }
+                },
+            }
+
+        def plant_result(query_name, *_args):
+            calls.append(("plant", query_name))
             self.assertEqual(query_name, "TEST1")
             if sum(call_mode == "plant" for call_mode, _name in calls) == 1:
                 raise SourceError("temporary PlantConnectome failure")
@@ -1026,9 +1022,15 @@ class PipelineTests(unittest.TestCase):
             root = Path(directory)
             pipeline.cache_dir = root / "cache"
             pipeline.evidence_dir = root / "evidence"
-            with patch(
-                "gene_function_prediction.run_pipeline.run_json_command",
-                side_effect=source_result,
+            with (
+                patch(
+                    "gene_function_prediction.run_pipeline.fetch_arabidopsis_tair",
+                    side_effect=tair_result,
+                ),
+                patch(
+                    "gene_function_prediction.run_pipeline.fetch_plantconnectome",
+                    side_effect=plant_result,
+                ),
             ):
                 first = pipeline.process_arabidopsis(target)
                 second = pipeline.process_arabidopsis(target)
@@ -1044,17 +1046,14 @@ class PipelineTests(unittest.TestCase):
         target = "AT4G25480"
         candidates = ["ATCBF3", "CBF3", "DREB1A"]
         selected_names = ["CBF3", "DREB1A"]
-        script = Path("/tmp/query_arabidopsis_gene_search.py")
         pipeline = Pipeline.__new__(Pipeline)
         pipeline.args = SimpleNamespace(
             source_timeout=1,
             source_retries=0,
             plantconnectome_max_entities=10,
             plantconnectome_max_edges=5,
-            arabidopsis_script=script,
             force_sources=False,
         )
-        pipeline._script_hashes = {str(script): "script-hash"}
         pipeline._cache_lock_guard = threading.Lock()
         pipeline._cache_locks = {}
         pipeline.record_error = Mock()
@@ -1067,20 +1066,27 @@ class PipelineTests(unittest.TestCase):
         )
         commands = []
 
-        def source_result(command, **_kwargs):
-            mode, query_name = command[2], command[3]
-            commands.append((mode, query_name))
-            if mode == "tair":
-                return self._arabidopsis_tair_result(target, candidates)
+        def tair_result(query_target, *_args):
+            commands.append(("tair", query_target))
+            return self._arabidopsis_tair_result(target, candidates)
+
+        def plant_result(query_name, *_args):
+            commands.append(("plant", query_name))
             return self._arabidopsis_plant_result(query_name)
 
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             pipeline.cache_dir = root / "cache"
             pipeline.evidence_dir = root / "evidence"
-            with patch(
-                "gene_function_prediction.run_pipeline.run_json_command",
-                side_effect=source_result,
+            with (
+                patch(
+                    "gene_function_prediction.run_pipeline.fetch_arabidopsis_tair",
+                    side_effect=tair_result,
+                ),
+                patch(
+                    "gene_function_prediction.run_pipeline.fetch_plantconnectome",
+                    side_effect=plant_result,
+                ),
             ):
                 first = pipeline.process_arabidopsis(target)
                 second = pipeline.process_arabidopsis(target)

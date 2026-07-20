@@ -4,25 +4,30 @@
 from __future__ import annotations
 
 import argparse
+import ast
 import csv
+import gzip
 import hashlib
 import html
+import http.client
 import json
 import os
 import re
+import socket
 import statistics
-import subprocess
 import sys
 import threading
 import time
 import unicodedata
+import urllib.error
 import urllib.parse
 import urllib.request
 import uuid
+import xml.etree.ElementTree as ET
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
-from io import StringIO
+from io import BytesIO, StringIO
 from pathlib import Path
 from typing import Any, Callable
 
@@ -34,9 +39,24 @@ else:
 
 
 HERE = Path(__file__).resolve().parent
-REPO_ROOT = HERE.parent
-SKILLS_ROOT = REPO_ROOT / "skills" / "potato-knowledge-bioinformatics"
 PROMPT_DIR = HERE / "prompts"
+
+TAIR_API_BASE = "https://www.arabidopsis.org/api"
+PLANTCONNECTOME_BASE = "https://plant.connectome.tools"
+ARABIDOPSIS_SOURCE_VERSION = "internal-tair-plantconnectome-v1"
+POTATO_SOURCE_VERSION = "internal-potato-api-v1"
+PUBMED_SOURCE_VERSION = "internal-pubmed-eutils-v1"
+DEFAULT_POTATO_API_BASE = "https://www.potato-ai.top"
+DEFAULT_PUBMED_API_BASE = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils"
+ARABIDOPSIS_MAX_RESPONSE_BYTES = 16 * 1024 * 1024
+PLANTCONNECTOME_MAX_EDGE_PAYLOAD_CHARS = 8 * 1024 * 1024
+PLANTCONNECTOME_MAX_AST_NODES = 500_000
+HTTP_READ_CHUNK_SIZE = 64 * 1024
+TRANSIENT_HTTP_CODES = {408, 425, 429, 500, 502, 503, 504}
+BROWSER_USER_AGENT = (
+    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/124.0 Safari/537.36"
+)
 
 DEFAULT_HOMOLOG_DIR = Path("/mnt/data/ref_homlogs")
 DEFAULT_EXPRESSION_MATRIX = Path(
@@ -116,10 +136,780 @@ class SourceError(RuntimeError):
     """Raised when a required external command or HTTP query fails."""
 
 
+class SourceDeadlineExceeded(SourceError):
+    """Raised when one external source query exhausts its wall-clock deadline."""
+
+
+class SourceResponseTooLarge(SourceError):
+    """Raised when a compressed or decompressed response exceeds its size limit."""
+
+
+class SourceResponseParseError(SourceError):
+    """Raised when an upstream response does not match the expected structure."""
+
+
+@dataclass(frozen=True)
+class SourceHttpPolicy:
+    timeout: float
+    retries: int
+    retry_backoff: float
+    max_response_bytes: int
+    deadline_at: float
+
+    @classmethod
+    def create(
+        cls,
+        *,
+        timeout: float,
+        retries: int,
+        deadline: float | None,
+        retry_backoff: float = 1.0,
+        max_response_bytes: int = ARABIDOPSIS_MAX_RESPONSE_BYTES,
+    ) -> "SourceHttpPolicy":
+        if timeout <= 0:
+            raise ValueError("HTTP timeout must be greater than zero")
+        if retries < 0:
+            raise ValueError("HTTP retries must be zero or greater")
+        if retry_backoff < 0:
+            raise ValueError("HTTP retry backoff must be zero or greater")
+        if max_response_bytes <= 0:
+            raise ValueError("HTTP response limit must be greater than zero")
+        if deadline is None:
+            deadline = timeout * (retries + 1) + retry_backoff * (2**retries - 1)
+        if deadline <= 0:
+            raise ValueError("HTTP deadline must be greater than zero")
+        return cls(
+            timeout=timeout,
+            retries=retries,
+            retry_backoff=retry_backoff,
+            max_response_bytes=max_response_bytes,
+            deadline_at=time.monotonic() + deadline,
+        )
+
+    def remaining(self) -> float:
+        remaining = self.deadline_at - time.monotonic()
+        if remaining <= 0:
+            raise SourceDeadlineExceeded("source query wall-clock deadline exceeded")
+        return remaining
+
+
 @dataclass(frozen=True)
 class Homolog:
     target_gene_id: str
     level: str
+
+
+def _is_transient_http_error(exc: BaseException) -> bool:
+    if isinstance(exc, urllib.error.HTTPError):
+        return exc.code in TRANSIENT_HTTP_CODES
+    if isinstance(exc, urllib.error.URLError):
+        reason = exc.reason
+        if isinstance(reason, socket.gaierror):
+            return reason.errno == socket.EAI_AGAIN
+        return isinstance(
+            reason,
+            (TimeoutError, socket.timeout, ConnectionError),
+        )
+    return isinstance(
+        exc,
+        (
+            TimeoutError,
+            socket.timeout,
+            ConnectionError,
+            http.client.IncompleteRead,
+        ),
+    )
+
+
+def _sleep_before_http_retry(
+    policy: SourceHttpPolicy, attempt: int, exc: BaseException
+) -> None:
+    delay = policy.retry_backoff * (2**attempt)
+    remaining = policy.remaining()
+    if delay >= remaining:
+        raise SourceDeadlineExceeded(
+            "source query deadline would be exceeded before the next retry"
+        ) from exc
+    if delay:
+        time.sleep(delay)
+
+
+def _with_http_retries(
+    operation: Callable[[], Any], policy: SourceHttpPolicy
+) -> Any:
+    for attempt in range(policy.retries + 1):
+        policy.remaining()
+        try:
+            return operation()
+        except Exception as exc:
+            if attempt >= policy.retries or not _is_transient_http_error(exc):
+                raise
+            if isinstance(exc, urllib.error.HTTPError):
+                exc.close()
+            _sleep_before_http_retry(policy, attempt, exc)
+    raise AssertionError("unreachable")
+
+
+def _set_response_socket_timeout(response: Any, timeout: float) -> None:
+    raw = getattr(getattr(response, "fp", None), "raw", None)
+    sock = getattr(raw, "_sock", None)
+    if sock is not None:
+        sock.settimeout(timeout)
+
+
+def _decompress_gzip_limited(
+    data: bytes, *, policy: SourceHttpPolicy, url: str
+) -> bytes:
+    decoded = bytearray()
+    try:
+        with gzip.GzipFile(fileobj=BytesIO(data)) as stream:
+            while True:
+                policy.remaining()
+                chunk = stream.read(HTTP_READ_CHUNK_SIZE)
+                if not chunk:
+                    break
+                decoded.extend(chunk)
+                if len(decoded) > policy.max_response_bytes:
+                    raise SourceResponseTooLarge(
+                        f"decompressed response from {url} exceeded "
+                        f"{policy.max_response_bytes} bytes"
+                    )
+    except SourceError:
+        raise
+    except (EOFError, OSError) as exc:
+        raise SourceResponseParseError(
+            f"invalid gzip response from {url}: {exc}"
+        ) from exc
+    policy.remaining()
+    return bytes(decoded)
+
+
+def _read_http_response(
+    response: Any, *, policy: SourceHttpPolicy, url: str
+) -> bytes:
+    content_length = response.headers.get("Content-Length")
+    if content_length:
+        try:
+            if int(content_length) > policy.max_response_bytes:
+                raise SourceResponseTooLarge(
+                    f"response from {url} declares {content_length} bytes; "
+                    f"limit is {policy.max_response_bytes}"
+                )
+        except ValueError:
+            pass
+
+    body = bytearray()
+    read_chunk = getattr(response, "read1", response.read)
+    while True:
+        remaining = policy.remaining()
+        _set_response_socket_timeout(
+            response, max(0.001, min(policy.timeout, remaining))
+        )
+        chunk = read_chunk(HTTP_READ_CHUNK_SIZE)
+        policy.remaining()
+        if not chunk:
+            break
+        body.extend(chunk)
+        if len(body) > policy.max_response_bytes:
+            raise SourceResponseTooLarge(
+                f"response from {url} exceeded {policy.max_response_bytes} bytes"
+            )
+
+    encodings = [
+        token.strip().lower()
+        for token in response.headers.get("Content-Encoding", "").split(",")
+        if token.strip()
+    ]
+    decoded = bytes(body)
+    for encoding in reversed(encodings):
+        if encoding == "identity":
+            continue
+        if encoding != "gzip":
+            raise SourceError(f"unsupported Content-Encoding {encoding!r} from {url}")
+        decoded = _decompress_gzip_limited(decoded, policy=policy, url=url)
+    policy.remaining()
+    return decoded
+
+
+def _request_bytes(
+    request: urllib.request.Request, *, policy: SourceHttpPolicy
+) -> tuple[bytes, str]:
+    def request_once() -> tuple[bytes, str]:
+        timeout = max(0.001, min(policy.timeout, policy.remaining()))
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            body = _read_http_response(
+                response, policy=policy, url=request.full_url
+            )
+            return body, response.geturl()
+
+    return _with_http_retries(request_once, policy)
+
+
+def _http_json(
+    url: str,
+    *,
+    policy: SourceHttpPolicy,
+    method: str = "GET",
+    payload: dict[str, Any] | None = None,
+    referer: str,
+) -> Any:
+    headers = {
+        "User-Agent": BROWSER_USER_AGENT,
+        "Accept": "application/json, text/plain, */*",
+        "Accept-Language": "en-US,en;q=0.9",
+        "Referer": referer,
+    }
+    data = None
+    if payload is not None:
+        data = json.dumps(payload).encode("utf-8")
+        headers["Content-Type"] = "application/json;charset=UTF-8"
+        parsed = urllib.parse.urlsplit(url)
+        headers["Origin"] = f"{parsed.scheme}://{parsed.netloc}"
+    request = urllib.request.Request(url, data=data, headers=headers, method=method)
+    body, _ = _request_bytes(request, policy=policy)
+    try:
+        return json.loads(body.decode("utf-8", "replace"))
+    except (UnicodeError, json.JSONDecodeError) as exc:
+        raise SourceResponseParseError(
+            f"invalid JSON response from {url}: {exc}"
+        ) from exc
+
+
+def _http_text(
+    url: str,
+    *,
+    policy: SourceHttpPolicy,
+    referer: str,
+    accept_gzip: bool = False,
+) -> tuple[str, str]:
+    headers = {
+        "User-Agent": BROWSER_USER_AGENT,
+        "Accept": "text/html,application/json,text/plain,*/*",
+        "Accept-Language": "en-US,en;q=0.9",
+        "Referer": referer,
+    }
+    if accept_gzip:
+        headers["Accept-Encoding"] = "gzip"
+    request = urllib.request.Request(url, headers=headers, method="GET")
+    body, final_url = _request_bytes(request, policy=policy)
+    return body.decode("utf-8", "replace"), final_url
+
+
+def _summarize_tair_doc(doc: dict[str, Any]) -> dict[str, Any]:
+    descriptions = doc.get("description") or []
+    gene_names = doc.get("gene_name") or []
+    return {
+        "id": doc.get("id"),
+        "gene_id": gene_names[0] if gene_names else None,
+        "gene_model_ids": doc.get("gene_model_ids") or [],
+        "other_names": doc.get("other_names") or [],
+        "description": descriptions[0] if descriptions else "",
+        "keywords": doc.get("keywords") or [],
+        "keyword_types": doc.get("keyword_types") or [],
+        "phenotypes": doc.get("phenotypes") or [],
+        "gene_model_type": doc.get("gene_model_type") or [],
+        "locus_tairObjectId": doc.get("locus_tairObjectId"),
+        "gene_tairObjectId": doc.get("gene_tairObjectId"),
+        "has_publications": doc.get("has_publications"),
+        "is_obselete": doc.get("is_obselete"),
+    }
+
+
+def _exact_tair_docs(
+    docs: list[dict[str, Any]], target: str
+) -> list[dict[str, Any]]:
+    query = target.strip().upper()
+    gene_query = re.sub(r"\.\d+$", "", query)
+    matches: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for doc in docs:
+        gene_names = doc.get("gene_name") or []
+        gene_id = str(gene_names[0]).upper() if gene_names else ""
+        gene_models = {
+            str(value).upper() for value in doc.get("gene_model_ids") or []
+        }
+        if gene_query != gene_id and query not in gene_models:
+            continue
+        key = gene_id or clean_text(doc.get("id")).casefold()
+        if key not in seen:
+            seen.add(key)
+            matches.append(doc)
+    return matches
+
+
+def fetch_arabidopsis_tair(
+    target: str,
+    timeout: float,
+    retries: int,
+    deadline: float | None,
+) -> dict[str, Any]:
+    policy = SourceHttpPolicy.create(
+        timeout=timeout, retries=retries, deadline=deadline
+    )
+    data = _http_json(
+        f"{TAIR_API_BASE}/search/gene",
+        policy=policy,
+        method="POST",
+        payload={"searchText": target.strip()},
+        referer="https://www.arabidopsis.org/search/genes",
+    )
+    if not isinstance(data, dict):
+        raise SourceResponseParseError("TAIR search response is not a JSON object")
+    if "docs" not in data:
+        raise SourceResponseParseError("TAIR search response is missing the docs field")
+    raw_docs = data.get("docs")
+    if raw_docs is not None and not isinstance(raw_docs, list):
+        raise SourceResponseParseError("TAIR search response docs field is not a list")
+    docs = raw_docs or []
+    if any(not isinstance(doc, dict) for doc in docs):
+        raise SourceResponseParseError("TAIR search docs contain a non-object entry")
+
+    exact = _exact_tair_docs(docs, target)
+    tair: dict[str, Any] = {
+        "total": data.get("total"),
+        "candidate_count": len(docs),
+        "candidates": [_summarize_tair_doc(doc) for doc in docs[:10]],
+        "exact_candidates": [_summarize_tair_doc(doc) for doc in exact[:10]],
+    }
+    result: dict[str, Any] = {"mode": "tair", "query": target, "tair": tair}
+    if not exact:
+        result.update(
+            status="not_found",
+            message=f"TAIR returned no exact AGI match for {target}",
+        )
+        return result
+    if len(exact) > 1:
+        result.update(
+            status="ambiguous",
+            message=f"TAIR returned multiple exact AGI matches for {target}",
+        )
+        return result
+    tair["selected"] = _summarize_tair_doc(exact[0])
+    result["status"] = "ok"
+    return result
+
+
+def _parse_plantconnectome_preview(
+    html_text: str,
+) -> tuple[str | None, list[list[Any]]]:
+    if re.search(
+        r"<h2\b[^>]*>\s*No\s+hits\s+were\s+found\s+using\s+the\s+query\s*:",
+        html_text,
+        re.IGNORECASE,
+    ):
+        return None, []
+    uid_match = re.search(r'const\s+unique_id\s*=\s*"([^"]+)"', html_text)
+    if not uid_match:
+        raise SourceResponseParseError("PlantConnectome preview is missing unique_id")
+    rows_match = re.search(
+        r"allRowsData\s*=\s*cached\s*\?\s*cached\.preview_results\s*:\s*(.*?);\s*\n\s*/\*\s*build entityNodeMap",
+        html_text,
+        re.DOTALL,
+    )
+    if not rows_match:
+        raise SourceResponseParseError("PlantConnectome preview is missing allRowsData")
+    try:
+        rows = json.loads(rows_match.group(1).strip())
+    except json.JSONDecodeError as exc:
+        raise SourceResponseParseError(
+            f"PlantConnectome preview allRowsData is invalid JSON: {exc}"
+        ) from exc
+    if not isinstance(rows, list):
+        raise SourceResponseParseError("PlantConnectome preview allRowsData is not a list")
+    return uid_match.group(1), rows
+
+
+def _parse_plantconnectome_edges(html_text: str) -> list[dict[str, Any]]:
+    match = re.search(r'const\s+g\s*=\s*"(.*?)";\s*\n', html_text, re.DOTALL)
+    if not match:
+        raise SourceResponseParseError(
+            "PlantConnectome detail is missing the edge payload"
+        )
+    decoded = html.unescape(match.group(1))
+    if len(decoded) > PLANTCONNECTOME_MAX_EDGE_PAYLOAD_CHARS:
+        raise SourceResponseTooLarge(
+            "PlantConnectome edge payload exceeded "
+            f"{PLANTCONNECTOME_MAX_EDGE_PAYLOAD_CHARS} characters"
+        )
+    errors: list[str] = []
+    parsers: list[tuple[str, Callable[[str], Any]]] = [("JSON", json.loads)]
+
+    def parse_python_literal(value: str) -> Any:
+        tree = ast.parse(value, mode="eval")
+        for node_count, _ in enumerate(ast.walk(tree), 1):
+            if node_count > PLANTCONNECTOME_MAX_AST_NODES:
+                raise SourceResponseTooLarge(
+                    "PlantConnectome edge payload AST exceeded "
+                    f"{PLANTCONNECTOME_MAX_AST_NODES} nodes"
+                )
+        return ast.literal_eval(tree)
+
+    parsers.append(("Python literal", parse_python_literal))
+    for parser_name, parser in parsers:
+        try:
+            value = parser(decoded)
+        except SourceError:
+            raise
+        except Exception as exc:
+            errors.append(f"{parser_name} parse failed: {exc}")
+            continue
+        if not isinstance(value, list):
+            errors.append(f"{parser_name} type was {type(value).__name__}")
+            continue
+        if any(not isinstance(edge, dict) for edge in value):
+            raise SourceResponseParseError(
+                "PlantConnectome edge payload contains non-object entries"
+            )
+        return value
+    raise SourceResponseParseError(
+        "PlantConnectome edge payload could not be parsed: " + "; ".join(errors)
+    )
+
+
+def _plantconnectome_entity_url(
+    entity: str, entity_type: str, unique_id: str | None
+) -> str:
+    url = (
+        f"{PLANTCONNECTOME_BASE}/normal/"
+        f"{urllib.parse.quote(entity, safe='')}/results/"
+        f"{urllib.parse.quote(entity_type, safe='')}"
+    )
+    if unique_id:
+        url += "?uid=" + urllib.parse.quote(unique_id)
+    return url
+
+
+def fetch_plantconnectome(
+    gene_name: str,
+    max_entities: int,
+    max_edges: int,
+    timeout: float,
+    retries: int,
+    deadline: float | None,
+) -> dict[str, Any]:
+    if max_entities <= 0 or max_edges <= 0:
+        raise ValueError("PlantConnectome entity and edge limits must be positive")
+    policy = SourceHttpPolicy.create(
+        timeout=timeout, retries=retries, deadline=deadline
+    )
+    preview_url = (
+        f"{PLANTCONNECTOME_BASE}/normal/"
+        f"{urllib.parse.quote(gene_name, safe='')}"
+    )
+    preview_html, final_preview_url = _http_text(
+        preview_url,
+        policy=policy,
+        referer=f"{PLANTCONNECTOME_BASE}/",
+        accept_gzip=True,
+    )
+    unique_id, rows = _parse_plantconnectome_preview(preview_html)
+    preview = {
+        "url": final_preview_url,
+        "unique_id": unique_id,
+        "row_count": len(rows),
+        "rows": rows[: max(20, max_entities)],
+    }
+    if not rows:
+        plantconnectome = {
+            "status": "not_found",
+            "message": f"PlantConnectome returned no preview entities for {gene_name}",
+            "gene_id": gene_name,
+            "preview": preview,
+            "entities": [],
+        }
+        return {
+            "status": "not_found",
+            "mode": "plant",
+            "plantconnectome": plantconnectome,
+        }
+
+    entities: list[dict[str, Any]] = []
+    for row in rows[:max_entities]:
+        if not isinstance(row, list) or len(row) < 2:
+            raise SourceResponseParseError(
+                "PlantConnectome preview row lacks entity or entity type"
+            )
+        entity = str(row[0])
+        entity_type = str(row[1])
+        detail_url = _plantconnectome_entity_url(entity, entity_type, unique_id)
+        detail_html, final_detail_url = _http_text(
+            detail_url,
+            policy=policy,
+            referer=final_preview_url,
+            accept_gzip=True,
+        )
+        edges = _parse_plantconnectome_edges(detail_html)
+        entities.append(
+            {
+                "preview_row": row,
+                "entity": entity,
+                "entity_type": entity_type,
+                "url": final_detail_url,
+                "edge_count_total": len(edges),
+                "edges": edges[:max_edges],
+            }
+        )
+
+    if any(entity["edge_count_total"] for entity in entities):
+        status = "ok"
+        message = ""
+    else:
+        status = "not_found"
+        message = f"PlantConnectome returned no knowledge-graph edges for {gene_name}"
+    plantconnectome = {
+        "status": status,
+        **({"message": message} if message else {}),
+        "gene_id": gene_name,
+        "preview": preview,
+        "entities": entities,
+    }
+    return {
+        "status": status,
+        "mode": "plant",
+        "plantconnectome": plantconnectome,
+    }
+
+
+def _default_source_deadline(
+    timeout: float, retries: int, *, operations: int = 1
+) -> float:
+    return operations * (timeout * (retries + 1) + (2**retries - 1))
+
+
+def fetch_potato_gene_search(
+    query: str,
+    *,
+    base_url: str,
+    max_results: int,
+    timeout: float,
+    retries: int,
+) -> dict[str, Any]:
+    query = query.strip()
+    if not query:
+        raise ValueError("Potato gene query must not be empty")
+    if max_results < 0:
+        raise ValueError("Potato gene max_results must be zero or greater")
+    policy = SourceHttpPolicy.create(
+        timeout=timeout,
+        retries=retries,
+        deadline=_default_source_deadline(timeout, retries),
+    )
+    endpoint = base_url.rstrip("/") + "/api/gene_search"
+    url = endpoint + "?" + urllib.parse.urlencode({"q": query})
+    data = _http_json(
+        url,
+        policy=policy,
+        referer=base_url.rstrip("/") + "/",
+    )
+    if not isinstance(data, dict):
+        raise SourceResponseParseError("Potato gene API response is not a JSON object")
+    if data.get("error"):
+        raise SourceError(f"Potato gene API reported an error: {data['error']}")
+    results = data.get("results", [])
+    if not isinstance(results, list):
+        raise SourceResponseParseError(
+            "Potato gene API response field 'results' is not a list"
+        )
+    if any(not isinstance(item, dict) for item in results):
+        raise SourceResponseParseError(
+            "Potato gene API results contain a non-object entry"
+        )
+    output = dict(data)
+    output.update(
+        endpoint="gene_search",
+        query=query,
+        result_count=len(results),
+        results=results[:max_results],
+    )
+    return output
+
+
+def fetch_potato_rag(
+    query: str,
+    *,
+    base_url: str,
+    top_k_retrieve: int,
+    top_k_rerank: int,
+    timeout: float,
+    retries: int,
+) -> dict[str, Any]:
+    query = query.strip()
+    if not query:
+        raise ValueError("Potato RAG query must not be empty")
+    if top_k_retrieve <= 0 or top_k_rerank <= 0:
+        raise ValueError("Potato RAG retrieval limits must be positive")
+    policy = SourceHttpPolicy.create(
+        timeout=timeout,
+        retries=retries,
+        deadline=_default_source_deadline(timeout, retries),
+    )
+    endpoint = base_url.rstrip("/") + "/api/rag/search"
+    data = _http_json(
+        endpoint,
+        policy=policy,
+        method="POST",
+        payload={
+            "query": query,
+            "top_k_retrieve": top_k_retrieve,
+            "top_k_rerank": top_k_rerank,
+        },
+        referer=base_url.rstrip("/") + "/",
+    )
+    if not isinstance(data, dict):
+        raise SourceResponseParseError("Potato RAG response is not a JSON object")
+    if data.get("success") is False:
+        raise SourceError(
+            "Potato RAG API reported failure: " + clean_text(data.get("error"), 800)
+        )
+    raw_results = data.get("results")
+    if raw_results is None:
+        raw_results = []
+    if not isinstance(raw_results, list):
+        raise SourceResponseParseError("Potato RAG results field is not a list")
+    results: list[dict[str, Any]] = []
+    for rank, item in enumerate(raw_results, 1):
+        if not isinstance(item, dict):
+            raise SourceResponseParseError(
+                "Potato RAG results contain a non-object entry"
+            )
+        row = dict(item)
+        row.setdefault("rank", rank)
+        results.append(row)
+    rag = {
+        "success": True,
+        "query": data.get("query", query),
+        "top_k_retrieve": top_k_retrieve,
+        "top_k_rerank": top_k_rerank,
+        "results": results,
+    }
+    return {
+        "success": True,
+        "query": query,
+        "rag": rag,
+        "kg": {"success": None, "skipped": True, "entities": []},
+        "warnings": [],
+    }
+
+
+def _xml_text(element: ET.Element | None) -> str:
+    return "" if element is None else "".join(element.itertext()).strip()
+
+
+def fetch_pubmed(
+    query: str,
+    *,
+    base_url: str,
+    limit: int,
+    timeout: float,
+    retries: int,
+) -> dict[str, Any]:
+    query = query.strip()
+    if not query:
+        raise ValueError("PubMed query must not be empty")
+    if limit <= 0:
+        raise ValueError("PubMed limit must be positive")
+    policy = SourceHttpPolicy.create(
+        timeout=timeout,
+        retries=retries,
+        deadline=_default_source_deadline(timeout, retries, operations=2),
+    )
+    base_url = base_url.rstrip("/")
+    search_url = base_url + "/esearch.fcgi?" + urllib.parse.urlencode(
+        {"db": "pubmed", "term": query, "retmax": limit, "retmode": "json"}
+    )
+    search_data = _http_json(
+        search_url,
+        policy=policy,
+        referer="https://pubmed.ncbi.nlm.nih.gov/",
+    )
+    if not isinstance(search_data, dict):
+        raise SourceResponseParseError("PubMed ESearch response is not a JSON object")
+    search_result = search_data.get("esearchresult")
+    if not isinstance(search_result, dict):
+        raise SourceResponseParseError("PubMed ESearch response is missing esearchresult")
+    raw_ids = search_result.get("idlist")
+    if not isinstance(raw_ids, list) or any(not isinstance(value, str) for value in raw_ids):
+        raise SourceResponseParseError("PubMed ESearch idlist is malformed")
+    ids = raw_ids[:limit]
+    if not ids:
+        return {"total": 0, "data": []}
+
+    fetch_url = base_url + "/efetch.fcgi?" + urllib.parse.urlencode(
+        {
+            "db": "pubmed",
+            "id": ",".join(ids),
+            "retmode": "xml",
+            "rettype": "abstract",
+        }
+    )
+    xml_text, _ = _http_text(
+        fetch_url,
+        policy=policy,
+        referer="https://pubmed.ncbi.nlm.nih.gov/",
+    )
+    try:
+        root = ET.fromstring(xml_text)
+    except ET.ParseError as exc:
+        raise SourceResponseParseError(f"PubMed EFetch returned invalid XML: {exc}") from exc
+
+    papers: list[dict[str, Any]] = []
+    for article in root.findall(".//PubmedArticle"):
+        pmid = _xml_text(article.find(".//PMID"))
+        title = _xml_text(article.find(".//ArticleTitle"))
+        abstract_parts: list[str] = []
+        for abstract_element in article.findall(".//AbstractText"):
+            abstract = _xml_text(abstract_element)
+            if not abstract:
+                continue
+            label = clean_text(abstract_element.get("Label"))
+            abstract_parts.append(f"{label}: {abstract}" if label else abstract)
+
+        year: int | None = None
+        year_text = _xml_text(article.find(".//PubDate/Year"))
+        if year_text.isdigit():
+            year = int(year_text)
+        if year is None:
+            medline_date = _xml_text(article.find(".//PubDate/MedlineDate"))
+            year_match = re.search(r"\b(?:18|19|20)\d{2}\b", medline_date)
+            if year_match:
+                year = int(year_match.group(0))
+
+        doi = ""
+        for article_id in article.findall(".//ArticleId"):
+            if article_id.get("IdType") == "doi":
+                doi = _xml_text(article_id)
+                break
+        if not doi:
+            for location_id in article.findall(".//ELocationID"):
+                if location_id.get("EIdType") == "doi":
+                    doi = _xml_text(location_id)
+                    break
+        authors: list[str] = []
+        for author in article.findall(".//Author"):
+            name = " ".join(
+                value
+                for value in (
+                    _xml_text(author.find("ForeName")),
+                    _xml_text(author.find("LastName")),
+                )
+                if value
+            )
+            if name:
+                authors.append(name)
+        papers.append(
+            {
+                "id": pmid,
+                "pmid": pmid,
+                "doi": doi,
+                "title": title,
+                "year": year,
+                "authors": authors,
+                "abstract": " ".join(abstract_parts),
+                "venue": _xml_text(article.find(".//Journal/Title")),
+                "source": "pubmed",
+            }
+        )
+    return {"total": len(papers), "data": papers}
 
 
 def read_gene_list(path: Path) -> list[str]:
@@ -186,14 +976,6 @@ def sha256_json(value: object) -> str:
     return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
 
 
-def sha256_file(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        for block in iter(lambda: handle.read(1024 * 1024), b""):
-            digest.update(block)
-    return digest.hexdigest()
-
-
 def atomic_json(path: Path, value: object) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_name(path.name + f".tmp.{os.getpid()}.{uuid.uuid4().hex}")
@@ -241,40 +1023,6 @@ def load_maize_index(path: Path) -> dict[str, dict[str, str]]:
                 "source_line": str(line_number),
             }
     return result
-
-
-def run_json_command(
-    command: list[str],
-    timeout: int | float,
-    attempts: int = 2,
-    accepted_returncodes: set[int] | None = None,
-) -> dict[str, Any]:
-    accepted_returncodes = accepted_returncodes or {0}
-    error = "command did not run"
-    for attempt in range(attempts):
-        try:
-            process = subprocess.run(
-                command,
-                text=True,
-                capture_output=True,
-                timeout=timeout,
-                check=False,
-            )
-            try:
-                data = json.loads(process.stdout)
-            except json.JSONDecodeError:
-                data = None
-            if process.returncode in accepted_returncodes and isinstance(data, dict):
-                return data
-            if isinstance(data, dict) and data.get("error"):
-                error = clean_text(data.get("error"), 1000)
-            else:
-                error = clean_text(process.stderr or process.stdout, 1000) or f"exit {process.returncode}"
-        except subprocess.TimeoutExpired:
-            error = f"timeout after {timeout}s"
-        if attempt + 1 < attempts:
-            time.sleep(1.0 + attempt)
-    raise SourceError(f"Command failed ({' '.join(command[:3])}): {error}")
 
 
 def fetch_ricedata(target: str, timeout: int, retries: int = 3) -> dict[str, Any]:
@@ -733,15 +1481,6 @@ class Pipeline:
         self._cache_locks: dict[Path, threading.Lock] = {}
         self._error_lock = threading.Lock()
         self.errors: list[dict[str, str]] = []
-        self._script_hashes = {
-            str(path): sha256_file(path)
-            for path in (
-                args.potato_gene_script,
-                args.potato_rag_script,
-                args.arabidopsis_script,
-                args.literature_script,
-            )
-        }
 
     def record_error(self, stage: str, key: str, error: object) -> None:
         record = {"stage": stage, "key": key, "error": clean_text(error, 1500)}
@@ -848,28 +1587,21 @@ class Pipeline:
             "query": query,
             "limit": self.args.pubmed_limit,
             "source": "pm",
-            "script": str(self.args.literature_script.resolve()),
-            "script_sha256": self._script_hashes[str(self.args.literature_script)],
+            "base_url": self.args.pubmed_api_base_url,
+            "timeout": self.args.source_timeout,
+            "retries": self.args.source_retries,
+            "implementation": PUBMED_SOURCE_VERSION,
         }
 
         def produce() -> dict[str, Any]:
             with self._pubmed_semaphore:
-                data = run_json_command(
-                    [
-                        sys.executable,
-                        str(self.args.literature_script),
-                        "search",
-                        query,
-                        "--limit",
-                        str(self.args.pubmed_limit),
-                        "--source",
-                        "pm",
-                    ],
-                    timeout=self.args.source_timeout * 2 + 20,
-                    attempts=self.args.source_retries + 1,
+                data = fetch_pubmed(
+                    query,
+                    base_url=self.args.pubmed_api_base_url,
+                    limit=self.args.pubmed_limit,
+                    timeout=self.args.source_timeout,
+                    retries=self.args.source_retries,
                 )
-            if data.get("error"):
-                raise SourceError(f"PubMed search failed: {data['error']}")
             if not isinstance(data.get("data"), list):
                 raise SourceError("PubMed search returned malformed results")
             return {"query": query, "papers": compact_pubmed(data)}
@@ -882,28 +1614,22 @@ class Pipeline:
         specification = {
             "query": gene,
             "max_results": 5,
-            "script": str(self.args.potato_gene_script.resolve()),
-            "script_sha256": self._script_hashes[str(self.args.potato_gene_script)],
+            "base_url": self.args.potato_gene_base_url,
             "timeout": self.args.source_timeout,
+            "retries": self.args.source_retries,
+            "implementation": POTATO_SOURCE_VERSION,
         }
         try:
             search = self.source_call(
                 "potato_gene_search",
                 gene,
                 specification,
-                lambda: run_json_command(
-                    [
-                        sys.executable,
-                        str(self.args.potato_gene_script),
-                        "search",
-                        gene,
-                        "--max-results",
-                        "5",
-                        "--timeout",
-                        str(self.args.source_timeout),
-                    ],
-                    timeout=self.args.source_timeout + 20,
-                    attempts=self.args.source_retries + 1,
+                lambda: fetch_potato_gene_search(
+                    gene,
+                    base_url=self.args.potato_gene_base_url,
+                    max_results=5,
+                    timeout=self.args.source_timeout,
+                    retries=self.args.source_retries,
                 ),
                 validator=validate_potato_gene_source,
             )
@@ -934,31 +1660,23 @@ class Pipeline:
                 "query": query,
                 "top_k_retrieve": self.args.rag_top_k_retrieve,
                 "top_k_rerank": self.args.rag_top_k_rerank,
-                "script": str(self.args.potato_rag_script.resolve()),
-                "script_sha256": self._script_hashes[str(self.args.potato_rag_script)],
+                "base_url": self.args.potato_rag_base_url,
+                "timeout": self.args.source_timeout,
+                "retries": self.args.source_retries,
+                "implementation": POTATO_SOURCE_VERSION,
             }
             try:
                 raw = self.source_call(
                     "potato_rag",
                     query,
                     specification,
-                    lambda q=query: run_json_command(
-                        [
-                            sys.executable,
-                            str(self.args.potato_rag_script),
-                            q,
-                            "--rag-only",
-                            "--format",
-                            "json",
-                            "--rag-top-k-retrieve",
-                            str(self.args.rag_top_k_retrieve),
-                            "--rag-top-k-rerank",
-                            str(self.args.rag_top_k_rerank),
-                            "--rag-timeout",
-                            str(self.args.source_timeout),
-                        ],
-                        timeout=self.args.source_timeout + 20,
-                        attempts=self.args.source_retries + 1,
+                    lambda q=query: fetch_potato_rag(
+                        q,
+                        base_url=self.args.potato_rag_base_url,
+                        top_k_retrieve=self.args.rag_top_k_retrieve,
+                        top_k_rerank=self.args.rag_top_k_rerank,
+                        timeout=self.args.source_timeout,
+                        retries=self.args.source_retries,
                     ),
                     validator=validate_potato_rag_source,
                 )
@@ -1076,31 +1794,18 @@ class Pipeline:
             "timeout": self.args.source_timeout,
             "retries": self.args.source_retries,
             "deadline": query_deadline,
-            "script": str(self.args.arabidopsis_script.resolve()),
-            "script_sha256": self._script_hashes[str(self.args.arabidopsis_script)],
+            "implementation": ARABIDOPSIS_SOURCE_VERSION,
         }
         try:
             tair_raw = self.source_call(
                 "arabidopsis_tair",
                 target,
                 {**common_specification, "mode": "tair"},
-                lambda: run_json_command(
-                    [
-                        sys.executable,
-                        str(self.args.arabidopsis_script),
-                        "tair",
-                        target,
-                        "--timeout",
-                        str(self.args.source_timeout),
-                        "--retries",
-                        str(self.args.source_retries),
-                        "--deadline",
-                        str(query_deadline),
-                        "--format",
-                        "json",
-                    ],
-                    timeout=query_deadline + 20,
-                    attempts=1,
+                lambda: fetch_arabidopsis_tair(
+                    target,
+                    self.args.source_timeout,
+                    self.args.source_retries,
+                    query_deadline,
                 ),
                 validator=lambda value: validate_arabidopsis_tair_source(value, target),
             )
@@ -1156,30 +1861,13 @@ class Pipeline:
                         "max_edges": self.args.plantconnectome_max_edges,
                         "snippets": 0,
                     },
-                    lambda name=gene_name: run_json_command(
-                        [
-                            sys.executable,
-                            str(self.args.arabidopsis_script),
-                            "plant",
-                            name,
-                            "--max-entities",
-                            str(max_entities),
-                            "--max-edges",
-                            str(self.args.plantconnectome_max_edges),
-                            "--snippets",
-                            "0",
-                            "--timeout",
-                            str(self.args.source_timeout),
-                            "--retries",
-                            str(self.args.source_retries),
-                            "--deadline",
-                            str(query_deadline),
-                            "--format",
-                            "json",
-                        ],
-                        timeout=query_deadline + 20,
-                        attempts=1,
-                        accepted_returncodes={0, 3},
+                    lambda name=gene_name: fetch_plantconnectome(
+                        name,
+                        max_entities,
+                        self.args.plantconnectome_max_edges,
+                        self.args.source_timeout,
+                        self.args.source_retries,
+                        query_deadline,
                     ),
                     validator=validate_plantconnectome_source,
                 )
@@ -1576,24 +2264,27 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--expression-metadata", type=Path, default=DEFAULT_EXPRESSION_METADATA)
     parser.add_argument("--maize-data", type=Path, default=DEFAULT_MAIZE_DATA)
     parser.add_argument(
-        "--potato-gene-script",
-        type=Path,
-        default=SKILLS_ROOT / "potato-gene-search" / "scripts" / "query_potato_gene.py",
+        "--potato-gene-base-url",
+        default=os.environ.get(
+            "GENE_FUNCTION_POTATO_GENE_BASE_URL",
+            os.environ.get("POTATO_GENE_BASE_URL", DEFAULT_POTATO_API_BASE),
+        ),
+        help="Potato gene search API base URL",
     )
     parser.add_argument(
-        "--potato-rag-script",
-        type=Path,
-        default=SKILLS_ROOT / "potato-knowledge-search" / "scripts" / "query_potato_knowledge.py",
+        "--potato-rag-base-url",
+        default=os.environ.get(
+            "GENE_FUNCTION_POTATO_RAG_BASE_URL",
+            os.environ.get("POTATO_RAG_BASE_URL", DEFAULT_POTATO_API_BASE),
+        ),
+        help="Potato RAG API base URL",
     )
     parser.add_argument(
-        "--arabidopsis-script",
-        type=Path,
-        default=SKILLS_ROOT / "arabidopsis-gene-search" / "scripts" / "query_arabidopsis_gene_search.py",
-    )
-    parser.add_argument(
-        "--literature-script",
-        type=Path,
-        default=SKILLS_ROOT / "literature-review" / "scripts" / "lit_search.py",
+        "--pubmed-api-base-url",
+        default=os.environ.get(
+            "GENE_FUNCTION_PUBMED_API_BASE_URL", DEFAULT_PUBMED_API_BASE
+        ),
+        help="NCBI E-utilities API base URL",
     )
     parser.add_argument("--fetch-workers", type=int, default=8)
     parser.add_argument("--source-timeout", type=int, default=60)
@@ -1637,10 +2328,6 @@ def validate_paths(args: argparse.Namespace) -> None:
         args.expression_matrix,
         args.expression_metadata,
         args.maize_data,
-        args.potato_gene_script,
-        args.potato_rag_script,
-        args.arabidopsis_script,
-        args.literature_script,
         *(PROMPT_DIR / f"{name}.md" for name in (
             "potato_rag_summary",
             "arabidopsis_gene_names",
@@ -1663,6 +2350,14 @@ def validate_paths(args: argparse.Namespace) -> None:
         raise ValueError("PlantConnectome max edges must be positive")
     if args.plantconnectome_max_entities < 1:
         raise ValueError("PlantConnectome max entities must be positive")
+    for option, value in (
+        ("--potato-gene-base-url", args.potato_gene_base_url),
+        ("--potato-rag-base-url", args.potato_rag_base_url),
+        ("--pubmed-api-base-url", args.pubmed_api_base_url),
+    ):
+        parsed = urllib.parse.urlsplit(value)
+        if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+            raise ValueError(f"{option} must be an HTTP(S) base URL")
 
 
 def main(argv: list[str] | None = None) -> int:
