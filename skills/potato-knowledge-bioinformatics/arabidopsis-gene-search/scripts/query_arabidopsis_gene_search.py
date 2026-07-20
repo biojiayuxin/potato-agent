@@ -12,13 +12,18 @@ from __future__ import annotations
 
 import argparse
 import ast
+import gzip
 import html
+import http.client
 import json
 import re
+import socket
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
 from collections import Counter
+from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 TAIR_API_BASE = "https://www.arabidopsis.org/api"
@@ -28,9 +33,197 @@ BROWSER_UA = (
     "(KHTML, like Gecko) Chrome/124.0 Safari/537.36"
 )
 
+DEFAULT_RETRIES = 3
+DEFAULT_RETRY_BACKOFF = 1.0
+DEFAULT_MAX_RESPONSE_BYTES = 16 * 1024 * 1024
+READ_CHUNK_SIZE = 64 * 1024
+TRANSIENT_HTTP_CODES = {408, 425, 429, 500, 502, 503, 504}
+
+
+class QueryError(RuntimeError):
+    """Base class for failures that should stop the current source query."""
+
+
+class QueryDeadlineExceeded(QueryError):
+    """The wall-clock deadline for the query was exhausted."""
+
+
+class ResponseTooLarge(QueryError):
+    """An HTTP response exceeded the configured size limit."""
+
+
+class ResponseParseError(QueryError):
+    """A remote response no longer matches the expected data structure."""
+
+
+@dataclass(frozen=True)
+class HttpPolicy:
+    timeout: float
+    retries: int
+    retry_backoff: float
+    max_response_bytes: int
+    deadline_at: float
+
+    @classmethod
+    def create(
+        cls,
+        *,
+        timeout: float,
+        retries: int = DEFAULT_RETRIES,
+        retry_backoff: float = DEFAULT_RETRY_BACKOFF,
+        max_response_bytes: int = DEFAULT_MAX_RESPONSE_BYTES,
+        deadline: Optional[float] = None,
+    ) -> "HttpPolicy":
+        if timeout <= 0:
+            raise ValueError("timeout must be greater than zero")
+        if retries < 0:
+            raise ValueError("retries must be zero or greater")
+        if retry_backoff < 0:
+            raise ValueError("retry_backoff must be zero or greater")
+        if max_response_bytes <= 0:
+            raise ValueError("max_response_bytes must be greater than zero")
+        if deadline is None:
+            deadline = timeout * (retries + 1) + retry_backoff * (2 ** retries - 1)
+        if deadline <= 0:
+            raise ValueError("deadline must be greater than zero")
+        return cls(
+            timeout=timeout,
+            retries=retries,
+            retry_backoff=retry_backoff,
+            max_response_bytes=max_response_bytes,
+            deadline_at=time.monotonic() + deadline,
+        )
+
+    def remaining(self) -> float:
+        remaining = self.deadline_at - time.monotonic()
+        if remaining <= 0:
+            raise QueryDeadlineExceeded("query wall-clock deadline exceeded")
+        return remaining
+
+
+def _is_transient_error(exc: BaseException) -> bool:
+    if isinstance(exc, urllib.error.HTTPError):
+        return exc.code in TRANSIENT_HTTP_CODES
+    if isinstance(exc, urllib.error.URLError):
+        reason = exc.reason
+        if isinstance(reason, socket.gaierror):
+            return reason.errno == socket.EAI_AGAIN
+        return isinstance(
+            reason,
+            (
+                TimeoutError,
+                socket.timeout,
+                ConnectionError,
+                ConnectionResetError,
+                ConnectionAbortedError,
+            ),
+        )
+    return isinstance(
+        exc,
+        (
+            TimeoutError,
+            socket.timeout,
+            ConnectionResetError,
+            ConnectionAbortedError,
+            http.client.IncompleteRead,
+        ),
+    )
+
+
+def _sleep_before_retry(policy: HttpPolicy, attempt: int, exc: BaseException) -> None:
+    delay = policy.retry_backoff * (2 ** attempt)
+    remaining = policy.remaining()
+    if delay >= remaining:
+        raise QueryDeadlineExceeded(
+            "query wall-clock deadline would be exceeded before the next retry"
+        ) from exc
+    if delay:
+        time.sleep(delay)
+
+
+def _with_retries(operation: Any, policy: HttpPolicy) -> Any:
+    for attempt in range(policy.retries + 1):
+        policy.remaining()
+        try:
+            return operation()
+        except Exception as exc:
+            if attempt >= policy.retries or not _is_transient_error(exc):
+                raise
+            if isinstance(exc, urllib.error.HTTPError):
+                exc.close()
+            _sleep_before_retry(policy, attempt, exc)
+    raise AssertionError("unreachable")
+
+
+def _set_response_timeout(response: Any, timeout: float) -> None:
+    raw = getattr(getattr(response, "fp", None), "raw", None)
+    sock = getattr(raw, "_sock", None)
+    if sock is not None:
+        sock.settimeout(timeout)
+
+
+def _read_response(response: Any, *, policy: HttpPolicy, url: str) -> bytes:
+    content_length = response.headers.get("Content-Length")
+    if content_length:
+        try:
+            if int(content_length) > policy.max_response_bytes:
+                raise ResponseTooLarge(
+                    f"response from {url} declares {content_length} bytes; "
+                    f"limit is {policy.max_response_bytes}"
+                )
+        except ValueError:
+            pass
+
+    body = bytearray()
+    read_chunk = getattr(response, "read1", response.read)
+    while True:
+        remaining = policy.remaining()
+        _set_response_timeout(response, max(0.001, min(policy.timeout, remaining)))
+        chunk = read_chunk(READ_CHUNK_SIZE)
+        policy.remaining()
+        if not chunk:
+            break
+        body.extend(chunk)
+        if len(body) > policy.max_response_bytes:
+            raise ResponseTooLarge(
+                f"response from {url} exceeded {policy.max_response_bytes} bytes"
+            )
+
+    content_encoding = response.headers.get("Content-Encoding", "")
+    encodings = [token.strip().lower() for token in content_encoding.split(",") if token.strip()]
+    decoded = bytes(body)
+    for encoding in reversed(encodings):
+        if encoding in {"identity"}:
+            continue
+        if encoding != "gzip":
+            raise QueryError(f"unsupported Content-Encoding {encoding!r} from {url}")
+        try:
+            decoded = gzip.decompress(decoded)
+        except (EOFError, OSError) as exc:
+            raise ResponseParseError(f"invalid gzip response from {url}: {exc}") from exc
+        if len(decoded) > policy.max_response_bytes:
+            raise ResponseTooLarge(
+                f"decompressed response from {url} exceeded "
+                f"{policy.max_response_bytes} bytes"
+            )
+    policy.remaining()
+    return decoded
+
+
+def _request_bytes(req: urllib.request.Request, *, policy: HttpPolicy) -> Tuple[bytes, str]:
+    def request_once() -> Tuple[bytes, str]:
+        timeout = max(0.001, min(policy.timeout, policy.remaining()))
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            body = _read_response(resp, policy=policy, url=req.full_url)
+            return body, resp.geturl()
+
+    return _with_retries(request_once, policy)
+
 
 def http_json(url: str, *, method: str = "GET", payload: Optional[dict] = None,
-              timeout: int = 60, referer: str = "https://www.arabidopsis.org/") -> Any:
+              timeout: int = 60, referer: str = "https://www.arabidopsis.org/",
+              policy: Optional[HttpPolicy] = None) -> Any:
+    policy = policy or HttpPolicy.create(timeout=timeout)
     data = None
     headers = {
         "User-Agent": BROWSER_UA,
@@ -44,12 +237,18 @@ def http_json(url: str, *, method: str = "GET", payload: Optional[dict] = None,
         parsed = urllib.parse.urlsplit(url)
         headers["Origin"] = f"{parsed.scheme}://{parsed.netloc}"
     req = urllib.request.Request(url, data=data, headers=headers, method=method)
-    with urllib.request.urlopen(req, timeout=timeout) as resp:
-        return json.loads(resp.read().decode("utf-8", "replace"))
+    body, _ = _request_bytes(req, policy=policy)
+    try:
+        return json.loads(body.decode("utf-8", "replace"))
+    except (UnicodeError, json.JSONDecodeError) as exc:
+        raise ResponseParseError(f"invalid JSON response from {url}: {exc}") from exc
 
 
 def http_text(url: str, *, method: str = "GET", payload: Optional[dict] = None,
-              timeout: int = 60, referer: Optional[str] = None) -> Tuple[str, str]:
+              timeout: int = 60, referer: Optional[str] = None,
+              accept_gzip: bool = False,
+              policy: Optional[HttpPolicy] = None) -> Tuple[str, str]:
+    policy = policy or HttpPolicy.create(timeout=timeout)
     data = None
     headers = {
         "User-Agent": BROWSER_UA,
@@ -58,14 +257,16 @@ def http_text(url: str, *, method: str = "GET", payload: Optional[dict] = None,
     }
     if referer:
         headers["Referer"] = referer
+    if accept_gzip:
+        headers["Accept-Encoding"] = "gzip"
     if payload is not None:
         data = json.dumps(payload).encode("utf-8")
         headers["Content-Type"] = "application/json;charset=UTF-8"
         parsed = urllib.parse.urlsplit(url)
         headers["Origin"] = f"{parsed.scheme}://{parsed.netloc}"
     req = urllib.request.Request(url, data=data, headers=headers, method=method)
-    with urllib.request.urlopen(req, timeout=timeout) as resp:
-        return resp.read().decode("utf-8", "replace"), resp.geturl()
+    body, final_url = _request_bytes(req, policy=policy)
+    return body.decode("utf-8", "replace"), final_url
 
 
 def normalize_query(q: str) -> str:
@@ -76,15 +277,24 @@ def is_agi_id(q: str) -> bool:
     return bool(re.fullmatch(r"AT[1-5CM]G\d{5}(?:\.\d+)?", q.strip().upper()))
 
 
-def tair_search(query: str, *, timeout: int = 60) -> Dict[str, Any]:
+def tair_search(query: str, *, timeout: int = 60,
+                policy: Optional[HttpPolicy] = None) -> Dict[str, Any]:
     data = http_json(
         f"{TAIR_API_BASE}/search/gene",
         method="POST",
         payload={"searchText": query.strip()},
         timeout=timeout,
         referer="https://www.arabidopsis.org/search/genes",
+        policy=policy,
     )
-    return {"query": query, "total": data.get("total"), "docs": data.get("docs") or [], "raw": data}
+    if not isinstance(data, dict):
+        raise ResponseParseError("TAIR search response is not a JSON object")
+    if "docs" not in data:
+        raise ResponseParseError("TAIR search response is missing the docs field")
+    docs = data.get("docs")
+    if docs is not None and not isinstance(docs, list):
+        raise ResponseParseError("TAIR search response docs field is not a list")
+    return {"query": query, "total": data.get("total"), "docs": docs or [], "raw": data}
 
 
 def summarize_tair_doc(doc: Dict[str, Any]) -> Dict[str, Any]:
@@ -120,23 +330,23 @@ def exact_matches(docs: Sequence[Dict[str, Any]], query: str) -> List[Dict[str, 
 
 def choose_tair_candidate(query: str, docs: Sequence[Dict[str, Any]], *,
                           forced_gene_id: Optional[str] = None,
-                          timeout: int = 60) -> Dict[str, Any]:
+                          timeout: int = 60,
+                          policy: Optional[HttpPolicy] = None) -> Dict[str, Any]:
     if forced_gene_id:
         fg = forced_gene_id.upper()
-        search_sets = [docs]
-        if not docs:
-            search_sets.append(tair_search(forced_gene_id, timeout=timeout).get("docs", []))
-        else:
-            try:
-                search_sets.append(tair_search(forced_gene_id, timeout=timeout).get("docs", []))
-            except Exception:
-                pass
-        for group in search_sets:
-            for d in group:
-                gene_id = ((d.get("gene_name") or [""])[0] or "").upper()
-                gene_models = [str(x).upper() for x in d.get("gene_model_ids") or []]
-                if fg == gene_id or fg in gene_models:
-                    return {"status": "ok", "selected": d, "reason": "forced_gene_id matched TAIR"}
+        for d in docs:
+            gene_id = ((d.get("gene_name") or [""])[0] or "").upper()
+            gene_models = [str(x).upper() for x in d.get("gene_model_ids") or []]
+            if fg == gene_id or fg in gene_models:
+                return {"status": "ok", "selected": d, "reason": "forced_gene_id matched TAIR"}
+        forced_docs = tair_search(
+            forced_gene_id, timeout=timeout, policy=policy
+        ).get("docs", [])
+        for d in forced_docs:
+            gene_id = ((d.get("gene_name") or [""])[0] or "").upper()
+            gene_models = [str(x).upper() for x in d.get("gene_model_ids") or []]
+            if fg == gene_id or fg in gene_models:
+                return {"status": "ok", "selected": d, "reason": "forced_gene_id matched TAIR"}
         return {"status": "error", "message": f"forced_gene_id {forced_gene_id} not found in TAIR results"}
 
     if not docs:
@@ -169,46 +379,76 @@ def choose_tair_candidate(query: str, docs: Sequence[Dict[str, Any]], *,
 
 
 def parse_preview(html_text: str) -> Tuple[Optional[str], List[List[Any]]]:
+    if re.search(
+        r"<h2\b[^>]*>\s*No\s+hits\s+were\s+found\s+using\s+the\s+query\s*:",
+        html_text,
+        re.IGNORECASE,
+    ):
+        return None, []
     uid_match = re.search(r'const\s+unique_id\s*=\s*"([^"]+)"', html_text)
-    uid = uid_match.group(1) if uid_match else None
+    if not uid_match:
+        raise ResponseParseError("PlantConnectome preview is missing unique_id")
+    uid = uid_match.group(1)
     m = re.search(
         r"allRowsData\s*=\s*cached\s*\?\s*cached\.preview_results\s*:\s*(.*?);\s*\n\s*/\*\s*build entityNodeMap",
         html_text,
         re.S,
     )
-    rows: List[List[Any]] = []
-    if m:
-        try:
-            rows = json.loads(m.group(1).strip())
-        except Exception:
-            rows = []
+    if not m:
+        raise ResponseParseError("PlantConnectome preview is missing allRowsData")
+    try:
+        rows = json.loads(m.group(1).strip())
+    except json.JSONDecodeError as exc:
+        raise ResponseParseError(
+            f"PlantConnectome preview allRowsData is invalid JSON: {exc}"
+        ) from exc
+    if not isinstance(rows, list):
+        raise ResponseParseError("PlantConnectome preview allRowsData is not a list")
     return uid, rows
 
 
 def parse_kg_edges(html_text: str) -> List[Dict[str, Any]]:
     m = re.search(r'const\s+g\s*=\s*"(.*?)";\s*\n', html_text, re.S)
     if not m:
-        return []
+        raise ResponseParseError("PlantConnectome detail is missing the edge payload")
     decoded = html.unescape(m.group(1))
+    errors = []
     try:
         val = ast.literal_eval(decoded)
         if isinstance(val, list):
-            return [x for x in val if isinstance(x, dict)]
-    except Exception:
-        pass
+            if any(not isinstance(x, dict) for x in val):
+                raise ResponseParseError("PlantConnectome edge payload contains non-object entries")
+            return val
+        errors.append(f"Python literal type was {type(val).__name__}")
+    except ResponseParseError:
+        raise
+    except Exception as exc:
+        errors.append(f"Python literal parse failed: {exc}")
     try:
         val = json.loads(decoded)
         if isinstance(val, list):
-            return [x for x in val if isinstance(x, dict)]
-    except Exception:
-        return []
-    return []
+            if any(not isinstance(x, dict) for x in val):
+                raise ResponseParseError("PlantConnectome edge payload contains non-object entries")
+            return val
+        errors.append(f"JSON type was {type(val).__name__}")
+    except ResponseParseError:
+        raise
+    except Exception as exc:
+        errors.append(f"JSON parse failed: {exc}")
+    raise ResponseParseError("PlantConnectome edge payload could not be parsed: " + "; ".join(errors))
 
 
-def plant_preview(gene_id: str, *, timeout: int = 60) -> Dict[str, Any]:
+def plant_preview(gene_id: str, *, timeout: int = 60,
+                  policy: Optional[HttpPolicy] = None) -> Dict[str, Any]:
     encoded = urllib.parse.quote(gene_id, safe="")
     url = f"{PLANTCONNECTOME_BASE}/normal/{encoded}"
-    text, final_url = http_text(url, timeout=timeout, referer=f"{PLANTCONNECTOME_BASE}/")
+    text, final_url = http_text(
+        url,
+        timeout=timeout,
+        referer=f"{PLANTCONNECTOME_BASE}/",
+        accept_gzip=True,
+        policy=policy,
+    )
     uid, rows = parse_preview(text)
     return {"gene_id": gene_id, "url": final_url, "unique_id": uid, "rows": rows}
 
@@ -225,35 +465,63 @@ def entity_result_url(search_type: str, entity: str, entity_type: str, uid: Opti
     return url
 
 
-def plant_snippet(p_source: str, *, timeout: int = 60) -> Dict[str, Any]:
+def plant_snippet(p_source: str, *, timeout: int = 60,
+                  policy: Optional[HttpPolicy] = None) -> Dict[str, Any]:
     return http_json(
         f"{PLANTCONNECTOME_BASE}/process-text-withoutapi",
         method="POST",
         payload={"p_source": p_source},
         timeout=timeout,
         referer=f"{PLANTCONNECTOME_BASE}/",
+        policy=policy,
     )
 
 
 def plant_details(gene_id: str, *, max_entities: int = 3, max_edges: int = 200,
-                  snippets: int = 0, timeout: int = 60) -> Dict[str, Any]:
-    prev = plant_preview(gene_id, timeout=timeout)
+                  snippets: int = 0, timeout: int = 60,
+                  policy: Optional[HttpPolicy] = None) -> Dict[str, Any]:
+    policy = policy or HttpPolicy.create(timeout=timeout)
+    if max_entities <= 0:
+        raise ValueError("max_entities must be greater than zero")
+    if max_edges <= 0:
+        raise ValueError("max_edges must be greater than zero")
+    if snippets < 0:
+        raise ValueError("snippets must be zero or greater")
+    prev = plant_preview(gene_id, timeout=timeout, policy=policy)
     uid = prev.get("unique_id")
     rows = prev.get("rows") or []
+    if not rows:
+        return {
+            "status": "not_found",
+            "message": f"PlantConnectome returned no preview entities for {gene_id}",
+            "gene_id": gene_id,
+            "preview": {
+                "url": prev.get("url"),
+                "unique_id": uid,
+                "row_count": 0,
+                "rows": [],
+            },
+            "entities": [],
+            "snippets": {},
+        }
     entities = []
     seen_p_sources: List[str] = []
     for row in rows[:max_entities]:
         if not isinstance(row, list) or len(row) < 2:
-            continue
+            raise ResponseParseError(
+                "PlantConnectome preview row is not a list with entity and entity type"
+            )
         entity = str(row[0])
         entity_type = str(row[1])
         url = entity_result_url("normal", entity, entity_type, uid)
-        try:
-            detail_html, final_url = http_text(url, timeout=timeout, referer=prev.get("url") or None)
-            edges = parse_kg_edges(detail_html)
-        except Exception as exc:
-            entities.append({"preview_row": row, "entity": entity, "entity_type": entity_type, "url": url, "error": str(exc), "edges": []})
-            continue
+        detail_html, final_url = http_text(
+            url,
+            timeout=timeout,
+            referer=prev.get("url") or None,
+            accept_gzip=True,
+            policy=policy,
+        )
+        edges = parse_kg_edges(detail_html)
         kept_edges = edges[:max_edges]
         for e in kept_edges:
             ps = e.get("p_source")
@@ -272,11 +540,18 @@ def plant_details(gene_id: str, *, max_entities: int = 3, max_edges: int = 200,
     snippet_map = {}
     if snippets > 0:
         for ps in seen_p_sources[:snippets]:
-            try:
-                snippet_map[ps] = plant_snippet(ps, timeout=timeout)
-            except Exception as exc:
-                snippet_map[ps] = {"error": str(exc)}
+            snippet_map[ps] = plant_snippet(ps, timeout=timeout, policy=policy)
+    if not entities:
+        raise ResponseParseError("PlantConnectome preview contained no usable entity rows")
+    if not any(entity.get("edge_count_total", 0) for entity in entities):
+        status = "not_found"
+        message = f"PlantConnectome returned no knowledge-graph edges for {gene_id}"
+    else:
+        status = "ok"
+        message = ""
     return {
+        "status": status,
+        **({"message": message} if message else {}),
         "gene_id": gene_id,
         "preview": {"url": prev.get("url"), "unique_id": uid, "row_count": len(rows), "rows": rows[:max(20, max_entities)]},
         "entities": entities,
@@ -331,13 +606,42 @@ def preferred_alias_queries(selected: Dict[str, Any], *, max_alias_queries: int 
 def build_result(query: str, *, mode: str, forced_gene_id: Optional[str],
                  max_candidates: int, max_entities: int, max_edges: int,
                  snippets: int, timeout: int, include_aliases: bool = False,
-                 max_alias_queries: int = 2) -> Dict[str, Any]:
+                 max_alias_queries: int = 2,
+                 retries: int = DEFAULT_RETRIES,
+                 retry_backoff: float = DEFAULT_RETRY_BACKOFF,
+                 max_response_bytes: int = DEFAULT_MAX_RESPONSE_BYTES,
+                 deadline: Optional[float] = None) -> Dict[str, Any]:
+    policy = HttpPolicy.create(
+        timeout=timeout,
+        retries=retries,
+        retry_backoff=retry_backoff,
+        max_response_bytes=max_response_bytes,
+        deadline=deadline,
+    )
     if mode == "plant":
-        return {"mode": mode, "plantconnectome": plant_details(query, max_entities=max_entities, max_edges=max_edges, snippets=snippets, timeout=timeout)}
+        plantconnectome = plant_details(
+            query,
+            max_entities=max_entities,
+            max_edges=max_edges,
+            snippets=snippets,
+            timeout=timeout,
+            policy=policy,
+        )
+        return {
+            "status": plantconnectome.get("status", "error"),
+            "mode": mode,
+            "plantconnectome": plantconnectome,
+        }
 
-    tair_res = tair_search(query, timeout=timeout)
+    tair_res = tair_search(query, timeout=timeout, policy=policy)
     docs = tair_res.get("docs", [])
-    choice = choose_tair_candidate(query, docs, forced_gene_id=forced_gene_id, timeout=timeout)
+    choice = choose_tair_candidate(
+        query,
+        docs,
+        forced_gene_id=forced_gene_id,
+        timeout=timeout,
+        policy=policy,
+    )
     out: Dict[str, Any] = {
         "mode": mode,
         "query": query,
@@ -363,19 +667,45 @@ def build_result(query: str, *, mode: str, forced_gene_id: Optional[str],
     out["status"] = "ok"
     out["tair"]["selected"] = selected
     gene_id = selected.get("gene_id")
-    if mode == "full" and gene_id:
-        out["plantconnectome"] = plant_details(gene_id, max_entities=max_entities, max_edges=max_edges, snippets=snippets, timeout=timeout)
+    if mode == "full" and not gene_id:
+        raise ResponseParseError("TAIR selected candidate is missing its AGI gene ID")
+    if mode == "full":
+        out["plantconnectome"] = plant_details(
+            gene_id,
+            max_entities=max_entities,
+            max_edges=max_edges,
+            snippets=snippets,
+            timeout=timeout,
+            policy=policy,
+        )
+        if out["plantconnectome"].get("status") != "ok":
+            out["status"] = out["plantconnectome"].get("status", "error")
+            out["message"] = out["plantconnectome"].get(
+                "message", "PlantConnectome evidence retrieval failed"
+            )
+            return out
         if include_aliases:
             alias_queries = preferred_alias_queries(selected, max_alias_queries=max_alias_queries)
             out["plantconnectome_alias_queries"] = []
             for alias in alias_queries:
-                try:
-                    out["plantconnectome_alias_queries"].append({
-                        "query": alias,
-                        "result": plant_details(alias, max_entities=max_entities, max_edges=max_edges, snippets=snippets, timeout=timeout),
-                    })
-                except Exception as exc:
-                    out["plantconnectome_alias_queries"].append({"query": alias, "error": str(exc)})
+                alias_result = plant_details(
+                    alias,
+                    max_entities=max_entities,
+                    max_edges=max_edges,
+                    snippets=snippets,
+                    timeout=timeout,
+                    policy=policy,
+                )
+                out["plantconnectome_alias_queries"].append({
+                    "query": alias,
+                    "result": alias_result,
+                })
+                if alias_result.get("status") not in {"ok", "not_found"}:
+                    out["status"] = alias_result.get("status", "error")
+                    out["message"] = alias_result.get(
+                        "message", f"PlantConnectome alias query failed for {alias}"
+                    )
+                    return out
     return out
 
 
@@ -447,7 +777,10 @@ def summary_lines(result: Dict[str, Any]) -> List[str]:
     status = result.get("status")
     mode = result.get("mode")
     if mode == "plant":
-        return plant_summary_lines(result.get("plantconnectome", {}))
+        lines = plant_summary_lines(result.get("plantconnectome", {}))
+        if status != "ok":
+            lines.insert(0, f"状态：{status}; {result.get('plantconnectome', {}).get('message', '')}")
+        return lines
     lines: List[str] = []
     lines.append(f"查询：{result.get('query')}")
     tair = result.get("tair", {})
@@ -500,16 +833,46 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     parser.add_argument("--snippets", type=int, default=0, help="fetch snippets for first N p_source values")
     parser.add_argument("--include-aliases", action="store_true", help="in full mode, also query TAIR-confirmed long aliases/full names in PlantConnectome")
     parser.add_argument("--max-alias-queries", type=int, default=2, help="maximum TAIR-confirmed alias/full-name PlantConnectome queries")
-    parser.add_argument("--timeout", type=int, default=60)
+    parser.add_argument("--timeout", type=float, default=60, help="per-socket-operation timeout in seconds (default: 60)")
+    parser.add_argument(
+        "--retries",
+        type=int,
+        default=DEFAULT_RETRIES,
+        help="retries after the initial HTTP attempt (default: 3; four total attempts)",
+    )
+    parser.add_argument(
+        "--retry-backoff",
+        type=float,
+        default=DEFAULT_RETRY_BACKOFF,
+        help="initial exponential retry delay in seconds (default: 1)",
+    )
+    parser.add_argument(
+        "--deadline",
+        type=float,
+        help=(
+            "total wall-clock deadline for the complete query in seconds; "
+            "default is enough for all configured attempts plus backoff"
+        ),
+    )
+    parser.add_argument(
+        "--max-response-bytes",
+        type=int,
+        default=DEFAULT_MAX_RESPONSE_BYTES,
+        help="maximum compressed or decompressed HTTP response size (default: 16777216)",
+    )
     args = parser.parse_args(argv)
     try:
         result = build_result(args.query, mode=args.mode, forced_gene_id=args.gene_id,
                               max_candidates=args.max_candidates, max_entities=args.max_entities,
                               max_edges=args.max_edges, snippets=args.snippets, timeout=args.timeout,
                               include_aliases=args.include_aliases,
-                              max_alias_queries=args.max_alias_queries)
+                              max_alias_queries=args.max_alias_queries,
+                              retries=args.retries,
+                              retry_backoff=args.retry_backoff,
+                              max_response_bytes=args.max_response_bytes,
+                              deadline=args.deadline)
     except urllib.error.HTTPError as exc:
-        body = exc.read().decode("utf-8", "replace")[:2000]
+        body = exc.read(2001).decode("utf-8", "replace")[:2000]
         result = {"status": "http_error", "code": exc.code, "reason": exc.reason, "body": body}
     except Exception as exc:
         result = {"status": "error", "error_type": type(exc).__name__, "message": str(exc)}
@@ -518,7 +881,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         print(json.dumps(result, ensure_ascii=False, indent=2))
     else:
         print("\n".join(summary_lines(result)))
-    return 0 if result.get("status") not in {"error", "http_error"} else 1
+    return {"ok": 0, "ambiguous": 2, "not_found": 3}.get(result.get("status"), 1)
 
 
 if __name__ == "__main__":

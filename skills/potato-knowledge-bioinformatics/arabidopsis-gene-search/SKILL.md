@@ -74,7 +74,11 @@ python3 scripts/query_arabidopsis_gene_search.py plant AT1G62360 --max-entities 
 --snippets N                为前 N 个 p_source 拉取文献片段，默认 0
 --include-aliases           full 模式下额外用 TAIR 确认的长别名/全名查 PlantConnectome
 --max-alias-queries N       最多辅助查询几个长别名/全名，默认 2
---timeout SECONDS           HTTP 超时，默认 60
+--timeout SECONDS           单次 socket 操作超时，默认 60
+--retries N                 首次失败后的额外重试次数，默认 3（总计最多 4 次）
+--retry-backoff SECONDS     指数退避初始秒数，默认 1（随后为 2、4）
+--deadline SECONDS          整个查询的墙钟时间上限
+--max-response-bytes N      压缩前及解压后响应大小上限，默认 16 MiB
 ```
 
 ## 回答格式
@@ -100,4 +104,5 @@ python3 scripts/query_arabidopsis_gene_search.py full AT1G62360 --max-entities 1
 - TAIR 详情接口可能需要登录；本技能只依赖不登录可用的基础检索接口。
 - 脚本固定使用浏览器 User-Agent，避免 TAIR 对默认命令行请求返回 403。
 - PlantConnectome 解析依赖网页内嵌数据结构；如果网站前端改版，脚本可能需要更新。
-- 对 ICE1/AT3G26744 等高连接实体，详情页可能很大；必要时使用 `--timeout 300` 和 `--max-entities 1`。
+- PlantConnectome 预览页和详情页默认请求 gzip。对高连接实体仍应使用 `--max-entities 1`，并通过 `--deadline` 控制完整查询总时长；不要只依靠增大 socket timeout。
+- 瞬态 HTTP 或网络错误默认在首次请求后再重试 3 次。解析错误、普通 4xx 和明确的 `not_found` 不重试。
