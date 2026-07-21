@@ -1,12 +1,12 @@
 ---
 name: arabidopsis-gene-search
-description: 查询拟南芥基因功能和文献证据；先用 TAIR 将 gene symbol、alias 或 AGI ID 解析为标准 geneID，再用该 geneID 调用 PlantConnectome 查询知识图谱关系和 PMID。适用于拟南芥基因功能、别名、AGI ID 消歧和证据总结。
-version: 1.0.0
+description: 解析拟南芥 gene symbol、alias、AGI gene ID 或转录本 ID，并按 TAIR 确认的基因名称逐组检索 PlantConnectome 和 PubMed 功能证据。用于拟南芥基因身份消歧、基础注释、关系证据、PMID/DOI 文献检索和有来源约束的功能总结。
+version: 2.0.0
 author: Potato Agent
 license: MIT
 metadata:
   hermes:
-    tags: [Arabidopsis, TAIR, PlantConnectome, gene-function, PMID, knowledge-graph]
+    tags: [Arabidopsis, Arabidopsis-thaliana, TAIR, PlantConnectome, PubMed, gene-search, PMID, DOI]
     related_skills: [literature-review]
 prerequisites:
   commands: [python3]
@@ -14,95 +14,124 @@ prerequisites:
 
 # Arabidopsis Gene Search
 
-查询拟南芥（*Arabidopsis thaliana*）基因功能、别名、AGI ID 和文献证据。
+查询拟南芥（*Arabidopsis thaliana*）基因身份、TAIR 注释、PlantConnectome 关系和 PubMed 文献证据。
 
 ## 固定流程
 
-1. 先运行 TAIR 查询，把用户输入解析为标准 AGI geneID。
-2. 如果 TAIR 返回多个合理候选，先让用户选择 geneID；不要直接用 symbol 查 PlantConnectome。
-3. 确认 geneID 后，用 `full` 模式查询 PlantConnectome 关系和 PMID。
-4. PlantConnectome 是自动抽取知识图谱，回答时要把 TAIR 注释和 PlantConnectome 证据分开说明。
+1. 先用 TAIR 将输入解析为标准 AGI gene ID。输入可以是 AGI ID、转录本 ID、symbol 或 alias。
+2. TAIR 返回多个合理候选时，停止完整检索并让用户确认 gene ID；不要擅自合并候选。
+3. 从已选 TAIR 记录的 `other_names` 取名称，清理空白后按 NFKC 和大小写无关规则稳定去重。不要用 LLM 筛选、改写或补充基因名。
+4. `full` 模式默认保留全部去重名称，并按 TAIR 顺序对每个名称依次查询 PlantConnectome、再查询 PubMed。用 `--max-gene-names` 才能显式限制名称数。
+5. PlantConnectome 的合法 `not_found` 不影响 TAIR 身份，也不阻止同组 PubMed 查询。网络、解析或结构校验错误则整次命令失败，避免把不完整来源当作成功。
+6. 汇总时以 TAIR selected record 为身份基准，并保持每个 `gene_name` 的 PlantConnectome 和 PubMed 证据相互隔离。
 
-## 命令
+脚本不调用任何 LLM。证据总结由加载本技能的 Hermes Agent 完成。
 
-优先使用一步式查询：
+## 推荐命令
 
-```bash
-python3 scripts/query_arabidopsis_gene_search.py full AT1G62360 --max-entities 1 --max-edges 50 --format summary
-```
-
-查询 symbol 或 alias 时，先看 TAIR 是否歧义：
+先检查 symbol 或 alias 是否歧义：
 
 ```bash
-python3 scripts/query_arabidopsis_gene_search.py tair STM --format summary
+python3 "${HERMES_SKILL_DIR}/scripts/query_arabidopsis_gene_search.py" tair STM --format summary
 ```
 
-如果用户已确认 geneID，用 `--gene-id` 消歧：
+对明确 AGI ID 执行完整证据检索：
 
 ```bash
-python3 scripts/query_arabidopsis_gene_search.py full STM --gene-id AT1G62360 --max-entities 1 --max-edges 50 --format summary
+python3 "${HERMES_SKILL_DIR}/scripts/query_arabidopsis_gene_search.py" full AT1G62360 \
+  --max-entities 3 --max-edges 50 --pubmed-limit 20 --format json
 ```
 
-当 geneID 结果很少或明显噪声较多时，再用 TAIR 确认的长别名/全名辅助查询：
+若用户已从 TAIR 候选中确认 gene ID：
 
 ```bash
-python3 scripts/query_arabidopsis_gene_search.py full AT1G62360 --include-aliases --max-alias-queries 1 --max-entities 1 --max-edges 50 --format summary
+python3 "${HERMES_SKILL_DIR}/scripts/query_arabidopsis_gene_search.py" full STM \
+  --gene-id AT1G62360 --max-entities 3 --max-edges 50 \
+  --pubmed-limit 20 --format json
 ```
 
-`plant` 模式是低层接口，只在 geneID 已确认时使用；它不做 TAIR 消歧：
+名称很多时，可显式限制检索数量；截断顺序始终与 TAIR 一致：
 
 ```bash
-python3 scripts/query_arabidopsis_gene_search.py plant AT1G62360 --max-entities 1 --max-edges 50 --format summary
+python3 "${HERMES_SKILL_DIR}/scripts/query_arabidopsis_gene_search.py" full AT1G62360 \
+  --max-gene-names 3 --max-entities 1 --max-edges 20 \
+  --pubmed-limit 20 --deadline 300 --format json
 ```
 
-## 输出使用规则
+只诊断 PlantConnectome 原始查询时使用 `plant`。该模式绕过 TAIR，可以接收 AGI ID 或名称，因此不得用它自行确认基因身份：
 
-- TAIR 字段 `gene_name` 是标准 AGI geneID，`gene_model_ids` 是转录本/模型 ID，`other_names` 是 symbol/alias。
-- `status: ambiguous` 表示必须让用户确认 geneID 后再继续。
-- 总结功能时，优先用 TAIR 描述确定基因身份和基础功能；PlantConnectome 只作为关系和 PMID 证据。
-- PlantConnectome 证据优先压缩为 `source/id + relation + target + PMID`。脚本 summary 会展示少量 `basis` 供核查，但最终回答不必展开所有 `basis`。
-- 不要仅凭 PlantConnectome 关系频次下结论；重要结论应对应到 PMID 或 TAIR 注释。
+```bash
+python3 "${HERMES_SKILL_DIR}/scripts/query_arabidopsis_gene_search.py" plant STM \
+  --max-entities 1 --max-edges 20 --format summary
+```
+
+## 输出结构与状态
+
+`full --format json` 的关键字段：
+
+- `tair.selected`：身份基准，包括 `gene_id`、gene models、`other_names`、描述、关键词和表型。
+- `candidate_gene_names`：TAIR `other_names` 的完整确定性去重结果。
+- `retrieval_gene_names`：实际逐名检索的名称；只受 `--max-gene-names` 或 `--no-name-searches` 影响。
+- `plantconnectome`：AGI ID 的兼容性直接查询；仅作补充诊断。
+- `plantconnectome_searches`：按 `gene_name` 分组的关系证据。每组状态可为 `ok` 或合法的 `not_found`。
+- `pubmed`：按同一 `gene_name` 分组的检索式和论文；论文包含 PMID、DOI、题名、年份及截断摘要。
+- `database_evidence`：TAIR selected record 和四字段关系 `entity_1 / relationship / entity_2 / citation` 的紧凑视图。
+
+需要基于题名和摘要综合功能时使用 JSON。`summary` 只展示每组前 10 篇论文及最多 350 字符的摘要预览，适合人工检查和冒烟测试。
+
+状态码：
+
+- `status: ok`，退出码 `0`：TAIR 身份已确认；某些 PlantConnectome 组可以没有结果。
+- `status: ambiguous`，退出码 `2`：必须让用户确认 AGI ID。
+- `status: not_found`，退出码 `3`：TAIR 或低层 `plant` 模式未找到目标。
+- 其它错误退出码 `1`：HTTP、超时、响应过大或上游结构变化；不要据此生成成功结论。
+
+## 证据使用规则
+
+- TAIR 决定基因身份和基础描述。`gene_name` 是标准 AGI gene ID；`gene_model_ids` 是转录本/模型 ID；`other_names` 是检索名称。
+- PlantConnectome 是自动抽取知识图谱，可能混入同名实体、相似家族成员或其它物种。只采用关系本身能明确关联目标 AGI ID 或当前名称组的记录。
+- 不要把一个名称组的关系或论文无依据地转移到另一组，也不要凭关系频次推断功能。
+- PubMed 题名或摘要必须明确涉及当前名称、目标 AGI ID，或提供两者等价关系；仅命中相似名称或家族成员时不得归因。
+- 关键结论优先引用 TAIR、PMID 或 DOI。只能使用输出中实际出现的引用，不得补造实验、功能或文献。
+- 没有基因特异证据时，明确说明未检出；不要把宽泛注释扩写成已验证功能。
 
 ## 常用参数
 
 ```text
 --format json|summary       输出格式，默认 json
---max-candidates N          TAIR 候选返回数量，默认 10
---gene-id AGI               用户已确认的 AGI ID，用于跳过歧义选择
---max-entities N            PlantConnectome 预览实体数量，默认 3
---max-edges N               每个 PlantConnectome 实体最多保留 KG 边数，默认 50
---snippets N                为前 N 个 p_source 拉取文献片段，默认 0
---include-aliases           full 模式下额外用 TAIR 确认的长别名/全名查 PlantConnectome
---max-alias-queries N       最多辅助查询几个长别名/全名，默认 2
+--gene-id AGI               为歧义输入指定用户确认的 AGI ID
+--max-candidates N          TAIR 候选上限，默认 10
+--max-gene-names N          最多检索前 N 个确定性去重名称；默认全部
+--no-name-searches          跳过逐名 PlantConnectome 和 PubMed，仅保留 TAIR/AGI 查询
+--max-entities N            每个 PlantConnectome 名称最多解析的实体数，默认 3
+--max-edges N               每个实体最多保留的关系数，默认 50
+--snippets N                为前 N 个 PlantConnectome p_source 拉取片段，默认 0
+--pubmed-limit N            每个名称最多返回的 PubMed 论文数，默认 20
+--pubmed-base-url URL       NCBI E-utilities 基础 URL
 --timeout SECONDS           单次 socket 操作超时，默认 60
---retries N                 首次失败后的额外重试次数，默认 3（总计最多 4 次）
---retry-backoff SECONDS     指数退避初始秒数，默认 1（随后为 2、4）
---deadline SECONDS          整个查询的墙钟时间上限
---max-response-bytes N      压缩前及解压后响应大小上限，默认 16 MiB
+--retries N                 首次失败后的额外重试次数，范围 0-10，默认 3
+--retry-backoff SECONDS     指数退避初始秒数，默认 1
+--deadline SECONDS          显式设置整个命令共享的墙钟时间上限；Linux CLI 另用进程定时器强制中断
+--max-response-bytes N      压缩前及解压后响应上限，默认 16 MiB
 ```
 
-## 回答格式
-
-回答用户时保持简洁：
-
-1. TAIR 确认的 geneID、gene model、主要别名和描述。
-2. 归纳的功能结论，每条结论标注 TAIR 或 PMID 证据。
-3. PlantConnectome 自动抽取结果的限制说明。
+`--include-aliases` 和 `--max-alias-queries` 作为旧命令兼容别名保留；新任务使用默认行为和 `--max-gene-names`。
 
 ## 验证
 
 ```bash
-python3 scripts/query_arabidopsis_gene_search.py tair AT1G62360 --format summary
-python3 scripts/query_arabidopsis_gene_search.py tair STM --format summary
-python3 scripts/query_arabidopsis_gene_search.py full AT1G62360 --max-entities 1 --max-edges 50 --format summary
+python3 "${HERMES_SKILL_DIR}/scripts/query_arabidopsis_gene_search.py" tair AT1G62360 --format summary
+python3 "${HERMES_SKILL_DIR}/scripts/query_arabidopsis_gene_search.py" tair STM --format summary
+python3 "${HERMES_SKILL_DIR}/scripts/query_arabidopsis_gene_search.py" full AT1G62360 \
+  --max-gene-names 1 --max-entities 1 --max-edges 5 \
+  --pubmed-limit 1 --deadline 180 --format summary
 ```
 
-预期：`AT1G62360` 唯一解析为 SHOOT MERISTEMLESS / STM；`STM` 返回多个精确 alias 候选，需要用户确认。
+预期：`AT1G62360` 唯一解析为 SHOOT MERISTEMLESS / STM；`STM` 返回多个精确 alias 候选并要求确认；完整查询同时出现按名称分组的 PlantConnectome 和 PubMed 部分。
 
-## 注意
+## 限制
 
-- TAIR 详情接口可能需要登录；本技能只依赖不登录可用的基础检索接口。
-- 脚本固定使用浏览器 User-Agent，避免 TAIR 对默认命令行请求返回 403。
-- PlantConnectome 解析依赖网页内嵌数据结构；如果网站前端改版，脚本可能需要更新。
-- PlantConnectome 预览页和详情页默认请求 gzip。对高连接实体仍应使用 `--max-entities 1`，并通过 `--deadline` 控制完整查询总时长；不要只依靠增大 socket timeout。
-- 瞬态 HTTP 或网络错误默认在首次请求后再重试 3 次。解析错误、普通 4xx 和明确的 `not_found` 不重试。
+- TAIR 详情接口可能需要登录；脚本只使用无需登录的基础检索接口，并设置浏览器 User-Agent。
+- PlantConnectome 数据来自网页内嵌结构；前端改版会触发明确解析错误。内嵌载荷限制为 8 MiB、结构项 500,000、嵌套 200 层；Python literal 在构建 AST 前另限制为 500,000 个词法令牌，构建后再限制为 500,000 个 AST 节点。
+- 所有 HTTP 响应都受压缩体和流式解压后大小限制。瞬态 408/425/429/5xx、超时和临时连接错误会指数退避重试；普通 4xx、解析错误及合法 `not_found` 不重试。
+- 多个名称会增加串行网络请求数。优先保留默认完整流程；只有在调用预算明确受限时才使用 `--max-gene-names`，并在回答中说明截断。

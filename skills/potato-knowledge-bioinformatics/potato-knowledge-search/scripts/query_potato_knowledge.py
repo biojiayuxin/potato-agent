@@ -33,7 +33,6 @@ DEFAULT_KG_RETRIES = 2
 DEFAULT_KG_EDGE_LIMIT = 50
 DEFAULT_MAX_KG_ENTITIES = 5
 
-DEFAULT_SUMMARY_RAG_LIMIT = 5
 DEFAULT_SUMMARY_KG_LIMIT = 5
 
 TRANSIENT_STATUS = {502, 503, 504}
@@ -537,7 +536,7 @@ def format_summary(data: dict[str, Any], args: argparse.Namespace) -> str:
     if rag.get("success"):
         results = normalize_rag_results(rag)
         lines.append(f"Results: {len(results)}")
-        for row in results[: args.summary_rag_limit]:
+        for row in results[: args.rag_top_k_rerank]:
             title = row.get("title") or "No title returned"
             doi = row.get("doi") or "No DOI returned"
             snippet = truncate(row.get("text"), args.max_text_chars)
@@ -683,7 +682,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     parser.add_argument("--rag-base-url", default=os.environ.get("POTATO_RAG_BASE_URL", DEFAULT_RAG_BASE_URL), help=f"Potato RAG service base URL. Default: {DEFAULT_RAG_BASE_URL}.")
     parser.add_argument("--rag-top-k-retrieve", type=int, default=DEFAULT_RAG_TOP_K_RETRIEVE, help=f"RAG vector candidates. Default: {DEFAULT_RAG_TOP_K_RETRIEVE}.")
-    parser.add_argument("--rag-top-k-rerank", type=int, default=DEFAULT_RAG_TOP_K_RERANK, help=f"RAG reranked results. Default: {DEFAULT_RAG_TOP_K_RERANK}.")
+    parser.add_argument("--rag-top-k-rerank", type=int, default=DEFAULT_RAG_TOP_K_RERANK, help=f"RAG reranked results and summary items. Default: {DEFAULT_RAG_TOP_K_RERANK}.")
     parser.add_argument("--rag-timeout", type=int, default=DEFAULT_RAG_TIMEOUT, help=f"RAG HTTP timeout seconds. Default: {DEFAULT_RAG_TIMEOUT}.")
 
     parser.add_argument(
@@ -704,7 +703,6 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--no-kg-variants", action="store_true", help="Disable automatic uppercase/St-prefix KG title variants.")
     parser.add_argument("--no-kg-edge-details", action="store_true", help="Skip /kg/edge enrichment for returned neighbor links.")
 
-    parser.add_argument("--summary-rag-limit", type=int, default=DEFAULT_SUMMARY_RAG_LIMIT, help=f"RAG results shown in summary. Default: {DEFAULT_SUMMARY_RAG_LIMIT}.")
     parser.add_argument("--summary-kg-limit", type=int, default=DEFAULT_SUMMARY_KG_LIMIT, help=f"KG items shown in summary. Default: {DEFAULT_SUMMARY_KG_LIMIT}.")
     parser.add_argument("--max-text-chars", type=int, default=700, help="Maximum snippet characters per RAG result in summary output. Default: 700.")
     return parser
@@ -721,7 +719,6 @@ def validate_args(args: argparse.Namespace) -> None:
     non_negative_int("--kg-retries", args.kg_retries)
     positive_int("--kg-edge-limit", args.kg_edge_limit)
     positive_int("--max-kg-entities", args.max_kg_entities)
-    positive_int("--summary-rag-limit", args.summary_rag_limit)
     positive_int("--summary-kg-limit", args.summary_kg_limit)
     non_negative_int("--max-text-chars", args.max_text_chars)
     args.kg_base_url = normalize_kg_base_url(args.kg_base_url)

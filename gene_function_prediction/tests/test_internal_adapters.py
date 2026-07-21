@@ -74,8 +74,8 @@ class PotatoRagAdapterTests(unittest.TestCase):
             result = run_pipeline.fetch_potato_rag(
                 "  PYL8 potato gene function  ",
                 base_url="https://rag.example/",
-                top_k_retrieve=20,
-                top_k_rerank=5,
+                top_k_retrieve=100,
+                top_k_rerank=10,
                 timeout=5,
                 retries=0,
             )
@@ -90,8 +90,8 @@ class PotatoRagAdapterTests(unittest.TestCase):
         rag = result["rag"]
         self.assertTrue(rag["success"])
         self.assertEqual(rag["query"], "normalized server query")
-        self.assertEqual(rag["top_k_retrieve"], 20)
-        self.assertEqual(rag["top_k_rerank"], 5)
+        self.assertEqual(rag["top_k_retrieve"], 100)
+        self.assertEqual(rag["top_k_rerank"], 10)
         self.assertEqual([item["rank"] for item in rag["results"]], [1, 7])
 
         self.assertEqual(request.call_args.args[0], "https://rag.example/api/rag/search")
@@ -100,8 +100,8 @@ class PotatoRagAdapterTests(unittest.TestCase):
             request.call_args.kwargs["payload"],
             {
                 "query": "PYL8 potato gene function",
-                "top_k_retrieve": 20,
-                "top_k_rerank": 5,
+                "top_k_retrieve": 100,
+                "top_k_rerank": 10,
             },
         )
 

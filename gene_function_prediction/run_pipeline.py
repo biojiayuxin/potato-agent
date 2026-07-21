@@ -2300,8 +2300,8 @@ def build_parser() -> argparse.ArgumentParser:
         default=20,
         help="Maximum PubMed records per homolog query; must be at least 20",
     )
-    parser.add_argument("--rag-top-k-retrieve", type=int, default=20)
-    parser.add_argument("--rag-top-k-rerank", type=int, default=5)
+    parser.add_argument("--rag-top-k-retrieve", type=int, default=100)
+    parser.add_argument("--rag-top-k-rerank", type=int, default=10)
     parser.add_argument("--rag-max-evidence", type=int, default=10)
     parser.add_argument("--rag-text-chars", type=int, default=1600)
     parser.add_argument(

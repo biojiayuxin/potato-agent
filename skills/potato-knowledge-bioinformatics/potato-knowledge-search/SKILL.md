@@ -8,8 +8,8 @@ metadata:
   hermes:
     tags: [potato, knowledge-search, rag, literature, knowledge-graph, PlantScience.ai, retrieval, doi, Potato-Knowledge-Hub]
     related_skills: [literature-review, potato-gene-search]
-required_commands:
-  - python3
+prerequisites:
+  commands: [python3]
 ---
 
 # Potato Knowledge Search
@@ -48,8 +48,10 @@ required_commands:
 
 ## 脚本
 
+以下命令中的技能路径由 Hermes 在加载时展开为绝对路径；不要依赖当前工作目录。
+
 ```bash
-python3 scripts/query_potato_knowledge.py --help
+python3 "${HERMES_SKILL_DIR}/scripts/query_potato_knowledge.py" --help
 ```
 
 ### 推荐调用
@@ -57,7 +59,7 @@ python3 scripts/query_potato_knowledge.py --help
 面向下游处理时使用 JSON：
 
 ```bash
-python3 scripts/query_potato_knowledge.py \
+python3 "${HERMES_SKILL_DIR}/scripts/query_potato_knowledge.py" \
   "potato tuber dormancy genes" \
   --kg-entity "StSP6A|SP6A|SELF-PRUNING 6A" \
   --kg-entity "tuber dormancy" \
@@ -67,12 +69,12 @@ python3 scripts/query_potato_knowledge.py \
 面向人工快速查看时使用 summary：
 
 ```bash
-python3 scripts/query_potato_knowledge.py \
+python3 "${HERMES_SKILL_DIR}/scripts/query_potato_knowledge.py" \
   "potato late blight resistance" \
   --kg-entity "Phytophthora infestans" \
   --kg-entity "late blight" \
-  --rag-top-k-retrieve 20 \
-  --rag-top-k-rerank 2 \
+  --rag-top-k-retrieve 200 \
+  --rag-top-k-rerank 20 \
   --kg-edge-limit 5 \
   --format summary
 ```
@@ -80,7 +82,7 @@ python3 scripts/query_potato_knowledge.py \
 表格处理可使用 TSV：
 
 ```bash
-python3 scripts/query_potato_knowledge.py \
+python3 "${HERMES_SKILL_DIR}/scripts/query_potato_knowledge.py" \
   "potato starch biosynthesis" \
   --kg-entity "starch biosynthesis" \
   --format tsv
@@ -89,6 +91,10 @@ python3 scripts/query_potato_knowledge.py \
 ### 关键参数
 
 ```text
+--rag-top-k-retrieve N
+                    RAG 初始向量候选数量，默认 200。
+--rag-top-k-rerank N
+                    RAG 重排后返回数量，默认 20；summary 同步展示这些结果，不再额外截断。
 --kg-entity "primary|alias1|alias2"
                     指定 PlantScience.ai KG 实体；可重复使用。
 --max-kg-entities N 最多查询多少个 KG 实体，默认 5。
@@ -175,7 +181,7 @@ JSON 输出顶层结构：
 安装或修改后可执行：
 
 ```bash
-python3 scripts/query_potato_knowledge.py --help
-python3 scripts/query_potato_knowledge.py "potato late blight resistance" --kg-entity "Phytophthora infestans" --kg-entity "late blight" --rag-top-k-retrieve 20 --rag-top-k-rerank 1 --kg-edge-limit 1 --format summary
-python3 scripts/query_potato_knowledge.py "potato tuber dormancy genes" --kg-entity "StSP6A|SP6A|SELF-PRUNING 6A" --rag-top-k-retrieve 20 --rag-top-k-rerank 1 --kg-edge-limit 1 --format json
+python3 "${HERMES_SKILL_DIR}/scripts/query_potato_knowledge.py" --help
+python3 "${HERMES_SKILL_DIR}/scripts/query_potato_knowledge.py" "potato late blight resistance" --kg-entity "Phytophthora infestans" --kg-entity "late blight" --rag-top-k-retrieve 200 --rag-top-k-rerank 20 --kg-edge-limit 1 --format summary
+python3 "${HERMES_SKILL_DIR}/scripts/query_potato_knowledge.py" "potato tuber dormancy genes" --kg-entity "StSP6A|SP6A|SELF-PRUNING 6A" --rag-top-k-retrieve 200 --rag-top-k-rerank 20 --kg-edge-limit 1 --format json
 ```

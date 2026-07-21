@@ -83,7 +83,7 @@ Use `--force-sources` to refresh database/RAG/PubMed calls and `--force-llm` to 
 ## Fixed Retrieval Plan
 
 - Potato names: Potato Knowledge Hub gene search queried directly with the user-provided gene ID.
-- Potato RAG: one query per deduplicated gene name, `top_k_retrieve=20`, `top_k_rerank=5`, RAG-only.
+- Potato RAG: one query per deduplicated gene name, `top_k_retrieve=100`, `top_k_rerank=10`, RAG-only.
 - Arabidopsis: the TAIR and PlantConnectome clients are implemented directly in `run_pipeline.py`; no Arabidopsis skill script is called. TAIR runs first. Zero names skip both downstream sources; one name is used directly; two or more names are reduced by an LLM that may only select from the TAIR-provided names. Each retained name is queried sequentially in PlantConnectome and PubMed, and its evidence remains in a separate group. PlantConnectome retrieves up to 10 entities and 5 edges per entity, so up to 50 relationships per retained name are sent to the summary LLM without a second edge cap. Each relationship contains only `entity_1`, `relationship`, `entity_2`, and `citation`; no species-string filter is applied in code. PlantConnectome HTML is requested with gzip compression.
 - Rice: RiceData HTML query using the gene-level target ID. All exact-match rows are retained, their non-empty gene symbols are deduplicated, and PubMed is queried once per symbol. PubMed is skipped when no exact row or no non-empty symbol is returned.
 - Maize: local `Zm00001eb.1.fulldata.txt`, joined by column 2, with gene name from column 11.
