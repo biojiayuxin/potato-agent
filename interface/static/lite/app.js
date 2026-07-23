@@ -644,17 +644,13 @@ const isActiveSessionBlockingModelSwitch = () => {
 };
 
 const MODEL_DISPLAY_NAME_OVERRIDES = {
-  primary: 'GPT-5.5',
-  'gpt-5.5': 'GPT-5.5',
-  'gpt-5.5-alt': 'GPT-5.5-alt',
-  'gpt-5.6-sol': 'GPT-5.6-sol',
+  'gpt-5.6-sol': 'Deep',
+  'gpt-5.6-terra': 'Fast',
 };
 
 const MODEL_DISPLAY_ORDER = [
-  'GPT-5.5',
-  'GPT-5.5-alt',
-  'DeepSeek',
-  'GPT-5.6-sol',
+  'Deep',
+  'Fast',
 ];
 
 const getModelKeyCandidates = (model) => [

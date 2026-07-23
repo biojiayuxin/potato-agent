@@ -42,4 +42,4 @@ def test_file_tree_requests_bypass_browser_cache() -> None:
     index = LITE_INDEX_PATH.read_text(encoding="utf-8")
 
     assert "cache: 'no-store'" in source
-    assert "app.js?v=20260718-workspace-path-links-fenced" in index
+    assert "app.js?v=20260723-model-labels" in index
