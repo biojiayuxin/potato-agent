@@ -5,7 +5,7 @@ import os
 import subprocess
 import sys
 
-from conftest import write_profile
+from tests.profile_support import write_profile
 
 
 def _run_script(runtime_paths, script: str, *, profile=None) -> dict:
@@ -102,4 +102,3 @@ print(json.dumps({
     )
 
     assert result == {"denied": True, "imported": False, "registered": False}
-

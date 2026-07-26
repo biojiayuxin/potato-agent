@@ -63,6 +63,15 @@ def _pid_from(path: Path) -> int | None:
         return None
 
 
+def _gateway_state_from(path: Path) -> str | None:
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        value = payload.get("gateway_state")
+        return value if isinstance(value, str) else None
+    except (FileNotFoundError, OSError, json.JSONDecodeError):
+        return None
+
+
 def _stop(process: subprocess.Popen[str]) -> None:
     if process.poll() is None:
         process.terminate()
@@ -83,12 +92,7 @@ def test_gateway_guard_enforces_single_process_replace_and_clean_stop(
     replacement = None
     try:
         _wait_until(lambda: _pid_from(pid_path) == first.pid)
-        _wait_until(
-            lambda: json.loads(state_path.read_text(encoding="utf-8")).get(
-                "gateway_state"
-            )
-            == "running"
-        )
+        _wait_until(lambda: _gateway_state_from(state_path) == "running")
 
         duplicate = subprocess.run(
             [
@@ -147,4 +151,3 @@ def test_gateway_guard_fails_closed_without_runtime_profile(
 
     assert result.returncode != 0
     assert "requires HERMES_RUNTIME_PROFILE_PATH" in (result.stdout + result.stderr)
-

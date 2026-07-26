@@ -34,6 +34,12 @@ from tui_gateway.transport import (
 
 logger = logging.getLogger(__name__)
 
+
+def _tui_subprocess_env() -> dict[str, str]:
+    from tools.environments.local import hermes_subprocess_env
+
+    return hermes_subprocess_env(inherit_credentials=False)
+
 _hermes_home = get_hermes_home()
 load_hermes_dotenv(
     hermes_home=_hermes_home, project_env=Path(__file__).parent.parent / ".env"
@@ -438,6 +444,9 @@ def _estimate_image_tokens(width: int, height: int) -> int:
 
 def _image_meta(path: Path) -> dict:
     meta = {"name": path.name}
+    from agent.file_safety import raise_if_read_blocked
+
+    raise_if_read_blocked(str(path))
     try:
         from PIL import Image
 
@@ -735,6 +744,8 @@ def _git_branch_for_cwd(cwd: str) -> str:
             text=True,
             timeout=1.5,
             check=False,
+            env=_tui_subprocess_env(),
+            stdin=subprocess.DEVNULL,
         )
         if result.returncode == 0:
             branch = result.stdout.strip()
@@ -746,6 +757,8 @@ def _git_branch_for_cwd(cwd: str) -> str:
             text=True,
             timeout=1.5,
             check=False,
+            env=_tui_subprocess_env(),
+            stdin=subprocess.DEVNULL,
         )
         return head.stdout.strip() if head.returncode == 0 else ""
     except Exception:
@@ -4629,7 +4642,7 @@ def _run_prompt_submit(rid, sid: str, session: dict, text: Any) -> None:
             # Apply pending_title now that the DB row exists.
             _pending = session.get("pending_title")
             if _pending and status == "complete":
-                _pdb = _get_db()
+                _pdb = getattr(agent, "_session_db", None)
                 if _pdb:
                     _session_key = session.get("session_key") or sid
                     try:
@@ -4653,19 +4666,118 @@ def _run_prompt_submit(rid, sid: str, session: dict, text: Any) -> None:
                 and raw.strip()
                 and isinstance(text, str)
                 and text.strip()
+                and not session.get("pending_title")
             ):
                 try:
-                    from agent.title_generator import maybe_auto_title
+                    from agent.title_generator import AutoTitleOutcome, maybe_auto_title
 
-                    maybe_auto_title(
-                        _get_db(),
-                        session.get("session_key") or sid,
-                        text,
-                        raw,
-                        session.get("history", []),
+                    _title_db = getattr(agent, "_session_db", None)
+                    _title_session_key = str(session.get("session_key") or sid)
+                    _existing_title = (
+                        _title_db.get_session_title_in_lineage(_title_session_key)
+                        if _title_db is not None
+                        else None
                     )
-                except Exception:
-                    pass
+                    with session["history_lock"]:
+                        _title_task_running = bool(session.get("auto_title_task_id"))
+                    if _title_db is not None and not _existing_title and not _title_task_running:
+                        _title_task_id = f"title_{uuid.uuid4().hex}"
+                        _title_started_event_sent = False
+                        _runtime_getter = getattr(agent, "_current_main_runtime", None)
+                        _main_runtime = (
+                            dict(_runtime_getter())
+                            if callable(_runtime_getter)
+                            else {
+                                "model": getattr(agent, "model", "") or "",
+                                "provider": getattr(agent, "provider", "") or "",
+                                "base_url": getattr(agent, "base_url", "") or "",
+                                "api_key": getattr(agent, "api_key", "") or "",
+                                "api_mode": getattr(agent, "api_mode", "") or "",
+                            }
+                        )
+                        with session["history_lock"]:
+                            if session.get("auto_title_task_id"):
+                                _title_task_id = ""
+                            else:
+                                session["auto_title_task_id"] = _title_task_id
+
+                        if _title_task_id:
+                            def _title_updated(title: str) -> None:
+                                _emit(
+                                    "session.title.updated",
+                                    sid,
+                                    {
+                                        "task_id": _title_task_id,
+                                        "session_key": _title_session_key,
+                                        "title": title,
+                                        "source": "auto",
+                                    },
+                                )
+
+                            def _title_finished(outcome: AutoTitleOutcome) -> None:
+                                with session["history_lock"]:
+                                    if session.get("auto_title_task_id") == _title_task_id:
+                                        session["auto_title_task_id"] = None
+                                _emit(
+                                    "session.title.finished",
+                                    sid,
+                                    {
+                                        "task_id": _title_task_id,
+                                        "session_key": _title_session_key,
+                                        "status": outcome.status,
+                                        "reason": outcome.reason,
+                                    },
+                                )
+
+                            _emit(
+                                "session.title.started",
+                                sid,
+                                {
+                                    "task_id": _title_task_id,
+                                    "session_key": _title_session_key,
+                                },
+                            )
+                            _title_started_event_sent = True
+                            _started = maybe_auto_title(
+                                _title_db,
+                                _title_session_key,
+                                text,
+                                raw,
+                                session.get("history", []),
+                                main_runtime=_main_runtime,
+                                title_callback=_title_updated,
+                                outcome_callback=_title_finished,
+                            )
+                            if not _started:
+                                _title_finished(
+                                    AutoTitleOutcome("skipped", reason="not_eligible")
+                                )
+                except Exception as _title_exc:
+                    _failed_title_task_id = str(locals().get("_title_task_id") or "")
+                    with session["history_lock"]:
+                        session["auto_title_task_id"] = None
+                    if _failed_title_task_id and bool(
+                        locals().get("_title_started_event_sent")
+                    ):
+                        _emit(
+                            "session.title.finished",
+                            sid,
+                            {
+                                "task_id": _failed_title_task_id,
+                                "session_key": str(
+                                    locals().get("_title_session_key")
+                                    or session.get("session_key")
+                                    or sid
+                                ),
+                                "status": "failed",
+                                "reason": "scheduling_failed",
+                            },
+                        )
+                    logger.warning(
+                        "Auto-title scheduling failed for session %s: %s",
+                        session.get("session_key") or sid,
+                        _title_exc,
+                    )
 
         except Exception as e:
             import traceback
@@ -5035,7 +5147,14 @@ def _(rid, params: dict) -> dict:
             str(pdf_path), str(out_prefix),
         ]
         try:
-            res = subprocess.run(argv, capture_output=True, text=True, timeout=120)
+            res = subprocess.run(
+                argv,
+                capture_output=True,
+                text=True,
+                timeout=120,
+                env=_tui_subprocess_env(),
+                stdin=subprocess.DEVNULL,
+            )
         except subprocess.TimeoutExpired:
             return _err(rid, 5028, "pdftoppm timed out (>120s)")
         if res.returncode != 0:
@@ -6270,6 +6389,8 @@ def _(rid, params: dict) -> dict:
                 capture_output=True,
                 text=True,
                 timeout=30,
+                env=_tui_subprocess_env(),
+                stdin=subprocess.DEVNULL,
             )
             output = (
                 (r.stdout or "")
@@ -6660,6 +6781,8 @@ def _list_repo_files(root: str) -> list[str]:
             capture_output=True,
             timeout=2.0,
             check=False,
+            env=_tui_subprocess_env(),
+            stdin=subprocess.DEVNULL,
         )
         if top_result.returncode == 0:
             top = top_result.stdout.decode("utf-8", "replace").strip()
@@ -6677,6 +6800,8 @@ def _list_repo_files(root: str) -> list[str]:
                 capture_output=True,
                 timeout=2.0,
                 check=False,
+                env=_tui_subprocess_env(),
+                stdin=subprocess.DEVNULL,
             )
             if list_result.returncode == 0:
                 for p in list_result.stdout.decode("utf-8", "replace").split("\0"):
@@ -8022,7 +8147,14 @@ def _(rid, params: dict) -> dict:
         return _err(rid, 5001, "shell.exec unavailable: approval safety module not importable")
     try:
         r = subprocess.run(
-            cmd, shell=True, capture_output=True, text=True, timeout=30, cwd=os.getcwd()
+            cmd,
+            shell=True,
+            capture_output=True,
+            text=True,
+            timeout=30,
+            cwd=os.getcwd(),
+            env=_tui_subprocess_env(),
+            stdin=subprocess.DEVNULL,
         )
         return _ok(
             rid,

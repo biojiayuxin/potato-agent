@@ -1,0 +1,54 @@
+name: security
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  locked-build-and-audit:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Check out source
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+
+      - name: Validate workflow policy
+        run: python3 ci/verify_security_workflows.py
+
+      - name: Install locked Lite dependencies
+        run: |
+          python3 -m venv /tmp/potato-lite-ci
+          /tmp/potato-lite-ci/bin/pip install --require-hashes -r hermes-lite/manifests/requirements-py312-linux-x86_64.lock
+          /tmp/potato-lite-ci/bin/pip install --require-hashes -r ci/requirements-py312-linux-x86_64.lock
+
+      - name: Install locked Interface dependencies
+        run: |
+          python3 -m venv /tmp/potato-interface-ci
+          /tmp/potato-interface-ci/bin/pip install --require-hashes -r interface/requirements-py312-linux-x86_64.lock
+          /tmp/potato-interface-ci/bin/pip install --require-hashes -r ci/requirements-py312-linux-x86_64.lock
+
+      - name: Validate Interface lock manifests
+        run: |
+          /tmp/potato-interface-ci/bin/python ci/verify_locked_artifacts.py --requirements interface/requirements.txt --lock interface/requirements-py312-linux-x86_64.lock --wheelhouse-manifest interface/wheelhouse-py312-linux-x86_64.json --fingerprint interface/distributions-py312-linux-x86_64.json
+
+      - name: Audit both locked environments through OSV
+        run: |
+          python3 -m venv /tmp/potato-audit-ci
+          /tmp/potato-audit-ci/bin/pip install pip-audit==2.10.1
+          /tmp/potato-audit-ci/bin/pip-audit --vulnerability-service osv --require-hashes --no-deps -r hermes-lite/manifests/requirements-py312-linux-x86_64.lock
+          /tmp/potato-audit-ci/bin/pip-audit --vulnerability-service osv --require-hashes --no-deps -r interface/requirements-py312-linux-x86_64.lock
+
+      - name: Run security regressions
+        run: |
+          /tmp/potato-lite-ci/bin/python -m pytest -c /dev/null hermes-lite/tests hermes-lite/tests_packaging
+          /tmp/potato-interface-ci/bin/python -m pytest interface/test_*.py
+
+      - name: Build the Lite wheel twice
+        env:
+          SOURCE_DATE_EPOCH: "315532800"
+        run: |
+          /tmp/potato-lite-ci/bin/python hermes-lite/scripts/build_lite_release.py --output /tmp/potato-release-a --site-packages /tmp/potato-lite-ci/lib/python3.12/site-packages
+          /tmp/potato-lite-ci/bin/python hermes-lite/scripts/build_lite_release.py --output /tmp/potato-release-b --site-packages /tmp/potato-lite-ci/lib/python3.12/site-packages
+          cmp /tmp/potato-release-a/wheel/*.whl /tmp/potato-release-b/wheel/*.whl

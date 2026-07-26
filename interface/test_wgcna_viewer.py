@@ -42,10 +42,7 @@ def test_wgcna_page_route_serves_static_page() -> None:
 
 def test_wgcna_api_does_not_refresh_runtime_activity() -> None:
     class Request:
-        class Url:
-            path = "/api/wgcna/status"
-
-        url = Url()
+        scope = {"path": "/api/wgcna/status"}
 
     assert interface_app_mod._should_refresh_activity_for_request(Request()) is False
 

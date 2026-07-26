@@ -247,6 +247,7 @@ const liveSessionPollFailuresBySessionId = new Map();
 const liveSessionPollGenerationBySessionId = new Map();
 const liveSessionSnapshotAcceptedRequestBySessionId = new Map();
 const confirmedTurnRequestIdsBySessionId = new Map();
+const titleReconciliationsBySessionId = new Map();
 let liveSessionPollGenerationCounter = 0;
 let liveSessionSnapshotRequestCounter = 0;
 let fileTreeRefreshTimer = null;
@@ -287,6 +288,7 @@ const FILE_TREE_FOCUS_REFRESH_MIN_INTERVAL_MS = 5000;
 const FILE_TREE_REFRESH_MAX_CONCURRENCY = 3;
 const FILE_TREE_CHANGE_POLL_INTERVAL_MS = 5000;
 const FILE_TREE_CHANGE_POLL_FAILURE_DELAY_MS = 15000;
+const TITLE_RECONCILE_DELAYS_MS = [1000, 3000, 8000, 20000, 35000];
 const WORKSPACE_DATA_PATH_PREFIX = '/mnt/data/';
 const ATTACHMENT_BLOCK_START = '<potato-files>';
 const ATTACHMENT_BLOCK_END = '</potato-files>';
@@ -1325,6 +1327,7 @@ const handleTuiBridgeEvent = (message) => {
   }
 
   if (type === 'gateway.exit') {
+    cancelAllTitleReconciliations();
     for (const [sessionId, transport] of sessionRunTransportById.entries()) {
       if (transport === 'tui') {
         busySessionIds.delete(sessionId);
@@ -1339,6 +1342,29 @@ const handleTuiBridgeEvent = (message) => {
     renderChatList();
     renderApprovalModal();
     setTuiBridgeStatus('TUI gateway exited');
+    return;
+  }
+
+  if (type === 'session.title.started') {
+    const sessionKey = getTitleEventSessionKey(message);
+    scheduleTitleReconciliation(resolveLogicalTitleSessionId(sessionKey));
+    return;
+  }
+
+  if (type === 'session.title.updated') {
+    const sessionKey = getTitleEventSessionKey(message);
+    reconcileCanonicalSessionTitle(sessionKey, { cancelAfterRefresh: true }).catch(() => {});
+    return;
+  }
+
+  if (type === 'session.title.finished') {
+    const sessionKey = getTitleEventSessionKey(message);
+    const status = String(message?.payload?.status || '').trim();
+    if (status === 'failed') {
+      cancelTitleReconciliationsForSessionKey(sessionKey);
+    } else {
+      reconcileCanonicalSessionTitle(sessionKey, { cancelAfterRefresh: true }).catch(() => {});
+    }
     return;
   }
 
@@ -1399,25 +1425,8 @@ const handleTuiBridgeEvent = (message) => {
         ? MODEL_RESPONSE_ERROR_MESSAGE
         : (text ? `TUI complete: ${text.slice(0, 120)}` : 'TUI request completed')
     );
-    if (completedSessionId) {
-      window.setTimeout(async () => {
-        try {
-          await updateSessionSnapshot(completedSessionId, {
-            preserveLiveMessages: true,
-            backgroundRefresh: true,
-            shouldApplySnapshot: (resolvedSessionId) => (
-              resolvedSessionId === completedSessionId
-              && !isSessionBusy(completedSessionId)
-            ),
-          });
-          if (isViewingSession(completedSessionId)) {
-            syncActiveSessionFromSessions(completedSessionId);
-            renderWorkspace();
-          } else {
-            renderChatList();
-          }
-        } catch {}
-      }, 1200);
+    if (status.trim().toLowerCase() === 'complete') {
+      scheduleTitleReconciliation(completedSessionId);
     }
     scheduleFileTreeRefresh('message.complete');
     return;
@@ -2606,6 +2615,7 @@ const performSignOut = async () => {
   state.pendingAttachments = [];
   stopAuthPolling();
   resetTuiBridgeReconnectState();
+  cancelAllTitleReconciliations();
   closeTuiBridge();
   activeTuiSessionId = '';
   activePersistentSessionId = '';
@@ -3049,6 +3059,7 @@ const resetWorkspaceState = () => {
   workspacePathNavigationGeneration += 1;
   stopAllLiveSessionPolling();
   resetTuiBridgeReconnectState();
+  cancelAllTitleReconciliations();
   closeTuiBridge();
   recoveringTuiSessionIds.clear();
   liveTuiSessionsByPersistentId.clear();
@@ -3887,6 +3898,7 @@ const renameSession = async (sessionId, nextTitle) => {
       : null
   );
   if (normalizedSession?.id) {
+    cancelTitleReconciliationsForSessionKey(normalizedSession.id);
     applyLiveStateToSession(normalizedSession.id, json?.live || normalizedSession.live || null);
   }
   if (
@@ -6305,6 +6317,123 @@ const updateSessionSnapshot = async (
   return state.sessions.find((chat) => chat.id === session.id) || sessionWithLive;
 };
 
+function getTitleEventSessionKey(message) {
+  return String(
+    message?.payload?.session_key
+    || message?.persistent_session_id
+    || message?.persistentSessionId
+    || ''
+  ).trim();
+}
+
+function resolveLogicalTitleSessionId(sessionKey) {
+  const normalizedKey = String(sessionKey || '').trim();
+  if (!normalizedKey) return '';
+  const matched = state.sessions.find((session) => (
+    String(session?.id || '').trim() === normalizedKey
+    || String(session?.resume_session_id || session?.resumeSessionId || '').trim() === normalizedKey
+  ));
+  return String(matched?.id || normalizedKey).trim();
+}
+
+function cancelTitleReconciliation(sessionId) {
+  const normalizedSessionId = String(sessionId || '').trim();
+  if (!normalizedSessionId) return;
+  const record = titleReconciliationsBySessionId.get(normalizedSessionId);
+  if (!record) return;
+  for (const timer of record.timers) {
+    window.clearTimeout(timer);
+  }
+  titleReconciliationsBySessionId.delete(normalizedSessionId);
+}
+
+function cancelTitleReconciliationsForSessionKey(sessionKey) {
+  const normalizedKey = String(sessionKey || '').trim();
+  if (!normalizedKey) return;
+  cancelTitleReconciliation(normalizedKey);
+  for (const session of state.sessions) {
+    const sessionId = String(session?.id || '').trim();
+    const resumeSessionId = String(
+      session?.resume_session_id || session?.resumeSessionId || ''
+    ).trim();
+    if (sessionId === normalizedKey || resumeSessionId === normalizedKey) {
+      cancelTitleReconciliation(sessionId);
+    }
+  }
+}
+
+function cancelAllTitleReconciliations() {
+  for (const sessionId of Array.from(titleReconciliationsBySessionId.keys())) {
+    cancelTitleReconciliation(sessionId);
+  }
+}
+
+const hasHermesSessionTitle = (session) => (
+  session?.title_source === 'hermes_root' || session?.title_source === 'hermes_tip'
+);
+
+async function reconcileCanonicalSessionTitle(sessionKey, { token = null, cancelAfterRefresh = false } = {}) {
+  const normalizedKey = String(sessionKey || '').trim();
+  if (!normalizedKey || !state.user) return null;
+  const logicalSessionId = resolveLogicalTitleSessionId(normalizedKey);
+  const record = titleReconciliationsBySessionId.get(logicalSessionId);
+  if (token && record?.token !== token) return null;
+  if (record?.inFlight) return null;
+  if (record) record.inFlight = true;
+  try {
+    const session = await updateSessionSnapshot(normalizedKey, {
+      preserveLiveMessages: true,
+      backgroundRefresh: true,
+      managePolling: false,
+      shouldApplySnapshot: () => (
+        Boolean(state.user)
+        && (!token || titleReconciliationsBySessionId.get(logicalSessionId)?.token === token)
+      ),
+    });
+    if (!session) return null;
+    if (isViewingSession(session.id)) {
+      syncActiveSessionFromSessions(session.id);
+      renderWorkspace();
+    } else {
+      renderChatList();
+    }
+    if (hasHermesSessionTitle(session) || cancelAfterRefresh) {
+      cancelTitleReconciliationsForSessionKey(normalizedKey);
+      cancelTitleReconciliationsForSessionKey(session.id);
+    }
+    return session;
+  } finally {
+    const current = titleReconciliationsBySessionId.get(logicalSessionId);
+    if (current && (!token || current.token === token)) {
+      current.inFlight = false;
+    }
+  }
+}
+
+function scheduleTitleReconciliation(sessionId) {
+  const logicalSessionId = resolveLogicalTitleSessionId(sessionId);
+  if (!logicalSessionId || !state.user) return;
+  cancelTitleReconciliation(logicalSessionId);
+  const token = Symbol(logicalSessionId);
+  const record = { token, timers: new Set(), inFlight: false };
+  titleReconciliationsBySessionId.set(logicalSessionId, record);
+  TITLE_RECONCILE_DELAYS_MS.forEach((delayMs, index) => {
+    const timer = window.setTimeout(async () => {
+      record.timers.delete(timer);
+      try {
+        await reconcileCanonicalSessionTitle(logicalSessionId, { token });
+      } catch {}
+      if (
+        index === TITLE_RECONCILE_DELAYS_MS.length - 1
+        && titleReconciliationsBySessionId.get(logicalSessionId)?.token === token
+      ) {
+        cancelTitleReconciliation(logicalSessionId);
+      }
+    }, delayMs);
+    record.timers.add(timer);
+  });
+}
+
 function stopLiveSessionPolling(sessionId) {
   const persistentSessionId = String(sessionId || '').trim();
   if (!persistentSessionId) return;
@@ -6585,6 +6714,9 @@ async function pollLiveSessionSnapshot(sessionId, generation = getLiveSessionPol
     const status = String(liveState?.status || '').trim();
     if (!ACTIVE_LIVE_SESSION_STATUSES.has(status)) {
       scheduleFileTreeRefresh('live.terminal');
+      if (status === 'completed') {
+        scheduleTitleReconciliation(persistentSessionId);
+      }
       stopLiveSessionPolling(persistentSessionId);
       const finalRefreshGeneration = getLiveSessionPollingGeneration(persistentSessionId);
       if (snapshot.changed) {
@@ -6662,6 +6794,7 @@ const deleteChat = async (chatId, isDraft = false) => {
   }
 
   forgetLiveTuiSession(chatId);
+  cancelTitleReconciliationsForSessionKey(chatId);
   stopLiveSessionPolling(chatId);
   liveSessionSnapshotAcceptedRequestBySessionId.delete(chatId);
 

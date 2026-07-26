@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import json
+import io
 import subprocess
+import types
 from dataclasses import replace
 from pathlib import Path
 
@@ -269,7 +271,7 @@ def test_stop_idle_runtime_cli_rechecks_after_service_probe(
     assert eligibility_calls == 2
 
 
-def test_file_info_allows_only_configured_public_data_in_restricted_modes(
+def test_file_stream_v2_allows_only_configured_public_data_in_restricted_modes(
     monkeypatch,
     tmp_path: Path,
 ) -> None:
@@ -292,27 +294,32 @@ def test_file_info_allows_only_configured_public_data_in_restricted_modes(
         "DEFAULT_PUBLIC_DATA_PATH",
         public_data,
     )
+    output = io.BytesIO()
     monkeypatch.setattr(
-        privileged_helper,
-        "_probe_path",
-        lambda checked_target, path: {
-            "exists": True,
-            "is_file": True,
-            "readable": True,
-        },
+        "interface.file_stream_worker.sys.stdout",
+        types.SimpleNamespace(buffer=output),
     )
+    from interface.file_stream_worker import stream_file
 
-    info = privileged_helper._file_info(
-        target,
-        public_link / public_file.name,
+    stream_file(
+        home=target.home_dir,
+        browser_root=target.home_dir,
+        requested_path=public_link / public_file.name,
         mode="home_and_public_data",
+        public_data_root=public_data,
     )
 
-    assert info["filename"] == public_file.name
-    assert info["size"] == public_file.stat().st_size
-    with pytest.raises(RuntimeError, match="outside the allowed browser roots"):
-        privileged_helper._file_info(
-            target,
-            public_link / public_file.name,
+    header, body = output.getvalue().split(b"\n", 1)
+    metadata = json.loads(header)
+    assert metadata["protocol"] == "file-stream-v2"
+    assert metadata["filename"] == public_file.name
+    assert metadata["size"] == public_file.stat().st_size
+    assert body == public_file.read_bytes()
+    with pytest.raises(file_browser_policy.FileBrowserAccessError):
+        stream_file(
+            home=target.home_dir,
+            browser_root=target.home_dir,
+            requested_path=public_link / public_file.name,
             mode="home_only",
+            public_data_root=public_data,
         )

@@ -34,6 +34,7 @@ release=${base}/releases/${release_id}
 current=${base}/current
 hermes_link=/usr/local/bin/hermes
 interface_unit=potato-interface.service
+interface_exec_dropin=/etc/systemd/system/potato-interface.service.d/40-security-entrypoint.conf
 interface_dropin=/etc/systemd/system/potato-interface.service.d/50-hermes-lite.conf
 fingerprint_script=${code_source}/hermes-lite/scripts/fingerprint_state.py
 refresh_script=${repo}/refresh_hermes_systemd_units.py
@@ -205,6 +206,12 @@ elif [[ -e ${interface_dropin} || -L ${interface_dropin} ]]; then
   echo "error: interface Lite drop-in is not a regular file" >&2
   exit 2
 fi
+if [[ -f ${interface_exec_dropin} && ! -L ${interface_exec_dropin} ]]; then
+  cp -a "${interface_exec_dropin}" "${backup}/interface-exec-dropin.conf"
+elif [[ -e ${interface_exec_dropin} || -L ${interface_exec_dropin} ]]; then
+  echo "error: Interface entrypoint drop-in is not a regular file" >&2
+  exit 2
+fi
 
 atomic_symlink() {
   local target=$1
@@ -233,6 +240,11 @@ rollback() {
   for service in "${mapped_services[@]}"; do
     cp -a "${backup}/units/${service}" "/etc/systemd/system/${service}"
   done
+  if [[ -f ${backup}/interface-exec-dropin.conf ]]; then
+    cp -a "${backup}/interface-exec-dropin.conf" "${interface_exec_dropin}"
+  else
+    rm -f "${interface_exec_dropin}"
+  fi
   if [[ -f ${backup}/interface-dropin.conf ]]; then
     cp -a "${backup}/interface-dropin.conf" "${interface_dropin}"
   else
@@ -307,6 +319,15 @@ atomic_symlink "${release}" "${current}"
 atomic_symlink "${current}/venv/bin/hermes" "${hermes_link}"
 
 install -d -o root -g root -m 0755 "$(dirname "${interface_dropin}")"
+exec_dropin_temp=${interface_exec_dropin}.cutover.$$
+printf '%s\n' \
+  '[Service]' \
+  'ExecStart=' \
+  'ExecStart=/opt/interface-env/bin/python -m interface.serve --host 0.0.0.0 --port 3000' \
+  >"${exec_dropin_temp}"
+chown root:root "${exec_dropin_temp}"
+chmod 0644 "${exec_dropin_temp}"
+mv -Tf "${exec_dropin_temp}" "${interface_exec_dropin}"
 dropin_temp=${interface_dropin}.cutover.$$
 printf '%s\n' \
   '[Service]' \
@@ -315,6 +336,7 @@ printf '%s\n' \
 chown root:root "${dropin_temp}"
 chmod 0644 "${dropin_temp}"
 mv -Tf "${dropin_temp}" "${interface_dropin}"
+systemctl daemon-reload
 
 if PYTHONPATH="${repo}" \
   POTATO_AGENT_MAPPING_PATH="${mapping}" \

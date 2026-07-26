@@ -28,7 +28,7 @@ import logging
 import os
 import socket
 import asyncio
-from urllib.parse import quote, urlparse, urlsplit, urlunsplit
+from urllib.parse import quote, unquote, urlparse, urlsplit, urlunsplit
 
 from utils import is_truthy_value
 
@@ -107,6 +107,7 @@ _ALWAYS_BLOCKED_IPS = frozenset({
 _ALWAYS_BLOCKED_NETWORKS = (
     ipaddress.ip_network("169.254.0.0/16"),    # Entire link-local range (no legit agent target)
     ipaddress.ip_network("::ffff:169.254.0.0/112"), # IPv4-mapped link-local range
+    ipaddress.ip_network("fe80::/10"),         # IPv6 link-local metadata/control plane
 )
 
 # Exact HTTPS hostnames allowed to resolve to private/benchmark-space IPs.
@@ -210,6 +211,17 @@ def _is_blocked_ip(ip: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
     return False
 
 
+def _parse_ip_literal(hostname: str):
+    """Parse an IP literal after normalizing an IPv6 scope identifier."""
+    normalized = unquote(hostname)
+    if ":" in normalized and "%" in normalized:
+        normalized = normalized.split("%", 1)[0]
+    try:
+        return ipaddress.ip_address(normalized)
+    except ValueError:
+        return None
+
+
 def is_always_blocked_url(url: str) -> bool:
     """Return True when the URL targets an always-blocked endpoint.
 
@@ -254,10 +266,7 @@ def is_always_blocked_url(url: str) -> bool:
             return True
 
         # Literal IP → check directly against the always-blocked set
-        try:
-            ip = ipaddress.ip_address(hostname)
-        except ValueError:
-            ip = None
+        ip = _parse_ip_literal(hostname)
 
         if ip is not None:
             if ip in _ALWAYS_BLOCKED_IPS or any(
@@ -342,14 +351,19 @@ def is_safe_url(url: str) -> bool:
 
         allow_private_ip = _allows_private_ip_resolution(hostname, scheme)
 
-        # Try to resolve and check IP
-        try:
-            addr_info = socket.getaddrinfo(hostname, None, socket.AF_UNSPEC, socket.SOCK_STREAM)
-        except socket.gaierror:
-            # DNS resolution failed — fail closed. If DNS can't resolve it,
-            # the HTTP client will also fail, so blocking loses nothing.
-            logger.warning("Blocked request — DNS resolution failed for: %s", hostname)
-            return False
+        # Try to resolve and check IP. Normalize IPv6 zone identifiers before
+        # classification so ``fe80::...%eth0`` cannot bypass link-local rules.
+        literal_ip = _parse_ip_literal(hostname)
+        if literal_ip is not None:
+            addr_info = [(0, 0, 0, "", (str(literal_ip), 0))]
+        else:
+            try:
+                addr_info = socket.getaddrinfo(hostname, None, socket.AF_UNSPEC, socket.SOCK_STREAM)
+            except socket.gaierror:
+                # DNS resolution failed — fail closed. If DNS can't resolve it,
+                # the HTTP client will also fail, so blocking loses nothing.
+                logger.warning("Blocked request — DNS resolution failed for: %s", hostname)
+                return False
 
         for family, _, _, _, sockaddr in addr_info:
             ip_str = sockaddr[0]

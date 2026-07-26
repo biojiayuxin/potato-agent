@@ -1477,6 +1477,121 @@ class SessionDB:
             row = cursor.fetchone()
         return row["title"] if row else None
 
+    @staticmethod
+    def _compression_lineage_rows(
+        conn: sqlite3.Connection,
+        session_id: str,
+    ) -> List[sqlite3.Row]:
+        """Resolve the compression root-to-tip lineage on one connection."""
+        row = conn.execute(
+            "SELECT * FROM sessions WHERE id = ?", (session_id,)
+        ).fetchone()
+        if row is None:
+            return []
+
+        current = row
+        for _ in range(100):
+            parent_id = str(current["parent_session_id"] or "").strip()
+            if not parent_id:
+                break
+            parent = conn.execute(
+                "SELECT * FROM sessions WHERE id = ?", (parent_id,)
+            ).fetchone()
+            if (
+                parent is None
+                or str(parent["end_reason"] or "") != "compression"
+                or parent["ended_at"] is None
+                or float(current["started_at"] or 0)
+                < float(parent["ended_at"] or 0)
+            ):
+                break
+            current = parent
+
+        lineage = [current]
+        for _ in range(100):
+            child = conn.execute(
+                "SELECT child.* FROM sessions child "
+                "JOIN sessions parent ON parent.id = child.parent_session_id "
+                "WHERE child.parent_session_id = ? "
+                "  AND parent.end_reason = 'compression' "
+                "  AND child.started_at >= parent.ended_at "
+                "ORDER BY child.started_at DESC LIMIT 1",
+                (current["id"],),
+            ).fetchone()
+            if child is None:
+                break
+            lineage.append(child)
+            current = child
+        return lineage
+
+    def get_session_title_in_lineage(self, session_id: str) -> Optional[str]:
+        """Return the first title in a session's compression lineage."""
+        with self._lock:
+            lineage = self._compression_lineage_rows(self._conn, session_id)
+        for row in lineage:
+            title = str(row["title"] or "").strip()
+            if title:
+                return title
+        return None
+
+    @staticmethod
+    def _next_available_title(
+        conn: sqlite3.Connection,
+        title: str,
+    ) -> str:
+        """Apply the existing ``Title #2`` uniqueness convention in-transaction."""
+        match = re.match(r"^(.*?) #(\d+)$", title)
+        base = match.group(1) if match else title
+        escaped = base.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+        rows = conn.execute(
+            "SELECT title FROM sessions "
+            "WHERE title = ? OR title LIKE ? ESCAPE '\\'",
+            (base, f"{escaped} #%"),
+        ).fetchall()
+        if not rows:
+            return base
+
+        max_num = 1
+        for row in rows:
+            numbered = re.match(r"^.* #(\d+)$", str(row["title"] or ""))
+            if numbered:
+                max_num = max(max_num, int(numbered.group(1)))
+        return f"{base} #{max_num + 1}"
+
+    def claim_auto_session_title(
+        self,
+        session_id: str,
+        title: str,
+    ) -> Optional[Tuple[str, str]]:
+        """Atomically set an auto-title on the current compression tip.
+
+        Manual titles and titles already committed anywhere in the compression
+        lineage always win. The returned pair identifies the row and exact
+        unique title committed by this transaction.
+        """
+        sanitized = self.sanitize_title(title)
+        if not sanitized:
+            return None
+
+        def _do(conn: sqlite3.Connection) -> Optional[Tuple[str, str]]:
+            lineage = self._compression_lineage_rows(conn, session_id)
+            if not lineage or any(str(row["title"] or "").strip() for row in lineage):
+                return None
+
+            tip_id = str(lineage[-1]["id"] or "").strip()
+            if not tip_id:
+                return None
+            unique_title = self._next_available_title(conn, sanitized)
+            cursor = conn.execute(
+                "UPDATE sessions SET title = ? WHERE id = ? AND title IS NULL",
+                (unique_title, tip_id),
+            )
+            if cursor.rowcount != 1:
+                return None
+            return tip_id, unique_title
+
+        return self._execute_write(_do)
+
     def set_session_archived(self, session_id: str, archived: bool) -> bool:
         """Archive or unarchive a session.
 

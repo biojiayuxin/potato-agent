@@ -21,6 +21,7 @@ from interface.model_proxy_config import (
     username_from_local_token,
 )
 from interface import token_usage_store
+from interface.request_limits import RequestBodyLimitMiddleware
 
 
 logger = logging.getLogger(__name__)
@@ -28,6 +29,12 @@ logger = logging.getLogger(__name__)
 DEFAULT_UPSTREAM_TIMEOUT_SECONDS = float(
     os.getenv("POTATO_MODEL_PROXY_UPSTREAM_TIMEOUT_SECONDS") or "600"
 )
+DEFAULT_MODEL_PROXY_REQUEST_LIMIT_BYTES = 128 * 1024 * 1024
+HARD_MODEL_PROXY_REQUEST_LIMIT_BYTES = 192 * 1024 * 1024
+MAX_SSE_BUFFER_BYTES = 2 * 1024 * 1024
+MAX_SSE_FRAME_BYTES = 1024 * 1024
+MAX_USAGE_CAPTURE_BYTES = 4 * 1024 * 1024
+MAX_NON_SSE_RESPONSE_BYTES = 64 * 1024 * 1024
 HOP_BY_HOP_HEADERS = {
     "connection",
     "content-length",
@@ -456,22 +463,29 @@ async def _iter_response_sse_bytes(
     buffer = b""
     state: dict[str, Any] = {}
     async for chunk in response.aiter_bytes():
-        buffer += chunk
-        while True:
-            lf_pos = buffer.find(b"\n\n")
-            crlf_pos = buffer.find(b"\r\n\r\n")
-            positions = [pos for pos in (lf_pos, crlf_pos) if pos >= 0]
-            if not positions:
-                break
-            pos = min(positions)
-            sep_len = 4 if pos == crlf_pos else 2
-            frame = buffer[:pos]
-            buffer = buffer[pos + sep_len :]
-            _capture_usage_from_sse_frame(frame, telemetry)
-            if normalize_responses:
-                frame = _normalize_sse_frame(frame, state)
-            yield frame + b"\n\n"
+        for offset in range(0, len(chunk), 64 * 1024):
+            buffer += chunk[offset : offset + 64 * 1024]
+            while True:
+                lf_pos = buffer.find(b"\n\n")
+                crlf_pos = buffer.find(b"\r\n\r\n")
+                positions = [pos for pos in (lf_pos, crlf_pos) if pos >= 0]
+                if not positions:
+                    break
+                pos = min(positions)
+                if pos > MAX_SSE_FRAME_BYTES:
+                    raise RuntimeError("upstream SSE frame exceeded the size limit")
+                sep_len = 4 if pos == crlf_pos else 2
+                frame = buffer[:pos]
+                buffer = buffer[pos + sep_len :]
+                _capture_usage_from_sse_frame(frame, telemetry)
+                if normalize_responses:
+                    frame = _normalize_sse_frame(frame, state)
+                yield frame + b"\n\n"
+            if len(buffer) > MAX_SSE_BUFFER_BYTES:
+                raise RuntimeError("upstream SSE buffer exceeded the size limit")
     if buffer:
+        if len(buffer) > MAX_SSE_FRAME_BYTES:
+            raise RuntimeError("upstream SSE frame exceeded the size limit")
         _capture_usage_from_sse_frame(buffer, telemetry)
         if normalize_responses:
             buffer = _normalize_sse_frame(buffer, state)
@@ -728,8 +742,23 @@ async def _forward_model_request(request: Request, endpoint: str) -> Response:
         started_at=started_at,
     )
 
+    upstream_content_length = response.headers.get("content-length")
+    if upstream_content_length is not None and not is_sse:
+        try:
+            declared_response_bytes = int(upstream_content_length)
+        except (TypeError, ValueError):
+            await response.aclose()
+            await client.aclose()
+            raise HTTPException(status_code=502, detail="Invalid upstream response")
+        if declared_response_bytes < 0 or declared_response_bytes > MAX_NON_SSE_RESPONSE_BYTES:
+            await response.aclose()
+            await client.aclose()
+            raise HTTPException(status_code=502, detail="Upstream response too large")
+
     async def body_iter():
         body_chunks: list[bytes] = []
+        response_bytes = 0
+        usage_capture_bytes = 0
         try:
             if is_sse:
                 async for chunk in _iter_response_sse_bytes(
@@ -740,10 +769,19 @@ async def _forward_model_request(request: Request, endpoint: str) -> Response:
                     yield chunk
             else:
                 async for chunk in response.aiter_bytes():
-                    if 200 <= response.status_code < 300:
+                    response_bytes += len(chunk)
+                    if response_bytes > MAX_NON_SSE_RESPONSE_BYTES:
+                        raise RuntimeError("upstream response exceeded the size limit")
+                    if (
+                        200 <= response.status_code < 300
+                        and usage_capture_bytes + len(chunk) <= MAX_USAGE_CAPTURE_BYTES
+                    ):
                         body_chunks.append(chunk)
+                        usage_capture_bytes += len(chunk)
+                    elif body_chunks:
+                        body_chunks.clear()
                     yield chunk
-                if 200 <= response.status_code < 300:
+                if 200 <= response.status_code < 300 and body_chunks:
                     telemetry.raw_usage = _json_body_usage(b"".join(body_chunks))
             _record_completed_usage(telemetry)
         finally:
@@ -809,6 +847,25 @@ async def chat_completions(request: Request) -> Response:
 @app.api_route("/v1/responses", methods=["POST"])
 async def responses(request: Request) -> Response:
     return await _forward_model_request(request, "responses")
+
+
+def _model_proxy_request_body_limit(scope: dict[str, Any]) -> int:
+    del scope
+    raw = os.getenv("POTATO_MODEL_PROXY_MAX_REQUEST_BYTES", "").strip()
+    try:
+        configured = int(raw) if raw else DEFAULT_MODEL_PROXY_REQUEST_LIMIT_BYTES
+    except ValueError:
+        configured = DEFAULT_MODEL_PROXY_REQUEST_LIMIT_BYTES
+    return min(
+        max(configured, 1),
+        HARD_MODEL_PROXY_REQUEST_LIMIT_BYTES,
+    )
+
+
+app.add_middleware(
+    RequestBodyLimitMiddleware,
+    limit_for_scope=_model_proxy_request_body_limit,
+)
 
 
 @app.exception_handler(ModelProxyConfigError)

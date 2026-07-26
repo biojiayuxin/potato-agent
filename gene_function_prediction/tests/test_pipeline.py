@@ -19,6 +19,8 @@ from gene_function_prediction.run_pipeline import (
     _dedupe_rag_results,
     build_parser,
     compact_arabidopsis,
+    error_text,
+    evidence_citations,
     extract_gene_names,
     fetch_ricedata,
     load_homologs,
@@ -333,6 +335,32 @@ class PipelineTests(unittest.TestCase):
         self.assertNotIn("limitations", EVIDENCE_SCHEMA["properties"])
         self.assertNotIn("limitations", result)
 
+    def test_tair_description_citations_are_allowed_in_both_common_formats(self):
+        payload = {
+            "description": (
+                "Supported by Pubmed ID: 20856808 and PMID:36471048. "
+                "Additional evidence appears in DOI:10.1105/tpc.18.00357 "
+                "and 10.1111/tpj.16273."
+            )
+        }
+        citations = evidence_citations(payload)
+
+        for value in (
+            "20856808",
+            "PMID:20856808",
+            "36471048",
+            "PMID:36471048",
+            "10.1105/tpc.18.00357",
+            "DOI:10.1105/tpc.18.00357",
+            "10.1111/tpj.16273",
+            "DOI:10.1111/tpj.16273",
+        ):
+            with self.subTest(value=value):
+                self.assertIn(value.casefold(), citations)
+
+    def test_empty_exception_message_keeps_exception_type(self):
+        self.assertEqual(error_text(TimeoutError()), "TimeoutError")
+
     def test_prediction_uses_one_integrated_function_field(self):
         predicted_function = (
             "  Literature-supported summary: <b>A homolog has a supported function.</b>\n"
@@ -623,6 +651,39 @@ class PipelineTests(unittest.TestCase):
         self.assertEqual(payload["retrieval_gene_names"], [])
         self.assertEqual(payload["database_evidence"]["plantconnectome_searches"], [])
         self.assertEqual(payload["pubmed"], [])
+
+    def test_arabidopsis_tair_not_found_continues_as_no_evidence(self):
+        target = "ATMG00516"
+        pipeline = self._arabidopsis_pipeline()
+        tair_result = {
+            "status": "not_found",
+            "query": target,
+            "tair": {
+                "candidate_count": 0,
+                "candidates": [],
+                "exact_candidates": [],
+            },
+        }
+
+        with (
+            patch(
+                "gene_function_prediction.run_pipeline.fetch_arabidopsis_tair",
+                return_value=tair_result,
+            ),
+            patch(
+                "gene_function_prediction.run_pipeline.fetch_plantconnectome"
+            ) as fetch_plant,
+        ):
+            record = pipeline.process_arabidopsis(target)
+
+        self.assertEqual(record["status"], "ok")
+        fetch_plant.assert_not_called()
+        pipeline.llm_call.assert_not_called()
+        pipeline.pubmed.assert_not_called()
+        payload = pipeline._species_summary.call_args.args[2]
+        self.assertEqual(payload["query_gene"], target)
+        self.assertEqual(payload["candidate_gene_names"], [])
+        self.assertIsNone(payload["database_evidence"]["tair_selected"])
 
     def test_arabidopsis_one_name_skips_filter_and_queries_both_sources(self):
         target = "AT4G25480"

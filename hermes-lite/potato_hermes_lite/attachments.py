@@ -77,6 +77,9 @@ def resolve_attachment_path(raw_path: str) -> Path | None:
         path = Path(os.getenv("TERMINAL_CWD", os.getcwd())) / path
     try:
         resolved = path.resolve()
+        from agent.file_safety import raise_if_read_blocked
+
+        raise_if_read_blocked(str(resolved))
         return resolved if resolved.is_file() else None
     except OSError:
         return None

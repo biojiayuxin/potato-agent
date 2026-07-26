@@ -436,6 +436,150 @@ async def test_gateway_exit_releases_foreground_leases(monkeypatch) -> None:
 
 
 @pytest.mark.asyncio
+async def test_title_events_survive_live_mapping_cleanup_and_track_inflight(monkeypatch) -> None:
+    bridge = TuiGatewayBridge(user_id="user-1", target=None)  # type: ignore[arg-type]
+    _install_fake_processes(monkeypatch, bridge)
+    captured: list[dict[str, Any]] = []
+    monkeypatch.setattr(
+        bridge,
+        "_dispatch_event",
+        lambda event, **_kwargs: captured.append(event),
+    )
+    monkeypatch.setattr(
+        bridge,
+        "_schedule_foreground_lease_release",
+        lambda _live_session_id, _generation: None,
+    )
+
+    start = asyncio.create_task(bridge.ensure_started())
+    generation = await _wait_for_generation(bridge)
+    await _mark_ready(bridge, generation)
+    await start
+    bridge.remember_live_session(
+        "live-1",
+        persistent_session_id="root-session",
+        run_id="run-1",
+    )
+    bridge._dispatch_message(
+        generation,
+        {
+            "method": "event",
+            "params": {
+                "type": "message.complete",
+                "session_id": "live-1",
+                "payload": {"status": "complete"},
+            },
+        },
+    )
+    assert bridge.get_persistent_session_id("live-1") == ""
+
+    bridge._dispatch_message(
+        generation,
+        {
+            "method": "event",
+            "params": {
+                "type": "session.title.started",
+                "session_id": "live-1",
+                "payload": {"task_id": "title-1", "session_key": "tip-session"},
+            },
+        },
+    )
+    assert captured[-1]["persistent_session_id"] == "tip-session"
+    assert bridge.has_inflight_activity() is True
+
+    bridge._dispatch_message(
+        generation,
+        {
+            "method": "event",
+            "params": {
+                "type": "session.title.updated",
+                "session_id": "live-1",
+                "payload": {
+                    "task_id": "title-1",
+                    "session_key": "tip-session",
+                    "title": "Committed Title",
+                    "source": "auto",
+                },
+            },
+        },
+    )
+    assert bridge.has_active_title_tasks() is False
+    await bridge.close()
+
+
+@pytest.mark.asyncio
+async def test_title_events_bypass_run_listeners_but_reach_websocket() -> None:
+    bridge = TuiGatewayBridge(user_id="user-1", target=None)  # type: ignore[arg-type]
+    listener_events: list[str] = []
+    websocket_payloads: list[dict[str, Any]] = []
+
+    async def listener(event: dict[str, Any]) -> None:
+        listener_events.append(str(event.get("type") or ""))
+
+    class _WebSocket:
+        async def send_text(self, value: str) -> None:
+            websocket_payloads.append(json.loads(value))
+
+    bridge.add_event_listener(listener)
+    bridge._subscribers.add(_WebSocket())  # type: ignore[arg-type]
+    event = {
+        "type": "session.title.updated",
+        "payload": {"task_id": "title-1", "session_key": "session-1"},
+    }
+    await bridge._broadcast_event(event)
+
+    assert listener_events == []
+    assert websocket_payloads == [event]
+
+
+@pytest.mark.asyncio
+async def test_title_event_delivery_waits_for_prior_turn_event() -> None:
+    bridge = TuiGatewayBridge(user_id="user-1", target=None)  # type: ignore[arg-type]
+    complete_started = asyncio.Event()
+    release_complete = asyncio.Event()
+    websocket_payloads: list[str] = []
+
+    async def listener(event: dict[str, Any]) -> None:
+        if event.get("type") == "message.complete":
+            complete_started.set()
+            await release_complete.wait()
+
+    class _WebSocket:
+        async def send_text(self, value: str) -> None:
+            websocket_payloads.append(str(json.loads(value).get("type") or ""))
+
+    bridge.add_event_listener(listener)
+    bridge._subscribers.add(_WebSocket())  # type: ignore[arg-type]
+    complete = asyncio.create_task(
+        bridge._broadcast_event({"type": "message.complete", "payload": {}})
+    )
+    await complete_started.wait()
+    title = asyncio.create_task(
+        bridge._broadcast_event(
+            {"type": "session.title.started", "payload": {"task_id": "title-1"}}
+        )
+    )
+    await asyncio.sleep(0)
+
+    assert websocket_payloads == []
+    release_complete.set()
+    await asyncio.gather(complete, title)
+    assert websocket_payloads == ["message.complete", "session.title.started"]
+
+
+def test_title_task_ttl_prevents_lifecycle_leak(monkeypatch) -> None:
+    now = 100.0
+    monkeypatch.setattr(bridge_mod.time, "monotonic", lambda: now)
+    bridge = TuiGatewayBridge(user_id="user-1", target=None)  # type: ignore[arg-type]
+    bridge._title_task_deadlines["title-1"] = now + bridge_mod._TITLE_TASK_TTL_SECONDS
+
+    assert bridge.has_active_title_tasks() is True
+    now += bridge_mod._TITLE_TASK_TTL_SECONDS + 1
+    assert bridge.has_active_title_tasks() is False
+    assert bridge.has_inflight_activity() is False
+
+
+@pytest.mark.asyncio
 async def test_terminal_error_releases_its_foreground_lease(monkeypatch) -> None:
     bridge = TuiGatewayBridge(user_id="user-1", target=None)  # type: ignore[arg-type]
     _install_fake_processes(monkeypatch, bridge)

@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import argparse
-import base64
 import json
 import os
 import pwd
@@ -17,10 +16,13 @@ if REPO_ROOT.is_dir() and str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from interface.background_jobs import has_active_background_processes
+from interface import file_browser_policy
 from interface.file_browser_policy import (
     FileBrowserAccessError,
     authorize_file_browser_path,
 )
+from interface.file_stream_worker import build_file_stream_worker_command
+from interface.file_upload_worker import build_file_upload_worker_command
 from interface.hermes_profile import (
     DEFAULT_HERMES_LITE_PYTHON,
     runtime_profile_environment,
@@ -62,6 +64,7 @@ from interface.runtime_state import (
     revoke_runtime_session,
     runtime_sleep_claim_is_valid,
 )
+from interface.subprocess_env import interface_subprocess_env
 
 
 DEFAULT_SESSION_DB_PYTHON = (
@@ -96,6 +99,7 @@ def _run_as_user(
         target.linux_user,
         "--",
         "env",
+        "-i",
         f"HOME={target.home_dir}",
         f"HERMES_HOME={target.hermes_home}",
         f"TERMINAL_CWD={target.workdir}",
@@ -115,6 +119,7 @@ def _run_as_user(
         text=True,
         cwd=str(cwd or target.workdir),
         check=False,
+        env=interface_subprocess_env(),
     )
 
 
@@ -246,116 +251,11 @@ def _list_directory(
     return allowed_entries
 
 
-def _cat_file_b64(target: HermesTarget, path: Path, *, mode: str) -> dict[str, Any]:
-    path = _authorize_browser_path(target, path, mode=mode)
-    payload = _probe_path(target, path)
-    if not payload.get("exists"):
-        raise RuntimeError("Requested file does not exist")
-    if not payload.get("is_file"):
-        raise RuntimeError("Requested path is not a file")
-    if not payload.get("readable"):
-        raise RuntimeError("Permission denied for this file")
-    script = (
-        "import base64, pathlib, sys\n"
-        "target = pathlib.Path(sys.argv[1]).resolve()\n"
-        "sys.stdout.write(base64.b64encode(target.read_bytes()).decode('ascii'))\n"
-    )
-    result = _run_as_user(target, ["python3", "-c", script, str(path)])
-    if result.returncode != 0:
-        raise RuntimeError(result.stderr.strip() or result.stdout.strip() or "file read failed")
-    return {"content_b64": result.stdout.strip(), "filename": path.name}
-
-
 def _authorize_browser_path(target: HermesTarget, path: Path, *, mode: str) -> Path:
     try:
         return authorize_file_browser_path(path, home=target.home_dir, mode=mode)
     except FileBrowserAccessError as exc:
         raise RuntimeError(str(exc)) from exc
-
-
-def _file_info(target: HermesTarget, path: Path, *, mode: str) -> dict[str, Any]:
-    path = _authorize_browser_path(target, path, mode=mode)
-    payload = _probe_path(target, path)
-    if not payload.get("exists"):
-        raise RuntimeError("Requested file does not exist")
-    if not payload.get("is_file"):
-        raise RuntimeError("Requested path is not a file")
-    if not payload.get("readable"):
-        raise RuntimeError("Permission denied for this file")
-    stat = path.stat()
-    return {
-        "filename": path.name,
-        "size": int(stat.st_size),
-        "modified": int(stat.st_mtime),
-    }
-
-
-def _file_stream_command(target: HermesTarget, path: Path) -> list[str]:
-    script = (
-        "import pathlib, shutil, sys\n"
-        "target = pathlib.Path(sys.argv[1]).resolve()\n"
-        "with target.open('rb') as source:\n"
-        "    shutil.copyfileobj(source, sys.stdout.buffer, length=1024 * 1024)\n"
-    )
-    return [
-        "runuser",
-        "-u",
-        target.linux_user,
-        "--",
-        "env",
-        f"HOME={target.home_dir}",
-        f"HERMES_HOME={target.hermes_home}",
-        f"TERMINAL_CWD={target.workdir}",
-        "PYTHONUNBUFFERED=1",
-        "python3",
-        "-c",
-        script,
-        str(path),
-    ]
-
-
-def _write_upload_b64(target: HermesTarget, filename: str, content_b64: str, upload_dir_name: str) -> dict[str, Any]:
-    script = (
-        "import base64, json, os, pathlib, pwd, sys, uuid, datetime\n"
-        "upload_dir_name = pathlib.Path(sys.argv[1])\n"
-        "filename = pathlib.Path(sys.argv[2]).name or 'upload.bin'\n"
-        "data = base64.b64decode(sys.stdin.read().strip().encode('ascii'))\n"
-        "home = pathlib.Path(os.environ['HOME']).resolve()\n"
-        "root = (upload_dir_name.joinpath(os.environ.get('POTATO_MAPPING_USERNAME', 'user'))).resolve() if upload_dir_name.is_absolute() else (home / upload_dir_name).resolve()\n"
-        "root.mkdir(parents=True, exist_ok=True)\n"
-        "root.chmod(0o700)\n"
-        "safe = ''.join(ch if ch.isalnum() or ch in '._-' else '_' for ch in filename).strip('._') or 'upload.bin'\n"
-        "dest = root / f\"{uuid.uuid4().hex}_{datetime.datetime.now().strftime('%Y%m%d%H%M%S')}_{safe}\"\n"
-        "dest.write_bytes(data)\n"
-        "dest.chmod(0o600)\n"
-        "print(json.dumps({'path': str(dest), 'name': safe, 'size': len(data)}))\n"
-    )
-    result = subprocess.run(
-        [
-            "runuser",
-            "-u",
-            target.linux_user,
-            "--",
-            "env",
-            f"HOME={target.home_dir}",
-            f"HERMES_HOME={target.hermes_home}",
-            f"TERMINAL_CWD={target.workdir}",
-            f"POTATO_MAPPING_USERNAME={target.username}",
-            "python3",
-            "-c",
-            script,
-            upload_dir_name,
-            filename,
-        ],
-        capture_output=True,
-        text=True,
-        input=content_b64,
-        cwd=str(target.workdir),
-        check=False,
-    )
-    if result.returncode != 0:
-        raise RuntimeError(result.stderr.strip() or result.stdout.strip() or "upload write failed")
-    return json.loads(result.stdout.strip() or "{}")
 
 
 def _tui_gateway_command(target: HermesTarget) -> list[str]:
@@ -392,6 +292,7 @@ def _tui_gateway_command(target: HermesTarget) -> list[str]:
         target.linux_user,
         "--",
         "env",
+        "-i",
         f"HOME={target.home_dir}",
         f"HERMES_HOME={target.hermes_home}",
         f"TERMINAL_CWD={target.workdir}",
@@ -460,17 +361,17 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--root", default="")
     p.add_argument("--path", default="")
 
-    for name in ("file-download", "file-info", "file-stream"):
-        p = sub.add_parser(name)
-        p.add_argument("--username", required=True)
-        p.add_argument("--mode", default="home_only")
-        p.add_argument("--root", default="")
-        p.add_argument("--path", required=True)
+    p = sub.add_parser("file-stream-v2")
+    p.add_argument("--username", required=True)
+    p.add_argument("--mode", default="home_only")
+    p.add_argument("--root", default="")
+    p.add_argument("--path", required=True)
 
     p = sub.add_parser("file-upload")
     p.add_argument("--username", required=True)
     p.add_argument("--filename", required=True)
     p.add_argument("--upload-dir-name", required=True)
+    p.add_argument("--max-bytes", type=int, required=True)
     return parser
 
 
@@ -641,39 +542,35 @@ def main() -> int:
                 }
             )
 
-        if args.command == "file-download":
+        if args.command == "file-stream-v2":
             target = _load_target(args.username)
             root = _resolve_browser_root(target, args.root, mode=args.mode)
             relative = _normalize_relative_path(args.path)
-            result = _cat_file_b64(target, (root / relative).resolve(), mode=args.mode)
-            return _emit({"ok": True, **result})
-
-        if args.command == "file-info":
-            target = _load_target(args.username)
-            root = _resolve_browser_root(target, args.root, mode=args.mode)
-            relative = _normalize_relative_path(args.path)
-            result = _file_info(target, (root / relative).resolve(), mode=args.mode)
-            return _emit({"ok": True, **result})
-
-        if args.command == "file-stream":
-            target = _load_target(args.username)
-            root = _resolve_browser_root(target, args.root, mode=args.mode)
-            relative = _normalize_relative_path(args.path)
-            file_path = (root / relative).resolve()
-            _file_info(target, file_path, mode=args.mode)
-            command = _file_stream_command(target, file_path)
+            file_path = root / relative
+            _authorize_browser_path(target, file_path, mode=args.mode)
+            command = build_file_stream_worker_command(
+                linux_user=target.linux_user,
+                home=target.home_dir,
+                browser_root=root,
+                requested_path=file_path,
+                mode=args.mode,
+                public_data_root=file_browser_policy.DEFAULT_PUBLIC_DATA_PATH,
+            )
             os.execvp(command[0], command)
             raise RuntimeError("failed to exec file stream")
 
         if args.command == "file-upload":
             target = _load_target(args.username)
-            result = _write_upload_b64(
-                target,
-                args.filename,
-                sys.stdin.read().strip(),
-                args.upload_dir_name,
+            command = build_file_upload_worker_command(
+                linux_user=target.linux_user,
+                home=target.home_dir,
+                mapping_username=target.username,
+                filename=args.filename,
+                upload_dir_name=args.upload_dir_name,
+                max_bytes=args.max_bytes,
             )
-            return _emit({"ok": True, **result})
+            os.execvp(command[0], command)
+            raise RuntimeError("failed to exec file upload")
 
         if args.command == "tui-gateway-command":
             return _emit(
@@ -685,7 +582,7 @@ def main() -> int:
 
         raise RuntimeError(f"Unsupported command: {args.command}")
     except Exception as exc:
-        if getattr(args, "command", "") == "file-stream":
+        if getattr(args, "command", "") in {"file-stream-v2", "file-upload"}:
             print(str(exc), file=sys.stderr)
             return 1
         return _emit({"ok": False, "error": str(exc), "type": type(exc).__name__})

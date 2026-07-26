@@ -15,6 +15,25 @@ FILE_BROWSER_MODES = frozenset(
 )
 DEFAULT_PUBLIC_DATA_PATH = Path("/mnt/data/public_data")
 
+_SENSITIVE_FILE_BASENAMES = frozenset(
+    {
+        ".anthropic_oauth.json",
+        ".git-credentials",
+        ".envrc",
+        "application_default_credentials.json",
+        "auth.json",
+        "auth.lock",
+        "bws_cache.json",
+        "client_secret.json",
+        "config.yaml",
+        "credentials",
+        "google_client_secret.json",
+        "google_oauth.json",
+        "webhook_subscriptions.json",
+    }
+)
+_SENSITIVE_DIRECTORY_NAMES = frozenset({"mcp-tokens", "pairing"})
+
 
 class FileBrowserAccessError(RuntimeError):
     pass
@@ -35,6 +54,34 @@ def _is_within(path: Path, root: Path) -> bool:
     return True
 
 
+def is_sensitive_file_browser_path(path: Path) -> bool:
+    """Return whether a lexical or resolved path is hidden from the browser."""
+
+    candidates = [path.expanduser()]
+    try:
+        resolved = path.expanduser().resolve()
+    except (OSError, RuntimeError):
+        resolved = None
+    if resolved is not None and resolved != candidates[0]:
+        candidates.append(resolved)
+
+    for candidate in candidates:
+        folded_parts = tuple(part.casefold() for part in candidate.parts)
+        if any(part in _SENSITIVE_DIRECTORY_NAMES for part in folded_parts):
+            return True
+        basename = candidate.name.casefold()
+        if basename == ".env" or basename.startswith(".env."):
+            return True
+        if basename in _SENSITIVE_FILE_BASENAMES:
+            return True
+    return False
+
+
+def raise_if_file_browser_path_sensitive(path: Path) -> None:
+    if is_sensitive_file_browser_path(path):
+        raise FileBrowserAccessError("Opening sensitive credential files is disabled")
+
+
 def authorize_file_browser_path(
     path: Path,
     *,
@@ -42,7 +89,9 @@ def authorize_file_browser_path(
     mode: str | None,
     public_data_root: Path | None = None,
 ) -> Path:
+    raise_if_file_browser_path_sensitive(path)
     resolved_path = path.resolve()
+    raise_if_file_browser_path_sensitive(resolved_path)
     normalized_mode = normalize_file_browser_mode(mode)
     if normalized_mode == USER_READABLE_MODE:
         return resolved_path

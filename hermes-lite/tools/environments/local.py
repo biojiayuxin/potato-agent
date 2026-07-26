@@ -131,10 +131,13 @@ def _build_provider_env_blocklist() -> frozenset:
         "OPENAI_ORGANIZATION",
         "OPENROUTER_API_KEY",
         "ANTHROPIC_BASE_URL",
+        "ANTHROPIC_API_KEY",
         "ANTHROPIC_TOKEN",
         "CLAUDE_CODE_OAUTH_TOKEN",
         "LLM_MODEL",
         "GOOGLE_API_KEY",
+        "VERTEX_CREDENTIALS_PATH",
+        "GOOGLE_APPLICATION_CREDENTIALS",
         "DEEPSEEK_API_KEY",
         "MISTRAL_API_KEY",
         "GROQ_API_KEY",
@@ -178,6 +181,7 @@ def _build_provider_env_blocklist() -> frozenset:
         "HERMES_DASHBOARD_SESSION_TOKEN",
         "GATEWAY_ALLOWED_USERS",
         "GH_TOKEN",
+        "GITHUB_TOKEN",
         "GITHUB_APP_ID",
         "GITHUB_APP_PRIVATE_KEY_PATH",
         "GITHUB_APP_INSTALLATION_ID",
@@ -189,6 +193,67 @@ def _build_provider_env_blocklist() -> frozenset:
 
 
 _HERMES_PROVIDER_ENV_BLOCKLIST = _build_provider_env_blocklist()
+
+
+_ALWAYS_STRIP_KEYS: frozenset[str] = frozenset({
+    # Interface, gateway, source-control, and messaging control-plane auth.
+    "INTERFACE_SESSION_SECRET",
+    "INTERFACE_RESEND_API_KEY",
+    "HERMES_API_KEY",
+    "HERMES_DASHBOARD_SESSION_TOKEN",
+    "GH_TOKEN",
+    "GITHUB_TOKEN",
+    "GITHUB_APP_ID",
+    "GITHUB_APP_PRIVATE_KEY_PATH",
+    "GITHUB_APP_INSTALLATION_ID",
+    "TELEGRAM_BOT_TOKEN",
+    "DISCORD_BOT_TOKEN",
+    "SLACK_BOT_TOKEN",
+    "SLACK_APP_TOKEN",
+    "SLACK_SIGNING_SECRET",
+    "MATRIX_ACCESS_TOKEN",
+    "FEISHU_APP_SECRET",
+    "LARK_APP_SECRET",
+    "LINE_CHANNEL_ACCESS_TOKEN",
+    "LINE_CHANNEL_SECRET",
+    "WHATSAPP_ACCESS_TOKEN",
+    "SIGNAL_TOKEN",
+    "WEBHOOK_SECRET",
+    "EMAIL_PASSWORD",
+    "GATEWAY_ALLOWED_USERS",
+    "GATEWAY_ALLOW_ALL_USERS",
+    "GATEWAY_RELAY_ID",
+    "GATEWAY_RELAY_SECRET",
+    "GATEWAY_RELAY_DELIVERY_KEY",
+    # Remote-compute and cloud credential files are never child inputs.
+    "MODAL_TOKEN_ID",
+    "MODAL_TOKEN_SECRET",
+    "DAYTONA_API_KEY",
+    "RUNPOD_API_KEY",
+    "VERTEX_CREDENTIALS_PATH",
+    "GOOGLE_APPLICATION_CREDENTIALS",
+    "GOOGLE_APPLICATION_CREDENTIALS_JSON",
+})
+
+
+def _is_hermes_internal_secret(key: str) -> bool:
+    """Return True for dynamic internal credentials that must never pass."""
+    upper = key.upper()
+    if upper.startswith("AUXILIARY_") and (
+        upper.endswith("_API_KEY") or upper.endswith("_BASE_URL")
+    ):
+        return True
+    if upper.startswith("GATEWAY_RELAY_"):
+        return True
+    return False
+
+
+def _is_unconditionally_stripped(key: str) -> bool:
+    return (
+        key in _ALWAYS_STRIP_KEYS
+        or key.startswith(_HERMES_PROVIDER_ENV_FORCE_PREFIX)
+        or _is_hermes_internal_secret(key)
+    )
 
 
 def _inject_context_hermes_home(env: dict) -> None:
@@ -213,7 +278,7 @@ def _sanitize_subprocess_env(base_env: dict | None, extra_env: dict | None = Non
     sanitized: dict[str, str] = {}
 
     for key, value in (base_env or {}).items():
-        if key.startswith(_HERMES_PROVIDER_ENV_FORCE_PREFIX):
+        if _is_unconditionally_stripped(key):
             continue
         if key not in _HERMES_PROVIDER_ENV_BLOCKLIST or _is_passthrough(key):
             sanitized[key] = value
@@ -221,7 +286,10 @@ def _sanitize_subprocess_env(base_env: dict | None, extra_env: dict | None = Non
     for key, value in (extra_env or {}).items():
         if key.startswith(_HERMES_PROVIDER_ENV_FORCE_PREFIX):
             real_key = key[len(_HERMES_PROVIDER_ENV_FORCE_PREFIX):]
-            sanitized[real_key] = value
+            if not _is_unconditionally_stripped(real_key):
+                sanitized[real_key] = value
+        elif _is_unconditionally_stripped(key):
+            continue
         elif key not in _HERMES_PROVIDER_ENV_BLOCKLIST or _is_passthrough(key):
             sanitized[key] = value
 
@@ -234,6 +302,31 @@ def _sanitize_subprocess_env(base_env: dict | None, extra_env: dict | None = Non
         sanitized["HOME"] = _profile_home
 
     return sanitized
+
+
+def hermes_subprocess_env(*, inherit_credentials: bool = False) -> dict[str, str]:
+    """Build the credential-safe environment for non-terminal subprocesses.
+
+    Control-plane, messaging, remote-compute, GCP credential-file, and dynamic
+    internal secrets are always removed. Provider/tool credentials are removed
+    by default and may only be inherited by an explicitly trusted model CLI.
+    """
+    env = os.environ.copy()
+    for key in list(env):
+        if _is_unconditionally_stripped(key):
+            env.pop(key, None)
+    if not inherit_credentials:
+        for key in _HERMES_PROVIDER_ENV_BLOCKLIST:
+            env.pop(key, None)
+
+    env.setdefault("PYTHONUTF8", "1")
+    _inject_context_hermes_home(env)
+
+    from hermes_constants import get_subprocess_home
+    profile_home = get_subprocess_home()
+    if profile_home:
+        env["HOME"] = profile_home
+    return env
 
 
 def _find_bash() -> str:
@@ -312,7 +405,10 @@ def _make_run_env(env: dict) -> dict:
     for k, v in merged.items():
         if k.startswith(_HERMES_PROVIDER_ENV_FORCE_PREFIX):
             real_key = k[len(_HERMES_PROVIDER_ENV_FORCE_PREFIX):]
-            run_env[real_key] = v
+            if not _is_unconditionally_stripped(real_key):
+                run_env[real_key] = v
+        elif _is_unconditionally_stripped(k):
+            continue
         elif k not in _HERMES_PROVIDER_ENV_BLOCKLIST or _is_passthrough(k):
             run_env[k] = v
     existing_path = run_env.get("PATH", "")

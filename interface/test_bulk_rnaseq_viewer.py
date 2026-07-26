@@ -80,10 +80,7 @@ def test_bulk_rnaseq_page_route_serves_static_page() -> None:
 
 def test_bulk_rnaseq_api_does_not_refresh_runtime_activity() -> None:
     class Request:
-        class Url:
-            path = "/api/bulk-rnaseq/status"
-
-        url = Url()
+        scope = {"path": "/api/bulk-rnaseq/status"}
 
     assert interface_app_mod._should_refresh_activity_for_request(Request()) is False
 

@@ -45,6 +45,11 @@ import sys
 
 logger = logging.getLogger(__name__)
 
+
+def _guard_local_media_path(path: Path) -> None:
+    from agent.file_safety import raise_if_read_blocked
+    raise_if_read_blocked(str(path))
+
 _debug = DebugSession("vision_tools", env_var="VISION_TOOLS_DEBUG")
 
 # Configurable HTTP download timeout for _download_image().
@@ -108,6 +113,7 @@ async def _validate_image_url_async(url: str) -> bool:
 
 def _detect_image_mime_type(image_path: Path) -> Optional[str]:
     """Return a MIME type when the file looks like a supported image."""
+    _guard_local_media_path(image_path)
     with image_path.open("rb") as f:
         header = f.read(64)
 
@@ -297,6 +303,7 @@ def _image_to_base64_data_url(image_path: Path, mime_type: Optional[str] = None)
     Returns:
         str: Base64-encoded data URL (e.g., "data:image/jpeg;base64,...")
     """
+    _guard_local_media_path(image_path)
     # Read the image as bytes
     data = image_path.read_bytes()
     
@@ -361,6 +368,7 @@ def _image_exceeds_dimension(image_path: Path, max_dimension: int) -> bool:
     still apply, and we never want a missing soft dependency to break the
     embed path.
     """
+    _guard_local_media_path(image_path)
     try:
         from PIL import Image as _PILImage
         with _PILImage.open(image_path) as _img:
@@ -386,6 +394,7 @@ def _resize_image_for_vision(image_path: Path, mime_type: Optional[str] = None,
 
     Returns the base64 data URL string.
     """
+    _guard_local_media_path(image_path)
     # Quick file-size estimate: base64 expands by ~4/3, plus data URL header.
     # Skip the expensive full-read + encode if Pillow can resize directly.
     file_size = image_path.stat().st_size
@@ -718,6 +727,7 @@ async def _vision_analyze_native(
             resolved_url = resolved_url[len("file://"):]
         local_path = Path(os.path.expanduser(resolved_url))
 
+        _guard_local_media_path(local_path)
         if local_path.is_file():
             temp_image_path = local_path
             should_cleanup = False
@@ -870,6 +880,7 @@ async def vision_analyze_tool(
         if resolved_url.startswith("file://"):
             resolved_url = resolved_url[len("file://"):]
         local_path = Path(os.path.expanduser(resolved_url))
+        _guard_local_media_path(local_path)
         if local_path.is_file():
             # Local file path (e.g. from platform image cache) -- skip download
             logger.info("Using local image file: %s", image_url)
@@ -1255,6 +1266,7 @@ def _detect_video_mime_type(video_path: Path) -> Optional[str]:
 
 def _video_to_base64_data_url(video_path: Path, mime_type: Optional[str] = None) -> str:
     """Convert a video file to a base64-encoded data URL."""
+    _guard_local_media_path(video_path)
     data = video_path.read_bytes()
     encoded = base64.b64encode(data).decode("ascii")
     mime = mime_type or _VIDEO_MIME_TYPES.get(video_path.suffix.lower(), "video/mp4")
@@ -1373,6 +1385,7 @@ async def video_analyze_tool(
             resolved_url = resolved_url[len("file://"):]
         local_path = Path(os.path.expanduser(resolved_url))
 
+        _guard_local_media_path(local_path)
         if local_path.is_file():
             logger.info("Using local video file: %s", video_url)
             temp_video_path = local_path

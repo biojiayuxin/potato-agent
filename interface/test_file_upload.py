@@ -15,6 +15,8 @@ import interface.display_store as display_store_mod
 import interface.mapping as mapping_mod
 import interface.runtime_state as runtime_state_mod
 from interface import app as interface_app_mod
+from interface.file_stream_worker import build_file_stream_worker_command
+from interface.file_upload_worker import build_file_upload_worker_command
 
 
 class _DummyBridgeRegistry:
@@ -202,6 +204,22 @@ users:
         lambda user_id: runtime_state_mod.mark_foreground_activity(user_id, db_path=auth_db),
     )
     monkeypatch.setattr(interface_app_mod.os, "geteuid", lambda: 0)
+    monkeypatch.setattr(
+        interface_app_mod,
+        "build_file_stream_worker_command",
+        lambda **kwargs: build_file_stream_worker_command(
+            **kwargs,
+            use_runuser=False,
+        ),
+    )
+    monkeypatch.setattr(
+        interface_app_mod,
+        "build_file_upload_worker_command",
+        lambda **kwargs: build_file_upload_worker_command(
+            **kwargs,
+            use_runuser=False,
+        ),
+    )
     interface_app_mod.privileged_client.force_helper = False
     interface_app_mod.app.state.tui_gateway_bridges = _DummyBridgeRegistry()
 

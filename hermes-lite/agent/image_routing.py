@@ -435,6 +435,8 @@ def _file_to_data_url(path: Path) -> Optional[str]:
     denied, etc.); the caller reports those paths in ``skipped``.
     """
     try:
+        from agent.file_safety import raise_if_read_blocked
+        raise_if_read_blocked(str(path))
         raw = path.read_bytes()
     except Exception as exc:
         logger.warning("image_routing: failed to read %s — %s", path, exc)
@@ -489,6 +491,12 @@ def build_native_content_parts(
 
     for raw_path in image_paths:
         p = Path(raw_path)
+        try:
+            from agent.file_safety import raise_if_read_blocked
+            raise_if_read_blocked(str(p))
+        except ValueError:
+            skipped.append(str(raw_path))
+            continue
         if not p.exists() or not p.is_file():
             skipped.append(str(raw_path))
             continue

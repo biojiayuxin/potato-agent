@@ -138,6 +138,31 @@ class PubmedAdapterTests(unittest.TestCase):
             },
         )
 
+    def test_malformed_esearch_response_retries_the_complete_request(self) -> None:
+        malformed = {"esearchresult": {"idlist": "temporarily malformed"}}
+        valid = {"esearchresult": {"count": "0", "idlist": []}}
+        with (
+            patch.object(
+                run_pipeline,
+                "_http_json",
+                side_effect=[malformed, valid],
+            ) as search,
+            patch.object(run_pipeline, "_http_text") as fetch,
+            patch.object(run_pipeline.time, "sleep") as sleep,
+        ):
+            result = run_pipeline.fetch_pubmed(
+                "CBF3 Arabidopsis",
+                base_url="https://pubmed.example/eutils",
+                limit=20,
+                timeout=5,
+                retries=1,
+            )
+
+        self.assertEqual(result, {"total": 0, "data": []})
+        self.assertEqual(search.call_count, 2)
+        fetch.assert_not_called()
+        sleep.assert_called_once_with(1.0)
+
     def test_efetch_xml_is_parsed_into_compatible_paper_records(self) -> None:
         search_response = {
             "esearchresult": {"count": "2", "idlist": ["123", "456"]}
@@ -223,6 +248,50 @@ class PubmedAdapterTests(unittest.TestCase):
         parsed = urllib.parse.urlsplit(fetch_url)
         self.assertEqual(parsed.path, "/eutils/efetch.fcgi")
         self.assertEqual(urllib.parse.parse_qs(parsed.query)["id"], ["123,456"])
+
+    def test_invalid_efetch_xml_retries_esearch_and_efetch(self) -> None:
+        search_response = {
+            "esearchresult": {"count": "1", "idlist": ["123"]}
+        }
+        valid_xml = """
+        <PubmedArticleSet>
+          <PubmedArticle>
+            <MedlineCitation>
+              <PMID>123</PMID>
+              <Article><ArticleTitle>Recovered article</ArticleTitle></Article>
+            </MedlineCitation>
+          </PubmedArticle>
+        </PubmedArticleSet>
+        """
+        with (
+            patch.object(
+                run_pipeline,
+                "_http_json",
+                return_value=search_response,
+            ) as search,
+            patch.object(
+                run_pipeline,
+                "_http_text",
+                side_effect=[
+                    ("<PubmedArticleSet>\x00", "https://pubmed.example/invalid"),
+                    (valid_xml, "https://pubmed.example/valid"),
+                ],
+            ) as fetch,
+            patch.object(run_pipeline.time, "sleep") as sleep,
+        ):
+            result = run_pipeline.fetch_pubmed(
+                "CBF3 Arabidopsis",
+                base_url="https://pubmed.example/eutils",
+                limit=20,
+                timeout=5,
+                retries=1,
+            )
+
+        self.assertEqual(result["total"], 1)
+        self.assertEqual(result["data"][0]["pmid"], "123")
+        self.assertEqual(search.call_count, 2)
+        self.assertEqual(fetch.call_count, 2)
+        sleep.assert_called_once_with(1.0)
 
 
 if __name__ == "__main__":

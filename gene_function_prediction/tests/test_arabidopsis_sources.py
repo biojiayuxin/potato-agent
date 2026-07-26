@@ -197,6 +197,7 @@ class TairSourceTests(unittest.TestCase):
         self.assertEqual(result["status"], "not_found")
         self.assertNotIn("selected", result["tair"])
         self.assertEqual(result["tair"]["exact_candidates"], [])
+        run_pipeline.validate_arabidopsis_tair_source(result, "AT4G25480")
 
 
 class PlantConnectomeSourceTests(unittest.TestCase):
@@ -298,6 +299,76 @@ class PlantConnectomeSourceTests(unittest.TestCase):
             plant["entities"][0]["edges"],
             edge_payload[:5],
         )
+
+    def test_one_missing_entity_detail_keeps_recovered_edges(self) -> None:
+        rows = [["GOOD", "gene name"], ["MISSING", "gene name"]]
+        preview_html = (
+            'const unique_id = "uid-partial";\n'
+            "const allRowsData = cached ? cached.preview_results : "
+            f"{json.dumps(rows)};\n"
+            "/* build entityNodeMap */"
+        )
+        detail_html = (
+            'const g = "[{\'id\': \'GOOD\', \'target\': \'response\', '
+            '\'inter_type\': \'regulates\', \'publication\': \'12345678\'}]";\n'
+        )
+
+        with patch.object(
+            run_pipeline,
+            "_http_text",
+            side_effect=[
+                (preview_html, "https://plant.connectome.tools/normal/TEST"),
+                (detail_html, "https://plant.connectome.tools/good"),
+                ("<html>detail unavailable</html>", "https://plant.connectome.tools/missing"),
+            ],
+        ):
+            result = run_pipeline.fetch_plantconnectome(
+                "TEST",
+                max_entities=10,
+                max_edges=5,
+                timeout=5,
+                retries=0,
+                deadline=60,
+            )
+
+        self.assertEqual(result["status"], "ok")
+        plant = result["plantconnectome"]
+        self.assertEqual(len(plant["entities"]), 2)
+        self.assertEqual(plant["entities"][0]["edge_count_total"], 1)
+        self.assertIn("missing the edge payload", plant["entities"][1]["error"])
+        run_pipeline.validate_plantconnectome_source(result)
+
+    def test_missing_entity_details_without_any_edges_are_not_found(self) -> None:
+        rows = [["MISSING", "gene name"]]
+        preview_html = (
+            'const unique_id = "uid-missing";\n'
+            "const allRowsData = cached ? cached.preview_results : "
+            f"{json.dumps(rows)};\n"
+            "/* build entityNodeMap */"
+        )
+        with patch.object(
+            run_pipeline,
+            "_http_text",
+            side_effect=[
+                (preview_html, "https://plant.connectome.tools/normal/TEST"),
+                ("<html>detail unavailable</html>", "https://plant.connectome.tools/missing"),
+            ],
+        ):
+            result = run_pipeline.fetch_plantconnectome(
+                "TEST",
+                max_entities=10,
+                max_edges=5,
+                timeout=5,
+                retries=0,
+                deadline=60,
+            )
+
+        self.assertEqual(result["status"], "not_found")
+        plant = result["plantconnectome"]
+        self.assertEqual(plant["status"], "not_found")
+        self.assertEqual(plant["entities"][0]["edges"], [])
+        self.assertIn("no usable entity details", plant["message"])
+        run_pipeline.validate_plantconnectome_source(result)
 
 
 if __name__ == "__main__":

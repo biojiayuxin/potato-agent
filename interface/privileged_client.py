@@ -1,11 +1,9 @@
 from __future__ import annotations
 
-import base64
 import json
 import os
 import subprocess
 import sys
-from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -33,6 +31,7 @@ from interface.model_options import (
 )
 from interface.model_proxy_config import get_model_proxy_base_url
 from interface.process_utils import SESSION_DB_HELPER_TIMEOUT_SECONDS, run_process_group
+from interface.redaction import force_redact_text
 from interface.runtime_state import (
     DEFAULT_RUNTIME_IDLE_TIMEOUT_SECONDS,
     claim_runtime_sleep,
@@ -42,16 +41,11 @@ from interface.runtime_state import (
     revoke_runtime_session,
     runtime_sleep_claim_is_valid,
 )
+from interface.subprocess_env import interface_subprocess_env
 
 
 class PrivilegedClientError(RuntimeError):
     pass
-
-
-@dataclass(frozen=True)
-class FileDownload:
-    filename: str
-    content: bytes
 
 
 def build_direct_tui_gateway_command(target: HermesTarget) -> list[str]:
@@ -88,6 +82,7 @@ def build_direct_tui_gateway_command(target: HermesTarget) -> list[str]:
         target.linux_user,
         "--",
         "env",
+        "-i",
         f"HOME={target.home_dir}",
         f"HERMES_HOME={target.hermes_home}",
         f"TERMINAL_CWD={target.workdir}",
@@ -143,6 +138,7 @@ class PrivilegedClient:
                     text=True,
                     input=input_text,
                     check=False,
+                    env=interface_subprocess_env(),
                 )
             else:
                 result = run_process_group(
@@ -158,14 +154,16 @@ class PrivilegedClient:
         raw_payload = stdout_lines[-1] if stdout_lines else ""
         if not raw_payload:
             detail = result.stderr.strip() or result.stdout.strip() or f"exit code {result.returncode}"
-            raise PrivilegedClientError(detail)
+            raise PrivilegedClientError(force_redact_text(detail))
         try:
             payload = json.loads(raw_payload)
         except json.JSONDecodeError as exc:
             detail = result.stderr.strip() or raw_payload
-            raise PrivilegedClientError(detail) from exc
+            raise PrivilegedClientError(force_redact_text(detail)) from exc
         if not isinstance(payload, dict) or not payload.get("ok"):
-            raise PrivilegedClientError(str(payload.get("error") or "privileged helper failed"))
+            raise PrivilegedClientError(
+                force_redact_text(payload.get("error") or "privileged helper failed")
+            )
         return payload
 
     def provision_user(
@@ -398,55 +396,7 @@ class PrivilegedClient:
             ]
         )
 
-    def file_download(
-        self,
-        username: str,
-        *,
-        mode: str,
-        root: str | None,
-        path: str,
-    ) -> FileDownload:
-        payload = self._call_helper(
-            [
-                "file-download",
-                "--username",
-                username,
-                "--mode",
-                mode,
-                "--root",
-                root or "",
-                "--path",
-                path,
-            ]
-        )
-        return FileDownload(
-            filename=str(payload.get("filename") or Path(path).name or "download.bin"),
-            content=base64.b64decode(str(payload.get("content_b64") or "")),
-        )
-
-    def file_info(
-        self,
-        username: str,
-        *,
-        mode: str,
-        root: str | None,
-        path: str,
-    ) -> dict[str, Any]:
-        return self._call_helper(
-            [
-                "file-info",
-                "--username",
-                username,
-                "--mode",
-                mode,
-                "--root",
-                root or "",
-                "--path",
-                path,
-            ]
-        )
-
-    def file_stream_command(
+    def file_stream_v2_command(
         self,
         username: str,
         *,
@@ -456,7 +406,7 @@ class PrivilegedClient:
     ) -> list[str]:
         return self.helper_exec_command(
             [
-                "file-stream",
+                "file-stream-v2",
                 "--username",
                 username,
                 "--mode",
@@ -468,15 +418,15 @@ class PrivilegedClient:
             ]
         )
 
-    def file_upload(
+    def file_upload_command(
         self,
         username: str,
         *,
         filename: str,
-        content: bytes,
         upload_dir_name: str,
-    ) -> dict[str, Any]:
-        return self._call_helper(
+        max_bytes: int,
+    ) -> list[str]:
+        return self.helper_exec_command(
             [
                 "file-upload",
                 "--username",
@@ -485,8 +435,9 @@ class PrivilegedClient:
                 filename,
                 "--upload-dir-name",
                 upload_dir_name,
+                "--max-bytes",
+                str(max_bytes),
             ],
-            input_text=base64.b64encode(content).decode("ascii"),
         )
 
     def tui_gateway_command(self, target: HermesTarget) -> list[str]:

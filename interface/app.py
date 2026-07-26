@@ -12,8 +12,10 @@ import pwd
 import sqlite3
 import re
 import secrets
+import select
 import subprocess
 import sys
+import threading
 import time
 import uuid
 from dataclasses import dataclass
@@ -105,10 +107,18 @@ from interface.display_store import (
     list_display_session_metas,
     save_display_messages,
 )
+from interface import file_browser_policy
 from interface.file_browser_policy import (
     FileBrowserAccessError,
     authorize_file_browser_path,
     normalize_file_browser_mode,
+)
+from interface.file_stream_worker import build_file_stream_worker_command
+from interface.file_upload_worker import (
+    HARD_MAX_UPLOAD_BYTES,
+    UploadTooLargeError,
+    build_file_upload_worker_command,
+    run_upload_command,
 )
 from interface.hermes_profile import DEFAULT_HERMES_LITE_PYTHON
 from interface.mapping import DEFAULT_MAPPING_PATH, HermesTarget, MappingStore
@@ -143,6 +153,9 @@ from interface.runtime_state import (
     runtime_sleep_claim_is_valid,
     temporary_cleanup_claim_is_valid,
 )
+from interface.request_limits import RequestBodyLimitMiddleware
+from interface.redaction import force_redact_value
+from interface.subprocess_env import interface_subprocess_env
 from interface.model_options import (
     ModelOptionsError,
     normalize_model_options,
@@ -187,11 +200,20 @@ SESSION_SECRET = os.getenv("INTERFACE_SESSION_SECRET") or secrets.token_urlsafe(
 SESSION_TTL_SECONDS = int(
     os.getenv("INTERFACE_SESSION_TTL_SECONDS", str(7 * 24 * 3600))
 )
-MAX_UPLOAD_SIZE_BYTES = int(
-    os.getenv("INTERFACE_MAX_UPLOAD_BYTES", str(200 * 1024 * 1024))
+MAX_UPLOAD_SIZE_BYTES = min(
+    int(os.getenv("INTERFACE_MAX_UPLOAD_BYTES", str(HARD_MAX_UPLOAD_BYTES))),
+    HARD_MAX_UPLOAD_BYTES,
 )
 MAX_PREVIEW_SIZE_BYTES = int(
     os.getenv("INTERFACE_MAX_PREVIEW_BYTES", str(10 * 1024 * 1024))
+)
+FILE_STREAM_METADATA_MAX_BYTES = 64 * 1024
+FILE_STREAM_IDLE_TIMEOUT_SECONDS = 30.0
+MAX_DOWNLOADS_PER_USER = 2
+MAX_DOWNLOADS_GLOBAL = 16
+MAX_WEBSOCKET_RPC_BYTES = 64 * 1024
+BROWSER_WEBSOCKET_METHODS = frozenset(
+    {"session.create", "session.resume", "session.title"}
 )
 FILE_BROWSER_MODE = (
     os.getenv("INTERFACE_FILE_BROWSER_MODE", "home_only").strip().lower()
@@ -850,10 +872,10 @@ def _probe_path_as_user(path: Path, *, linux_user: str) -> dict[str, Any]:
         capture_output=True,
         text=True,
         check=False,
+        env=interface_subprocess_env(),
     )
     if result.returncode != 0:
-        detail = result.stderr.strip() or result.stdout.strip() or "path probe failed"
-        raise HTTPException(status_code=500, detail=detail)
+        raise HTTPException(status_code=500, detail="Path probe failed")
     try:
         payload = json.loads(result.stdout.strip() or "{}")
     except json.JSONDecodeError as exc:
@@ -932,10 +954,10 @@ def _list_directory_as_user(
         capture_output=True,
         text=True,
         check=False,
+        env=interface_subprocess_env(),
     )
     if result.returncode != 0:
-        detail = result.stderr.strip() or result.stdout.strip() or "directory access failed"
-        raise HTTPException(status_code=500, detail=detail)
+        raise HTTPException(status_code=500, detail="Directory access failed")
 
     try:
         payload = json.loads(result.stdout.strip() or "{}")
@@ -1012,6 +1034,7 @@ class _UserSessionDBProxy:
                         self.spec.linux_user,
                         "--",
                         "env",
+                        "-i",
                         f"HOME={self.spec.home_dir}",
                         f"HERMES_HOME={self.spec.hermes_home}",
                         f"TERMINAL_CWD={self.spec.workdir}",
@@ -1223,8 +1246,12 @@ def _apply_session_title_fallback(
     draft_title = str((display_meta or {}).get("draft_title") or "").strip()
     if hermes_title:
         normalized["title"] = hermes_title
+        normalized["title_source"] = "hermes_root"
     elif draft_title:
         normalized["title"] = draft_title
+        normalized["title_source"] = "draft"
+    else:
+        normalized["title_source"] = "fallback"
     return normalized
 
 
@@ -1362,11 +1389,19 @@ def _normalize_logical_session_row(
     ).strip()
 
     root_title = str((logical_session or {}).get("title") or "").strip()
+    tip_title = str(session.get("title") or "").strip()
     draft_title = str((display_meta or {}).get("draft_title") or "").strip()
     if root_title:
         normalized["title"] = root_title
+        normalized["title_source"] = "hermes_root"
+    elif tip_title:
+        normalized["title"] = tip_title
+        normalized["title_source"] = "hermes_tip"
     elif draft_title:
         normalized["title"] = draft_title
+        normalized["title_source"] = "draft"
+    else:
+        normalized["title_source"] = "fallback"
 
     normalized["live"] = live_state
     normalized["is_running"] = bool(
@@ -1729,12 +1764,19 @@ def _export_markdown_filename(title: str, session_id: str) -> str:
 
 def _session_export_title(
     logical_session: dict[str, Any] | None,
+    projected_session: dict[str, Any] | None,
     display_meta: dict[str, Any] | None,
     session_id: str,
 ) -> str:
     root_title = _markdown_single_line((logical_session or {}).get("title"), "")
+    tip_title = _markdown_single_line((projected_session or {}).get("title"), "")
     draft_title = _markdown_single_line((display_meta or {}).get("draft_title"), "")
-    return root_title or draft_title or f"Chat {str(session_id or '').strip() or 'export'}"
+    return (
+        root_title
+        or tip_title
+        or draft_title
+        or f"Chat {str(session_id or '').strip() or 'export'}"
+    )
 
 
 def _display_message_bucket_key(message: dict[str, Any]) -> str:
@@ -2546,25 +2588,174 @@ def _normalize_file_size(value: Any) -> int:
         return 0
 
 
-def _load_direct_file_preview_info(
+@dataclass
+class _OpenFileStream:
+    process: subprocess.Popen[bytes]
+    metadata: dict[str, Any]
+    prefetched: bytes = b""
+
+
+class _DownloadLimiter:
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._total = 0
+        self._by_user: dict[str, int] = {}
+
+    def acquire(self, user_id: str) -> bool:
+        with self._lock:
+            user_count = self._by_user.get(user_id, 0)
+            if self._total >= MAX_DOWNLOADS_GLOBAL or user_count >= MAX_DOWNLOADS_PER_USER:
+                return False
+            self._total += 1
+            self._by_user[user_id] = user_count + 1
+            return True
+
+    def release(self, user_id: str) -> None:
+        with self._lock:
+            user_count = self._by_user.get(user_id, 0)
+            if user_count <= 0:
+                return
+            self._total = max(0, self._total - 1)
+            if user_count == 1:
+                self._by_user.pop(user_id, None)
+            else:
+                self._by_user[user_id] = user_count - 1
+
+
+_DOWNLOAD_LIMITER = _DownloadLimiter()
+
+
+def _terminate_file_stream(opened: _OpenFileStream) -> None:
+    process = opened.process
+    if process.poll() is None:
+        with contextlib.suppress(ProcessLookupError):
+            process.kill()
+    with contextlib.suppress(subprocess.TimeoutExpired):
+        process.wait(timeout=2)
+    if process.stdout is not None:
+        process.stdout.close()
+    if process.stderr is not None:
+        process.stderr.close()
+
+
+def _read_file_stream_metadata(process: subprocess.Popen[bytes]) -> tuple[dict[str, Any], bytes]:
+    if process.stdout is None:
+        raise RuntimeError("file stream did not provide stdout")
+    fd = process.stdout.fileno()
+    buffer = bytearray()
+    deadline = time.monotonic() + FILE_STREAM_IDLE_TIMEOUT_SECONDS
+    while b"\n" not in buffer:
+        if len(buffer) > FILE_STREAM_METADATA_MAX_BYTES:
+            raise RuntimeError("file stream metadata is too large")
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise RuntimeError("file stream metadata timed out")
+        readable, _, _ = select.select([fd], [], [], remaining)
+        if not readable:
+            raise RuntimeError("file stream metadata timed out")
+        chunk = os.read(fd, min(4096, FILE_STREAM_METADATA_MAX_BYTES + 1 - len(buffer)))
+        if not chunk:
+            raise RuntimeError("file stream ended before metadata")
+        buffer.extend(chunk)
+
+    header, prefetched = bytes(buffer).split(b"\n", 1)
+    if len(header) > FILE_STREAM_METADATA_MAX_BYTES:
+        raise RuntimeError("file stream metadata is too large")
+    try:
+        metadata = json.loads(header.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise RuntimeError("invalid file stream metadata") from exc
+    if not isinstance(metadata, dict) or metadata.get("protocol") != "file-stream-v2":
+        raise RuntimeError("invalid file stream protocol")
+    size = metadata.get("size")
+    if isinstance(size, bool) or not isinstance(size, int) or size < 0:
+        raise RuntimeError("invalid file stream size")
+    filename = Path(str(metadata.get("filename") or "download.bin")).name
+    if not filename:
+        filename = "download.bin"
+    metadata["filename"] = filename
+    return metadata, prefetched
+
+
+def _open_file_stream(command: list[str]) -> _OpenFileStream:
+    process = subprocess.Popen(
+        command,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        bufsize=0,
+        env=interface_subprocess_env(),
+    )
+    opened = _OpenFileStream(process=process, metadata={})
+    try:
+        metadata, prefetched = _read_file_stream_metadata(process)
+        opened.metadata = metadata
+        opened.prefetched = prefetched
+        return opened
+    except BaseException:
+        _terminate_file_stream(opened)
+        raise
+
+
+def _file_stream_command_for_user(
     user: CurrentUser,
     *,
     root: str | None,
     path: str,
-) -> tuple[dict[str, Any], Path]:
+) -> list[str]:
+    mode = _normalized_file_browser_mode()
     browser_root = _resolve_file_browser_root(user, root)
-    _, target = _resolve_file_browser_target(browser_root, path)
-    target = _authorize_file_browser_target(user, target)
-    _assert_user_can_read_file(target, linux_user=user.target.linux_user)
-    stat_result = target.stat()
-    return (
-        {
-            "filename": target.name,
-            "size": int(stat_result.st_size),
-            "modified": int(stat_result.st_mtime),
-        },
-        target,
+    relative_path = _normalize_relative_browser_path(path)
+    requested_path = browser_root / relative_path
+    _authorize_file_browser_target(user, requested_path)
+
+    if _use_privileged_file_helper():
+        return privileged_client.file_stream_v2_command(
+            user.target.username,
+            mode=mode,
+            root=str(browser_root),
+            path=relative_path,
+        )
+    return build_file_stream_worker_command(
+        linux_user=user.target.linux_user,
+        home=user.target.home_dir,
+        browser_root=browser_root,
+        requested_path=requested_path,
+        mode=mode,
+        public_data_root=file_browser_policy.DEFAULT_PUBLIC_DATA_PATH,
     )
+
+
+def _open_user_file_stream(
+    user: CurrentUser,
+    *,
+    root: str | None,
+    path: str,
+) -> _OpenFileStream:
+    return _open_file_stream(_file_stream_command_for_user(user, root=root, path=path))
+
+
+def _preview_info_from_metadata(
+    metadata: dict[str, Any],
+    *,
+    path: str,
+    root: str | None,
+) -> dict[str, Any]:
+    filename = Path(str(metadata.get("filename") or path or "preview.bin")).name
+    size = _normalize_file_size(metadata.get("size"))
+    mime_type = _guess_preview_mime_type(filename)
+    preview_type = _classify_preview_type(filename, mime_type)
+    too_large = size > MAX_PREVIEW_SIZE_BYTES
+    return {
+        "filename": filename,
+        "size": size,
+        "modified": _normalize_file_size(metadata.get("modified")),
+        "mime_type": mime_type,
+        "preview_type": "too_large" if too_large else preview_type,
+        "raw_preview_type": preview_type,
+        "preview_limit": MAX_PREVIEW_SIZE_BYTES,
+        "too_large": too_large,
+        "download_url": _build_file_download_url(path=path, root=root),
+    }
 
 
 async def _load_file_preview_context(
@@ -2572,47 +2763,20 @@ async def _load_file_preview_context(
     path: str,
     root: str | None,
     user: CurrentUser,
-) -> tuple[dict[str, Any], Path | None]:
-    mode = _normalized_file_browser_mode()
-    target: Path | None = None
-    if _use_privileged_file_helper():
-        try:
-            info = await asyncio.to_thread(
-                privileged_client.file_info,
-                user.target.username,
-                mode=mode,
-                root=root,
-                path=path,
-            )
-        except PrivilegedClientError as exc:
-            raise HTTPException(status_code=403, detail=str(exc)) from exc
-    else:
-        info, target = await asyncio.to_thread(
-            _load_direct_file_preview_info,
+) -> dict[str, Any]:
+    try:
+        opened = await asyncio.to_thread(
+            _open_user_file_stream,
             user,
             root=root,
             path=path,
         )
-
-    filename = Path(str(info.get("filename") or path or "preview.bin")).name
-    size = _normalize_file_size(info.get("size"))
-    mime_type = _guess_preview_mime_type(filename)
-    preview_type = _classify_preview_type(filename, mime_type)
-    too_large = size > MAX_PREVIEW_SIZE_BYTES
-    return (
-        {
-            "filename": filename,
-            "size": size,
-            "modified": _normalize_file_size(info.get("modified")),
-            "mime_type": mime_type,
-            "preview_type": "too_large" if too_large else preview_type,
-            "raw_preview_type": preview_type,
-            "preview_limit": MAX_PREVIEW_SIZE_BYTES,
-            "too_large": too_large,
-            "download_url": _build_file_download_url(path=path, root=root),
-        },
-        target,
-    )
+    except (OSError, RuntimeError, PrivilegedClientError) as exc:
+        raise HTTPException(status_code=403, detail="File access denied") from exc
+    try:
+        return _preview_info_from_metadata(opened.metadata, path=path, root=root)
+    finally:
+        await asyncio.to_thread(_terminate_file_stream, opened)
 
 
 def _build_file_download_url(*, path: str, root: str | None) -> str:
@@ -2640,91 +2804,51 @@ def _ensure_previewable_size(info: dict[str, Any]) -> None:
         )
 
 
-def _read_direct_file_bytes(path: Path, max_bytes: int) -> bytes:
-    chunks: list[bytes] = []
-    total = 0
-    with path.open("rb") as handle:
-        while True:
-            chunk = handle.read(1024 * 1024)
-            if not chunk:
-                break
-            total += len(chunk)
-            if total > max_bytes:
-                raise HTTPException(status_code=413, detail="File is too large to preview.")
-            chunks.append(chunk)
-    return b"".join(chunks)
-
-
-def _read_stream_command_bytes(command: list[str], max_bytes: int) -> bytes:
-    process = subprocess.Popen(
-        command,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-    )
-    assert process.stdout is not None
-    chunks: list[bytes] = []
-    total = 0
-    try:
-        while True:
-            chunk = process.stdout.read(1024 * 1024)
-            if not chunk:
-                break
-            total += len(chunk)
-            if total > max_bytes:
-                process.kill()
-                raise HTTPException(status_code=413, detail="File is too large to preview.")
-            chunks.append(chunk)
-        returncode = process.wait()
-        if returncode != 0:
-            stderr = ""
-            if process.stderr is not None:
-                stderr = process.stderr.read().decode("utf-8", errors="replace").strip()
-            raise RuntimeError(stderr or f"file preview failed with exit code {returncode}")
-        return b"".join(chunks)
-    finally:
-        if process.poll() is None:
-            process.kill()
-        if process.stderr is not None:
-            process.stderr.close()
-        process.stdout.close()
-
-
-async def _read_preview_file_bytes(
+def _iter_open_file_stream(
+    opened: _OpenFileStream,
     *,
-    path: str,
-    root: str | None,
-    user: CurrentUser,
-    target: Path | None,
-) -> bytes:
-    if target is not None:
-        return await asyncio.to_thread(
-            _read_direct_file_bytes,
-            target,
-            MAX_PREVIEW_SIZE_BYTES,
-        )
-
-    command = privileged_client.file_stream_command(
-        user.target.username,
-        mode=_normalized_file_browser_mode(),
-        root=root,
-        path=path,
-    )
-    return await asyncio.to_thread(
-        _read_stream_command_bytes,
-        command,
-        MAX_PREVIEW_SIZE_BYTES,
-    )
-
-
-def _apply_file_permissions(path: Path, *, linux_user: str, is_dir: bool) -> None:
+    max_bytes: int | None = None,
+    download_user_id: str | None = None,
+) -> Iterator[bytes]:
+    process = opened.process
+    assert process.stdout is not None
+    total = 0
     try:
-        pw = pwd.getpwnam(linux_user)
-        os.chown(path, pw.pw_uid, pw.pw_gid)
-        os.chmod(path, 0o700 if is_dir else 0o600)
-    except PermissionError:
-        os.chmod(path, 0o755 if is_dir else 0o644)
-    except KeyError:
-        os.chmod(path, 0o755 if is_dir else 0o644)
+        if opened.prefetched:
+            total += len(opened.prefetched)
+            if max_bytes is not None and total > max_bytes:
+                raise HTTPException(status_code=413, detail="File is too large to preview.")
+            yield opened.prefetched
+            opened.prefetched = b""
+
+        fd = process.stdout.fileno()
+        while True:
+            readable, _, _ = select.select(
+                [fd],
+                [],
+                [],
+                FILE_STREAM_IDLE_TIMEOUT_SECONDS,
+            )
+            if not readable:
+                raise RuntimeError("file stream timed out")
+            chunk = os.read(fd, 1024 * 1024)
+            if not chunk:
+                break
+            total += len(chunk)
+            if max_bytes is not None and total > max_bytes:
+                raise HTTPException(status_code=413, detail="File is too large to preview.")
+            yield chunk
+        returncode = process.wait(timeout=2)
+        if returncode != 0 or total != int(opened.metadata["size"]):
+            raise RuntimeError("file stream failed")
+    finally:
+        _terminate_file_stream(opened)
+        if download_user_id is not None:
+            _DOWNLOAD_LIMITER.release(download_user_id)
+
+
+def _read_open_file_stream_bytes(opened: _OpenFileStream, max_bytes: int) -> bytes:
+    return b"".join(_iter_open_file_stream(opened, max_bytes=max_bytes))
 
 
 async def _get_tui_bridge_for_user(user: CurrentUser) -> TuiGatewayBridge:
@@ -2733,59 +2857,6 @@ async def _get_tui_bridge_for_user(user: CurrentUser) -> TuiGatewayBridge:
     session_run_manager: SessionRunManager = app.state.session_run_manager
     await session_run_manager.attach_bridge(bridge)
     return bridge
-
-
-def _ensure_upload_root(user: CurrentUser) -> Path:
-    upload_dir_name = Path(UPLOAD_DIR_NAME)
-    if upload_dir_name.is_absolute():
-        upload_root = (upload_dir_name / user.target.username).resolve()
-    else:
-        upload_root = (_get_user_workspace_root(user) / upload_dir_name).resolve()
-    upload_root.mkdir(parents=True, exist_ok=True)
-    _apply_file_permissions(upload_root, linux_user=user.target.linux_user, is_dir=True)
-    return upload_root
-
-
-def _store_direct_upload(
-    user: CurrentUser,
-    *,
-    filename: str,
-    source: Any,
-) -> dict[str, Any]:
-    upload_root = _ensure_upload_root(user)
-    safe_name = _sanitize_filename(filename)
-    timestamp = datetime.now().strftime("%Y%m%d%H%M%S")
-    file_id = uuid.uuid4().hex
-    destination = upload_root / f"{file_id}_{timestamp}_{safe_name}"
-    total_size = 0
-    try:
-        with destination.open("wb") as handle:
-            while True:
-                chunk = source.read(1024 * 1024)
-                if not chunk:
-                    break
-                total_size += len(chunk)
-                if total_size > MAX_UPLOAD_SIZE_BYTES:
-                    raise HTTPException(
-                        status_code=413,
-                        detail=_upload_file_too_large_detail(),
-                    )
-                handle.write(chunk)
-    except BaseException:
-        with contextlib.suppress(FileNotFoundError):
-            destination.unlink()
-        raise
-    _apply_file_permissions(
-        destination,
-        linux_user=user.target.linux_user,
-        is_dir=False,
-    )
-    return {
-        "id": file_id,
-        "name": safe_name,
-        "size": total_size,
-        "path": str(destination),
-    }
 
 
 def _use_privileged_file_helper() -> bool:
@@ -2825,7 +2896,7 @@ app.include_router(wgcna_viewer_router)
 
 
 def _should_refresh_activity_for_request(request: Request) -> bool:
-    path = request.url.path
+    path = str(request.scope.get("path") or "")
     if not path.startswith("/api/"):
         return False
     if path.startswith("/api/spatial/"):
@@ -2856,6 +2927,15 @@ def _should_refresh_activity_for_request(request: Request) -> bool:
     if path.startswith("/api/auth/signup/"):
         return False
     return True
+
+
+def _interface_request_body_limit(scope: dict[str, Any]) -> int:
+    path = str(scope.get("path") or "")
+    if path == "/api/files/upload":
+        return HARD_MAX_UPLOAD_BYTES + 1024 * 1024
+    if re.fullmatch(r"/api/sessions/[^/]+/display", path):
+        return 16 * 1024 * 1024
+    return 2 * 1024 * 1024
 
 
 @app.middleware("http")
@@ -2973,11 +3053,16 @@ async def tui_gateway_websocket(websocket: WebSocket) -> None:
     user = await get_current_user_ws(websocket)
     bridge = await _get_tui_bridge_for_user(user)
     await websocket.accept()
-    await bridge.add_subscriber(websocket)
+    if not await bridge.add_subscriber(websocket):
+        await websocket.close(code=4429, reason="Too many active connections")
+        return
 
     try:
         while True:
             raw = await websocket.receive_text()
+            if len(raw.encode("utf-8")) > MAX_WEBSOCKET_RPC_BYTES:
+                await websocket.close(code=1009, reason="RPC message too large")
+                return
             try:
                 payload = json.loads(raw)
             except json.JSONDecodeError:
@@ -3007,28 +3092,40 @@ async def tui_gateway_websocket(websocket: WebSocket) -> None:
                     )
                 )
                 continue
-
-            try:
-                result = await bridge.rpc(method, params)
-            except TuiGatewayBridgeError as exc:
+            if method not in BROWSER_WEBSOCKET_METHODS:
                 await websocket.send_text(
                     json.dumps(
                         {
                             "type": "rpc.error",
                             "id": request_id,
-                            "payload": {"message": str(exc)},
+                            "payload": {"message": "Method is not allowed"},
                         },
                         ensure_ascii=False,
                     )
                 )
                 continue
-            except Exception as exc:
+
+            try:
+                result = await bridge.rpc(method, params)
+            except TuiGatewayBridgeError:
                 await websocket.send_text(
                     json.dumps(
                         {
                             "type": "rpc.error",
                             "id": request_id,
-                            "payload": {"message": f"Bridge failure: {exc}"},
+                            "payload": {"message": "Gateway request failed"},
+                        },
+                        ensure_ascii=False,
+                    )
+                )
+                continue
+            except Exception:
+                await websocket.send_text(
+                    json.dumps(
+                        {
+                            "type": "rpc.error",
+                            "id": request_id,
+                            "payload": {"message": "Gateway request failed"},
                         },
                         ensure_ascii=False,
                     )
@@ -3040,7 +3137,7 @@ async def tui_gateway_websocket(websocket: WebSocket) -> None:
                     {
                         "type": "rpc.result",
                         "id": request_id,
-                        "payload": result,
+                        "payload": force_redact_value(result),
                     },
                     ensure_ascii=False,
                 )
@@ -3748,7 +3845,7 @@ def _load_normalized_sessions_sync(
                     "id": logical_session_id,
                     "source": "tui",
                     "model": "",
-                    "title": str(display_meta.get("draft_title") or "").strip(),
+                    "title": "",
                     "preview": "",
                     "started_at": int(display_meta.get("created_at") or 0),
                     "last_active": int(
@@ -3928,7 +4025,7 @@ async def _build_submitted_turn_response(
             "id": session_id,
             "source": "tui",
             "model": "",
-            "title": str((display_meta or {}).get("draft_title") or ""),
+            "title": "",
             "preview": "",
             "started_at": int((display_meta or {}).get("created_at") or 0),
             "last_active": int((display_meta or {}).get("updated_at") or 0),
@@ -4006,7 +4103,7 @@ async def get_session_detail(
             "id": session_id,
             "source": "tui",
             "model": "",
-            "title": str(display_meta_fallback.get("draft_title") or "").strip(),
+            "title": "",
             "preview": "",
             "started_at": int(display_meta_fallback.get("created_at") or 0),
             "last_active": int(display_meta_fallback.get("updated_at") or 0),
@@ -4075,7 +4172,7 @@ async def export_session_markdown(
         logical_session_id,
         logical_session,
         _,
-        _,
+        projected_session,
         raw_messages,
     ) = session_context
     if not logical_session or not _is_interface_managed_source(
@@ -4095,6 +4192,7 @@ async def export_session_markdown(
         display_messages = _build_fallback_display_messages(raw_messages)
     export_title = _session_export_title(
         logical_session,
+        projected_session,
         display_meta or display_meta_fallback,
         logical_session_id,
     )
@@ -4755,7 +4853,7 @@ async def files_preview_meta(
     root: str | None = None,
     user: CurrentUser = Depends(get_current_user),
 ) -> dict[str, Any]:
-    info, _ = await _load_file_preview_context(path=path, root=root, user=user)
+    info = await _load_file_preview_context(path=path, root=root, user=user)
     if not info["too_large"] and info["raw_preview_type"] in {"image", "pdf"}:
         info["content_url"] = _build_file_preview_content_url(path=path, root=root)
     return info
@@ -4767,17 +4865,29 @@ async def files_preview_text(
     root: str | None = None,
     user: CurrentUser = Depends(get_current_user),
 ) -> dict[str, Any]:
-    info, target = await _load_file_preview_context(path=path, root=root, user=user)
-    _ensure_previewable_size(info)
-    if info["raw_preview_type"] != "text":
-        raise HTTPException(status_code=415, detail="Requested file is not text-previewable")
-
-    data = await _read_preview_file_bytes(
-        path=path,
-        root=root,
-        user=user,
-        target=target,
-    )
+    try:
+        opened = await asyncio.to_thread(
+            _open_user_file_stream,
+            user,
+            root=root,
+            path=path,
+        )
+    except (OSError, RuntimeError, PrivilegedClientError) as exc:
+        raise HTTPException(status_code=403, detail="File access denied") from exc
+    info = _preview_info_from_metadata(opened.metadata, path=path, root=root)
+    try:
+        _ensure_previewable_size(info)
+        if info["raw_preview_type"] != "text":
+            raise HTTPException(status_code=415, detail="Requested file is not text-previewable")
+        data = await asyncio.to_thread(
+            _read_open_file_stream_bytes,
+            opened,
+            MAX_PREVIEW_SIZE_BYTES,
+        )
+    except BaseException:
+        if opened.process.poll() is None:
+            await asyncio.to_thread(_terminate_file_stream, opened)
+        raise
     content = data.decode("utf-8-sig", errors="replace")
     return {
         "filename": info["filename"],
@@ -4795,10 +4905,23 @@ async def files_preview_content(
     root: str | None = None,
     user: CurrentUser = Depends(get_current_user),
 ) -> FastAPIResponse:
-    info, target = await _load_file_preview_context(path=path, root=root, user=user)
-    _ensure_previewable_size(info)
-    if info["raw_preview_type"] not in {"image", "pdf"}:
-        raise HTTPException(status_code=415, detail="Requested file is not inline-previewable")
+    try:
+        opened = await asyncio.to_thread(
+            _open_user_file_stream,
+            user,
+            root=root,
+            path=path,
+        )
+    except (OSError, RuntimeError, PrivilegedClientError) as exc:
+        raise HTTPException(status_code=403, detail="File access denied") from exc
+    info = _preview_info_from_metadata(opened.metadata, path=path, root=root)
+    try:
+        _ensure_previewable_size(info)
+        if info["raw_preview_type"] not in {"image", "pdf"}:
+            raise HTTPException(status_code=415, detail="Requested file is not inline-previewable")
+    except BaseException:
+        await asyncio.to_thread(_terminate_file_stream, opened)
+        raise
 
     headers = {
         "Content-Disposition": _inline_content_disposition(str(info["filename"])),
@@ -4810,48 +4933,8 @@ async def files_preview_content(
     if isinstance(size, int) and size >= 0:
         headers["Content-Length"] = str(size)
 
-    if target is not None:
-        return FileResponse(
-            target,
-            media_type=str(info["mime_type"]),
-            headers=headers,
-        )
-
-    command = privileged_client.file_stream_command(
-        user.target.username,
-        mode=_normalized_file_browser_mode(),
-        root=root,
-        path=path,
-    )
-
-    def iter_file() -> Iterator[bytes]:
-        process = subprocess.Popen(
-            command,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-        )
-        assert process.stdout is not None
-        try:
-            while True:
-                chunk = process.stdout.read(1024 * 1024)
-                if not chunk:
-                    break
-                yield chunk
-            returncode = process.wait()
-            if returncode != 0:
-                stderr = ""
-                if process.stderr is not None:
-                    stderr = process.stderr.read().decode("utf-8", errors="replace").strip()
-                raise RuntimeError(stderr or f"file preview failed with exit code {returncode}")
-        finally:
-            if process.poll() is None:
-                process.kill()
-            if process.stderr is not None:
-                process.stderr.close()
-            process.stdout.close()
-
     return StreamingResponse(
-        iter_file(),
+        _iter_open_file_stream(opened, max_bytes=MAX_PREVIEW_SIZE_BYTES),
         media_type=str(info["mime_type"]),
         headers=headers,
     )
@@ -4863,69 +4946,30 @@ async def files_download(
     root: str | None = None,
     user: CurrentUser = Depends(get_current_user),
 ) -> FastAPIResponse:
-    if _use_privileged_file_helper():
-        try:
-            info = await asyncio.to_thread(
-                privileged_client.file_info,
-                user.target.username,
-                mode=_normalized_file_browser_mode(),
-                root=root,
-                path=path,
-            )
-        except PrivilegedClientError as exc:
-            raise HTTPException(status_code=403, detail=str(exc)) from exc
-        filename = Path(str(info.get("filename") or path or "download.bin")).name
-        headers = {"Content-Disposition": _attachment_content_disposition(filename)}
-        size = info.get("size")
-        if isinstance(size, int) and size >= 0:
-            headers["Content-Length"] = str(size)
-
-        command = privileged_client.file_stream_command(
-            user.target.username,
-            mode=_normalized_file_browser_mode(),
+    if not _DOWNLOAD_LIMITER.acquire(user.id):
+        raise HTTPException(status_code=429, detail="Too many active file downloads")
+    try:
+        opened = await asyncio.to_thread(
+            _open_user_file_stream,
+            user,
             root=root,
             path=path,
         )
+    except (OSError, RuntimeError, PrivilegedClientError) as exc:
+        _DOWNLOAD_LIMITER.release(user.id)
+        raise HTTPException(status_code=403, detail="File access denied") from exc
 
-        def iter_file() -> Iterator[bytes]:
-            process = subprocess.Popen(
-                command,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-            )
-            assert process.stdout is not None
-            try:
-                while True:
-                    chunk = process.stdout.read(1024 * 1024)
-                    if not chunk:
-                        break
-                    yield chunk
-                returncode = process.wait()
-                if returncode != 0:
-                    stderr = ""
-                    if process.stderr is not None:
-                        stderr = process.stderr.read().decode("utf-8", errors="replace").strip()
-                    raise RuntimeError(stderr or f"file stream failed with exit code {returncode}")
-            finally:
-                if process.poll() is None:
-                    process.kill()
-                if process.stderr is not None:
-                    process.stderr.close()
-                process.stdout.close()
-
-        return StreamingResponse(
-            iter_file(),
-            media_type="application/octet-stream",
-            headers=headers,
-        )
-
-    target = await asyncio.to_thread(
-        _resolve_direct_download_target,
-        user,
-        root=root,
-        path=path,
+    filename = str(opened.metadata["filename"])
+    headers = {
+        "Content-Disposition": _attachment_content_disposition(filename),
+        "Content-Length": str(opened.metadata["size"]),
+        "X-Content-Type-Options": "nosniff",
+    }
+    return StreamingResponse(
+        _iter_open_file_stream(opened, download_user_id=user.id),
+        media_type="application/octet-stream",
+        headers=headers,
     )
-    return FileResponse(target, filename=target.name)
 
 
 @app.post("/api/files/upload")
@@ -4934,57 +4978,50 @@ async def upload_file(
 ) -> dict[str, Any]:
     if not file.filename:
         raise HTTPException(status_code=400, detail="Filename is required")
-
+    content_type = file.content_type or "application/octet-stream"
     if _use_privileged_file_helper():
-        total_size = 0
-        chunks: list[bytes] = []
-        try:
-            while True:
-                chunk = await file.read(1024 * 1024)
-                if not chunk:
-                    break
-                total_size += len(chunk)
-                if total_size > MAX_UPLOAD_SIZE_BYTES:
-                    raise HTTPException(
-                        status_code=413,
-                        detail=_upload_file_too_large_detail(),
-                    )
-                chunks.append(chunk)
-        finally:
-            await file.close()
-        try:
-            stored = await asyncio.to_thread(
-                privileged_client.file_upload,
-                user.target.username,
-                filename=file.filename,
-                content=b"".join(chunks),
-                upload_dir_name=UPLOAD_DIR_NAME,
-            )
-        except PrivilegedClientError as exc:
-            raise HTTPException(status_code=403, detail=str(exc)) from exc
-        file_id = uuid.uuid4().hex
-        return {
-            "id": file_id,
-            "name": str(stored.get("name") or _sanitize_filename(file.filename)),
-            "size": int(stored.get("size") or total_size),
-            "content_type": file.content_type or "application/octet-stream",
-            "path": str(stored.get("path") or ""),
-        }
-
+        command = privileged_client.file_upload_command(
+            user.target.username,
+            filename=file.filename,
+            upload_dir_name=UPLOAD_DIR_NAME,
+            max_bytes=MAX_UPLOAD_SIZE_BYTES,
+        )
+    else:
+        command = build_file_upload_worker_command(
+            linux_user=user.target.linux_user,
+            home=user.target.home_dir,
+            mapping_username=user.target.username,
+            filename=file.filename,
+            upload_dir_name=UPLOAD_DIR_NAME,
+            max_bytes=MAX_UPLOAD_SIZE_BYTES,
+        )
     try:
         stored = await asyncio.to_thread(
-            _store_direct_upload,
-            user,
-            filename=file.filename,
-            source=file.file,
+            run_upload_command,
+            command,
+            file.file,
+            max_bytes=MAX_UPLOAD_SIZE_BYTES,
         )
+    except UploadTooLargeError as exc:
+        raise HTTPException(
+            status_code=413,
+            detail=_upload_file_too_large_detail(),
+        ) from exc
+    except (OSError, RuntimeError, PrivilegedClientError) as exc:
+        raise HTTPException(status_code=403, detail="File upload failed") from exc
     finally:
         await file.close()
 
     return {
-        "id": str(stored["id"]),
+        "id": uuid.uuid4().hex,
         "name": str(stored["name"]),
         "size": int(stored["size"]),
-        "content_type": file.content_type or "application/octet-stream",
+        "content_type": content_type,
         "path": str(stored["path"]),
     }
+
+
+app.add_middleware(
+    RequestBodyLimitMiddleware,
+    limit_for_scope=_interface_request_body_limit,
+)

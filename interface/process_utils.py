@@ -7,6 +7,8 @@ import subprocess
 from pathlib import Path
 from typing import Sequence
 
+from interface.subprocess_env import interface_subprocess_env
+
 
 SESSION_DB_INNER_TIMEOUT_SECONDS = 60.0
 SESSION_DB_HELPER_TIMEOUT_SECONDS = 70.0
@@ -29,6 +31,7 @@ def run_process_group(
         text=True,
         cwd=str(cwd) if cwd is not None else None,
         start_new_session=True,
+        env=interface_subprocess_env(),
     )
     try:
         stdout, stderr = process.communicate(

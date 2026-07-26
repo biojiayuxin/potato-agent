@@ -278,6 +278,7 @@ def test_session_list_uses_display_store_draft_title() -> None:
             session for session in payload["sessions"] if session["id"] == "sess_tui_1"
         )
         assert session_row["title"] == "列出 test_dir"
+        assert session_row["title_source"] == "draft"
     finally:
         client.close()
 
@@ -525,6 +526,7 @@ def test_session_detail_falls_back_when_display_transcript_missing() -> None:
         assert response.status_code == 200, response.text
         payload = response.json()
         assert payload["session"]["id"] == "sess_tui_1"
+        assert payload["session"]["title_source"] == "fallback"
         assert len(payload["messages"]) == 2
         assert payload["messages"][1]["progressLines"] == ["`🛠️ list_directory test_dir`"]
         assert payload["messages"][1]["content"] == "test_dir 里有 2 个文件：test.py 和 test2.py"
@@ -559,12 +561,16 @@ def test_tui_compression_chain_uses_logical_root_and_tip_resume_id() -> None:
             session for session in payload["sessions"] if session["id"] == "sess_tui_root"
         )
         assert compression_row["resume_session_id"] == "sess_tui_tip"
+        assert compression_row["title"] == "compression root"
+        assert compression_row["title_source"] == "hermes_root"
 
         detail_response = client.get("/api/sessions/sess_tui_root")
         assert detail_response.status_code == 200, detail_response.text
         detail_payload = detail_response.json()
         assert detail_payload["session"]["id"] == "sess_tui_root"
         assert detail_payload["session"]["resume_session_id"] == "sess_tui_tip"
+        assert detail_payload["session"]["title"] == "compression root"
+        assert detail_payload["session"]["title_source"] == "hermes_root"
         assert detail_payload["messages"][-1]["content"] == "压缩后的新 tip session 仍在继续"
     finally:
         client.close()
@@ -580,6 +586,60 @@ def test_session_markdown_export_resolves_compression_chain() -> None:
         assert "压缩之后继续回答" in markdown
         assert "压缩后的新 tip session 仍在继续" in markdown
         assert "pre-compression tool" not in markdown
+    finally:
+        client.close()
+
+
+def test_compression_tip_auto_title_beats_draft_in_list_detail_and_export() -> None:
+    client, interface_app_mod, user = _build_client_and_user()
+    try:
+        from interface.display_store import save_display_messages
+
+        target = interface_app_mod.mapping_store.resolve_target(
+            mapping_username=user.mapping_username,
+            email=user.email,
+            username=user.username,
+        )
+        assert target is not None
+        conn = sqlite3.connect(str(target.state_db_path))
+        try:
+            conn.execute(
+                "UPDATE sessions SET title = NULL WHERE id = ?",
+                ("sess_tui_root",),
+            )
+            conn.execute(
+                "UPDATE sessions SET title = ? WHERE id = ?",
+                ("Auto Tip Title", "sess_tui_tip"),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+        save_display_messages(
+            user.id,
+            "sess_tui_root",
+            [],
+            draft_title="Draft Title",
+        )
+
+        list_response = client.get("/api/sessions")
+        assert list_response.status_code == 200, list_response.text
+        list_row = next(
+            session
+            for session in list_response.json()["sessions"]
+            if session["id"] == "sess_tui_root"
+        )
+        assert list_row["title"] == "Auto Tip Title"
+        assert list_row["title_source"] == "hermes_tip"
+
+        detail_response = client.get("/api/sessions/sess_tui_root")
+        assert detail_response.status_code == 200, detail_response.text
+        detail_session = detail_response.json()["session"]
+        assert detail_session["title"] == "Auto Tip Title"
+        assert detail_session["title_source"] == "hermes_tip"
+
+        export_response = client.get("/api/sessions/sess_tui_root/export.md")
+        assert export_response.status_code == 200, export_response.text
+        assert export_response.text.startswith("# Auto Tip Title\n")
     finally:
         client.close()
 
@@ -604,6 +664,7 @@ def test_session_title_update_persists_and_returns_updated_snapshot() -> None:
         payload = response.json()
         assert payload["session"]["id"] == "sess_tui_1"
         assert payload["session"]["title"] == "Renamed chat"
+        assert payload["session"]["title_source"] == "hermes_root"
 
         list_response = client.get("/api/sessions")
         assert list_response.status_code == 200, list_response.text

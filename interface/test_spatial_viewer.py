@@ -544,10 +544,7 @@ def test_spatial_data_route_rejects_traversal_and_sqlite(monkeypatch, tmp_path) 
 
 def test_spatial_api_does_not_refresh_runtime_activity() -> None:
     class Request:
-        class Url:
-            path = "/api/spatial/datasets"
-
-        url = Url()
+        scope = {"path": "/api/spatial/datasets"}
 
     assert interface_app_mod._should_refresh_activity_for_request(Request()) is False
 

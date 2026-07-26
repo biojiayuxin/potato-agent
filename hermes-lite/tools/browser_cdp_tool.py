@@ -28,6 +28,38 @@ logger = logging.getLogger(__name__)
 
 CDP_DOCS_URL = "https://chromedevtools.github.io/devtools-protocol/"
 
+
+def _redact_cdp_output(value: Any) -> Any:
+    from tools.browser_tool import _redact_browser_output
+
+    return _redact_browser_output(value)
+
+
+def _cdp_metadata_floor_error(method: str, params: Dict[str, Any]) -> str | None:
+    from tools.browser_tool import (
+        _JS_NETWORK_PRIMITIVE_RE,
+        _expression_url_candidates,
+    )
+    from tools.url_safety import is_always_blocked_url
+
+    if method in {"Page.navigate", "Target.createTarget"}:
+        url = str(params.get("url") or "")
+        if url and is_always_blocked_url(url):
+            return "Blocked: CDP navigation targets a cloud metadata endpoint"
+    if method == "Runtime.evaluate":
+        expression = str(params.get("expression") or "")
+        candidates = _expression_url_candidates(expression)
+        if any(is_always_blocked_url(candidate) for candidate in candidates):
+            return "Blocked: CDP evaluation targets a cloud metadata endpoint"
+        if _JS_NETWORK_PRIMITIVE_RE.search(expression) and not candidates:
+            return "Blocked: CDP evaluation uses an unvalidated dynamic URL"
+    return None
+
+
+def _runtime_result_value(result: Dict[str, Any]) -> str:
+    remote = result.get("result") if isinstance(result.get("result"), dict) else {}
+    return str(remote.get("value") or "").strip()
+
 # ``websockets`` is a transitive dependency of hermes-agent (via fal_client
 # and firecrawl-py) and is already imported by gateway/platforms/feishu.py.
 # Wrap the import so a clean error surfaces if the package is ever absent.
@@ -154,32 +186,58 @@ async def _cdp_call(
                     break
                 # Ignore events (messages without "id") while waiting
 
-        # --- Step 2: dispatch the real method ---
-        call_id = next_id
-        next_id += 1
-        req: Dict[str, Any] = {
-            "id": call_id,
-            "method": method,
-            "params": params or {},
-        }
-        if session_id:
-            req["sessionId"] = session_id
-        await ws.send(json.dumps(req))
-
-        deadline = asyncio.get_running_loop().time() + timeout
-        while True:
-            remaining = deadline - asyncio.get_running_loop().time()
-            if remaining <= 0:
-                raise TimeoutError(
-                    f"Timed out waiting for response to {method}"
-                )
-            raw = await asyncio.wait_for(ws.recv(), timeout=remaining)
-            msg = json.loads(raw)
-            if msg.get("id") == call_id:
+        async def send_call(call_method: str, call_params: Dict[str, Any]) -> Dict[str, Any]:
+            nonlocal next_id
+            call_id = next_id
+            next_id += 1
+            req: Dict[str, Any] = {
+                "id": call_id,
+                "method": call_method,
+                "params": call_params,
+            }
+            if session_id:
+                req["sessionId"] = session_id
+            await ws.send(json.dumps(req))
+            deadline = asyncio.get_running_loop().time() + timeout
+            while True:
+                remaining = deadline - asyncio.get_running_loop().time()
+                if remaining <= 0:
+                    raise TimeoutError(f"Timed out waiting for response to {call_method}")
+                raw = await asyncio.wait_for(ws.recv(), timeout=remaining)
+                msg = json.loads(raw)
+                if msg.get("id") != call_id:
+                    continue
                 if "error" in msg:
                     raise RuntimeError(f"CDP error: {msg['error']}")
                 return msg.get("result", {})
-            # Ignore events / out-of-order responses
+
+        result = await send_call(method, params or {})
+        if method == "Target.createTarget" and not session_id:
+            created_target_id = str(result.get("targetId") or "")
+            if not created_target_id:
+                raise RuntimeError("Blocked: CDP could not validate the created page")
+            attach_result = await send_call(
+                "Target.attachToTarget",
+                {"targetId": created_target_id, "flatten": True},
+            )
+            session_id = str(attach_result.get("sessionId") or "") or None
+            if not session_id:
+                raise RuntimeError("Blocked: CDP could not validate the created page")
+        if session_id and method in {"Page.navigate", "Runtime.evaluate", "Target.createTarget"}:
+            location_result = await send_call(
+                "Runtime.evaluate",
+                {"expression": "window.location.href", "returnByValue": True},
+            )
+            current_url = _runtime_result_value(location_result)
+            from tools.url_safety import is_always_blocked_url
+
+            if not current_url:
+                await send_call("Page.navigate", {"url": "about:blank"})
+                raise RuntimeError("Blocked: CDP could not validate the current page")
+            if is_always_blocked_url(current_url):
+                await send_call("Page.navigate", {"url": "about:blank"})
+                raise RuntimeError("Blocked: CDP page reached a cloud metadata endpoint")
+        return result
 
 
 # ---------------------------------------------------------------------------
@@ -265,12 +323,42 @@ def _browser_cdp_via_supervisor(
         )
 
     async def _do_cdp():
-        return await supervisor._cdp(  # type: ignore[attr-defined]
+        result = await supervisor._cdp(  # type: ignore[attr-defined]
             method,
             params or {},
             session_id=child_sid,
             timeout=timeout,
         )
+        if method in {"Page.navigate", "Runtime.evaluate"}:
+            location_msg = await supervisor._cdp(  # type: ignore[attr-defined]
+                "Runtime.evaluate",
+                {"expression": "window.location.href", "returnByValue": True},
+                session_id=child_sid,
+                timeout=timeout,
+            )
+            location_result = (
+                location_msg.get("result", {})
+                if isinstance(location_msg, dict)
+                else {}
+            )
+            current_url = _runtime_result_value(location_result)
+            from tools.url_safety import is_always_blocked_url
+
+            if not current_url or is_always_blocked_url(current_url):
+                await supervisor._cdp(  # type: ignore[attr-defined]
+                    "Page.navigate",
+                    {"url": "about:blank"},
+                    session_id=child_sid,
+                    timeout=timeout,
+                )
+                if not current_url:
+                    raise RuntimeError(
+                        "Blocked: CDP could not validate the current frame"
+                    )
+                raise RuntimeError(
+                    "Blocked: CDP frame reached a cloud metadata endpoint"
+                )
+        return result
 
     try:
         from agent.async_utils import safe_schedule_threadsafe
@@ -283,7 +371,9 @@ def _browser_cdp_via_supervisor(
         result_msg = fut.result(timeout=timeout + 2)
     except Exception as exc:
         return tool_error(
-            f"CDP call via supervisor failed: {type(exc).__name__}: {exc}",
+            _redact_cdp_output(
+                f"CDP call via supervisor failed: {type(exc).__name__}: {exc}"
+            ),
             cdp_docs=CDP_DOCS_URL,
         )
 
@@ -292,7 +382,7 @@ def _browser_cdp_via_supervisor(
         "method": method,
         "frame_id": frame_id,
         "session_id": child_sid,
-        "result": result_msg.get("result", {}),
+        "result": _redact_cdp_output(result_msg.get("result", {})),
     }
     return json.dumps(payload, ensure_ascii=False)
 
@@ -330,22 +420,29 @@ def browser_cdp(
         JSON string ``{"success": True, "method": ..., "result": {...}}`` on
         success, or ``{"error": "..."}`` on failure.
     """
-    # --- Route iframe-scoped calls through the supervisor ---------------
-    if frame_id:
-        return _browser_cdp_via_supervisor(
-            task_id=task_id or "default",
-            frame_id=frame_id,
-            method=method,
-            params=params,
-            timeout=timeout,
-        )
-    del task_id  # stateless path below
-
     if not method or not isinstance(method, str):
         return tool_error(
             "'method' is required (e.g. 'Target.getTargets')",
             cdp_docs=CDP_DOCS_URL,
         )
+
+    call_params: Dict[str, Any] = params or {}
+    if not isinstance(call_params, dict):
+        return tool_error(
+            f"'params' must be an object/dict, got {type(call_params).__name__}"
+        )
+    metadata_error = _cdp_metadata_floor_error(method, call_params)
+    if metadata_error:
+        return tool_error(metadata_error, method=method)
+    if frame_id:
+        return _browser_cdp_via_supervisor(
+            task_id=task_id or "default",
+            frame_id=frame_id,
+            method=method,
+            params=call_params,
+            timeout=timeout,
+        )
+    del task_id
 
     if not _WS_AVAILABLE:
         return tool_error(
@@ -371,12 +468,6 @@ def browser_cdp(
             "browser is actually listening on the debug port."
         )
 
-    call_params: Dict[str, Any] = params or {}
-    if not isinstance(call_params, dict):
-        return tool_error(
-            f"'params' must be an object/dict, got {type(call_params).__name__}"
-        )
-
     try:
         safe_timeout = float(timeout) if timeout else 30.0
     except (TypeError, ValueError):
@@ -389,30 +480,34 @@ def browser_cdp(
         )
     except asyncio.TimeoutError as exc:
         return tool_error(
-            f"CDP call timed out after {safe_timeout}s: {exc}",
+            _redact_cdp_output(f"CDP call timed out after {safe_timeout}s: {exc}"),
             method=method,
         )
     except TimeoutError as exc:
-        return tool_error(str(exc), method=method)
+        return tool_error(_redact_cdp_output(str(exc)), method=method)
     except RuntimeError as exc:
-        return tool_error(str(exc), method=method)
+        return tool_error(_redact_cdp_output(str(exc)), method=method)
     except WebSocketException as exc:
         return tool_error(
-            f"WebSocket error talking to CDP at {endpoint}: {exc}. The "
-            "browser may have disconnected — try '/browser connect' again.",
+            _redact_cdp_output(
+                f"WebSocket error talking to CDP: {exc}. The browser may have "
+                "disconnected — try '/browser connect' again."
+            ),
             method=method,
         )
     except Exception as exc:  # pragma: no cover — unexpected
         logger.exception("browser_cdp unexpected error")
         return tool_error(
-            f"Unexpected error: {type(exc).__name__}: {exc}",
+            _redact_cdp_output(
+                f"Unexpected error: {type(exc).__name__}: {exc}"
+            ),
             method=method,
         )
 
     payload: Dict[str, Any] = {
         "success": True,
         "method": method,
-        "result": result,
+        "result": _redact_cdp_output(result),
     }
     if target_id:
         payload["target_id"] = target_id

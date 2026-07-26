@@ -122,6 +122,15 @@ def is_write_denied(path: str) -> bool:
             continue
 
     for base_real in hermes_dirs:
+        try:
+            state_db = os.path.realpath(os.path.join(base_real, "state.db"))
+            sessions_dir = os.path.realpath(os.path.join(base_real, "sessions"))
+            if resolved == state_db:
+                return True
+            if resolved == sessions_dir or resolved.startswith(sessions_dir + os.sep):
+                return True
+        except Exception:
+            pass
         for name in control_file_names:
             try:
                 if resolved == os.path.realpath(os.path.join(base_real, name)):
@@ -297,7 +306,7 @@ def get_read_block_error(path: str) -> Optional[str]:
     # .env contents — .env.example is the documented-shape substitute. The
     # terminal tool can still ``cat .env``; this is defense-in-depth, not a
     # boundary (see module docstring).
-    if resolved.name in _BLOCKED_PROJECT_ENV_BASENAMES:
+    if resolved.name.lower() in _BLOCKED_PROJECT_ENV_BASENAMES:
         return (
             f"Access denied: {path} is a secret-bearing environment file "
             "and cannot be read to prevent credential leakage. "
@@ -306,6 +315,13 @@ def get_read_block_error(path: str) -> Optional[str]:
         )
 
     return None
+
+
+def raise_if_read_blocked(path: str) -> None:
+    """Raise before a caller stats, reads, or decodes a protected local file."""
+    blocked = get_read_block_error(path)
+    if blocked:
+        raise ValueError(blocked)
 
 
 # ---------------------------------------------------------------------------

@@ -47,6 +47,7 @@ from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
 from hermes_cli.config import get_hermes_home
+from tools.process_output_redaction import redact_process_output
 
 logger = logging.getLogger(__name__)
 
@@ -94,6 +95,7 @@ class ProcessSession:
     task_id: str = ""                           # Task/sandbox isolation key
     session_key: str = ""                       # Gateway session key (for reset protection)
     pid: Optional[int] = None                   # OS process ID
+    pid_start_time: Optional[int] = None        # Linux /proc stat field 22
     process: Optional[subprocess.Popen] = None  # Popen handle (local only)
     env_ref: Any = None                         # Reference to the environment object
     cwd: Optional[str] = None                   # Working directory
@@ -103,6 +105,8 @@ class ProcessSession:
     output_buffer: str = ""                     # Rolling output (last MAX_OUTPUT_CHARS)
     max_output_chars: int = MAX_OUTPUT_CHARS
     detached: bool = False                      # True if recovered from crash (no pipe)
+    lost: bool = False                          # Identity unavailable or no longer matches
+    lost_reason: str = ""
     pid_scope: str = "host"                     # "host" for local/PTY PIDs, "sandbox" for env-local PIDs
     # Watcher/notification metadata (persisted for crash recovery)
     watcher_platform: str = ""
@@ -295,6 +299,7 @@ class ProcessRegistry:
         output = "\n".join(matched_lines[:20])
         if len(output) > 2000:
             output = output[:2000] + "\n...(truncated)"
+        output = redact_process_output(output)
 
         # Global circuit breaker — across all sessions (secondary safety net).
         if not self._global_watch_admit(now):
@@ -305,7 +310,7 @@ class ProcessRegistry:
             "session_key": session.session_key,
             "command": session.command,
             "type": "watch_match",
-            "pattern": matched_pattern,
+            "pattern": redact_process_output(matched_pattern),
             "output": output,
             "suppressed": suppressed,
             "platform": session.watcher_platform,
@@ -413,27 +418,47 @@ class ProcessRegistry:
         from gateway.status import _pid_exists
         return _pid_exists(pid)
 
+    @staticmethod
+    def _get_host_pid_start_time(pid: Optional[int]) -> Optional[int]:
+        if not pid:
+            return None
+        from gateway.status import get_process_start_time
+        return get_process_start_time(pid)
+
+    @classmethod
+    def _host_pid_identity_matches(cls, session: ProcessSession) -> bool:
+        """Require both liveness and a matching kernel process identity."""
+        if session.pid_scope != "host" or not session.pid or session.pid_start_time is None:
+            return False
+        return (
+            cls._is_host_pid_alive(session.pid)
+            and cls._get_host_pid_start_time(session.pid) == session.pid_start_time
+        )
+
+    def _mark_session_lost(self, session: ProcessSession, reason: str) -> ProcessSession:
+        with session._lock:
+            session.exited = True
+            session.exit_code = None
+            session.lost = True
+            session.lost_reason = reason
+        self._move_to_finished(session)
+        return session
+
     def _refresh_detached_session(self, session: Optional[ProcessSession]) -> Optional[ProcessSession]:
         """Update recovered host-PID sessions when the underlying process has exited."""
         if session is None or session.exited or not session.detached or session.pid_scope != "host":
             return session
 
-        if self._is_host_pid_alive(session.pid):
+        if self._host_pid_identity_matches(session):
             return session
 
-        with session._lock:
-            if session.exited:
-                return session
-            session.exited = True
-            # Recovered sessions no longer have a waitable handle, so the real
-            # exit code is unavailable once the original process object is gone.
-            session.exit_code = None
-
-        self._move_to_finished(session)
-        return session
+        return self._mark_session_lost(
+            session,
+            "Process identity no longer matches the recovered checkpoint",
+        )
 
     @staticmethod
-    def _terminate_host_pid(pid: int) -> None:
+    def _terminate_host_pid(pid: int, expected_start_time: Optional[int] = None) -> bool:
         """Terminate a host-visible PID and its descendants.
 
         POSIX: walks the process tree with ``psutil`` and SIGTERMs
@@ -464,6 +489,11 @@ class ProcessRegistry:
         POSIX and a missing ``taskkill.exe`` on Windows (effectively
         unreachable on real Windows installs, but cheap insurance).
         """
+        if expected_start_time is not None:
+            current_start = ProcessRegistry._get_host_pid_start_time(pid)
+            if current_start != expected_start_time:
+                return False
+
         if _IS_WINDOWS:
             try:
                 subprocess.run(
@@ -478,24 +508,34 @@ class ProcessRegistry:
                     os.kill(pid, signal.SIGTERM)
                 except (OSError, ProcessLookupError, PermissionError):
                     pass
-            return
+            return True
 
         import psutil
         try:
             parent = psutil.Process(pid)
-            for child in parent.children(recursive=True):
+            children = parent.children(recursive=True)
+            if expected_start_time is not None:
+                current_start = ProcessRegistry._get_host_pid_start_time(pid)
+                if current_start != expected_start_time:
+                    return False
+            for child in children:
                 try:
                     child.terminate()
                 except psutil.NoSuchProcess:
                     pass
             parent.terminate()
         except psutil.NoSuchProcess:
-            return
+            return False
         except (OSError, PermissionError):
             try:
+                if expected_start_time is not None:
+                    current_start = ProcessRegistry._get_host_pid_start_time(pid)
+                    if current_start != expected_start_time:
+                        return False
                 os.kill(pid, signal.SIGTERM)
             except (OSError, ProcessLookupError, PermissionError):
                 pass
+        return True
 
     # ----- Spawn -----
 
@@ -557,6 +597,7 @@ class ProcessRegistry:
                     dimensions=(30, 120),
                 )
                 session.pid = pty_proc.pid
+                session.pid_start_time = self._get_host_pid_start_time(session.pid)
                 # Store the pty handle on the session for read/write
                 session._pty = pty_proc
 
@@ -609,6 +650,7 @@ class ProcessRegistry:
 
         session.process = proc
         session.pid = proc.pid
+        session.pid_start_time = self._get_host_pid_start_time(session.pid)
 
         try:
             # Start output reader thread
@@ -718,11 +760,11 @@ class ProcessRegistry:
                 session.exit_code = int(result.get("returncode", -1))
                 if session.exit_code == 0:
                     session.exit_code = -1
-                session.output_buffer = result.get("output", "").strip()
+                session.output_buffer = redact_process_output(result.get("output", "").strip())
         except Exception as e:
             session.exited = True
             session.exit_code = -1
-            session.output_buffer = f"Failed to start: {e}"
+            session.output_buffer = redact_process_output(f"Failed to start: {e}")
 
         if not session.exited:
             # Start a poller thread that periodically reads the log file
@@ -762,6 +804,7 @@ class ProcessRegistry:
                     session.output_buffer += chunk
                     if len(session.output_buffer) > session.max_output_chars:
                         session.output_buffer = session.output_buffer[-session.max_output_chars:]
+                    session.output_buffer = redact_process_output(session.output_buffer)
                 self._check_watch_patterns(session, chunk)
         except Exception as e:
             logger.debug("Process stdout reader ended: %s", e)
@@ -794,7 +837,7 @@ class ProcessRegistry:
                     delta = new_output[prev_output_len:] if len(new_output) > prev_output_len else ""
                     prev_output_len = len(new_output)
                     with session._lock:
-                        session.output_buffer = new_output
+                        session.output_buffer = redact_process_output(new_output)
                         if len(session.output_buffer) > session.max_output_chars:
                             session.output_buffer = session.output_buffer[-session.max_output_chars:]
                     if delta:
@@ -842,6 +885,7 @@ class ProcessRegistry:
                             session.output_buffer += text
                             if len(session.output_buffer) > session.max_output_chars:
                                 session.output_buffer = session.output_buffer[-session.max_output_chars:]
+                            session.output_buffer = redact_process_output(session.output_buffer)
                         self._check_watch_patterns(session, text)
                 except EOFError:
                     break
@@ -876,7 +920,7 @@ class ProcessRegistry:
         # _move_to_finished(), producing duplicate [IMPORTANT: ...] messages.
         if was_running and session.notify_on_complete:
             from tools.ansi_strip import strip_ansi
-            output_tail = strip_ansi(session.output_buffer[-2000:]) if session.output_buffer else ""
+            output_tail = redact_process_output(strip_ansi(session.output_buffer[-2000:])) if session.output_buffer else ""
             self.completion_queue.put({
                 "type": "completion",
                 "session_id": session.id,
@@ -981,6 +1025,7 @@ class ProcessRegistry:
                 session.output_buffer += drained
                 if len(session.output_buffer) > session.max_output_chars:
                     session.output_buffer = session.output_buffer[-session.max_output_chars:]
+                session.output_buffer = redact_process_output(session.output_buffer)
             session.exited = True
             session.exit_code = rc
         logger.info(
@@ -1003,12 +1048,12 @@ class ProcessRegistry:
         self._reconcile_local_exit(session)
 
         with session._lock:
-            output_preview = strip_ansi(session.output_buffer[-1000:]) if session.output_buffer else ""
+            output_preview = redact_process_output(strip_ansi(session.output_buffer[-1000:])) if session.output_buffer else ""
 
         result = {
             "session_id": session.id,
             "command": session.command,
-            "status": "exited" if session.exited else "running",
+            "status": "lost" if session.lost else ("exited" if session.exited else "running"),
             "pid": session.pid,
             "uptime_seconds": int(time.time() - session.started_at),
             "output_preview": output_preview,
@@ -1018,7 +1063,7 @@ class ProcessRegistry:
             self._completion_consumed.add(session_id)
         if session.detached:
             result["detached"] = True
-            result["note"] = "Process recovered after restart -- output history unavailable"
+            result["note"] = session.lost_reason or "Process recovered after restart -- output history unavailable"
         return result
 
     def read_log(self, session_id: str, offset: int = 0, limit: int = 200) -> dict:
@@ -1030,7 +1075,7 @@ class ProcessRegistry:
             return {"status": "not_found", "error": f"No process with ID {session_id}"}
 
         with session._lock:
-            full_output = strip_ansi(session.output_buffer)
+            full_output = redact_process_output(strip_ansi(session.output_buffer))
 
         lines = full_output.splitlines()
         total_lines = len(lines)
@@ -1043,7 +1088,7 @@ class ProcessRegistry:
 
         result = {
             "session_id": session.id,
-            "status": "exited" if session.exited else "running",
+            "status": "lost" if session.lost else ("exited" if session.exited else "running"),
             "output": "\n".join(selected),
             "total_lines": total_lines,
             "showing": f"{len(selected)} lines",
@@ -1099,10 +1144,12 @@ class ProcessRegistry:
             if session.exited:
                 self._completion_consumed.add(session_id)
                 result = {
-                    "status": "exited",
+                    "status": "lost" if session.lost else "exited",
                     "exit_code": session.exit_code,
-                    "output": strip_ansi(session.output_buffer[-2000:]),
+                    "output": redact_process_output(strip_ansi(session.output_buffer[-2000:])),
                 }
+                if session.lost_reason:
+                    result["note"] = session.lost_reason
                 if timeout_note:
                     result["timeout_note"] = timeout_note
                 return result
@@ -1110,7 +1157,7 @@ class ProcessRegistry:
             if _is_interrupted():
                 result = {
                     "status": "interrupted",
-                    "output": strip_ansi(session.output_buffer[-1000:]),
+                    "output": redact_process_output(strip_ansi(session.output_buffer[-1000:])),
                     "note": "User sent a new message -- wait interrupted",
                 }
                 if timeout_note:
@@ -1121,7 +1168,7 @@ class ProcessRegistry:
 
         result = {
             "status": "timeout",
-            "output": strip_ansi(session.output_buffer[-1000:]),
+            "output": redact_process_output(strip_ansi(session.output_buffer[-1000:])),
         }
         if timeout_note:
             result["timeout_note"] = timeout_note
@@ -1134,6 +1181,12 @@ class ProcessRegistry:
         session = self.get(session_id)
         if session is None:
             return {"status": "not_found", "error": f"No process with ID {session_id}"}
+
+        if session.lost:
+            return {
+                "status": "lost",
+                "error": session.lost_reason or "Process identity is unavailable",
+            }
 
         if session.exited:
             return {
@@ -1173,16 +1226,24 @@ class ProcessRegistry:
                 # Non-local -- kill inside sandbox
                 session.env_ref.execute(f"kill {session.pid} 2>/dev/null", timeout=5)
             elif session.detached and session.pid_scope == "host" and session.pid:
-                if not self._is_host_pid_alive(session.pid):
-                    with session._lock:
-                        session.exited = True
-                        session.exit_code = None
-                    self._move_to_finished(session)
+                if not self._host_pid_identity_matches(session):
+                    self._mark_session_lost(
+                        session,
+                        "Process identity changed before termination",
+                    )
                     return {
-                        "status": "already_exited",
-                        "exit_code": session.exit_code,
+                        "status": "lost",
+                        "error": session.lost_reason,
                     }
-                self._terminate_host_pid(session.pid)
+                if not self._terminate_host_pid(session.pid, session.pid_start_time):
+                    self._mark_session_lost(
+                        session,
+                        "Process identity changed before termination",
+                    )
+                    return {
+                        "status": "lost",
+                        "error": session.lost_reason,
+                    }
             else:
                 return {
                     "status": "error",
@@ -1197,7 +1258,7 @@ class ProcessRegistry:
             self._write_checkpoint()
             return {"status": "killed", "session_id": session.id}
         except Exception as e:
-            return {"status": "error", "error": str(e)}
+            return {"status": "error", "error": redact_process_output(e)}
 
     def write_stdin(self, session_id: str, data: str) -> dict:
         """Send raw data to a running process's stdin (no newline appended)."""
@@ -1285,13 +1346,15 @@ class ProcessRegistry:
                 "pid": s.pid,
                 "started_at": time.strftime("%Y-%m-%dT%H:%M:%S", time.localtime(s.started_at)),
                 "uptime_seconds": int(time.time() - s.started_at),
-                "status": "exited" if s.exited else "running",
-                "output_preview": s.output_buffer[-200:] if s.output_buffer else "",
+                "status": "lost" if s.lost else ("exited" if s.exited else "running"),
+                "output_preview": redact_process_output(s.output_buffer[-200:]) if s.output_buffer else "",
             }
             if s.exited:
                 entry["exit_code"] = s.exit_code
             if s.detached:
                 entry["detached"] = True
+            if s.lost_reason:
+                entry["note"] = s.lost_reason
             result.append(entry)
         return result
 
@@ -1382,6 +1445,7 @@ class ProcessRegistry:
                             "session_id": s.id,
                             "command": s.command,
                             "pid": s.pid,
+                            "pid_start_time": s.pid_start_time,
                             "pid_scope": s.pid_scope,
                             "cwd": s.cwd,
                             "started_at": s.started_at,
@@ -1437,16 +1501,22 @@ class ProcessRegistry:
                 )
                 continue
 
-            # Check if PID is still alive
-            alive = self._is_host_pid_alive(pid)
+            recorded_start_time = entry.get("pid_start_time")
+            current_start_time = self._get_host_pid_start_time(pid)
+            identity_matches = (
+                isinstance(recorded_start_time, int)
+                and current_start_time == recorded_start_time
+                and self._is_host_pid_alive(pid)
+            )
 
-            if alive:
+            if identity_matches:
                 session = ProcessSession(
                     id=entry["session_id"],
                     command=entry.get("command", "unknown"),
                     task_id=entry.get("task_id", ""),
                     session_key=entry.get("session_key", ""),
                     pid=pid,
+                    pid_start_time=recorded_start_time,
                     pid_scope=pid_scope,
                     cwd=entry.get("cwd"),
                     started_at=entry.get("started_at", time.time()),
@@ -1480,6 +1550,30 @@ class ProcessRegistry:
                         "message_id": session.watcher_message_id,
                         "notify_on_complete": session.notify_on_complete,
                     })
+            else:
+                reason = (
+                    "Legacy checkpoint has no process identity"
+                    if not isinstance(recorded_start_time, int)
+                    else "Checkpoint process identity no longer matches"
+                )
+                session = ProcessSession(
+                    id=entry.get("session_id", f"lost_{uuid.uuid4().hex[:12]}"),
+                    command=entry.get("command", "unknown"),
+                    task_id=entry.get("task_id", ""),
+                    session_key=entry.get("session_key", ""),
+                    pid=pid,
+                    pid_start_time=recorded_start_time if isinstance(recorded_start_time, int) else None,
+                    pid_scope=pid_scope,
+                    cwd=entry.get("cwd"),
+                    started_at=entry.get("started_at", time.time()),
+                    exited=True,
+                    detached=True,
+                    lost=True,
+                    lost_reason=reason,
+                )
+                with self._lock:
+                    self._finished[session.id] = session
+                logger.warning("Refusing to recover process without matching identity: %s", session.id)
 
         self._write_checkpoint()
 
@@ -1501,7 +1595,7 @@ def format_process_notification(evt: dict) -> "str | None":
     _cmd = evt.get("command", "unknown")
 
     if evt_type == "watch_disabled":
-        return f"[IMPORTANT: {evt.get('message', '')}]"
+        return redact_process_output(f"[IMPORTANT: {evt.get('message', '')}]")
 
     if evt_type == "watch_match":
         _pat = evt.get("pattern", "?")
@@ -1516,11 +1610,11 @@ def format_process_notification(evt: dict) -> "str | None":
         if _sup:
             text += f"\n({_sup} earlier matches were suppressed by rate limit)"
         text += "]"
-        return text
+        return redact_process_output(text)
 
     _exit = evt.get("exit_code", "?")
     _out = evt.get("output", "")
-    return (
+    return redact_process_output(
         f"[IMPORTANT: Background process {_sid} completed "
         f"(exit code {_exit}).\n"
         f"Command: {_cmd}\n"

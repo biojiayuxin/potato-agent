@@ -257,7 +257,9 @@ def _git_env(
     ``store/indexes/<hash>`` so projects don't race on a shared index.
     """
     normalized_working_dir = _normalize_path(working_dir)
-    env = os.environ.copy()
+    from tools.environments.local import hermes_subprocess_env
+
+    env = hermes_subprocess_env(inherit_credentials=False)
     env["GIT_DIR"] = str(store)
     env["GIT_WORK_TREE"] = str(normalized_working_dir)
     env.pop("GIT_NAMESPACE", None)
@@ -413,7 +415,9 @@ def _init_store(store: Path, working_dir: str) -> Optional[str]:
     # ``git init --bare`` rejects GIT_WORK_TREE, so we can't use _run_git
     # here (which always sets GIT_DIR + GIT_WORK_TREE).  Use a raw
     # subprocess with just the config-isolation env vars.
-    init_env = os.environ.copy()
+    from tools.environments.local import hermes_subprocess_env
+
+    init_env = hermes_subprocess_env(inherit_credentials=False)
     init_env["GIT_CONFIG_GLOBAL"] = os.devnull
     init_env["GIT_CONFIG_SYSTEM"] = os.devnull
     init_env["GIT_CONFIG_NOSYSTEM"] = "1"

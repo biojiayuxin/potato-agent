@@ -235,14 +235,16 @@ def _sleep_before_http_retry(
 
 
 def _with_http_retries(
-    operation: Callable[[], Any], policy: SourceHttpPolicy
+    operation: Callable[[], Any],
+    policy: SourceHttpPolicy,
+    retryable: Callable[[BaseException], bool] = _is_transient_http_error,
 ) -> Any:
     for attempt in range(policy.retries + 1):
         policy.remaining()
         try:
             return operation()
         except Exception as exc:
-            if attempt >= policy.retries or not _is_transient_http_error(exc):
+            if attempt >= policy.retries or not retryable(exc):
                 raise
             if isinstance(exc, urllib.error.HTTPError):
                 exc.close()
@@ -370,8 +372,10 @@ def _http_json(
     try:
         return json.loads(body.decode("utf-8", "replace"))
     except (UnicodeError, json.JSONDecodeError) as exc:
+        preview = body[:300].decode("utf-8", "replace")
         raise SourceResponseParseError(
-            f"invalid JSON response from {url}: {exc}"
+            f"invalid JSON response from {url}: {exc}; "
+            f"response_prefix={preview!r}"
         ) from exc
 
 
@@ -566,6 +570,15 @@ def _parse_plantconnectome_edges(html_text: str) -> list[dict[str, Any]]:
     )
 
 
+def _is_missing_plantconnectome_detail(exc: BaseException) -> bool:
+    return (
+        isinstance(exc, urllib.error.HTTPError) and exc.code == 404
+    ) or (
+        isinstance(exc, SourceResponseParseError)
+        and str(exc) == "PlantConnectome detail is missing the edge payload"
+    )
+
+
 def _plantconnectome_entity_url(
     entity: str, entity_type: str, unique_id: str | None
 ) -> str:
@@ -632,13 +645,31 @@ def fetch_plantconnectome(
         entity = str(row[0])
         entity_type = str(row[1])
         detail_url = _plantconnectome_entity_url(entity, entity_type, unique_id)
-        detail_html, final_detail_url = _http_text(
-            detail_url,
-            policy=policy,
-            referer=final_preview_url,
-            accept_gzip=True,
-        )
-        edges = _parse_plantconnectome_edges(detail_html)
+        try:
+            detail_html, final_detail_url = _http_text(
+                detail_url,
+                policy=policy,
+                referer=final_preview_url,
+                accept_gzip=True,
+            )
+            edges = _parse_plantconnectome_edges(detail_html)
+        except Exception as exc:
+            if not _is_missing_plantconnectome_detail(exc):
+                raise
+            if isinstance(exc, urllib.error.HTTPError):
+                exc.close()
+            entities.append(
+                {
+                    "preview_row": row,
+                    "entity": entity,
+                    "entity_type": entity_type,
+                    "url": detail_url,
+                    "edge_count_total": 0,
+                    "edges": [],
+                    "error": error_text(exc),
+                }
+            )
+            continue
         entities.append(
             {
                 "preview_row": row,
@@ -650,12 +681,22 @@ def fetch_plantconnectome(
             }
         )
 
-    if any(entity["edge_count_total"] for entity in entities):
+    edge_count = sum(entity["edge_count_total"] for entity in entities)
+    failed_entities = [entity for entity in entities if entity.get("error")]
+    if edge_count:
         status = "ok"
-        message = ""
+        message = (
+            f"PlantConnectome skipped {len(failed_entities)} unavailable entity details"
+            if failed_entities
+            else ""
+        )
     else:
         status = "not_found"
-        message = f"PlantConnectome returned no knowledge-graph edges for {gene_name}"
+        message = (
+            f"PlantConnectome returned no usable entity details for {gene_name}"
+            if failed_entities
+            else f"PlantConnectome returned no knowledge-graph edges for {gene_name}"
+        )
     plantconnectome = {
         "status": status,
         **({"message": message} if message else {}),
@@ -795,62 +836,38 @@ def _xml_text(element: ET.Element | None) -> str:
     return "" if element is None else "".join(element.itertext()).strip()
 
 
-def fetch_pubmed(
-    query: str,
-    *,
-    base_url: str,
-    limit: int,
-    timeout: float,
-    retries: int,
-) -> dict[str, Any]:
-    query = query.strip()
-    if not query:
-        raise ValueError("PubMed query must not be empty")
-    if limit <= 0:
-        raise ValueError("PubMed limit must be positive")
-    policy = SourceHttpPolicy.create(
-        timeout=timeout,
-        retries=retries,
-        deadline=_default_source_deadline(timeout, retries, operations=2),
-    )
-    base_url = base_url.rstrip("/")
-    search_url = base_url + "/esearch.fcgi?" + urllib.parse.urlencode(
-        {"db": "pubmed", "term": query, "retmax": limit, "retmode": "json"}
-    )
-    search_data = _http_json(
-        search_url,
-        policy=policy,
-        referer="https://pubmed.ncbi.nlm.nih.gov/",
-    )
+def _pubmed_search_ids(search_data: object, limit: int) -> list[str]:
     if not isinstance(search_data, dict):
         raise SourceResponseParseError("PubMed ESearch response is not a JSON object")
     search_result = search_data.get("esearchresult")
     if not isinstance(search_result, dict):
-        raise SourceResponseParseError("PubMed ESearch response is missing esearchresult")
+        detail = clean_text(search_data.get("error"), 500)
+        suffix = f": {detail}" if detail else ""
+        raise SourceResponseParseError(
+            "PubMed ESearch response is missing esearchresult" + suffix
+        )
     raw_ids = search_result.get("idlist")
     if not isinstance(raw_ids, list) or any(not isinstance(value, str) for value in raw_ids):
-        raise SourceResponseParseError("PubMed ESearch idlist is malformed")
-    ids = raw_ids[:limit]
-    if not ids:
-        return {"total": 0, "data": []}
+        detail_value = search_result.get("errorlist") or search_result.get("ERROR")
+        detail = clean_text(
+            json.dumps(detail_value, ensure_ascii=False)
+            if detail_value is not None
+            else "",
+            500,
+        )
+        suffix = f": {detail}" if detail else ""
+        raise SourceResponseParseError("PubMed ESearch idlist is malformed" + suffix)
+    return raw_ids[:limit]
 
-    fetch_url = base_url + "/efetch.fcgi?" + urllib.parse.urlencode(
-        {
-            "db": "pubmed",
-            "id": ",".join(ids),
-            "retmode": "xml",
-            "rettype": "abstract",
-        }
-    )
-    xml_text, _ = _http_text(
-        fetch_url,
-        policy=policy,
-        referer="https://pubmed.ncbi.nlm.nih.gov/",
-    )
+
+def _parse_pubmed_xml(xml_text: str) -> list[dict[str, Any]]:
     try:
         root = ET.fromstring(xml_text)
     except ET.ParseError as exc:
-        raise SourceResponseParseError(f"PubMed EFetch returned invalid XML: {exc}") from exc
+        raise SourceResponseParseError(
+            f"PubMed EFetch returned invalid XML: {exc}; "
+            f"response_prefix={xml_text[:300]!r}"
+        ) from exc
 
     papers: list[dict[str, Any]] = []
     for article in root.findall(".//PubmedArticle"):
@@ -909,7 +926,72 @@ def fetch_pubmed(
                 "source": "pubmed",
             }
         )
-    return {"total": len(papers), "data": papers}
+    return papers
+
+
+def fetch_pubmed(
+    query: str,
+    *,
+    base_url: str,
+    limit: int,
+    timeout: float,
+    retries: int,
+) -> dict[str, Any]:
+    query = query.strip()
+    if not query:
+        raise ValueError("PubMed query must not be empty")
+    if limit <= 0:
+        raise ValueError("PubMed limit must be positive")
+    policy = SourceHttpPolicy.create(
+        timeout=timeout,
+        retries=retries,
+        deadline=_default_source_deadline(timeout, retries, operations=2),
+    )
+    request_policy = SourceHttpPolicy(
+        timeout=policy.timeout,
+        retries=0,
+        retry_backoff=policy.retry_backoff,
+        max_response_bytes=policy.max_response_bytes,
+        deadline_at=policy.deadline_at,
+    )
+    base_url = base_url.rstrip("/")
+    search_url = base_url + "/esearch.fcgi?" + urllib.parse.urlencode(
+        {"db": "pubmed", "term": query, "retmax": limit, "retmode": "json"}
+    )
+
+    def retrieve() -> dict[str, Any]:
+        search_data = _http_json(
+            search_url,
+            policy=request_policy,
+            referer="https://pubmed.ncbi.nlm.nih.gov/",
+        )
+        ids = _pubmed_search_ids(search_data, limit)
+        if not ids:
+            return {"total": 0, "data": []}
+        fetch_url = base_url + "/efetch.fcgi?" + urllib.parse.urlencode(
+            {
+                "db": "pubmed",
+                "id": ",".join(ids),
+                "retmode": "xml",
+                "rettype": "abstract",
+            }
+        )
+        xml_text, _ = _http_text(
+            fetch_url,
+            policy=request_policy,
+            referer="https://pubmed.ncbi.nlm.nih.gov/",
+        )
+        papers = _parse_pubmed_xml(xml_text)
+        return {"total": len(papers), "data": papers}
+
+    return _with_http_retries(
+        retrieve,
+        policy,
+        retryable=lambda exc: (
+            _is_transient_http_error(exc)
+            or isinstance(exc, SourceResponseParseError)
+        ),
+    )
 
 
 def read_gene_list(path: Path) -> list[str]:
@@ -969,6 +1051,15 @@ def clean_text(value: object, max_chars: int = 0) -> str:
     if max_chars and len(result) > max_chars:
         return result[: max_chars - 3].rstrip() + "..."
     return result
+
+
+def error_text(value: object, max_chars: int = 1500) -> str:
+    message = clean_text(value, max_chars)
+    if message:
+        return message
+    if isinstance(value, BaseException):
+        return type(value).__name__
+    return "unknown error"
 
 
 def sha256_json(value: object) -> str:
@@ -1221,11 +1312,22 @@ def compact_pubmed(data: dict[str, Any], max_abstract_chars: int = 1800) -> list
 
 def validate_arabidopsis_tair_source(data: dict[str, Any], target: str) -> None:
     source_status = clean_text(data.get("status")).casefold()
+    tair = data.get("tair")
+    if source_status == "not_found":
+        if clean_text(data.get("query")).casefold() != target.casefold():
+            raise SourceError("TAIR not-found result changed the query gene")
+        if not isinstance(tair, dict):
+            raise SourceError("TAIR not-found result is malformed")
+        exact_candidates = tair.get("exact_candidates")
+        if not isinstance(exact_candidates, list) or exact_candidates:
+            raise SourceError("TAIR not-found result contains exact candidates")
+        if tair.get("selected") is not None:
+            raise SourceError("TAIR not-found result unexpectedly selected a gene")
+        return
     if source_status != "ok":
         raise SourceError(
             f"TAIR returned status={source_status or 'missing'}"
         )
-    tair = data.get("tair")
     selected = tair.get("selected") if isinstance(tair, dict) else None
     selected_gene = clean_text(selected.get("gene_id")) if isinstance(selected, dict) else ""
     if selected_gene.casefold() != re.sub(r"\.\d+$", "", target).casefold():
@@ -1248,6 +1350,8 @@ def validate_plantconnectome_source(data: dict[str, Any]) -> None:
         raise SourceError(
             f"PlantConnectome returned status={plant_status or 'missing'}"
         )
+    if source_status != plant_status:
+        raise SourceError("PlantConnectome outer and inner statuses disagree")
     preview = plantconnectome.get("preview")
     entities = plantconnectome.get("entities")
     if not isinstance(preview, dict) or not isinstance(entities, list):
@@ -1261,10 +1365,20 @@ def validate_plantconnectome_source(data: dict[str, Any]) -> None:
         if isinstance(entity, dict) and clean_text(entity.get("error"))
     ]
     if failed_entities:
-        raise SourceError(
-            "PlantConnectome entity detail failed: "
-            + clean_text(failed_entities[0].get("error"), 800)
+        recovered_edges = sum(
+            len(entity.get("edges") or [])
+            for entity in entities
+            if isinstance(entity, dict) and not clean_text(entity.get("error"))
         )
+        if (
+            plant_status == "ok" and recovered_edges == 0
+        ) or (
+            plant_status == "not_found" and recovered_edges > 0
+        ):
+            raise SourceError(
+                "PlantConnectome entity detail status contradicts recovered edges: "
+                + error_text(failed_entities[0].get("error"), 800)
+            )
 
 
 def arabidopsis_gene_name_candidates(selected: object) -> list[str]:
@@ -1313,7 +1427,14 @@ def validate_arabidopsis_gene_names(
 
 
 def validate_arabidopsis_source(data: dict[str, Any], target: str) -> None:
-    validate_arabidopsis_tair_source({"status": "ok", "tair": data.get("tair")}, target)
+    validate_arabidopsis_tair_source(
+        {
+            "status": data.get("tair_status", "ok"),
+            "query": data.get("query", target),
+            "tair": data.get("tair"),
+        },
+        target,
+    )
     searches = data.get("plantconnectome_searches")
     if not isinstance(searches, list):
         raise SourceError("Arabidopsis PlantConnectome searches are malformed")
@@ -1419,6 +1540,14 @@ def validate_prediction(data: dict[str, Any], gene: str) -> dict[str, Any]:
 def evidence_citations(value: object) -> set[str]:
     citations: set[str] = set()
 
+    def add_pmid(pmid: str) -> None:
+        citations.add(_citation_key(pmid))
+        citations.add(_citation_key(f"PMID:{pmid}"))
+
+    def add_doi(doi: str) -> None:
+        citations.add(_citation_key(doi))
+        citations.add(_citation_key(f"DOI:{doi}"))
+
     def visit(item: object, parent_key: str = "") -> None:
         if isinstance(item, dict):
             for key, nested in item.items():
@@ -1432,9 +1561,23 @@ def evidence_citations(value: object) -> set[str]:
                 return
             citations.add(_citation_key(text))
             if parent_key in {"pmid", "publication", "citation"}:
-                citations.add(_citation_key(f"PMID:{text}"))
+                add_pmid(text)
             elif parent_key == "doi":
-                citations.add(_citation_key(f"DOI:{text}"))
+                add_doi(text)
+        elif parent_key == "description":
+            text = clean_text(item)
+            for match in re.finditer(
+                r"\b(?:pmid|pubmed\s+id)\s*:\s*(\d{7,9})\b",
+                text,
+                flags=re.IGNORECASE,
+            ):
+                add_pmid(match.group(1))
+            for match in re.finditer(
+                r"\b(?:doi\s*:\s*)?(10\.\d{4,9}/[^\s,;)\]]+)",
+                text,
+                flags=re.IGNORECASE,
+            ):
+                add_doi(match.group(1).rstrip("."))
 
     visit(value)
     return citations
@@ -1483,7 +1626,7 @@ class Pipeline:
         self.errors: list[dict[str, str]] = []
 
     def record_error(self, stage: str, key: str, error: object) -> None:
-        record = {"stage": stage, "key": key, "error": clean_text(error, 1500)}
+        record = {"stage": stage, "key": key, "error": error_text(error)}
         with self._error_lock:
             self.errors.append(record)
 
@@ -1519,7 +1662,10 @@ class Pipeline:
                 atomic_json(path, {"request_hash": digest, "status": "ok", "data": data})
                 return data
             except Exception as exc:
-                atomic_json(path, {"request_hash": digest, "status": "error", "error": str(exc)})
+                atomic_json(
+                    path,
+                    {"request_hash": digest, "status": "error", "error": error_text(exc)},
+                )
                 raise
 
     def llm_call(
@@ -1575,7 +1721,10 @@ class Pipeline:
                 )
                 return response.data
             except Exception as exc:
-                atomic_json(path, {"request_hash": digest, "status": "error", "error": str(exc)})
+                atomic_json(
+                    path,
+                    {"request_hash": digest, "status": "error", "error": error_text(exc)},
+                )
                 raise
 
     def _cache_lock(self, path: Path) -> threading.Lock:
@@ -1647,7 +1796,7 @@ class Pipeline:
                 {
                     "stage": "source:potato_gene_search",
                     "key": gene,
-                    "error": clean_text(exc, 1500),
+                    "error": error_text(exc),
                 }
             )
 
@@ -1703,7 +1852,7 @@ class Pipeline:
                     {
                         "stage": "source:potato_rag",
                         "key": query,
-                        "error": clean_text(exc, 1500),
+                        "error": error_text(exc),
                     }
                 )
 
@@ -1747,7 +1896,7 @@ class Pipeline:
                 "gene_names": names,
                 "input": payload,
                 "blocking_errors": [
-                    {"stage": "llm:potato", "key": gene, "error": clean_text(exc, 1500)}
+                    {"stage": "llm:potato", "key": gene, "error": error_text(exc)}
                 ],
             }
             atomic_json(self.evidence_dir / "potato" / f"{gene}.json", record)
@@ -1778,7 +1927,7 @@ class Pipeline:
             "source_species": species,
             "input": payload or {},
             "blocking_errors": [
-                {"stage": stage, "key": target, "error": clean_text(error, 1500)}
+                {"stage": stage, "key": target, "error": error_text(error)}
             ],
         }
         atomic_json(self.evidence_dir / species / f"{target}.json", record)
@@ -1813,8 +1962,12 @@ class Pipeline:
             return self._failed_species_record(
                 "arabidopsis", target, "source:arabidopsis_tair", exc
             )
-        confirmed_target = clean_text(tair_raw["tair"]["selected"]["gene_id"])
-        selected = tair_raw["tair"]["selected"]
+        tair_status = clean_text(tair_raw.get("status")).casefold()
+        tair = tair_raw.get("tair") if isinstance(tair_raw.get("tair"), dict) else {}
+        selected = tair.get("selected") if isinstance(tair.get("selected"), dict) else {}
+        confirmed_target = (
+            clean_text(selected.get("gene_id")) if tair_status == "ok" else target
+        )
         candidate_names = arabidopsis_gene_name_candidates(selected)
         retrieval_names = candidate_names
         if len(candidate_names) >= 2:
@@ -1876,7 +2029,7 @@ class Pipeline:
                     "arabidopsis",
                     target,
                     "source:arabidopsis_plantconnectome",
-                    f"PlantConnectome query failed for {gene_name}: {exc}",
+                    f"PlantConnectome query failed for {gene_name}: {error_text(exc)}",
                     {
                         "tair": tair_raw,
                         "candidate_gene_names": candidate_names,
@@ -1904,7 +2057,7 @@ class Pipeline:
                     "arabidopsis",
                     target,
                     "source:pubmed_arabidopsis",
-                    f"PubMed query failed for {gene_name}: {exc}",
+                    f"PubMed query failed for {gene_name}: {error_text(exc)}",
                     {
                         "tair": tair_raw,
                         "candidate_gene_names": candidate_names,
@@ -1920,6 +2073,7 @@ class Pipeline:
         raw = {
             "status": "ok",
             "query": target,
+            "tair_status": tair_status,
             "tair": tair_raw.get("tair"),
             "plantconnectome_searches": plantconnectome_searches,
         }
@@ -2143,7 +2297,7 @@ class Pipeline:
                 "potato_gene_id": gene,
                 "evidence": payload,
                 "blocking_errors": [
-                    {"stage": "llm:final", "key": gene, "error": clean_text(exc, 1500)}
+                    {"stage": "llm:final", "key": gene, "error": error_text(exc)}
                 ],
             }
             atomic_json(self.result_dir / "genes" / f"{gene}.json", record)
@@ -2447,7 +2601,7 @@ def main(argv: list[str] | None = None) -> int:
         print(json.dumps(run_report, ensure_ascii=False, indent=2))
         return 0 if run_status == "complete" else 2
     except (ValueError, OSError, LLMError) as exc:
-        print(f"error: {exc}", file=sys.stderr)
+        print(f"error: {error_text(exc)}", file=sys.stderr)
         return 2
 
 

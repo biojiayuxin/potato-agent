@@ -254,9 +254,18 @@ class LSPClient:
         return cmd
 
     async def _spawn(self) -> None:
-        env = dict(os.environ)
+        from tools.environments.local import hermes_subprocess_env
+
+        env = hermes_subprocess_env(inherit_credentials=False)
         if self._env:
             env.update(self._env)
+            from tools.environments.local import (
+                _HERMES_PROVIDER_ENV_BLOCKLIST,
+                _is_unconditionally_stripped,
+            )
+            for key in list(env):
+                if key in _HERMES_PROVIDER_ENV_BLOCKLIST or _is_unconditionally_stripped(key):
+                    env.pop(key, None)
 
         cmd = self._command
         if sys.platform == "win32":

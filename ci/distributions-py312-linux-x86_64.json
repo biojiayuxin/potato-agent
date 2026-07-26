@@ -1,0 +1,17 @@
+{
+  "distributions": {
+    "iniconfig": "2.3.0",
+    "packaging": "26.2",
+    "pluggy": "1.6.0",
+    "pygments": "2.20.0",
+    "pytest": "9.1.1",
+    "setuptools": "82.0.1"
+  },
+  "schema_version": 1,
+  "target": {
+    "implementation": "cp",
+    "machine": "x86_64",
+    "platform": "linux",
+    "python_version": "3.12"
+  }
+}

@@ -1,0 +1,239 @@
+{
+  "files": [
+    {
+      "filename": "annotated_types-0.8.0-py3-none-any.whl",
+      "name": "annotated-types",
+      "sha256": "f072f4d804ea359e4eaf198b1af7a8b0943881a87f31bb764f8bf219bb9419e0",
+      "size": 13427,
+      "version": "0.8.0"
+    },
+    {
+      "filename": "anyio-4.14.2-py3-none-any.whl",
+      "name": "anyio",
+      "sha256": "9f505dda5ac9f0c8309b5e8bd445a8c2bf7246f3ce950121e45ea15bc41d1494",
+      "size": 125813,
+      "version": "4.14.2"
+    },
+    {
+      "filename": "certifi-2026.5.20-py3-none-any.whl",
+      "name": "certifi",
+      "sha256": "3c52e209ba0a4ad7aebe60436a4ab349c39e1e602e8c134221e546902ad25897",
+      "size": 134134,
+      "version": "2026.5.20"
+    },
+    {
+      "filename": "cffi-2.1.0-cp312-cp312-manylinux2014_x86_64.manylinux_2_17_x86_64.whl",
+      "name": "cffi",
+      "sha256": "1e9f50d192a3e525b15a75ab5114e442d83d657b7ec29182a991bc9a88fd3a66",
+      "size": 221844,
+      "version": "2.1.0"
+    },
+    {
+      "filename": "charset_normalizer-3.4.9-cp312-cp312-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl",
+      "name": "charset-normalizer",
+      "sha256": "5e226f6218febc71f6c1fc2fafb91c226f75bdc1d8fb12d66823716e891608fd",
+      "size": 224256,
+      "version": "3.4.9"
+    },
+    {
+      "filename": "cryptography-48.0.1-cp311-abi3-manylinux_2_34_x86_64.whl",
+      "name": "cryptography",
+      "sha256": "0ee6ea481db1ab889cba043ec1eda17bb9c1ea79db6722f779c3667f9f70322f",
+      "size": 4745488,
+      "version": "48.0.1"
+    },
+    {
+      "filename": "distro-1.9.0-py3-none-any.whl",
+      "name": "distro",
+      "sha256": "7bffd925d65168f85027d8da9af6bddab658135b840670a223589bc0c8ef02b2",
+      "size": 20277,
+      "version": "1.9.0"
+    },
+    {
+      "filename": "h11-0.16.0-py3-none-any.whl",
+      "name": "h11",
+      "sha256": "63cf8bbe7522de3bf65932fda1d9c2772064ffb3dae62d55932da54b31cb6c86",
+      "size": 37515,
+      "version": "0.16.0"
+    },
+    {
+      "filename": "httpcore-1.0.9-py3-none-any.whl",
+      "name": "httpcore",
+      "sha256": "2d400746a40668fc9dec9810239072b40b4484b640a8c38fd654a024c7a1bf55",
+      "size": 78784,
+      "version": "1.0.9"
+    },
+    {
+      "filename": "httpx-0.28.1-py3-none-any.whl",
+      "name": "httpx",
+      "sha256": "d909fcccc110f8c7faf814ca82a9a4d816bc5a6dbfea25d6591d6985b8ba59ad",
+      "size": 73517,
+      "version": "0.28.1"
+    },
+    {
+      "filename": "idna-3.18-py3-none-any.whl",
+      "name": "idna",
+      "sha256": "7f952cbe720b688055e3f87de14f5c3e5fdaa8bc3928985c4077ca689de849a2",
+      "size": 65455,
+      "version": "3.18"
+    },
+    {
+      "filename": "jiter-0.16.0-cp312-cp312-manylinux_2_17_x86_64.manylinux2014_x86_64.whl",
+      "name": "jiter",
+      "sha256": "46add52f4ad47a08bfb1219f3e673da972191489a33016edefdb5ea55bfa8c48",
+      "size": 343805,
+      "version": "0.16.0"
+    },
+    {
+      "filename": "openai-2.24.0-py3-none-any.whl",
+      "name": "openai",
+      "sha256": "fed30480d7d6c884303287bde864980a4b137b60553ffbcf9ab4a233b7a73d94",
+      "size": 1120122,
+      "version": "2.24.0"
+    },
+    {
+      "filename": "pillow-12.3.0-cp312-cp312-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl",
+      "name": "pillow",
+      "sha256": "78cb2c6865a35ab8ff8b75fd122f6033b92a62c82801110e48ddd6c936a45d91",
+      "size": 6940830,
+      "version": "12.3.0"
+    },
+    {
+      "filename": "psutil-7.2.2-cp36-abi3-manylinux2010_x86_64.manylinux_2_12_x86_64.manylinux_2_28_x86_64.whl",
+      "name": "psutil",
+      "sha256": "076a2d2f923fd4821644f5ba89f059523da90dc9014e85f8e45a5774ca5bc6f9",
+      "size": 155560,
+      "version": "7.2.2"
+    },
+    {
+      "filename": "ptyprocess-0.7.0-py2.py3-none-any.whl",
+      "name": "ptyprocess",
+      "sha256": "4b41f3967fce3af57cc7e94b888626c18bf37a083e3651ca8feeb66d492fef35",
+      "size": 13993,
+      "version": "0.7.0"
+    },
+    {
+      "filename": "pycparser-3.0-py3-none-any.whl",
+      "name": "pycparser",
+      "sha256": "b727414169a36b7d524c1c3e31839a521725078d7b2ff038656844266160a992",
+      "size": 48172,
+      "version": "3.0"
+    },
+    {
+      "filename": "pydantic-2.13.4-py3-none-any.whl",
+      "name": "pydantic",
+      "sha256": "45a282cde31d808236fd7ea9d919b128653c8b38b393d1c4ab335c62924d9aba",
+      "size": 472262,
+      "version": "2.13.4"
+    },
+    {
+      "filename": "pydantic_core-2.46.4-cp312-cp312-manylinux_2_17_x86_64.manylinux2014_x86_64.whl",
+      "name": "pydantic-core",
+      "sha256": "926c9541b14b12b1681dca8a0b75feb510b06c6341b70a8e500c2fdcff837cce",
+      "size": 2094516,
+      "version": "2.46.4"
+    },
+    {
+      "filename": "pyjwt-2.13.0-py3-none-any.whl",
+      "name": "pyjwt",
+      "sha256": "66adcc2aff09b3f1bbd95fc1e1577df8ac8723c978552fd43304c8a290ac5728",
+      "size": 31274,
+      "version": "2.13.0"
+    },
+    {
+      "filename": "python_dotenv-1.2.2-py3-none-any.whl",
+      "name": "python-dotenv",
+      "sha256": "1d8214789a24de455a8b8bd8ae6fe3c6b69a5e3d64aa8a8e5d68e694bbcb285a",
+      "size": 22101,
+      "version": "1.2.2"
+    },
+    {
+      "filename": "pyyaml-6.0.3-cp312-cp312-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl",
+      "name": "pyyaml",
+      "sha256": "ba1cc08a7ccde2d2ec775841541641e4548226580ab850948cbfda66a1befcdc",
+      "size": 807870,
+      "version": "6.0.3"
+    },
+    {
+      "filename": "requests-2.33.0-py3-none-any.whl",
+      "name": "requests",
+      "sha256": "3324635456fa185245e24865e810cecec7b4caf933d7eb133dcde67d48cee69b",
+      "size": 65017,
+      "version": "2.33.0"
+    },
+    {
+      "filename": "ruamel_yaml-0.18.17-py3-none-any.whl",
+      "name": "ruamel-yaml",
+      "sha256": "9c8ba9eb3e793efdf924b60d521820869d5bf0cb9c6f1b82d82de8295e290b9d",
+      "size": 121594,
+      "version": "0.18.17"
+    },
+    {
+      "filename": "ruamel_yaml_clib-0.2.15-cp312-cp312-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl",
+      "name": "ruamel-yaml-clib",
+      "sha256": "11e5499db1ccbc7f4b41f0565e4f799d863ea720e01d3e99fa0b7b5fcd7802c9",
+      "size": 788211,
+      "version": "0.2.15"
+    },
+    {
+      "filename": "sniffio-1.3.1-py3-none-any.whl",
+      "name": "sniffio",
+      "sha256": "2f6da418d1f1e0fddd844478f41680e794e6051915791a034ff65e5f100525a2",
+      "size": 10235,
+      "version": "1.3.1"
+    },
+    {
+      "filename": "socksio-1.0.0-py3-none-any.whl",
+      "name": "socksio",
+      "sha256": "95dc1f15f9b34e8d7b16f06d74b8ccf48f609af32ab33c608d08761c5dcbb1f3",
+      "size": 12763,
+      "version": "1.0.0"
+    },
+    {
+      "filename": "tqdm-4.69.1-py3-none-any.whl",
+      "name": "tqdm",
+      "sha256": "0a654b96f7a2660cceb615b56f307ec2bef96c515409014a429a561981ab52b4",
+      "size": 675452,
+      "version": "4.69.1"
+    },
+    {
+      "filename": "typing_extensions-4.16.0-py3-none-any.whl",
+      "name": "typing-extensions",
+      "sha256": "481caa481374e813c1b176ada14e97f1f67a4539ce9cfeb3f350d78d6370c2e8",
+      "size": 45571,
+      "version": "4.16.0"
+    },
+    {
+      "filename": "typing_inspection-0.4.2-py3-none-any.whl",
+      "name": "typing-inspection",
+      "sha256": "4ed1cacbdc298c220f1bd249ed5287caa16f34d44ef4e9c3d0cbad5b521545e7",
+      "size": 14611,
+      "version": "0.4.2"
+    },
+    {
+      "filename": "urllib3-2.7.0-py3-none-any.whl",
+      "name": "urllib3",
+      "sha256": "9fb4c81ebbb1ce9531cce37674bbc6f1360472bc18ca9a553ede278ef7276897",
+      "size": 131087,
+      "version": "2.7.0"
+    },
+    {
+      "filename": "websockets-15.0.1-cp312-cp312-manylinux_2_5_x86_64.manylinux1_x86_64.manylinux_2_17_x86_64.manylinux2014_x86_64.whl",
+      "name": "websockets",
+      "sha256": "64dee438fed052b52e4f98f76c5790513235efaa1ef7f3f2192c392cd7c91b65",
+      "size": 182523,
+      "version": "15.0.1"
+    }
+  ],
+  "lock": {
+    "path": "requirements-py312-linux-x86_64.lock",
+    "sha256": "8545b0a40e91ad6eca381818498d07d6d681e01cd71b4109db4fa26dc0d68c50"
+  },
+  "schema_version": 1,
+  "target": {
+    "implementation": "cp",
+    "machine": "x86_64",
+    "platform": "linux",
+    "python_version": "3.12"
+  }
+}

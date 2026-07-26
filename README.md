@@ -82,15 +82,38 @@ runtime 在 `HERMES_RUNTIME_PROFILE_PATH` 缺失或 provider/API mode 不在 all
 当前生产状态：
 
 ```text
-release:      /opt/potato-hermes-lite/releases/20260718T082412Z-0.16.0-potato.lite.4-2ce0fef7
+release:      /opt/potato-hermes-lite/releases/20260726T042411Z-0.19.0-potato.lite.1-1cd02812
 current:      /opt/potato-hermes-lite/current
-version:      0.16.0+potato.lite.4
-wheel SHA256: 2ce0fef7ea82b95c6b63e8baea2e365a3ceea4171c2c8645b90272ecdb975481
+version:      0.19.0+potato.lite.1
+wheel SHA256: 1cd02812d7438aee3855241620103b732671ce612c30dd6f8c01a5c42e35d112
 ```
 
-11 个 mapped unit 和 Interface gateway Python 均已切到 Lite；初步实际用户验收已通过，目前仍处于观察和
-legacy 回滚保留期。完整工具清单、迁移证据和删除门禁见
-[`HERMES_SLIMMING_PLAN.md`](HERMES_SLIMMING_PLAN.md)。
+本次切换前基线是
+`20260725T090240Z-0.19.0-potato.lite.1-8ae648f3`；该 immutable release 在新版本验收和观察期结束前保留作
+回滚目标。11 个 mapped unit 和 Interface gateway Python 均使用 Lite。构建、切换、验收和回滚流程见
+本文第 6.3 至 6.7 小节及 [`hermes-lite/README.md`](hermes-lite/README.md)。
+
+### 0.19.0 Potato Lite 依赖更新
+
+`0.19.0+potato.lite.1` 不使用安装时动态解析的依赖集合。Lite 与 Interface 均以 Python 3.12、Linux x86_64
+全量 hash lock 安装，wheelhouse 文件名、大小和 SHA256 另由 manifest 绑定：
+
+| 边界 | 固定版本或范围 | 说明 |
+| --- | --- | --- |
+| Lite | `PyJWT[crypto]==2.13.0` | JWT crypto extra 固定到已审计版本 |
+| Lite | `urllib3>=2.7,<3` | 阻止回退到旧主版本并限制未来破坏性升级 |
+| Lite | `cryptography==48.0.1` | 替代已被 OSV 标记 HIGH 的 `46.0.7` |
+| Lite | `certifi==2026.5.20` | 固定 TLS 根证书集合 |
+| Lite | `Pillow==12.3.0` | 修复 `12.2.0` 的多项 HIGH 图像解析公告 |
+| Interface | `fastapi==0.136.1` | 固定 ASGI 框架版本 |
+| Interface | `starlette==1.3.1` | 固定请求/WebSocket 基础实现版本 |
+
+Lite 完整闭包见
+[`hermes-lite/manifests/requirements-py312-linux-x86_64.lock`](hermes-lite/manifests/requirements-py312-linux-x86_64.lock)，
+Interface 完整闭包见
+[`interface/requirements-py312-linux-x86_64.lock`](interface/requirements-py312-linux-x86_64.lock)。安装必须同时使用
+`--require-hashes --no-index` 和对应 wheelhouse；项目 wheel 单独使用 `--no-deps` 安装，完成后执行 `pip check`
+及 distribution/file fingerprint 校验。
 
 ## 安全边界
 
@@ -541,14 +564,12 @@ test ! -e "$BROWSER_ASSETS/browser/chrome/chrome-linux64/chrome-sandbox"
 
 #### 6.3 测试、隔离验证和重复构建
 
-Lite 单测与 packaging 测试有各自的 `conftest.py`，必须分开运行：
+Lite 单测与 packaging 测试必须联合收集，避免 CI 与本地验证边界不一致：
 
 ```bash
 PYTHONDONTWRITEBYTECODE=1 "$BUILD_PYTHON" -B -m pytest \
-  -q -p no:cacheprovider -c /dev/null hermes-lite/tests
-
-PYTHONDONTWRITEBYTECODE=1 "$BUILD_PYTHON" -B -m pytest \
-  -q -p no:cacheprovider -c /dev/null hermes-lite/tests_packaging
+  -q -p no:cacheprovider -c /dev/null \
+  hermes-lite/tests hermes-lite/tests_packaging
 
 PYTHONDONTWRITEBYTECODE=1 "$BUILD_PYTHON" -B -m pytest \
   -q -p no:cacheprovider -c /dev/null \
@@ -1189,7 +1210,7 @@ Environment=WGCNA_DATABASE_URL=postgresql:///potato_wgcna?host=/var/run/postgres
 Environment=BULK_RNASEQ_DB_PATH=/srv/bulk_rnaseq/current/bulk_rnaseq.sqlite
 Environment=INTERFACE_RESEND_API_KEY=replace-with-resend-api-key
 Environment="INTERFACE_MAIL_FROM=Potato Agent <noreply@mail.example.com>"
-ExecStart=/opt/interface-env/bin/python -m uvicorn interface.app:app --host 0.0.0.0 --port 3000
+ExecStart=/opt/interface-env/bin/python -m interface.serve --host 0.0.0.0 --port 3000
 Restart=always
 RestartSec=3
 
@@ -1396,14 +1417,13 @@ cd /srv/potato_agent
 /opt/interface-env/bin/python -m pytest interface/test_*.py
 ```
 
-Hermes Lite 源码、profile、manifest 或构建脚本变更后，还必须使用 6.1 小节的 `BUILD_PYTHON` 分开运行
+Hermes Lite 源码、profile、manifest 或构建脚本变更后，还必须使用 6.1 小节的 `BUILD_PYTHON` 运行
 Lite 单测、packaging 测试、mock gateway E2E 和隔离 verifier：
 
 ```bash
 PYTHONDONTWRITEBYTECODE=1 "$BUILD_PYTHON" -B -m pytest \
-  -q -p no:cacheprovider -c /dev/null hermes-lite/tests
-PYTHONDONTWRITEBYTECODE=1 "$BUILD_PYTHON" -B -m pytest \
-  -q -p no:cacheprovider -c /dev/null hermes-lite/tests_packaging
+  -q -p no:cacheprovider -c /dev/null \
+  hermes-lite/tests hermes-lite/tests_packaging
 PYTHONDONTWRITEBYTECODE=1 "$BUILD_PYTHON" -B -m pytest \
   -q -p no:cacheprovider -c /dev/null \
   hermes-lite/tests_e2e/test_mock_provider_e2e.py
@@ -1411,7 +1431,7 @@ PYTHONDONTWRITEBYTECODE=1 "$BUILD_PYTHON" -B \
   hermes-lite/scripts/verify_lite.py --python "$BUILD_PYTHON"
 ```
 
-不要把两个 pytest 目录合并成一次调用；它们使用不同的 `conftest.py` 边界。release 构建仍需按 6.3 小节
+两个 pytest 目录应在同一调用中收集；测试支持模块不依赖裸 `conftest` 导入。release 构建仍需按 6.3 小节
 完成 dry run 和两次 wheel SHA 比较。生产切换后还需完整执行 6.7 小节，不以单元测试代替 runtime origin、
 服务进程和受保护状态检查。
 

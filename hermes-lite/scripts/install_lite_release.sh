@@ -39,14 +39,18 @@ if [[ -e ${final} || -L ${final} || -e ${staging} || -L ${staging} ]]; then
   exit 2
 fi
 
-python3 - "${release_source}" <<'PY'
+python3 - "${release_source}" "${wheelhouse}" <<'PY'
 import hashlib
 import json
 import pathlib
+import platform
 import subprocess
 import sys
 
 root = pathlib.Path(sys.argv[1])
+wheelhouse = pathlib.Path(sys.argv[2])
+if sys.version_info[:2] != (3, 12) or sys.platform != "linux" or platform.machine() != "x86_64":
+    raise SystemExit("Lite release installation requires CPython 3.12 on Linux x86_64")
 manifest = json.loads((root / "manifest.json").read_text(encoding="utf-8"))
 project = manifest.get("project")
 if not isinstance(project, dict):
@@ -75,6 +79,27 @@ for relative, expected in checks.items():
     if actual != expected:
         raise SystemExit(f"release hash mismatch for {relative}: {actual} != {expected}")
 
+config = root / "config" / "manifests"
+lock_path = config / "requirements-py312-linux-x86_64.lock"
+wheelhouse_manifest_path = config / "wheelhouse-py312-linux-x86_64.json"
+wheelhouse_manifest = json.loads(wheelhouse_manifest_path.read_text(encoding="utf-8"))
+if digest(str(lock_path.relative_to(root))) != wheelhouse_manifest["lock"]["sha256"]:
+    raise SystemExit("Lite dependency lock differs from the wheelhouse manifest")
+expected_wheels = {}
+for item in wheelhouse_manifest.get("files", []):
+    filename = item.get("filename")
+    expected = item.get("sha256")
+    if not isinstance(filename, str) or not isinstance(expected, str):
+        raise SystemExit("invalid wheelhouse file manifest")
+    expected_wheels[filename] = expected
+actual_wheels = {path.name for path in wheelhouse.glob("*.whl")}
+if actual_wheels != set(expected_wheels):
+    raise SystemExit("wheelhouse contents differ from the file manifest")
+for filename, expected in expected_wheels.items():
+    value = hashlib.sha256((wheelhouse / filename).read_bytes()).hexdigest()
+    if value != expected:
+        raise SystemExit(f"wheelhouse hash mismatch for {filename}")
+
 chrome = root / manifest["browser_assets"]["chrome_for_testing"]["path"]
 output = subprocess.check_output([chrome, "--version"], text=True).strip()
 expected_version = manifest["browser_assets"]["chrome_for_testing"]["version"]
@@ -92,15 +117,23 @@ mv "${staging}" "${final}"
 python3 -m venv "${final}/venv"
 wheel_name=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["wheel"]["filename"])' "${final}/manifest.json")
 PIP_NO_CACHE_DIR=1 "${final}/venv/bin/pip" install \
+  --require-hashes \
   --no-index \
   --find-links "${wheelhouse}" \
+  -r "${final}/config/manifests/requirements-py312-linux-x86_64.lock"
+PIP_NO_CACHE_DIR=1 "${final}/venv/bin/pip" install \
+  --no-deps \
+  --no-index \
   "${final}/wheel/${wheel_name}"
 "${final}/venv/bin/pip" check
 
 "${final}/venv/bin/python" -I - "${final}" <<'PY'
 import importlib.metadata
+import base64
+import hashlib
 import json
 import pathlib
+import re
 import sys
 
 root = pathlib.Path(sys.argv[1]).resolve()
@@ -114,11 +147,35 @@ if project.get("name") != "potato-hermes-lite":
 expected_version = project.get("version")
 if not isinstance(expected_version, str) or not expected_version:
     raise SystemExit("release manifest project version is invalid")
+def canonical_name(value):
+    return re.sub(r"[-_.]+", "-", value).lower()
+
 installed = {
-    distribution.metadata["Name"].lower(): distribution.version
+    canonical_name(distribution.metadata["Name"]): distribution.version
     for distribution in importlib.metadata.distributions()
     if distribution.metadata.get("Name")
 }
+expected_dependency_data = json.loads(
+    (root / "config" / "manifests" / "distributions-py312-linux-x86_64.json").read_text(
+        encoding="utf-8"
+    )
+)
+expected_dependencies = expected_dependency_data.get("distributions")
+if not isinstance(expected_dependencies, dict):
+    raise SystemExit("invalid dependency distribution fingerprint")
+expected_installed = {
+    canonical_name(str(name)): str(version)
+    for name, version in expected_dependencies.items()
+}
+expected_installed["potato-hermes-lite"] = expected_version
+for name, version in expected_installed.items():
+    if installed.get(name) != version:
+        raise SystemExit(
+            f"distribution version mismatch for {name}: expected {version}, got {installed.get(name)}"
+        )
+unexpected = set(installed) - set(expected_installed) - {"pip", "setuptools"}
+if unexpected:
+    raise SystemExit(f"unexpected distributions in Lite venv: {sorted(unexpected)}")
 if installed.get("potato-hermes-lite") != expected_version:
     raise SystemExit(
         "potato-hermes-lite version mismatch: "
@@ -141,9 +198,31 @@ for module in (agent.codex_runtime, potato_hermes_lite, tui_gateway.entry):
     if site_root not in origin.parents:
         raise SystemExit(f"module loaded outside Lite venv: {origin}")
 
+file_fingerprints = {}
+for distribution in importlib.metadata.distributions():
+    raw_name = distribution.metadata.get("Name")
+    if not raw_name or canonical_name(raw_name) not in expected_installed:
+        continue
+    records = []
+    for entry in distribution.files or ():
+        path = pathlib.Path(distribution.locate_file(entry)).resolve()
+        if site_root != path and site_root not in path.parents:
+            raise SystemExit(f"distribution file escaped Lite venv: {path}")
+        if not path.is_file():
+            raise SystemExit(f"installed distribution file is missing: {path}")
+        digest = hashlib.sha256(path.read_bytes()).digest()
+        encoded = base64.urlsafe_b64encode(digest).decode("ascii").rstrip("=")
+        if entry.hash is not None:
+            if entry.hash.mode != "sha256" or entry.hash.value != encoded:
+                raise SystemExit(f"installed distribution file hash mismatch: {path}")
+        records.append((str(entry), path.stat().st_size, encoded))
+    rendered = json.dumps(sorted(records), separators=(",", ":")).encode("utf-8")
+    file_fingerprints[canonical_name(raw_name)] = hashlib.sha256(rendered).hexdigest()
+
 snapshot = {
     "python": sys.version.split()[0],
     "distributions": dict(sorted(installed.items())),
+    "distribution_file_fingerprints": dict(sorted(file_fingerprints.items())),
 }
 (root / "config" / "installed-distributions.json").write_text(
     json.dumps(snapshot, indent=2, sort_keys=True) + "\n",
@@ -153,6 +232,7 @@ PY
 
 "${final}/venv/bin/hermes" --help >/dev/null
 chown -R root:root "${final}"
+chmod -R a+rX "${final}/venv"
 chmod -R go-w "${final}"
 chrome_dir=${final}/browser/chrome/chrome-linux64
 chrome_sandbox_source=${chrome_dir}/chrome_sandbox

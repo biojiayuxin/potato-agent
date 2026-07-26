@@ -1,0 +1,14 @@
+[Unit]
+Description=Potato Agent web interface
+After=network.target
+
+[Service]
+Type=simple
+User=potato-interface
+Group=potato-interface
+WorkingDirectory=/srv/potato_agent
+ExecStart=/opt/interface-env/bin/python -m interface.serve --host 0.0.0.0 --port 3000
+Restart=on-failure
+
+[Install]
+WantedBy=multi-user.target

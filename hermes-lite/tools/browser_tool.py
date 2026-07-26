@@ -129,6 +129,24 @@ except ImportError:
 
 logger = logging.getLogger(__name__)
 
+_BROWSER_PASSTHROUGH_KEYS = frozenset({
+    "BROWSERBASE_API_KEY",
+    "BROWSERBASE_PROJECT_ID",
+    "BROWSER_USE_API_KEY",
+    "FIRECRAWL_API_KEY",
+    "FIRECRAWL_API_URL",
+})
+
+
+def _browser_subprocess_env() -> Dict[str, str]:
+    from tools.environments.local import hermes_subprocess_env
+
+    env = hermes_subprocess_env(inherit_credentials=False)
+    for key in _BROWSER_PASSTHROUGH_KEYS:
+        if key in os.environ:
+            env[key] = os.environ[key]
+    return env
+
 # Standard PATH entries for environments with minimal PATH (e.g. systemd services).
 # Includes Android/Termux and macOS Homebrew locations needed for agent-browser,
 # npx, node, and Android's glibc runner (grun).
@@ -931,7 +949,8 @@ def _run_chrome_fallback_command(
 
     task_socket_dir = os.path.join(_socket_safe_tmpdir(), f"agent-browser-{tmp_session}")
     os.makedirs(task_socket_dir, mode=0o700, exist_ok=True)
-    browser_env = {**os.environ, "AGENT_BROWSER_SOCKET_DIR": task_socket_dir}
+    browser_env = _browser_subprocess_env()
+    browser_env["AGENT_BROWSER_SOCKET_DIR"] = task_socket_dir
     browser_env["PATH"] = _merge_browser_path(browser_env.get("PATH", ""))
 
     if "AGENT_BROWSER_IDLE_TIMEOUT_MS" not in browser_env:
@@ -2067,7 +2086,7 @@ def _run_browser_command(
         logger.debug("browser cmd=%s task=%s socket_dir=%s (%d chars)",
                      command, task_id, task_socket_dir, len(task_socket_dir))
 
-        browser_env = {**os.environ}
+        browser_env = _browser_subprocess_env()
 
         # Ensure subprocesses inherit the same browser-specific PATH fallbacks
         # used during CLI discovery.
@@ -2413,7 +2432,7 @@ def browser_navigate(url: str, task_id: Optional[str] = None) -> str:
     # 169.254.169.254 / metadata.google.internal / ECS task metadata
     # via a browser, and routing those to a local Chromium sidecar
     # on an EC2/GCP/Azure host exfiltrates IAM credentials (#16234).
-    if not _is_local_backend() and _is_always_blocked_url(url):
+    if _is_always_blocked_url(url):
         return json.dumps({
             "success": False,
             "error": "Blocked: URL targets a cloud metadata endpoint",
@@ -2485,8 +2504,7 @@ def browser_navigate(url: str, task_id: Optional[str] = None) -> str:
         # when auto_local_this_nav is true — see pre-nav check for
         # rationale (#16234).
         if (
-            not _is_local_backend()
-            and final_url
+            final_url
             and final_url != url
             and _is_always_blocked_url(final_url)
         ):
@@ -2555,19 +2573,193 @@ def browser_navigate(url: str, task_id: Optional[str] = None) -> str:
                 refs = snap_data.get("refs", {})
                 if len(snapshot_text) > SNAPSHOT_SUMMARIZE_THRESHOLD:
                     snapshot_text = _truncate_snapshot(snapshot_text)
-                response["snapshot"] = snapshot_text
+                response["snapshot"] = _redact_browser_output(snapshot_text)
                 response["element_count"] = len(refs) if refs else 0
                 if snap_result.get("fallback_warning") and not response.get("fallback_warning"):
                     _copy_fallback_warning(response, snap_result)
         except Exception as e:
             logger.debug("Auto-snapshot after navigate failed: %s", e)
 
-        return json.dumps(response, ensure_ascii=False)
+        return json.dumps(_redact_browser_output(response), ensure_ascii=False)
     else:
-        return json.dumps({
+        return json.dumps(_redact_browser_output({
             "success": False,
             "error": result.get("error", "Navigation failed")
-        }, ensure_ascii=False)
+        }), ensure_ascii=False)
+
+
+def _redact_browser_output(value: Any) -> Any:
+    """Recursively redact browser-originated values at the tool boundary."""
+    from agent.redact import redact_sensitive_text
+
+    if isinstance(value, str):
+        return redact_sensitive_text(value, force=True)
+    if isinstance(value, list):
+        return [_redact_browser_output(item) for item in value]
+    if isinstance(value, tuple):
+        return tuple(_redact_browser_output(item) for item in value)
+    if isinstance(value, dict):
+        return {key: _redact_browser_output(item) for key, item in value.items()}
+    return value
+
+
+def _eval_ssrf_guard_active(effective_task_id: str) -> bool:
+    return (
+        not _is_local_backend()
+        and not _is_local_sidecar_key(effective_task_id)
+        and not _allow_private_urls()
+    )
+
+
+def _browser_url_block_reason(url: str, effective_task_id: str) -> Optional[str]:
+    if _is_always_blocked_url(url):
+        return "cloud metadata endpoint"
+    if _eval_ssrf_guard_active(effective_task_id) and not _is_safe_url(url):
+        return "private or internal address"
+    return None
+
+
+_JS_URL_LITERAL_RE = re.compile(r"""https?://[^\s'"`)\]<>]+""", re.IGNORECASE)
+_JS_STRING_LITERAL_RE = re.compile(
+    r"""'(?:\\.|[^'\\])*'|\"(?:\\.|[^\"\\])*\"|`(?:\\.|[^`\\])*`""",
+    re.S,
+)
+_JS_NETWORK_PRIMITIVE_RE = re.compile(
+    r"\b(?:fetch|XMLHttpRequest|WebSocket|EventSource|sendBeacon)\b",
+    re.I,
+)
+
+
+def _decode_js_string_literal(literal: str) -> str:
+    if len(literal) < 2:
+        return literal
+    try:
+        return bytes(literal[1:-1], "utf-8").decode("unicode_escape")
+    except Exception:
+        return literal[1:-1]
+
+
+def _expression_url_candidates(expression: str) -> list[str]:
+    decoded_literals = [
+        _decode_js_string_literal(match.group(0))
+        for match in _JS_STRING_LITERAL_RE.finditer(expression)
+    ]
+    sources = [expression, *decoded_literals]
+    if decoded_literals:
+        sources.append("".join(decoded_literals))
+    candidates: list[str] = []
+    for source in sources:
+        for match in _JS_URL_LITERAL_RE.findall(source):
+            candidate = match.rstrip(".,;")
+            if candidate not in candidates:
+                candidates.append(candidate)
+    return candidates
+
+
+def _expression_block_reason(
+    expression: str,
+    effective_task_id: str,
+) -> tuple[str, str] | None:
+    candidates = _expression_url_candidates(expression)
+    for candidate in candidates:
+        reason = _browser_url_block_reason(candidate, effective_task_id)
+        if reason:
+            return candidate, reason
+    if _JS_NETWORK_PRIMITIVE_RE.search(expression) and not candidates:
+        return "dynamic URL", "URL could not be validated"
+    return None
+
+
+def _current_page_block_reason(effective_task_id: str) -> tuple[str, str] | None:
+    try:
+        result = _run_browser_command(
+            effective_task_id,
+            "eval",
+            ["window.location.href"],
+            timeout=5,
+            _engine_override="auto",
+        )
+        if not result.get("success"):
+            return "unknown", "URL could not be validated"
+        current_url = str(result.get("data", {}).get("result", ""))
+        current_url = current_url.strip().strip('"').strip("'")
+        if not current_url:
+            return "unknown", "URL could not be validated"
+        if not current_url.lower().startswith(("http://", "https://")):
+            return None
+        reason = _browser_url_block_reason(current_url, effective_task_id)
+        if reason:
+            _run_browser_command(
+                effective_task_id,
+                "open",
+                ["about:blank"],
+                timeout=10,
+                _engine_override="auto",
+            )
+            return current_url, reason
+    except Exception as exc:
+        logger.debug("current browser URL safety probe failed: %s", exc)
+        return "unknown", "URL could not be validated"
+    return None
+
+
+def _blocked_current_page_response(effective_task_id: str) -> Optional[str]:
+    blocked = _current_page_block_reason(effective_task_id)
+    if not blocked:
+        return None
+    _, reason = blocked
+    return json.dumps(
+        {"success": False, "error": f"Blocked: page targets a {reason}"},
+        ensure_ascii=False,
+    )
+
+
+_RISKY_BROWSER_EVAL_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
+    (re.compile(r"\bdocument\s*\.\s*cookie\b", re.I), "document.cookie"),
+    (re.compile(r"\b(?:localStorage|sessionStorage)\b", re.I), "web storage"),
+    (re.compile(r"\bindexedDB\b", re.I), "IndexedDB"),
+    (re.compile(r"\bcaches\s*\.\s*(?:open|match|keys)\b", re.I), "Cache Storage"),
+    (re.compile(r"\bnavigator\s*\.\s*(?:clipboard|credentials|serviceWorker)\b", re.I), "navigator sensitive API"),
+    (_JS_NETWORK_PRIMITIVE_RE, "network request"),
+    (re.compile(r"\bdocument\s*\.\s*forms\b.*\bvalue\b", re.I | re.S), "form value extraction"),
+)
+
+
+def _restrict_browser_evaluate() -> bool:
+    try:
+        from hermes_cli.config import read_raw_config
+
+        return is_truthy_value(
+            cfg_get(read_raw_config(), "browser", "restrict_evaluate"),
+            default=False,
+        )
+    except Exception:
+        return False
+
+
+def _allow_unsafe_browser_evaluate() -> bool:
+    try:
+        from hermes_cli.config import read_raw_config
+
+        return is_truthy_value(
+            cfg_get(read_raw_config(), "browser", "allow_unsafe_evaluate"),
+            default=False,
+        )
+    except Exception:
+        return False
+
+
+def _enforce_browser_eval_policy(expression: str) -> Optional[str]:
+    if not _restrict_browser_evaluate() or _allow_unsafe_browser_evaluate():
+        return None
+    decoded_expression = expression + " " + " ".join(
+        _decode_js_string_literal(match.group(0))
+        for match in _JS_STRING_LITERAL_RE.finditer(expression)
+    )
+    for pattern, reason in _RISKY_BROWSER_EVAL_PATTERNS:
+        if pattern.search(decoded_expression):
+            return f"Blocked: restricted JavaScript primitive ({reason})"
+    return None
 
 
 def browser_snapshot(
@@ -2591,6 +2783,9 @@ def browser_snapshot(
         return camofox_snapshot(full, task_id, user_task)
 
     effective_task_id = _last_session_key(task_id or "default")
+    blocked_response = _blocked_current_page_response(effective_task_id)
+    if blocked_response:
+        return blocked_response
 
     # Build command args based on full flag
     args = []
@@ -2612,7 +2807,7 @@ def browser_snapshot(
 
         response = {
             "success": True,
-            "snapshot": snapshot_text,
+            "snapshot": _redact_browser_output(snapshot_text),
             "element_count": len(refs) if refs else 0
         }
         _copy_fallback_warning(response, result)
@@ -2626,17 +2821,20 @@ def browser_snapshot(
             if _supervisor is not None:
                 _sv_snap = _supervisor.snapshot()
                 if _sv_snap.active:
-                    response.update(_sv_snap.to_dict())
+                    response.update(_redact_browser_output(_sv_snap.to_dict()))
         except Exception as _sv_exc:
             logger.debug("supervisor snapshot merge failed: %s", _sv_exc)
 
-        return json.dumps(response, ensure_ascii=False)
+        return json.dumps(_redact_browser_output(response), ensure_ascii=False)
     else:
         response = {
             "success": False,
-            "error": result.get("error", "Failed to get snapshot")
+            "error": _redact_browser_output(result.get("error", "Failed to get snapshot"))
         }
-        return json.dumps(_copy_fallback_warning(response, result), ensure_ascii=False)
+        return json.dumps(
+            _redact_browser_output(_copy_fallback_warning(response, result)),
+            ensure_ascii=False,
+        )
 
 
 def browser_click(ref: str, task_id: Optional[str] = None) -> str:
@@ -2857,6 +3055,9 @@ def browser_console(clear: bool = False, expression: Optional[str] = None, task_
         return camofox_console(clear, task_id)
 
     effective_task_id = _last_session_key(task_id or "default")
+    blocked_response = _blocked_current_page_response(effective_task_id)
+    if blocked_response:
+        return blocked_response
 
     console_args = ["--clear"] if clear else []
     error_args = ["--clear"] if clear else []
@@ -2869,7 +3070,7 @@ def browser_console(clear: bool = False, expression: Optional[str] = None, task_
         for msg in console_result.get("data", {}).get("messages", []):
             messages.append({
                 "type": msg.get("type", "log"),
-                "text": msg.get("text", ""),
+                "text": _redact_browser_output(msg.get("text", "")),
                 "source": "console",
             })
 
@@ -2877,7 +3078,7 @@ def browser_console(clear: bool = False, expression: Optional[str] = None, task_
     if errors_result.get("success"):
         for err in errors_result.get("data", {}).get("errors", []):
             errors.append({
-                "message": err.get("message", ""),
+                "message": _redact_browser_output(err.get("message", "")),
                 "source": "exception",
             })
 
@@ -2891,15 +3092,28 @@ def browser_console(clear: bool = False, expression: Optional[str] = None, task_
     _copy_fallback_warning(response, console_result)
     if errors_result.get("fallback_warning") and not response.get("fallback_warning"):
         _copy_fallback_warning(response, errors_result)
-    return json.dumps(response, ensure_ascii=False)
+    return json.dumps(_redact_browser_output(response), ensure_ascii=False)
 
 
 def _browser_eval(expression: str, task_id: Optional[str] = None) -> str:
     """Evaluate a JavaScript expression in the page context and return the result."""
+    effective_task_id = _last_session_key(task_id or "default")
+    policy_error = _enforce_browser_eval_policy(expression)
+    if policy_error:
+        return json.dumps({"success": False, "error": policy_error})
+    blocked_expression = _expression_block_reason(expression, effective_task_id)
+    if blocked_expression:
+        _, reason = blocked_expression
+        return json.dumps(
+            {"success": False, "error": f"Blocked: JavaScript targets a {reason}"},
+            ensure_ascii=False,
+        )
+    blocked_response = _blocked_current_page_response(effective_task_id)
+    if blocked_response:
+        return blocked_response
+
     if _is_camofox_mode():
         return _camofox_eval(expression, task_id)
-
-    effective_task_id = _last_session_key(task_id or "default")
 
     # --- Fast path: route through the supervisor's persistent CDP WS ---------
     # When a CDPSupervisor is alive for this task_id, ``Runtime.evaluate`` runs
@@ -2924,10 +3138,13 @@ def _browser_eval(expression: str, task_id: Optional[str] = None) -> str:
                         pass  # keep as string
                 response = {
                     "success": True,
-                    "result": parsed,
+                    "result": _redact_browser_output(parsed),
                     "result_type": type(parsed).__name__,
                     "method": "cdp_supervisor",
                 }
+                blocked_response = _blocked_current_page_response(effective_task_id)
+                if blocked_response:
+                    return blocked_response
                 return json.dumps(response, ensure_ascii=False, default=str)
             # JS exception is a real failure — surface it instead of falling
             # through to the subprocess path (which would just re-run and
@@ -2935,7 +3152,10 @@ def _browser_eval(expression: str, task_id: Optional[str] = None) -> str:
             err = sup_result.get("error") or "evaluate_runtime failed"
             if "supervisor" not in err.lower():
                 # Real JS-side error — return it.
-                return json.dumps({"success": False, "error": err}, ensure_ascii=False)
+                return json.dumps(
+                    {"success": False, "error": _redact_browser_output(err)},
+                    ensure_ascii=False,
+                )
             # Supervisor-side failure (loop down, no session) — fall through.
             logger.debug(
                 "browser_eval: supervisor path unavailable (%s), falling back to subprocess",
@@ -2957,7 +3177,9 @@ def _browser_eval(expression: str, task_id: Optional[str] = None) -> str:
                 "success": False,
                 "error": f"JavaScript evaluation is not supported by this browser backend. {err}",
             }
-            return json.dumps(_copy_fallback_warning(response, result))
+            return json.dumps(
+                _redact_browser_output(_copy_fallback_warning(response, result))
+            )
         # A live DOM node / NodeList / Window can't be JSON-serialized by CDP
         # and fails the eval with "Object reference chain is too long".  The
         # supervisor fast path retries with returnByValue=false, but the CLI
@@ -2976,9 +3198,11 @@ def _browser_eval(expression: str, task_id: Optional[str] = None) -> str:
             return json.dumps(_copy_fallback_warning(response, result))
         response = {
             "success": False,
-            "error": err,
+            "error": _redact_browser_output(err),
         }
-        return json.dumps(_copy_fallback_warning(response, result))
+        return json.dumps(
+            _redact_browser_output(_copy_fallback_warning(response, result))
+        )
 
     data = result.get("data", {})
     raw_result = data.get("result")
@@ -2994,10 +3218,17 @@ def _browser_eval(expression: str, task_id: Optional[str] = None) -> str:
 
     response = {
         "success": True,
-        "result": parsed,
+        "result": _redact_browser_output(parsed),
         "result_type": type(parsed).__name__,
     }
-    return json.dumps(_copy_fallback_warning(response, result), ensure_ascii=False, default=str)
+    blocked_response = _blocked_current_page_response(effective_task_id)
+    if blocked_response:
+        return blocked_response
+    return json.dumps(
+        _redact_browser_output(_copy_fallback_warning(response, result)),
+        ensure_ascii=False,
+        default=str,
+    )
 
 
 def _camofox_eval(expression: str, task_id: Optional[str] = None) -> str:
@@ -3019,7 +3250,7 @@ def _camofox_eval(expression: str, task_id: Optional[str] = None) -> str:
 
         return json.dumps({
             "success": True,
-            "result": parsed,
+            "result": _redact_browser_output(parsed),
             "result_type": type(parsed).__name__,
         }, ensure_ascii=False, default=str)
     except Exception as e:
@@ -3031,7 +3262,7 @@ def _camofox_eval(expression: str, task_id: Optional[str] = None) -> str:
                 "error": "JavaScript evaluation is not supported by this Camofox server. "
                          "Use browser_snapshot or browser_vision to inspect page state.",
             })
-        return tool_error(error_msg, success=False)
+        return tool_error(_redact_browser_output(error_msg), success=False)
 
 
 def _maybe_start_recording(task_id: str):
@@ -3098,6 +3329,9 @@ def browser_get_images(task_id: Optional[str] = None) -> str:
         return camofox_get_images(task_id)
 
     effective_task_id = _last_session_key(task_id or "default")
+    blocked_response = _blocked_current_page_response(effective_task_id)
+    if blocked_response:
+        return blocked_response
 
     # Use eval to run JavaScript that extracts images
     js_code = """JSON.stringify(
@@ -3124,10 +3358,13 @@ def browser_get_images(task_id: Optional[str] = None) -> str:
 
             response = {
                 "success": True,
-                "images": images,
+                "images": _redact_browser_output(images),
                 "count": len(images)
             }
-            return json.dumps(_copy_fallback_warning(response, result), ensure_ascii=False)
+            return json.dumps(
+                _redact_browser_output(_copy_fallback_warning(response, result)),
+                ensure_ascii=False,
+            )
         except json.JSONDecodeError:
             response = {
                 "success": True,
@@ -3135,13 +3372,19 @@ def browser_get_images(task_id: Optional[str] = None) -> str:
                 "count": 0,
                 "warning": "Could not parse image data"
             }
-            return json.dumps(_copy_fallback_warning(response, result), ensure_ascii=False)
+            return json.dumps(
+                _redact_browser_output(_copy_fallback_warning(response, result)),
+                ensure_ascii=False,
+            )
     else:
         response = {
             "success": False,
-            "error": result.get("error", "Failed to get images")
+            "error": _redact_browser_output(result.get("error", "Failed to get images"))
         }
-        return json.dumps(_copy_fallback_warning(response, result), ensure_ascii=False)
+        return json.dumps(
+            _redact_browser_output(_copy_fallback_warning(response, result)),
+            ensure_ascii=False,
+        )
 
 
 def browser_vision(question: str, annotate: bool = False, task_id: Optional[str] = None) -> Union[str, Dict[str, Any]]:
@@ -3177,6 +3420,9 @@ def browser_vision(question: str, annotate: bool = False, task_id: Optional[str]
     screenshots_dir = get_hermes_dir("cache/screenshots", "browser_screenshots")
     screenshot_path = screenshots_dir / f"browser_screenshot_{uuid_mod.uuid4().hex}.png"
     effective_task_id = _last_session_key(task_id or "default")
+    blocked_response = _blocked_current_page_response(effective_task_id)
+    if blocked_response:
+        return blocked_response
 
     # Lightpanda has no graphical renderer — pre-route screenshots to Chrome
     # via the fallback helper instead of letting the normal path fail with a
@@ -3392,7 +3638,7 @@ def browser_vision(question: str, annotate: bool = False, task_id: Optional[str]
         analysis = (response.choices[0].message.content or "").strip()
         # Redact secrets the vision LLM may have read from the screenshot.
         from agent.redact import redact_sensitive_text
-        analysis = redact_sensitive_text(analysis)
+        analysis = redact_sensitive_text(analysis, force=True)
         response_data = {
             "success": True,
             "analysis": analysis or "Vision analysis returned no content.",
@@ -3402,20 +3648,27 @@ def browser_vision(question: str, annotate: bool = False, task_id: Optional[str]
         # Include annotation data if annotated screenshot was taken
         if annotate and result.get("data", {}).get("annotations"):
             response_data["annotations"] = result["data"]["annotations"]
-        return json.dumps(response_data, ensure_ascii=False)
+        return json.dumps(_redact_browser_output(response_data), ensure_ascii=False)
 
     except Exception as e:
         # Keep the screenshot if it was captured successfully — the failure is
         # in the LLM vision analysis, not the capture.  Deleting a valid
         # screenshot loses evidence the user might need.  The 24-hour cleanup
         # in _cleanup_old_screenshots prevents unbounded disk growth.
-        logger.warning("browser_vision failed: %s", e, exc_info=True)
-        error_info = {"success": False, "error": f"Error during vision analysis: {str(e)}"}
+        logger.warning(
+            "browser_vision failed: %s",
+            _redact_browser_output(e),
+            exc_info=True,
+        )
+        error_info = {
+            "success": False,
+            "error": _redact_browser_output(f"Error during vision analysis: {str(e)}"),
+        }
         if screenshot_path.exists():
             error_info["screenshot_path"] = str(screenshot_path)
             error_info["note"] = "Screenshot was captured but vision analysis failed. You can still share it via MEDIA:<path>."
         _copy_fallback_warning(error_info, result if 'result' in locals() else {})
-        return json.dumps(error_info, ensure_ascii=False)
+        return json.dumps(_redact_browser_output(error_info), ensure_ascii=False)
 
 
 def _cleanup_old_screenshots(screenshots_dir, max_age_hours=24):

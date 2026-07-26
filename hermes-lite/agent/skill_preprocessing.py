@@ -67,6 +67,8 @@ def run_inline_shell(command: str, cwd: Path | None, timeout: int) -> str:
     raising, so one bad snippet can't wreck the whole skill message.
     """
     try:
+        from tools.environments.local import hermes_subprocess_env
+
         completed = subprocess.run(
             ["bash", "-c", command],
             cwd=str(cwd) if cwd else None,
@@ -74,6 +76,8 @@ def run_inline_shell(command: str, cwd: Path | None, timeout: int) -> str:
             text=True,
             timeout=max(1, int(timeout)),
             check=False,
+            env=hermes_subprocess_env(inherit_credentials=False),
+            stdin=subprocess.DEVNULL,
         )
     except subprocess.TimeoutExpired:
         return f"[inline-shell timeout after {timeout}s: {command}]"

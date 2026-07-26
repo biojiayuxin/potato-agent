@@ -18,6 +18,8 @@ from urllib import request as urllib_request
 
 import yaml
 
+from interface.subprocess_env import interface_subprocess_env
+
 from interface.file_browser_policy import DEFAULT_PUBLIC_DATA_PATH
 from interface.hermes_profile import (
     DEFAULT_HERMES_LITE_EXECUTABLE,
@@ -112,6 +114,7 @@ def _run_command(
         "capture_output": True,
         "text": True,
         "check": False,
+        "env": interface_subprocess_env(),
     }
     if timeout_seconds is not None:
         run_kwargs["timeout"] = timeout_seconds
@@ -133,6 +136,7 @@ def _run_command_result(
         "capture_output": True,
         "text": True,
         "check": False,
+        "env": interface_subprocess_env(),
     }
     if timeout_seconds is not None:
         run_kwargs["timeout"] = timeout_seconds
@@ -167,7 +171,12 @@ def _strip_api_keys_outside_model(
 
 
 def ensure_linux_user(username: str) -> None:
-    result = subprocess.run(["id", "-u", username], capture_output=True, text=True)
+    result = subprocess.run(
+        ["id", "-u", username],
+        capture_output=True,
+        text=True,
+        env=interface_subprocess_env(),
+    )
     if result.returncode == 0:
         return
     _run_command(["useradd", "-m", "-s", "/bin/bash", username])
@@ -551,6 +560,7 @@ def install_user_files(config: dict[str, Any], user: HermesTarget) -> None:
         capture_output=True,
         text=True,
         check=False,
+        env=interface_subprocess_env(),
     )
 
 
@@ -583,7 +593,10 @@ def is_service_active(service_name: str) -> bool:
 
 def stop_and_remove_service(service_name: str) -> None:
     subprocess.run(
-        ["systemctl", "disable", "--now", service_name], capture_output=True, text=True
+        ["systemctl", "disable", "--now", service_name],
+        capture_output=True,
+        text=True,
+        env=interface_subprocess_env(),
     )
     service_path = Path("/etc/systemd/system") / service_name
     if service_path.exists():
@@ -592,7 +605,12 @@ def stop_and_remove_service(service_name: str) -> None:
 
 
 def remove_linux_user(linux_user: str, *, delete_home: bool) -> None:
-    result = subprocess.run(["id", "-u", linux_user], capture_output=True, text=True)
+    result = subprocess.run(
+        ["id", "-u", linux_user],
+        capture_output=True,
+        text=True,
+        env=interface_subprocess_env(),
+    )
     if result.returncode != 0:
         return
     command = ["userdel"]

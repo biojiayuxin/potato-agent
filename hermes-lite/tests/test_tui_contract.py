@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import sys
+import threading
+
+from agent.title_generator import AutoTitleOutcome
 
 
 def _import_server():
@@ -18,6 +21,60 @@ def _request(server, method: str, params: dict, request_id: int = 1) -> dict:
     )
     assert response is not None
     return response
+
+
+class _ImmediateThread:
+    def __init__(self, target=None, args=(), kwargs=None, **_ignored):
+        self.target = target
+        self.args = args
+        self.kwargs = kwargs or {}
+
+    def start(self) -> None:
+        self.target(*self.args, **self.kwargs)
+
+
+def _patch_prompt_runner(server, monkeypatch, events):
+    from hermes_cli import goals
+    from tools import approval
+    from tools.process_registry import process_registry
+
+    monkeypatch.setattr(server.threading, "Thread", _ImmediateThread)
+    monkeypatch.setattr(server, "_emit", lambda kind, sid, payload=None: events.append((kind, sid, payload)))
+    monkeypatch.setattr(server, "_set_session_context", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(server, "_clear_session_context", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(server, "_wire_callbacks", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(server, "_register_session_cwd", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(server, "make_stream_renderer", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(server, "render_message", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(server, "_get_usage", lambda *_args, **_kwargs: {})
+    monkeypatch.setattr(server, "_sync_session_key_after_compress", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(server, "_session_info", lambda *_args, **_kwargs: {})
+    monkeypatch.setattr(approval, "set_current_session_key", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(approval, "reset_current_session_key", lambda *_args, **_kwargs: None)
+    class _InactiveGoalManager:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        def is_active(self):
+            return False
+
+    monkeypatch.setattr(goals, "GoalManager", _InactiveGoalManager)
+    monkeypatch.setattr(process_registry, "drain_notifications", lambda: [])
+
+
+def _prompt_session(agent):
+    return {
+        "agent": agent,
+        "session_key": "persistent-session",
+        "history": [],
+        "history_version": 0,
+        "history_lock": threading.RLock(),
+        "attached_images": [],
+        "pending_title": None,
+        "running": True,
+        "cwd": "/tmp",
+        "cols": 100,
+    }
 
 
 def test_removed_cli_and_slash_workers_fail_closed(runtime_paths, monkeypatch) -> None:
@@ -169,3 +226,126 @@ def test_plan_dispatch_preserves_interface_skill_contract(
         "arg": "review the migration",
         "task_id": task_id,
     }
+
+
+def test_prompt_auto_title_uses_agent_db_runtime_and_ordered_events(
+    runtime_paths,
+    monkeypatch,
+) -> None:
+    server = _import_server()
+    from agent import title_generator
+
+    class _DB:
+        def get_session_title_in_lineage(self, _session_id):
+            return None
+
+    class _Agent:
+        _session_db = _DB()
+
+        def run_conversation(self, prompt, **_kwargs):
+            return {
+                "final_response": "answer",
+                "messages": [
+                    {"role": "user", "content": prompt},
+                    {"role": "assistant", "content": "answer"},
+                ],
+            }
+
+        def _current_main_runtime(self):
+            return {
+                "model": "runtime-model",
+                "provider": "custom",
+                "base_url": "https://example.invalid/v1",
+                "api_key": "runtime-key",
+                "api_mode": "codex_responses",
+            }
+
+    events = []
+    captured = {}
+    _patch_prompt_runner(server, monkeypatch, events)
+
+    def fake_auto_title(db, session_id, user_message, assistant_response, history, **kwargs):
+        captured.update(
+            {
+                "db": db,
+                "session_id": session_id,
+                "user_message": user_message,
+                "assistant_response": assistant_response,
+                "history": history,
+                "runtime": kwargs["main_runtime"],
+            }
+        )
+        kwargs["title_callback"]("Generated Title")
+        kwargs["outcome_callback"](
+            AutoTitleOutcome("updated", title="Generated Title")
+        )
+        return True
+
+    monkeypatch.setattr(title_generator, "maybe_auto_title", fake_auto_title)
+    agent = _Agent()
+    session = _prompt_session(agent)
+    server._run_prompt_submit("request", "live-session", session, "question")
+
+    title_events = [kind for kind, _sid, _payload in events if kind.startswith("session.title.")]
+    assert [kind for kind, _sid, _payload in events].index("message.complete") < (
+        [kind for kind, _sid, _payload in events].index("session.title.started")
+    )
+    assert title_events == [
+        "session.title.started",
+        "session.title.updated",
+        "session.title.finished",
+    ]
+    assert captured["db"] is agent._session_db
+    assert captured["session_id"] == "persistent-session"
+    assert captured["runtime"]["api_mode"] == "codex_responses"
+    for kind, _sid, payload in events:
+        if kind.startswith("session.title."):
+            assert payload["task_id"]
+            assert payload["session_key"] == "persistent-session"
+
+
+def test_prompt_auto_title_allows_only_one_worker_per_session(
+    runtime_paths,
+    monkeypatch,
+) -> None:
+    server = _import_server()
+    from agent import title_generator
+
+    class _DB:
+        def get_session_title_in_lineage(self, _session_id):
+            return None
+
+    class _Agent:
+        _session_db = _DB()
+
+        def run_conversation(self, prompt, **_kwargs):
+            return {
+                "final_response": "answer",
+                "messages": [{"role": "user", "content": prompt}],
+            }
+
+        def _current_main_runtime(self):
+            return {
+                "model": "runtime-model",
+                "provider": "custom",
+                "base_url": "",
+                "api_key": "runtime-key",
+                "api_mode": "chat_completions",
+            }
+
+    events = []
+    calls = []
+    _patch_prompt_runner(server, monkeypatch, events)
+    monkeypatch.setattr(
+        title_generator,
+        "maybe_auto_title",
+        lambda *_args, **_kwargs: calls.append(True) or True,
+    )
+    session = _prompt_session(_Agent())
+
+    server._run_prompt_submit("request-1", "live-session", session, "first")
+    session["running"] = True
+    server._run_prompt_submit("request-2", "live-session", session, "second")
+
+    assert calls == [True]
+    assert session["auto_title_task_id"]

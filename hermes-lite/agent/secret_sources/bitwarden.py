@@ -271,11 +271,15 @@ def _platform_asset_name() -> str:
         # don't need bullet-proof detection — getting it wrong falls
         # back to a clear error from the binary loader, which we catch.
         try:
+            from tools.environments.local import hermes_subprocess_env
+
             res = subprocess.run(
                 ["ldd", "--version"],
                 capture_output=True,
                 text=True,
                 timeout=2,
+                env=hermes_subprocess_env(inherit_credentials=False),
+                stdin=subprocess.DEVNULL,
             )
             if "musl" in (res.stdout + res.stderr).lower():
                 libc = "musl"
@@ -508,7 +512,9 @@ def _run_bws_list(
     bws: Path, access_token: str, project_id: str, server_url: str = ""
 ) -> Tuple[Dict[str, str], List[str]]:
     cmd = [str(bws), "secret", "list", project_id, "--output", "json"]
-    env = os.environ.copy()
+    from tools.environments.local import hermes_subprocess_env
+
+    env = hermes_subprocess_env(inherit_credentials=False)
     env["BWS_ACCESS_TOKEN"] = access_token
     # Make sure we're not echoing telemetry / colour codes into json.
     env.setdefault("NO_COLOR", "1")
@@ -527,6 +533,7 @@ def _run_bws_list(
             capture_output=True,
             text=True,
             timeout=_BWS_RUN_TIMEOUT,
+            stdin=subprocess.DEVNULL,
         )
     except subprocess.TimeoutExpired as exc:
         raise RuntimeError(

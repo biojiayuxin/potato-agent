@@ -123,10 +123,7 @@ def test_genome_browser_page_route_serves_static_page() -> None:
 
 def test_genome_browser_api_does_not_refresh_runtime_activity() -> None:
     class Request:
-        class Url:
-            path = "/api/genome-browser/assemblies"
-
-        url = Url()
+        scope = {"path": "/api/genome-browser/assemblies"}
 
     assert interface_app_mod._should_refresh_activity_for_request(Request()) is False
 

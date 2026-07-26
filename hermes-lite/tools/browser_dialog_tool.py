@@ -86,10 +86,13 @@ def browser_dialog(
     task_id: Optional[str] = None,
 ) -> str:
     """Respond to a pending dialog on the active task's CDP supervisor."""
+    from tools.browser_tool import _redact_browser_output
+
     effective_task_id = task_id or "default"
     supervisor = SUPERVISOR_REGISTRY.get(effective_task_id)
     if supervisor is None:
         return json.dumps(
+            _redact_browser_output(
             {
                 "success": False,
                 "error": (
@@ -99,6 +102,7 @@ def browser_dialog(
                     "Call browser_navigate or /browser connect first."
                 ),
             }
+            )
         )
 
     result = supervisor.respond_to_dialog(
@@ -108,13 +112,19 @@ def browser_dialog(
     )
     if result.get("ok"):
         return json.dumps(
+            _redact_browser_output(
             {
                 "success": True,
                 "action": action,
                 "dialog": result.get("dialog", {}),
             }
+            )
         )
-    return json.dumps({"success": False, "error": result.get("error", "unknown error")})
+    return json.dumps(
+        _redact_browser_output(
+            {"success": False, "error": result.get("error", "unknown error")}
+        )
+    )
 
 
 def _browser_dialog_check() -> bool:

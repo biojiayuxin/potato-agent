@@ -2436,8 +2436,8 @@ def terminal_tool(
             output = strip_ansi(output)
 
             # Redact secrets from command output (catches env/printenv leaking keys)
-            from agent.redact import redact_sensitive_text
-            output = redact_sensitive_text(output.strip()) if output else ""
+            from tools.process_output_redaction import redact_process_output
+            output = redact_process_output(output.strip()) if output else ""
 
             # Interpret non-zero exit codes that aren't real errors
             # (e.g. grep=1 means "no matches", diff=1 means "files differ")
@@ -2457,12 +2457,13 @@ def terminal_tool(
 
     except Exception as e:
         import traceback
-        tb_str = traceback.format_exc()
+        from tools.process_output_redaction import redact_process_output
+        tb_str = redact_process_output(traceback.format_exc())
         logger.error("terminal_tool exception:\n%s", tb_str)
         return json.dumps({
             "output": "",
             "exit_code": -1,
-            "error": f"Failed to execute command: {str(e)}",
+            "error": redact_process_output(f"Failed to execute command: {e}"),
             "traceback": tb_str,
             "status": "error"
         }, ensure_ascii=False)

@@ -20,6 +20,8 @@ from fastapi import WebSocket
 from interface.hermes_profile import runtime_profile_environment
 from interface.mapping import HermesTarget
 from interface.privileged_client import privileged_client
+from interface.redaction import force_redact_text, force_redact_value
+from interface.subprocess_env import interface_subprocess_env
 from interface.runtime_state import (
     FOREGROUND_CHAT_LEASE,
     create_runtime_lease,
@@ -71,6 +73,48 @@ _EVENT_LISTENER_RETRY_DELAYS_SECONDS = (0.0, 0.1, 0.5)
 LOGGER = logging.getLogger("potato_interface.tui_gateway_bridge")
 _run_in_thread = asyncio.to_thread
 _foreground_lease_sleep = asyncio.sleep
+_BRIDGE_ALLOWED_METHODS = frozenset(
+    {
+        "approval.respond",
+        "command.dispatch",
+        "prompt.submit",
+        "session.create",
+        "session.interrupt",
+        "session.resume",
+        "session.title",
+    }
+)
+_MAX_SUBSCRIBERS_PER_USER = 2
+_TITLE_EVENT_TYPES = frozenset(
+    {
+        "session.title.started",
+        "session.title.updated",
+        "session.title.finished",
+    }
+)
+_TITLE_TASK_TTL_SECONDS = 60.0
+
+
+def _contains_profile_parameter(value: Any) -> bool:
+    if isinstance(value, dict):
+        for key, item in value.items():
+            folded = str(key).casefold()
+            if folded == "profile" or folded.startswith("profile_"):
+                return True
+            if _contains_profile_parameter(item):
+                return True
+    elif isinstance(value, (list, tuple)):
+        return any(_contains_profile_parameter(item) for item in value)
+    return False
+
+
+def _validate_bridge_rpc(method: str, params: dict[str, Any]) -> None:
+    if method not in _BRIDGE_ALLOWED_METHODS:
+        raise TuiGatewayBridgeError("Gateway method is not allowed")
+    if _contains_profile_parameter(params):
+        raise TuiGatewayBridgeError("Gateway profile parameters are not allowed")
+    if method == "command.dispatch" and str(params.get("name") or "") != "plan":
+        raise TuiGatewayBridgeError("Gateway command is not allowed")
 
 
 def _startup_timeout_seconds() -> float:
@@ -118,11 +162,14 @@ class TuiGatewayBridge:
         self._event_listeners_lock = threading.Lock()
         self._event_listeners: dict[str, BridgeEventListener] = {}
         self._event_listener_delivery_locks: dict[str, asyncio.Lock] = {}
+        self._event_broadcast_lock = asyncio.Lock()
         self._session_mapping_lock = threading.Lock()
         self._persistent_ids_by_live_session_id: dict[str, str] = {}
         self._run_ids_by_live_session_id: dict[str, str] = {}
         self._event_seq_lock = threading.Lock()
         self._event_seq = 0
+        self._title_tasks_lock = threading.Lock()
+        self._title_task_deadlines: dict[str, float] = {}
 
     @property
     def started_at(self) -> float:
@@ -144,6 +191,18 @@ class TuiGatewayBridge:
         with self._foreground_leases_lock:
             return bool(self._foreground_leases)
 
+    def has_active_title_tasks(self) -> bool:
+        now = time.monotonic()
+        with self._title_tasks_lock:
+            expired = [
+                task_id
+                for task_id, deadline in self._title_task_deadlines.items()
+                if deadline <= now
+            ]
+            for task_id in expired:
+                self._title_task_deadlines.pop(task_id, None)
+            return bool(self._title_task_deadlines)
+
     def startup_in_progress(self) -> bool:
         startup_task = self._startup_task
         generation = self._generation
@@ -163,6 +222,7 @@ class TuiGatewayBridge:
             self.startup_in_progress()
             or self.has_pending_requests()
             or self.has_active_foreground_leases()
+            or self.has_active_title_tasks()
         )
 
     async def ensure_started(self) -> None:
@@ -270,13 +330,9 @@ class TuiGatewayBridge:
                         generation,
                         reason="tui_gateway did not become ready in time",
                     )
-                    tail = "\n".join(generation.stderr_tail[-20:]).strip()
-                    detail = (
-                        f"tui_gateway did not become ready in time. stderr tail:\n{tail}"
-                        if tail
-                        else "tui_gateway did not become ready in time"
-                    )
-                    raise TuiGatewayBridgeError(detail) from exc
+                    raise TuiGatewayBridgeError(
+                        "tui_gateway did not become ready in time"
+                    ) from exc
 
             if self._closed:
                 raise TuiGatewayBridgeError("bridge is closed")
@@ -299,7 +355,7 @@ class TuiGatewayBridge:
                     reason="tui_gateway startup cancelled",
                 )
             raise
-        except Exception:
+        except Exception as exc:
             if (
                 generation is not None
                 and self._generation is generation
@@ -309,7 +365,9 @@ class TuiGatewayBridge:
                     generation,
                     reason="tui_gateway failed during startup",
                 )
-            raise
+            if isinstance(exc, TuiGatewayBridgeError):
+                raise
+            raise TuiGatewayBridgeError("tui_gateway failed to start") from exc
         finally:
             if self._startup_task is current_task:
                 self._startup_task = None
@@ -337,21 +395,23 @@ class TuiGatewayBridge:
         return Path(os.getenv("POTATO_AGENT_REPO_ROOT") or "/srv/potato_agent")
 
     def _build_env(self) -> dict[str, str]:
-        env = os.environ.copy()
-        env["HOME"] = str(self.target.home_dir)
-        env["HERMES_HOME"] = str(self.target.hermes_home)
-        env["TERMINAL_CWD"] = str(self.target.workdir)
-        env["PYTHONUNBUFFERED"] = "1"
-        env.update(
-            runtime_profile_environment(
-                profile_path=self.target.runtime_profile_path,
-                browser_cdp_url=self.target.browser_cdp_url,
-            )
+        runtime_env = runtime_profile_environment(
+            profile_path=self.target.runtime_profile_path,
+            browser_cdp_url=self.target.browser_cdp_url,
         )
-        return env
+        return interface_subprocess_env(
+            {
+                "HOME": str(self.target.home_dir),
+                "HERMES_HOME": str(self.target.hermes_home),
+                "TERMINAL_CWD": str(self.target.workdir),
+                **runtime_env,
+            }
+        )
 
-    async def add_subscriber(self, websocket: WebSocket) -> None:
+    async def add_subscriber(self, websocket: WebSocket) -> bool:
         with self._subscribers_lock:
+            if len(self._subscribers) >= _MAX_SUBSCRIBERS_PER_USER:
+                return False
             self._subscribers.add(websocket)
         if self._last_ready_payload is not None:
             await self._send_ws(
@@ -361,6 +421,7 @@ class TuiGatewayBridge:
                     "payload": self._last_ready_payload,
                 },
             )
+        return True
 
     def remove_subscriber(self, websocket: WebSocket) -> None:
         with self._subscribers_lock:
@@ -426,12 +487,13 @@ class TuiGatewayBridge:
             return str(self._run_ids_by_live_session_id.get(normalized_live_session_id) or "")
 
     async def rpc(self, method: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
+        rpc_params = params or {}
+        _validate_bridge_rpc(method, rpc_params)
         generation = await self._ensure_ready_generation()
         proc = generation.proc
         if proc.stdin is None:
             raise TuiGatewayBridgeError("tui_gateway process is not available")
 
-        rpc_params = params or {}
         live_session_id = str(rpc_params.get("session_id") or "").strip()
         if method == "prompt.submit" and live_session_id:
             await self._start_foreground_lease(live_session_id)
@@ -473,7 +535,7 @@ class TuiGatewayBridge:
                 await self._release_foreground_lease(live_session_id)
             if isinstance(exc, TuiGatewayBridgeError):
                 raise
-            raise TuiGatewayBridgeError(f"failed to write to tui_gateway: {exc}") from exc
+            raise TuiGatewayBridgeError("failed to write to tui_gateway") from exc
 
         try:
             return await asyncio.wait_for(future, timeout=60.0)
@@ -532,6 +594,8 @@ class TuiGatewayBridge:
             self._proc = None
             self._last_ready_payload = None
         self._fail_pending_requests(reason, generation=generation.number)
+        with self._title_tasks_lock:
+            self._title_task_deadlines.clear()
 
     def _fail_pending_requests(
         self,
@@ -614,7 +678,7 @@ class TuiGatewayBridge:
         if proc.stderr is None:
             return
         for raw in proc.stderr:
-            line = raw.rstrip("\n")
+            line = force_redact_text(raw.rstrip("\n"))
             if not line:
                 continue
             if self._generation is not generation:
@@ -632,6 +696,7 @@ class TuiGatewayBridge:
         generation: _GatewayGeneration,
         payload: dict[str, Any],
     ) -> None:
+        payload = force_redact_value(payload)
         if (
             self._generation is not generation
             or generation.state is _GatewayGenerationState.EXITED
@@ -650,10 +715,33 @@ class TuiGatewayBridge:
                         event_payload,
                     )
             persistent_session_id = self.get_persistent_session_id(event_session_id)
+            if event_type in _TITLE_EVENT_TYPES:
+                task_id = str(event_payload.get("task_id") or "").strip()
+                now = time.monotonic()
+                with self._title_tasks_lock:
+                    expired = [
+                        active_task_id
+                        for active_task_id, deadline in self._title_task_deadlines.items()
+                        if deadline <= now
+                    ]
+                    for active_task_id in expired:
+                        self._title_task_deadlines.pop(active_task_id, None)
+                    if event_type == "session.title.started" and task_id:
+                        self._title_task_deadlines[task_id] = (
+                            now + _TITLE_TASK_TTL_SECONDS
+                        )
+                    elif task_id:
+                        self._title_task_deadlines.pop(task_id, None)
+                if not persistent_session_id:
+                    persistent_session_id = str(
+                        event_payload.get("session_key") or ""
+                    ).strip()
             run_id = self.get_run_id(event_session_id)
             if event_type in {"message.complete", "error"} and event_session_id:
                 self._schedule_foreground_lease_release(event_session_id, generation)
             elif event_type == "gateway.exit":
+                with self._title_tasks_lock:
+                    self._title_task_deadlines.clear()
                 self._schedule_release_all_foreground_leases(generation)
             with self._event_seq_lock:
                 self._event_seq += 1
@@ -688,11 +776,10 @@ class TuiGatewayBridge:
 
         if "error" in payload:
             error = payload.get("error") if isinstance(payload.get("error"), dict) else {}
-            message = str(error.get("message") or "RPC error")
             self._loop.call_soon_threadsafe(
                 self._set_future_exception_if_pending,
                 entry.future,
-                TuiGatewayBridgeError(message),
+                TuiGatewayBridgeError("Gateway request failed"),
             )
             return
 
@@ -940,6 +1027,8 @@ class TuiGatewayBridge:
             if generation is None:
                 with contextlib.suppress(Exception):
                     await self._release_all_foreground_leases()
+                with self._title_tasks_lock:
+                    self._title_task_deadlines.clear()
                 self._fail_pending_requests("tui_gateway process exited")
                 await self._broadcast_event(
                     {"type": "gateway.exit", "payload": {"user_id": self.user_id}}
@@ -979,6 +1068,15 @@ class TuiGatewayBridge:
         *,
         generation: _GatewayGeneration | None = None,
     ) -> None:
+        async with self._event_broadcast_lock:
+            await self._broadcast_event_ordered(event, generation=generation)
+
+    async def _broadcast_event_ordered(
+        self,
+        event: dict[str, Any],
+        *,
+        generation: _GatewayGeneration | None = None,
+    ) -> None:
         if generation is not None and self._generation is not generation:
             return
         if (
@@ -987,15 +1085,17 @@ class TuiGatewayBridge:
             and generation.state is not _GatewayGenerationState.READY
         ):
             return
-        with self._event_listeners_lock:
-            listeners = [
-                (
-                    listener_id,
-                    listener,
-                    self._event_listener_delivery_locks.get(listener_id),
-                )
-                for listener_id, listener in self._event_listeners.items()
-            ]
+        listeners = []
+        if event.get("type") not in _TITLE_EVENT_TYPES:
+            with self._event_listeners_lock:
+                listeners = [
+                    (
+                        listener_id,
+                        listener,
+                        self._event_listener_delivery_locks.get(listener_id),
+                    )
+                    for listener_id, listener in self._event_listeners.items()
+                ]
         for listener_id, listener, delivery_lock in listeners:
             if delivery_lock is None:
                 continue
@@ -1047,7 +1147,9 @@ class TuiGatewayBridge:
                     self._subscribers.discard(websocket)
 
     async def _send_ws(self, websocket: WebSocket, payload: dict[str, Any]) -> None:
-        await websocket.send_text(json.dumps(payload, ensure_ascii=False))
+        await websocket.send_text(
+            json.dumps(force_redact_value(payload), ensure_ascii=False)
+        )
 
 
 class TuiGatewayBridgeRegistry:

@@ -7,6 +7,7 @@ import argparse
 import configparser
 import json
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -39,6 +40,13 @@ FORBIDDEN_PATHS = "forbidden-paths.json"
 CONSOLE_ENTRYPOINTS = "console-entrypoints.json"
 DIRECT_DEPENDENCIES = "direct-dependencies.json"
 MODEL_TOOLS = "model-tools.txt"
+LOCK_INPUT = "requirements-py312-linux-x86_64.in"
+HASH_LOCK = "requirements-py312-linux-x86_64.lock"
+WHEELHOUSE_MANIFEST = "wheelhouse-py312-linux-x86_64.json"
+DISTRIBUTION_FINGERPRINT = "distributions-py312-linux-x86_64.json"
+_LOCK_LINE_RE = re.compile(
+    r"^([A-Za-z0-9_.-]+)==([^\s]+) --hash=sha256:([0-9a-f]{64})$"
+)
 
 
 def _load_manifest(manifest_dir: Path, name: str) -> dict[str, Any]:
@@ -148,11 +156,145 @@ def _validate_project_contract(
         raise LiteReleaseError(
             "pyproject console scripts differ from console-entrypoints.json"
         )
+    supply_chain = _validate_dependency_supply_chain(
+        manifest_dir=manifest_dir,
+        direct_dependencies=expected_dependencies,
+    )
     return {
         "name": PROJECT_NAME,
         "version": version,
         "dependencies": list(expected_dependencies),
         "scripts": dict(expected_scripts),
+        "supply_chain": supply_chain,
+    }
+
+
+def _validate_dependency_supply_chain(
+    *, manifest_dir: Path, direct_dependencies: list[str]
+) -> dict[str, Any]:
+    try:
+        from packaging.markers import default_environment
+        from packaging.requirements import Requirement
+        from packaging.utils import canonicalize_name
+        from packaging.version import Version
+    except ImportError as exc:
+        raise LiteReleaseError("packaging is required to validate dependency locks") from exc
+
+    input_lines = _read_manifest_lines(manifest_dir / LOCK_INPUT)
+    if [_requirement_key(item) for item in input_lines] != [
+        _requirement_key(item) for item in direct_dependencies
+    ]:
+        raise LiteReleaseError("dependency lock input differs from direct dependencies")
+
+    lock_path = manifest_dir / HASH_LOCK
+    raw_lock_lines = lock_path.read_text(encoding="ascii").splitlines()
+    if not raw_lock_lines or raw_lock_lines[0] != (
+        "# Generated for CPython 3.12 / Linux x86_64. Do not edit by hand."
+    ):
+        raise LiteReleaseError("dependency hash lock has an invalid target header")
+    if len(raw_lock_lines) < 2 or raw_lock_lines[1] != "--only-binary=:all:":
+        raise LiteReleaseError("dependency hash lock must require binary wheels")
+    locked: dict[str, dict[str, str]] = {}
+    for raw_line in raw_lock_lines[2:]:
+        if not raw_line:
+            continue
+        match = _LOCK_LINE_RE.fullmatch(raw_line)
+        if match is None:
+            raise LiteReleaseError(f"invalid dependency hash lock line: {raw_line!r}")
+        name = canonicalize_name(match.group(1))
+        if name in locked:
+            raise LiteReleaseError(f"duplicate dependency hash lock entry: {name}")
+        locked[name] = {"version": match.group(2), "sha256": match.group(3)}
+    if not locked:
+        raise LiteReleaseError("dependency hash lock is empty")
+
+    marker_environment = default_environment()
+    marker_environment.update(
+        {
+            "implementation_name": "cpython",
+            "platform_machine": "x86_64",
+            "python_version": "3.12",
+            "python_full_version": "3.12.0",
+            "sys_platform": "linux",
+        }
+    )
+    for raw_requirement in direct_dependencies:
+        requirement = Requirement(raw_requirement)
+        if requirement.marker is not None and not requirement.marker.evaluate(
+            marker_environment
+        ):
+            continue
+        name = canonicalize_name(requirement.name)
+        item = locked.get(name)
+        if item is None or Version(item["version"]) not in requirement.specifier:
+            raise LiteReleaseError(
+                f"dependency hash lock does not satisfy direct requirement: {raw_requirement}"
+            )
+
+    wheelhouse = _load_manifest(manifest_dir, WHEELHOUSE_MANIFEST)
+    expected_target = {
+        "implementation": "cp",
+        "python_version": "3.12",
+        "platform": "linux",
+        "machine": "x86_64",
+    }
+    if set(wheelhouse) != {"schema_version", "target", "lock", "files"}:
+        raise LiteReleaseError("wheelhouse manifest has invalid keys")
+    if wheelhouse.get("schema_version") != 1 or wheelhouse.get("target") != expected_target:
+        raise LiteReleaseError("wheelhouse manifest has an invalid target")
+    lock_record = wheelhouse.get("lock")
+    if not isinstance(lock_record, dict) or lock_record != {
+        "path": HASH_LOCK,
+        "sha256": sha256_file(lock_path),
+    }:
+        raise LiteReleaseError("wheelhouse manifest does not bind the dependency lock")
+    files = wheelhouse.get("files")
+    if not isinstance(files, list):
+        raise LiteReleaseError("wheelhouse manifest files must be a list")
+    wheel_distributions: dict[str, dict[str, str]] = {}
+    for item in files:
+        if not isinstance(item, dict) or set(item) != {
+            "filename", "name", "version", "sha256", "size"
+        }:
+            raise LiteReleaseError("wheelhouse manifest contains an invalid file record")
+        name = canonicalize_name(str(item["name"]))
+        if name in wheel_distributions:
+            raise LiteReleaseError(f"wheelhouse manifest contains duplicate {name}")
+        if (
+            not str(item["filename"]).endswith(".whl")
+            or not isinstance(item["size"], int)
+            or item["size"] <= 0
+        ):
+            raise LiteReleaseError("wheelhouse manifest contains invalid wheel metadata")
+        wheel_distributions[name] = {
+            "version": str(item["version"]),
+            "sha256": str(item["sha256"]),
+        }
+    if wheel_distributions != locked:
+        raise LiteReleaseError("wheelhouse manifest differs from dependency hash lock")
+
+    fingerprint = _load_manifest(manifest_dir, DISTRIBUTION_FINGERPRINT)
+    if set(fingerprint) != {"schema_version", "target", "distributions"}:
+        raise LiteReleaseError("distribution fingerprint has invalid keys")
+    expected_distributions = {
+        name: item["version"] for name, item in sorted(locked.items())
+    }
+    if (
+        fingerprint.get("schema_version") != 1
+        or fingerprint.get("target") != expected_target
+        or fingerprint.get("distributions") != expected_distributions
+    ):
+        raise LiteReleaseError("distribution fingerprint differs from dependency lock")
+    return {
+        "target": expected_target,
+        "lock_sha256": sha256_file(lock_path),
+        "distribution_count": len(locked),
+        "wheelhouse_manifest_sha256": sha256_file(
+            manifest_dir / WHEELHOUSE_MANIFEST
+        ),
+        "distribution_fingerprint_sha256": sha256_file(
+            manifest_dir / DISTRIBUTION_FINGERPRINT
+        ),
     }
 
 

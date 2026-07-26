@@ -666,21 +666,21 @@ def test_file_tree_refresh_does_not_extend_activity(tmp_path, monkeypatch) -> No
     _, app_mod, _, _ = _load_app(tmp_path, monkeypatch)
 
     file_tree_request = SimpleNamespace(
-        url=SimpleNamespace(path="/api/files/tree"),
+        scope={"path": "/api/files/tree"},
     )
     file_revision_request = SimpleNamespace(
-        url=SimpleNamespace(path="/api/files/revision"),
+        scope={"path": "/api/files/revision"},
     )
     upload_request = SimpleNamespace(
-        url=SimpleNamespace(path="/api/files/upload"),
+        scope={"path": "/api/files/upload"},
     )
     background_session_refresh = SimpleNamespace(
-        url=SimpleNamespace(path="/api/sessions/session-1"),
+        scope={"path": "/api/sessions/session-1"},
         method="GET",
         query_params={"background": "1"},
     )
     foreground_session_refresh = SimpleNamespace(
-        url=SimpleNamespace(path="/api/sessions/session-1"),
+        scope={"path": "/api/sessions/session-1"},
         method="GET",
         query_params={},
     )
