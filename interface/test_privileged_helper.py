@@ -10,6 +10,7 @@ from pathlib import Path
 import pytest
 
 from interface import file_browser_policy
+from interface.file_stream_worker import FileStreamAccessError
 from interface.mapping import HermesTarget
 from interface import privileged_helper
 
@@ -315,7 +316,7 @@ def test_file_stream_v2_allows_only_configured_public_data_in_restricted_modes(
     assert metadata["filename"] == public_file.name
     assert metadata["size"] == public_file.stat().st_size
     assert body == public_file.read_bytes()
-    with pytest.raises(file_browser_policy.FileBrowserAccessError):
+    with pytest.raises(FileStreamAccessError):
         stream_file(
             home=target.home_dir,
             browser_root=target.home_dir,

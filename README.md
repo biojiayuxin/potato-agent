@@ -167,6 +167,36 @@ find /srv/bulk_rnaseq -type f -exec chmod 0640 {} + 2>/dev/null || true
 内网机器上，并且你确实希望用户可以浏览 Linux 账号本身有权限读取的任意目录时，才使用
 `user_readable`。
 
+### Files 预览和下载 worker
+
+文件预览和下载必须同时满足源码隔离与目标用户权限检查。privileged helper 以 root 身份校验映射、
+浏览器根目录和敏感路径，并在降权前读取可信的 `interface/file_stream_worker.py` 源码、生成完整的
+只读路径策略；随后通过 `runuser -u <linux_user> -- python -I -c ...` 执行内联 worker。文件内容仍由
+目标 Linux 用户身份打开，worker 不需要、也不允许在降权后重新读取 `/srv/potato_agent`。
+
+部署时必须保持以下约束：
+
+- `/srv/potato_agent` 继续使用 `root:potato-interface`、`0750`，不要为了修复预览而改成 `0751`/`0755`，
+  也不要把普通 Hermes 用户加入 `potato-interface` 组；
+- `interface/file_stream_worker.py` 和 `interface/file_browser_policy.py` 必须作为同一次代码发布同步，文件
+  由 root 拥有且不能由 `potato-interface` 写入；
+- 代码更新后必须重启 `potato-interface.service`。生产升级应使用后文的
+  `cutover_lite_production.sh`，由脚本在同步 Interface 代码前停止服务，避免新旧策略代码混用；
+- 不需要在 `/usr/local/libexec` 额外安装 worker，也不需要为目标用户添加任何 `/srv` ACL。
+
+发布前至少运行对应权限回归：
+
+```bash
+python3 -m pytest -c /dev/null \
+  interface/test_security_boundaries.py \
+  interface/test_privileged_helper.py \
+  interface/test_file_preview.py \
+  interface/test_file_browser_policy.py
+
+test "$(stat -c '%a %U %G' /srv/potato_agent)" = "750 root potato-interface"
+sudo -u potato-interface test -r /srv/potato_agent/interface/file_stream_worker.py
+```
+
 ## 前置条件
 
 以下命令默认以 root 执行，目标机器需要 Linux 和 systemd。

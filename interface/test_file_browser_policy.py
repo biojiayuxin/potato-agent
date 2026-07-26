@@ -11,6 +11,7 @@ from interface.file_browser_policy import (
     USER_READABLE_MODE,
     FileBrowserAccessError,
     authorize_file_browser_path,
+    build_file_stream_policy,
     normalize_file_browser_mode,
 )
 
@@ -139,3 +140,20 @@ def test_user_readable_keeps_allowing_paths_outside_managed_roots(
     )
 
     assert resolved == outside_file.resolve()
+
+
+def test_file_stream_policy_scopes_user_readable_to_selected_browser_root(
+    tmp_path: Path,
+) -> None:
+    home, public_data, outside = _browser_roots(tmp_path)
+
+    policy = build_file_stream_policy(
+        home=home,
+        browser_root=outside,
+        mode=USER_READABLE_MODE,
+        public_data_root=public_data,
+    )
+
+    assert policy["allowed_roots"] == [str(outside.resolve())]
+    assert ".git-credentials" in policy["sensitive_file_basenames"]
+    assert "mcp-tokens" in policy["sensitive_directory_names"]

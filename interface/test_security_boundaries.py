@@ -4,13 +4,19 @@ import asyncio
 import io
 import json
 import os
+import subprocess
+import sys
 import types
 from pathlib import Path
 
 import pytest
 
+from interface import file_stream_worker
 from interface.file_browser_policy import FileBrowserAccessError
-from interface.file_stream_worker import stream_file
+from interface.file_stream_worker import (
+    build_file_stream_worker_command,
+    stream_file,
+)
 from interface.file_upload_worker import UploadTooLargeError, store_upload
 from interface.request_limits import RequestBodyLimitMiddleware
 from interface.subprocess_env import interface_subprocess_env
@@ -156,6 +162,84 @@ def test_file_stream_rejects_final_symlink(tmp_path: Path) -> None:
             mode="home_only",
             public_data_root=tmp_path / "public",
         )
+
+
+def test_file_stream_rejects_non_regular_file(tmp_path: Path) -> None:
+    fifo = tmp_path / "results.fifo"
+    os.mkfifo(fifo)
+
+    with pytest.raises(file_stream_worker.FileStreamAccessError):
+        stream_file(
+            home=tmp_path,
+            browser_root=tmp_path,
+            requested_path=fifo,
+            mode="home_only",
+            public_data_root=tmp_path / "public",
+        )
+
+
+def test_file_stream_command_does_not_require_access_to_worker_source(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    home = tmp_path / "home"
+    home.mkdir()
+    requested = home / "result.txt"
+    requested.write_bytes(b"isolated-worker")
+    outside = tmp_path / "outside.txt"
+    outside.write_bytes(b"denied")
+    private_source_dir = tmp_path / "private-source"
+    private_source_dir.mkdir()
+    private_worker = private_source_dir / "file_stream_worker.py"
+    private_worker.write_text(
+        Path(file_stream_worker.__file__).read_text(encoding="utf-8"),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(file_stream_worker, "__file__", str(private_worker))
+
+    command = build_file_stream_worker_command(
+        linux_user="unused",
+        home=home,
+        browser_root=home,
+        requested_path=requested,
+        mode="home_only",
+        public_data_root=tmp_path / "public",
+        python_bin=sys.executable,
+        use_runuser=False,
+    )
+    assert "-I" in command
+    assert "-c" in command
+    assert not any(str(private_worker) in argument for argument in command)
+    denied_command = build_file_stream_worker_command(
+        linux_user="unused",
+        home=home,
+        browser_root=home,
+        requested_path=outside,
+        mode="home_only",
+        public_data_root=tmp_path / "public",
+        python_bin=sys.executable,
+        use_runuser=False,
+    )
+
+    private_source_dir.chmod(0)
+    try:
+        result = subprocess.run(command, capture_output=True, check=False, timeout=5)
+        denied = subprocess.run(
+            denied_command,
+            capture_output=True,
+            check=False,
+            timeout=5,
+        )
+    finally:
+        private_source_dir.chmod(0o700)
+
+    assert result.returncode == 0, result.stderr.decode("utf-8", errors="replace")
+    header, body = result.stdout.split(b"\n", 1)
+    assert json.loads(header)["protocol"] == "file-stream-v2"
+    assert body == b"isolated-worker"
+    assert denied.returncode == 1
+    assert denied.stdout == b""
+    assert denied.stderr == b"file stream request denied\n"
 
 
 def test_upload_worker_enforces_limit_and_cleans_temporary_file(tmp_path: Path) -> None:

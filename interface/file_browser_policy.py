@@ -82,6 +82,43 @@ def raise_if_file_browser_path_sensitive(path: Path) -> None:
         raise FileBrowserAccessError("Opening sensitive credential files is disabled")
 
 
+def _restricted_mode_allowed_roots(
+    *,
+    home: Path,
+    mode: str,
+    public_data_root: Path | None,
+) -> tuple[Path, ...]:
+    roots = [home.resolve()]
+    if mode == HOME_AND_PUBLIC_DATA_MODE:
+        roots.append((public_data_root or DEFAULT_PUBLIC_DATA_PATH).resolve())
+    return tuple(roots)
+
+
+def build_file_stream_policy(
+    *,
+    home: Path,
+    browser_root: Path,
+    mode: str | None,
+    public_data_root: Path | None = None,
+) -> dict[str, object]:
+    """Return the complete path policy for the isolated file-stream worker."""
+
+    normalized_mode = normalize_file_browser_mode(mode)
+    if normalized_mode == USER_READABLE_MODE:
+        allowed_roots = (browser_root.resolve(),)
+    else:
+        allowed_roots = _restricted_mode_allowed_roots(
+            home=home,
+            mode=normalized_mode,
+            public_data_root=public_data_root,
+        )
+    return {
+        "allowed_roots": [str(root) for root in allowed_roots],
+        "sensitive_file_basenames": sorted(_SENSITIVE_FILE_BASENAMES),
+        "sensitive_directory_names": sorted(_SENSITIVE_DIRECTORY_NAMES),
+    }
+
+
 def authorize_file_browser_path(
     path: Path,
     *,
@@ -96,9 +133,11 @@ def authorize_file_browser_path(
     if normalized_mode == USER_READABLE_MODE:
         return resolved_path
 
-    allowed_roots = [home.resolve()]
-    if normalized_mode == HOME_AND_PUBLIC_DATA_MODE:
-        allowed_roots.append((public_data_root or DEFAULT_PUBLIC_DATA_PATH).resolve())
+    allowed_roots = _restricted_mode_allowed_roots(
+        home=home,
+        mode=normalized_mode,
+        public_data_root=public_data_root,
+    )
 
     if any(_is_within(resolved_path, root) for root in allowed_roots):
         return resolved_path
