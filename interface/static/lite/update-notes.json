@@ -1,6 +1,13 @@
 {
   "updates": [
     {
+      "version": "2026-07-26-001",
+      "title": "Hermes v0.19",
+      "date": "July 26, 2026",
+      "summary": "Updated the agent core to Hermes v0.19.",
+      "items": []
+    },
+    {
       "version": "2026-07-19-001",
       "title": "Hermes and navigation",
       "date": "July 19, 2026",
