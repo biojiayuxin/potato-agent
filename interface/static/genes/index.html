@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Genes | Potato Research</title>
     <link rel="icon" type="image/png" href="/static/favicon.png" />
-    <link rel="stylesheet" href="/static/genes/styles.css?v=20260727-genes-search-no-title" />
+    <link rel="stylesheet" href="/static/genes/styles.css?v=20260727-gene-detail-width" />
   </head>
   <body>
     <div class="genes-app">
@@ -84,9 +84,7 @@
           <div id="gene-detail-content" hidden>
             <header class="gene-detail-header">
               <div class="gene-detail-title-group">
-                <div id="gene-detail-assembly" class="section-label">DMv8.2 Gene</div>
                 <h2 id="gene-detail-heading">Gene details</h2>
-                <div id="gene-detail-symbols" class="gene-detail-symbols"></div>
               </div>
               <a
                 id="gene-genome-browser-link"
@@ -98,84 +96,55 @@
               >Genome Browser</a>
             </header>
 
-            <dl id="gene-detail-overview" class="gene-detail-overview"></dl>
+            <section class="gene-detail-block" aria-labelledby="gene-symbols-heading">
+              <header class="gene-block-header">
+                <h3 id="gene-symbols-heading">Symbols</h3>
+              </header>
+              <div id="gene-detail-symbols" class="gene-detail-symbols"></div>
+            </section>
+
+            <section class="gene-detail-block" aria-labelledby="gene-reported-ids-heading">
+              <header class="gene-block-header">
+                <h3 id="gene-reported-ids-heading">Reported IDs</h3>
+              </header>
+              <div id="gene-reported-id-list" class="gene-reported-id-list"></div>
+            </section>
+
+            <section class="gene-detail-block" aria-labelledby="gene-transcripts-heading">
+              <header class="gene-block-header">
+                <h3 id="gene-transcripts-heading">Transcripts</h3>
+              </header>
+              <div id="gene-transcript-list" class="gene-transcript-list"></div>
+            </section>
 
             <section class="gene-detail-block gene-description-block" aria-labelledby="gene-description-heading">
               <header class="gene-block-header">
-                <div>
-                  <div class="gene-block-label">Functional prediction</div>
-                  <h3 id="gene-description-heading">Description</h3>
-                </div>
+                <h3 id="gene-description-heading">Summary</h3>
                 <span id="gene-reliability-grade" class="gene-reliability-grade" hidden></span>
               </header>
               <p id="gene-predicted-function" class="gene-predicted-function"></p>
             </section>
 
-            <section class="gene-detail-block" aria-labelledby="gene-identifiers-heading">
-              <header class="gene-block-header">
-                <div>
-                  <div class="gene-block-label">Catalog mapping</div>
-                  <h3 id="gene-identifiers-heading">Identifiers and transcripts</h3>
-                </div>
-              </header>
-              <div class="gene-identifiers-layout">
-                <dl id="gene-identifier-list" class="gene-identifier-list"></dl>
-                <div id="gene-transcript-list" class="gene-transcript-list"></div>
-              </div>
-            </section>
-
             <section class="gene-detail-block" aria-labelledby="gene-annotations-heading">
               <header class="gene-block-header">
-                <div>
-                  <div class="gene-block-label">Functional annotation</div>
-                  <h3 id="gene-annotations-heading">GO, KEGG, and InterPro</h3>
-                </div>
+                <h3 id="gene-annotations-heading">InterPro Domains</h3>
               </header>
-              <div id="gene-annotation-tabs" class="gene-annotation-tabs" role="tablist" aria-label="Annotation types"></div>
               <div id="gene-annotation-toolbar" class="gene-annotation-toolbar" hidden>
-                <label class="visually-hidden" for="gene-annotation-filter">Filter annotations</label>
+                <label class="visually-hidden" for="gene-annotation-filter">Filter InterPro domains</label>
                 <input id="gene-annotation-filter" type="search" autocomplete="off" spellcheck="false" />
                 <span id="gene-annotation-count"></span>
               </div>
-              <div id="gene-annotation-list" class="gene-annotation-list" role="tabpanel"></div>
-              <nav id="gene-annotation-pagination" class="gene-inline-pagination" aria-label="Annotation pages" hidden>
+              <div id="gene-annotation-list" class="gene-annotation-list"></div>
+              <nav id="gene-annotation-pagination" class="gene-inline-pagination" aria-label="InterPro domain pages" hidden>
                 <button id="gene-annotation-previous" class="gene-secondary-button" type="button">Previous</button>
                 <span id="gene-annotation-page"></span>
                 <button id="gene-annotation-next" class="gene-secondary-button" type="button">Next</button>
               </nav>
             </section>
 
-            <section class="gene-detail-block" aria-labelledby="gene-expression-heading">
-              <header class="gene-block-header">
-                <div>
-                  <div class="gene-block-label">Expression Atlas</div>
-                  <h3 id="gene-expression-heading">Tissue expression</h3>
-                </div>
-                <span id="gene-expression-unit" class="gene-block-meta">Mean TPM</span>
-              </header>
-              <div id="gene-expression-chart" class="gene-expression-chart"></div>
-              <p id="gene-expression-statistic" class="gene-expression-statistic"></p>
-            </section>
-
-            <section class="gene-detail-block" aria-labelledby="gene-literature-heading">
-              <header class="gene-block-header">
-                <div>
-                  <div class="gene-block-label">Potato gene evidence</div>
-                  <h3 id="gene-literature-heading">Literature</h3>
-                </div>
-                <span id="gene-paper-count" class="gene-block-meta"></span>
-              </header>
-              <ol id="gene-paper-list" class="gene-paper-list"></ol>
-              <button id="gene-paper-more" class="gene-secondary-button" type="button" hidden></button>
-            </section>
-
             <section class="gene-detail-block" aria-labelledby="gene-similarity-heading">
               <header class="gene-block-header">
-                <div>
-                  <div class="gene-block-label">Protein homology</div>
-                  <h3 id="gene-similarity-heading">UniRef100 similarity</h3>
-                </div>
-                <span id="gene-similarity-count" class="gene-block-meta"></span>
+                <h3 id="gene-similarity-heading">UniRef100 similarity</h3>
               </header>
               <div id="gene-similarity-table-wrap" class="gene-table-wrap">
                 <table class="gene-similarity-table">
@@ -194,24 +163,55 @@
               <button id="gene-similarity-more" class="gene-secondary-button" type="button" hidden></button>
             </section>
 
+            <section class="gene-detail-block" aria-labelledby="gene-expression-heading">
+              <header class="gene-block-header">
+                <h3 id="gene-expression-heading">Tissue expression</h3>
+                <span id="gene-expression-unit" class="gene-block-meta">Expression Atlas, mean TPM and SD</span>
+              </header>
+              <div id="gene-expression-chart" class="gene-expression-chart"></div>
+            </section>
+
+            <section class="gene-detail-block" aria-labelledby="gene-literature-heading">
+              <header class="gene-block-header">
+                <h3 id="gene-literature-heading">Literature</h3>
+              </header>
+              <ol id="gene-paper-list" class="gene-paper-list"></ol>
+              <button id="gene-paper-more" class="gene-secondary-button" type="button" hidden></button>
+            </section>
+
             <section class="gene-detail-block gene-sequence-block" aria-labelledby="gene-sequences-heading">
               <header class="gene-block-header">
-                <div>
-                  <div class="gene-block-label">Sequence data</div>
-                  <h3 id="gene-sequences-heading">Sequences</h3>
-                </div>
+                <h3 id="gene-sequences-heading">Sequences</h3>
               </header>
               <div class="gene-sequence-controls">
-                <label class="gene-sequence-transcript-label" for="gene-sequence-transcript">Transcript</label>
-                <select id="gene-sequence-transcript"></select>
-                <div id="gene-sequence-tabs" class="gene-sequence-tabs" role="tablist" aria-label="Sequence types"></div>
+                <div class="gene-sequence-control">
+                  <label for="gene-sequence-transcript">Transcript</label>
+                  <select id="gene-sequence-transcript"></select>
+                </div>
+                <div class="gene-sequence-control">
+                  <label for="gene-sequence-type">Sequence type</label>
+                  <select id="gene-sequence-type"></select>
+                </div>
               </div>
-              <div id="gene-sequence-panel" class="gene-sequence-panel" role="tabpanel">
+              <div id="gene-sequence-panel" class="gene-sequence-panel">
                 <div id="gene-sequence-state" class="gene-sequence-state"></div>
                 <div id="gene-sequence-content" hidden>
                   <div class="gene-sequence-toolbar">
                     <dl id="gene-sequence-metadata" class="gene-sequence-metadata"></dl>
-                    <button id="gene-sequence-copy" class="gene-secondary-button" type="button">Copy</button>
+                    <button
+                      id="gene-sequence-copy"
+                      class="gene-sequence-copy-button"
+                      type="button"
+                      aria-label="Copy sequence"
+                      title="Copy sequence"
+                    >
+                      <img
+                        id="gene-sequence-copy-icon"
+                        class="gene-sequence-copy-icon"
+                        src="/static/lite/icons/copy_button.png"
+                        alt=""
+                      />
+                    </button>
                   </div>
                   <pre id="gene-sequence-value" tabindex="0"></pre>
                 </div>
@@ -222,6 +222,6 @@
       </main>
     </div>
 
-    <script src="/static/genes/app.js?v=20260727-gene-summary-label"></script>
+    <script src="/static/genes/app.js?v=20260727-gene-result-new-tab"></script>
   </body>
 </html>

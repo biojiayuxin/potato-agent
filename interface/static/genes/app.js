@@ -9,27 +9,23 @@
   const GENOME_BROWSER_ASSEMBLIES = {
     'DMv8.2': 'monoploid/DMv8.2',
   };
+  const ICON_COPY_PATH = '/static/lite/icons/copy_button.png';
+  const ICON_COPIED_PATH = '/static/lite/icons/copied.png';
 
-  const ANNOTATION_TYPES = [
-    {
-      key: 'goTerms',
-      label: 'GO',
-      singular: 'GO annotation',
-      placeholder: 'Filter GO annotations',
-    },
-    {
-      key: 'keggTerms',
-      label: 'KEGG',
-      singular: 'KEGG annotation',
-      placeholder: 'Filter KEGG annotations',
-    },
-    {
-      key: 'interpro',
-      label: 'InterPro',
-      singular: 'InterPro domain',
-      placeholder: 'Filter InterPro domains',
-    },
+  const EXPRESSION_TISSUE_GROUPS = [
+    /flower|floral|anther|stamen|carpel|perianth|petal|sepal|pistil|ovary|inflorescence/i,
+    /fruit|berry/i,
+    /stem/i,
+    /leaf/i,
+    /root/i,
+    /stolon/i,
+    /tuber/i,
   ];
+
+  const EXPRESSION_TISSUE_LABELS = new Map([
+    ['immature small tuber (transection diameter < 1 cm)', 'Small tuber'],
+    ['immature big tuber (1 cm <transection diameter < 5 cm)', 'Large tuber'],
+  ]);
 
   const SEQUENCE_TYPES = [
     { key: 'cds', label: 'CDS', headerLabel: 'cds', unit: 'bp' },
@@ -37,7 +33,7 @@
     { key: 'genomic', label: 'Genomic span', headerLabel: 'genomic_span', unit: 'bp' },
     {
       key: 'promoter',
-      label: 'ATG upstream (2 kb)',
+      label: 'Promoter',
       headerLabel: 'atg_upstream_2000bp',
       unit: 'bp',
     },
@@ -60,16 +56,13 @@
   const detailBack = document.getElementById('gene-detail-back');
   const detailLoading = document.getElementById('gene-detail-loading');
   const detailContent = document.getElementById('gene-detail-content');
-  const detailAssembly = document.getElementById('gene-detail-assembly');
   const detailHeading = document.getElementById('gene-detail-heading');
   const detailSymbols = document.getElementById('gene-detail-symbols');
   const genomeBrowserLink = document.getElementById('gene-genome-browser-link');
-  const detailOverview = document.getElementById('gene-detail-overview');
   const reliabilityGrade = document.getElementById('gene-reliability-grade');
   const predictedFunction = document.getElementById('gene-predicted-function');
-  const identifierList = document.getElementById('gene-identifier-list');
+  const reportedIdList = document.getElementById('gene-reported-id-list');
   const transcriptList = document.getElementById('gene-transcript-list');
-  const annotationTabs = document.getElementById('gene-annotation-tabs');
   const annotationToolbar = document.getElementById('gene-annotation-toolbar');
   const annotationFilter = document.getElementById('gene-annotation-filter');
   const annotationCount = document.getElementById('gene-annotation-count');
@@ -79,23 +72,21 @@
   const annotationNext = document.getElementById('gene-annotation-next');
   const annotationPageSummary = document.getElementById('gene-annotation-page');
   const expressionChart = document.getElementById('gene-expression-chart');
-  const expressionStatistic = document.getElementById('gene-expression-statistic');
   const expressionUnit = document.getElementById('gene-expression-unit');
-  const paperCount = document.getElementById('gene-paper-count');
   const paperList = document.getElementById('gene-paper-list');
   const paperMore = document.getElementById('gene-paper-more');
-  const similarityCount = document.getElementById('gene-similarity-count');
   const similarityTableWrap = document.getElementById('gene-similarity-table-wrap');
   const similarityBody = document.getElementById('gene-similarity-body');
   const similarityEmpty = document.getElementById('gene-similarity-empty');
   const similarityMore = document.getElementById('gene-similarity-more');
   const sequenceTranscript = document.getElementById('gene-sequence-transcript');
-  const sequenceTabs = document.getElementById('gene-sequence-tabs');
+  const sequenceTypeSelect = document.getElementById('gene-sequence-type');
   const sequenceState = document.getElementById('gene-sequence-state');
   const sequenceContent = document.getElementById('gene-sequence-content');
   const sequenceMetadata = document.getElementById('gene-sequence-metadata');
   const sequenceValue = document.getElementById('gene-sequence-value');
   const sequenceCopy = document.getElementById('gene-sequence-copy');
+  const sequenceCopyIcon = document.getElementById('gene-sequence-copy-icon');
 
   let activeSearchController = null;
   let activeDetailController = null;
@@ -104,7 +95,6 @@
   let currentOffset = 0;
   let currentHasMore = false;
   let detailPayload = null;
-  let currentAnnotationKey = ANNOTATION_TYPES[0].key;
   let currentAnnotationPage = 0;
   let currentPaperLimit = PAPER_PAGE_SIZE;
   let currentSimilarityLimit = SIMILARITY_PAGE_SIZE;
@@ -277,8 +267,10 @@
     const title = document.createElement('a');
     title.className = 'gene-result-title';
     title.href = `/genes/${encodeURIComponent(String(gene.geneId || ''))}`;
+    title.target = '_blank';
+    title.rel = 'noopener noreferrer';
     title.textContent = String(gene.geneId || 'Unknown gene');
-    title.setAttribute('aria-label', `Open ${title.textContent}`);
+    title.setAttribute('aria-label', `Open ${title.textContent} in a new tab`);
 
     const geneIdRow = createResultRow('Gene ID:');
     geneIdRow.value.append(title);
@@ -424,50 +416,12 @@
     target.append(wrapper);
   }
 
-  function createExpandableValues(values, limit, formatter = (value) => String(value)) {
-    const wrapper = document.createElement('div');
-    wrapper.className = 'gene-expandable-values';
+  function renderDelimitedValues(target, values, formatter = (value) => String(value)) {
     const normalized = Array.isArray(values)
-      ? values.map((value) => ({ value, label: formatter(value) })).filter((item) => item.label)
+      ? values.map((value) => formatter(value)).filter(Boolean)
       : [];
-    let expanded = false;
-
-    function render() {
-      wrapper.replaceChildren();
-      if (!normalized.length) {
-        const empty = document.createElement('span');
-        empty.className = 'gene-value-empty';
-        empty.textContent = 'Not assigned';
-        wrapper.append(empty);
-        return;
-      }
-
-      const valuesContainer = document.createElement('div');
-      valuesContainer.className = 'gene-value-tokens';
-      const visible = expanded ? normalized : normalized.slice(0, limit);
-      visible.forEach((item) => {
-        const value = document.createElement('span');
-        value.className = 'gene-value-token';
-        value.textContent = item.label;
-        valuesContainer.append(value);
-      });
-      wrapper.append(valuesContainer);
-
-      if (normalized.length > limit) {
-        const toggle = document.createElement('button');
-        toggle.className = 'gene-inline-button';
-        toggle.type = 'button';
-        toggle.textContent = expanded ? 'Show fewer' : `Show all (${formatCount(normalized.length)})`;
-        toggle.addEventListener('click', () => {
-          expanded = !expanded;
-          render();
-        });
-        wrapper.append(toggle);
-      }
-    }
-
-    render();
-    return wrapper;
+    target.textContent = normalized.length ? normalized.join('; ') : 'Not assigned';
+    target.classList.toggle('is-empty', normalized.length === 0);
   }
 
   function sequenceTypeConfig(sequenceType) {
@@ -477,34 +431,7 @@
   function renderDetailHeader(payload) {
     const gene = payload.gene || {};
     const geneId = String(gene.geneId || 'Unknown gene');
-    const symbols = Array.isArray(gene.symbols) ? gene.symbols.filter(Boolean) : [];
-    detailAssembly.textContent = `${String(payload.assembly || 'DMv8.2')} Gene`;
     detailHeading.textContent = geneId;
-    detailSymbols.replaceChildren();
-    if (symbols.length) {
-      appendValueList(detailSymbols, symbols, 5);
-    } else {
-      detailSymbols.textContent = 'No gene symbol assigned';
-      detailSymbols.classList.add('is-empty');
-    }
-    if (symbols.length) {
-      detailSymbols.classList.remove('is-empty');
-    }
-
-    detailOverview.replaceChildren();
-    appendDefinitionItem(detailOverview, 'Assembly', payload.assembly || 'DMv8.2');
-    appendDefinitionItem(detailOverview, 'Genomic location', locationText(gene.location));
-    appendDefinitionItem(
-      detailOverview,
-      'Transcripts',
-      formatCount(Array.isArray(payload.transcripts) ? payload.transcripts.length : 0),
-    );
-    appendDefinitionItem(
-      detailOverview,
-      'Available sequences',
-      formatCount(Array.isArray(payload.sequenceAvailability) ? payload.sequenceAvailability.length : 0),
-    );
-    appendDefinitionItem(detailOverview, 'Catalog release', payload.catalogVersion || 'Not available');
 
     const browserAssembly = GENOME_BROWSER_ASSEMBLIES[String(payload.assembly || '')];
     const location = gene.location;
@@ -526,6 +453,18 @@
     }
   }
 
+  function renderSymbols(payload) {
+    const symbols = Array.isArray(payload.gene?.symbols) ? payload.gene.symbols : [];
+    renderDelimitedValues(detailSymbols, symbols);
+  }
+
+  function renderReportedIds(payload) {
+    const reportedIds = Array.isArray(payload.gene?.reportedIds)
+      ? payload.gene.reportedIds
+      : [];
+    renderDelimitedValues(reportedIdList, reportedIds, reportedIdLabel);
+  }
+
   function renderDescription(payload) {
     const description = payload.description || {};
     predictedFunction.textContent = String(
@@ -540,9 +479,6 @@
 
   function renderTranscripts(transcripts) {
     transcriptList.replaceChildren();
-    const heading = document.createElement('h4');
-    heading.textContent = `Transcripts (${formatCount(transcripts.length)})`;
-    transcriptList.append(heading);
 
     if (!transcripts.length) {
       const empty = document.createElement('div');
@@ -554,76 +490,21 @@
 
     const list = document.createElement('ul');
     list.className = 'gene-transcripts';
-    let expanded = false;
-
-    function renderRows() {
-      list.replaceChildren();
-      const visible = expanded ? transcripts : transcripts.slice(0, 6);
-      visible.forEach((transcript) => {
-        const item = document.createElement('li');
-        const top = document.createElement('div');
-        top.className = 'gene-transcript-top';
-        const transcriptId = document.createElement('span');
-        transcriptId.className = 'gene-transcript-id';
-        transcriptId.textContent = String(transcript.transcriptId || 'Unknown transcript');
-        top.append(transcriptId);
-        if (transcript.isRepresentative) {
-          const representative = document.createElement('span');
-          representative.className = 'gene-representative-badge';
-          representative.textContent = 'Representative';
-          top.append(representative);
-        }
-
-        const metadata = document.createElement('div');
-        metadata.className = 'gene-transcript-meta';
-        const types = Array.isArray(transcript.sequenceTypes)
-          ? transcript.sequenceTypes.map((value) => sequenceTypeConfig(value).label)
-          : [];
-        metadata.textContent = `${locationText(transcript.location)} | ${types.length ? types.join(', ') : 'No sequence available'}`;
-        item.append(top, metadata);
-        list.append(item);
-      });
-    }
-
-    renderRows();
+    transcripts.forEach((transcript) => {
+      const item = document.createElement('li');
+      const transcriptId = document.createElement('span');
+      transcriptId.className = 'gene-transcript-id';
+      transcriptId.textContent = String(transcript.transcriptId || 'Unknown transcript');
+      item.append(transcriptId);
+      if (transcript.isRepresentative) {
+        const representative = document.createElement('small');
+        representative.className = 'gene-representative-badge';
+        representative.textContent = 'Representative';
+        item.append(representative);
+      }
+      list.append(item);
+    });
     transcriptList.append(list);
-    if (transcripts.length > 6) {
-      const toggle = document.createElement('button');
-      toggle.type = 'button';
-      toggle.className = 'gene-inline-button';
-      toggle.textContent = `Show all (${formatCount(transcripts.length)})`;
-      toggle.addEventListener('click', () => {
-        expanded = !expanded;
-        toggle.textContent = expanded ? 'Show fewer' : `Show all (${formatCount(transcripts.length)})`;
-        renderRows();
-      });
-      transcriptList.append(toggle);
-    }
-  }
-
-  function renderIdentifiers(payload) {
-    const gene = payload.gene || {};
-    identifierList.replaceChildren();
-    appendDefinitionItem(
-      identifierList,
-      'DMv8.2 gene ID',
-      createExpandableValues([gene.geneId], 1),
-    );
-    appendDefinitionItem(
-      identifierList,
-      'Gene symbols',
-      createExpandableValues(gene.symbols, 6),
-    );
-    appendDefinitionItem(
-      identifierList,
-      'Reported IDs',
-      createExpandableValues(gene.reportedIds, 8, reportedIdLabel),
-    );
-    renderTranscripts(Array.isArray(payload.transcripts) ? payload.transcripts : []);
-  }
-
-  function annotationConfig(key) {
-    return ANNOTATION_TYPES.find((item) => item.key === key) || ANNOTATION_TYPES[0];
   }
 
   function annotationTermText(term) {
@@ -636,50 +517,21 @@
     return [term.id, term.name, term.description, term.label].filter(Boolean).join(' ');
   }
 
-  function annotationHref(key, identifier) {
+  function interproHref(identifier) {
     const id = String(identifier || '').trim();
-    if (key === 'goTerms' && /^GO:\d+$/i.test(id)) {
-      return `https://amigo.geneontology.org/amigo/term/${encodeURIComponent(id)}`;
-    }
-    if (key === 'keggTerms' && /^[A-Za-z]+\d+$/i.test(id)) {
-      return `https://www.kegg.jp/entry/${encodeURIComponent(id)}`;
-    }
-    if (key === 'interpro' && /^IPR\d+$/i.test(id)) {
+    if (/^IPR\d+$/i.test(id)) {
       return `https://www.ebi.ac.uk/interpro/entry/InterPro/${encodeURIComponent(id)}/`;
     }
     return '';
   }
 
-  function renderAnnotationTabs() {
-    annotationTabs.replaceChildren();
-    const annotations = detailPayload?.annotations || {};
-    ANNOTATION_TYPES.forEach((config) => {
-      const terms = Array.isArray(annotations[config.key]) ? annotations[config.key] : [];
-      const button = document.createElement('button');
-      button.type = 'button';
-      button.id = `gene-annotation-tab-${config.key}`;
-      button.setAttribute('role', 'tab');
-      button.setAttribute('aria-controls', 'gene-annotation-list');
-      button.setAttribute('aria-selected', config.key === currentAnnotationKey ? 'true' : 'false');
-      button.textContent = `${config.label} (${formatCount(terms.length)})`;
-      button.addEventListener('click', () => {
-        currentAnnotationKey = config.key;
-        currentAnnotationPage = 0;
-        annotationFilter.value = '';
-        renderAnnotationTabs();
-        renderAnnotations();
-      });
-      annotationTabs.append(button);
-    });
-  }
-
-  function createAnnotationItem(term, key) {
+  function createInterproItem(term) {
     const item = document.createElement('li');
     const identifier = typeof term === 'string' ? term : String(term?.id || '');
     const description = typeof term === 'object'
       ? String(term?.description || term?.name || term?.label || '')
       : '';
-    const href = annotationHref(key, identifier);
+    const href = interproHref(identifier);
     let identifierElement;
     if (href) {
       identifierElement = document.createElement('a');
@@ -702,11 +554,8 @@
   }
 
   function renderAnnotations() {
-    const config = annotationConfig(currentAnnotationKey);
     const annotations = detailPayload?.annotations || {};
-    const terms = Array.isArray(annotations[currentAnnotationKey])
-      ? annotations[currentAnnotationKey]
-      : [];
+    const terms = Array.isArray(annotations.interpro) ? annotations.interpro : [];
     const query = annotationFilter.value.trim().toLocaleLowerCase();
     const filtered = query
       ? terms.filter((term) => annotationTermText(term).toLocaleLowerCase().includes(query))
@@ -717,26 +566,26 @@
     const visible = filtered.slice(start, start + ANNOTATION_PAGE_SIZE);
 
     annotationList.replaceChildren();
-    annotationList.setAttribute('aria-labelledby', `gene-annotation-tab-${currentAnnotationKey}`);
-    annotationToolbar.hidden = terms.length === 0;
+    annotationList.setAttribute('aria-labelledby', 'gene-annotations-heading');
+    annotationToolbar.hidden = terms.length <= ANNOTATION_PAGE_SIZE;
     annotationFilter.hidden = terms.length <= ANNOTATION_PAGE_SIZE;
-    annotationFilter.placeholder = config.placeholder;
+    annotationFilter.placeholder = 'Filter InterPro domains';
 
     if (!filtered.length) {
       const empty = document.createElement('div');
       empty.className = 'gene-detail-empty';
       empty.textContent = query
-        ? `No ${config.label} annotations match this filter.`
-        : `No ${config.singular}s available.`;
+        ? 'No InterPro domains match this filter.'
+        : 'No InterPro domains available.';
       annotationList.append(empty);
-      annotationCount.textContent = query ? '0 matches' : '0 annotations';
+      annotationCount.textContent = query ? '0 matches' : '0 domains';
       annotationPagination.hidden = true;
       return;
     }
 
     const list = document.createElement('ul');
     list.className = 'gene-annotation-terms';
-    visible.forEach((term) => list.append(createAnnotationItem(term, currentAnnotationKey)));
+    visible.forEach((term) => list.append(createInterproItem(term)));
     annotationList.append(list);
 
     const end = start + visible.length;
@@ -747,15 +596,55 @@
     annotationPageSummary.textContent = `Page ${formatCount(currentAnnotationPage + 1)} of ${formatCount(pageCount)}`;
   }
 
+  function expressionTissueGroup(tissueName) {
+    const name = String(tissueName || '');
+    const index = EXPRESSION_TISSUE_GROUPS.findIndex((pattern) => pattern.test(name));
+    return index < 0 ? EXPRESSION_TISSUE_GROUPS.length : index;
+  }
+
+  function orderedExpressionTissues(values) {
+    return values
+      .map((tissue, index) => ({ tissue, index }))
+      .sort((left, right) => {
+        const groupDifference = expressionTissueGroup(left.tissue.tissue)
+          - expressionTissueGroup(right.tissue.tissue);
+        return groupDifference || left.index - right.index;
+      })
+      .map((item) => item.tissue);
+  }
+
+  function expressionTissueLabel(tissueName) {
+    const fullName = String(tissueName || 'Unknown tissue');
+    return EXPRESSION_TISSUE_LABELS.get(fullName.toLocaleLowerCase()) || fullName;
+  }
+
+  function createExpressionLegend() {
+    const legend = document.createElement('div');
+    legend.className = 'gene-expression-legend';
+
+    const meanItem = document.createElement('span');
+    const meanSwatch = document.createElement('span');
+    meanSwatch.className = 'gene-expression-legend-mean';
+    meanSwatch.setAttribute('aria-hidden', 'true');
+    meanItem.append(meanSwatch, document.createTextNode('Mean TPM'));
+
+    const sdItem = document.createElement('span');
+    const sdSwatch = document.createElement('span');
+    sdSwatch.className = 'gene-expression-legend-sd';
+    sdSwatch.setAttribute('aria-hidden', 'true');
+    sdItem.append(sdSwatch, document.createTextNode('SD'));
+
+    legend.append(meanItem, sdItem);
+    return legend;
+  }
+
   function renderExpression(payload) {
     const expression = payload.expression || {};
     const tissues = Array.isArray(expression.tissues)
-      ? expression.tissues.slice().sort((left, right) => Number(right.meanTpm || 0) - Number(left.meanTpm || 0))
+      ? orderedExpressionTissues(expression.tissues)
       : [];
     expressionChart.replaceChildren();
     expressionUnit.hidden = !tissues.length;
-    expressionStatistic.textContent = String(expression.statistic || '');
-    expressionStatistic.hidden = !expressionStatistic.textContent;
 
     if (!tissues.length) {
       const empty = document.createElement('div');
@@ -765,38 +654,74 @@
       return;
     }
 
-    const maximum = Math.max(...tissues.map((item) => Number(item.meanTpm) || 0), 0);
+    const maximum = Math.max(
+      ...tissues.map((item) => (Number(item.meanTpm) || 0) + (Number(item.sdTpm) || 0)),
+      1,
+    );
+    const scaleMaximum = maximum * 1.08;
+    const scroll = document.createElement('div');
+    scroll.className = 'gene-expression-scroll';
+    const plot = document.createElement('div');
+    plot.className = 'gene-expression-plot';
+    plot.style.gridTemplateColumns = `repeat(${tissues.length}, 60px)`;
+    plot.style.minWidth = `${Math.max(720, tissues.length * 52)}px`;
+
     tissues.forEach((tissue) => {
+      const fullName = String(tissue.tissue || 'Unknown tissue');
+      const shortName = expressionTissueLabel(fullName);
       const mean = Number(tissue.meanTpm) || 0;
       const sd = Number(tissue.sdTpm) || 0;
-      const row = document.createElement('div');
-      row.className = 'gene-expression-row';
-      row.title = `${String(tissue.tissue || 'Unknown tissue')}: mean ${formatDecimal(mean, 3)} TPM; SD ${formatDecimal(sd, 3)}; ${formatCount(tissue.nSources)} sources; ${formatCount(tissue.nRuns)} runs`;
+      const tooltipText = `${fullName}: mean ${formatDecimal(mean, 3)} TPM; SD ${formatDecimal(sd, 3)} TPM`;
+      const column = document.createElement('div');
+      column.className = 'gene-expression-column';
+      column.tabIndex = 0;
+      column.title = tooltipText;
+      column.setAttribute('aria-label', tooltipText);
 
-      const heading = document.createElement('div');
-      heading.className = 'gene-expression-heading';
-      const label = document.createElement('span');
-      label.className = 'gene-expression-tissue';
-      label.textContent = String(tissue.tissue || 'Unknown tissue');
-      const value = document.createElement('span');
-      value.className = 'gene-expression-value';
-      value.textContent = `${formatDecimal(mean, 3)} TPM`;
-      heading.append(label, value);
+      const tooltip = document.createElement('div');
+      tooltip.className = 'gene-expression-tooltip';
+      tooltip.textContent = tooltipText;
 
-      const track = document.createElement('div');
-      track.className = 'gene-expression-track';
-      const fill = document.createElement('div');
-      fill.className = 'gene-expression-fill';
-      const percentage = maximum > 0 ? (mean / maximum) * 100 : 0;
-      fill.style.width = `${mean > 0 ? Math.max(percentage, 1.25) : 0}%`;
-      track.append(fill);
+      const barArea = document.createElement('div');
+      barArea.className = 'gene-expression-bar-area';
+      const meanPercentage = (mean / scaleMaximum) * 100;
+      const lowerPercentage = (Math.max(0, mean - sd) / scaleMaximum) * 100;
+      const upperPercentage = (Math.min(scaleMaximum, mean + sd) / scaleMaximum) * 100;
 
-      const metadata = document.createElement('div');
-      metadata.className = 'gene-expression-meta';
-      metadata.textContent = `SD ${formatDecimal(sd, 3)} | ${formatCount(tissue.nSources)} sources | ${formatCount(tissue.nRuns)} runs`;
-      row.append(heading, track, metadata);
-      expressionChart.append(row);
+      const meanValue = document.createElement('span');
+      meanValue.className = 'gene-expression-value';
+      meanValue.textContent = formatDecimal(mean, 2);
+      meanValue.style.bottom = `calc(${meanPercentage}% + 7px)`;
+
+      const bar = document.createElement('div');
+      bar.className = 'gene-expression-bar';
+      bar.style.height = `${meanPercentage}%`;
+      if (mean > 0) {
+        bar.classList.add('has-value');
+      }
+      bar.setAttribute('aria-hidden', 'true');
+
+      if (sd > 0) {
+        const errorBar = document.createElement('div');
+        errorBar.className = 'gene-expression-error-bar';
+        errorBar.style.bottom = `${lowerPercentage}%`;
+        errorBar.style.height = `${upperPercentage - lowerPercentage}%`;
+        errorBar.setAttribute('aria-hidden', 'true');
+        barArea.append(errorBar);
+      }
+      barArea.append(bar, meanValue);
+
+      const label = document.createElement('div');
+      label.className = 'gene-expression-label';
+      const labelText = document.createElement('span');
+      labelText.textContent = shortName;
+      label.append(labelText);
+
+      column.append(tooltip, barArea, label);
+      plot.append(column);
     });
+    scroll.append(plot);
+    expressionChart.append(createExpressionLegend(), scroll);
   }
 
   function normalizedDoi(value) {
@@ -813,7 +738,6 @@
   function renderPapers() {
     const papers = Array.isArray(detailPayload?.papers) ? detailPayload.papers : [];
     paperList.replaceChildren();
-    paperCount.textContent = `${formatCount(papers.length)} ${papers.length === 1 ? 'paper' : 'papers'}`;
 
     if (!papers.length) {
       paperList.classList.add('is-empty');
@@ -873,7 +797,6 @@
       ? detailPayload.proteinSimilarityHits
       : [];
     similarityBody.replaceChildren();
-    similarityCount.textContent = `${formatCount(hits.length)} ${hits.length === 1 ? 'hit' : 'hits'}`;
 
     if (!hits.length) {
       similarityTableWrap.hidden = true;
@@ -988,61 +911,41 @@
       appendDefinitionItem(sequenceMetadata, 'Anchor', parts.join(' | '));
     }
     sequenceValue.textContent = sequenceFasta(payload);
-    sequenceCopy.textContent = 'Copy';
+    if (copyResetTimer) {
+      window.clearTimeout(copyResetTimer);
+      copyResetTimer = null;
+    }
+    resetSequenceCopyFeedback();
   }
 
   function renderSequenceIdle() {
-    const transcript = selectedTranscript();
-    if (!transcript || !currentSequenceType) {
-      setSequenceState('No sequence is available for this transcript.');
-      return;
-    }
-    const key = sequenceCacheKey(transcript.transcriptId, currentSequenceType);
-    const cached = sequenceCache.get(key);
-    if (cached) {
-      renderSequencePayload(cached);
-      return;
-    }
-
-    const config = sequenceTypeConfig(currentSequenceType);
-    setSequenceState(`${config.label} is available for ${transcript.transcriptId}.`);
-    const loadButton = document.createElement('button');
-    loadButton.type = 'button';
-    loadButton.className = 'gene-secondary-button';
-    loadButton.textContent = `Load ${config.label}`;
-    loadButton.addEventListener('click', loadSequence);
-    sequenceState.append(loadButton);
+    setSequenceState('No sequence is available for this transcript.');
   }
 
-  function renderSequenceTabs() {
-    sequenceTabs.replaceChildren();
+  function renderSequenceTypeOptions(preferredType = '') {
+    sequenceTypeSelect.replaceChildren();
     const transcript = selectedTranscript();
     const availableTypes = Array.isArray(transcript?.sequenceTypes) ? transcript.sequenceTypes : [];
-    if (!availableTypes.includes(currentSequenceType)) {
-      currentSequenceType = availableTypes[0] || '';
-    }
+    const availableConfigs = SEQUENCE_TYPES.filter((config) => availableTypes.includes(config.key));
+    const selectedType = availableTypes.includes(preferredType)
+      ? preferredType
+      : availableTypes.includes('cds')
+        ? 'cds'
+        : availableConfigs[0]?.key || '';
 
-    SEQUENCE_TYPES.forEach((config) => {
-      const availability = transcript
-        ? sequenceAvailability(transcript.transcriptId, config.key)
-        : null;
-      const button = document.createElement('button');
-      button.type = 'button';
-      button.setAttribute('role', 'tab');
-      button.setAttribute('aria-controls', 'gene-sequence-panel');
-      button.setAttribute('aria-selected', config.key === currentSequenceType ? 'true' : 'false');
-      button.disabled = !availability;
+    availableConfigs.forEach((config) => {
+      const availability = sequenceAvailability(transcript.transcriptId, config.key);
+      const option = document.createElement('option');
+      option.value = config.key;
       const length = availability
         ? ` (${formatCount(availability.length)} ${config.unit})`
         : '';
-      button.textContent = `${config.label}${length}`;
-      button.addEventListener('click', () => {
-        currentSequenceType = config.key;
-        renderSequenceTabs();
-        loadSequence();
-      });
-      sequenceTabs.append(button);
+      option.textContent = `${config.label}${length}`;
+      sequenceTypeSelect.append(option);
     });
+    currentSequenceType = selectedType;
+    sequenceTypeSelect.value = selectedType;
+    sequenceTypeSelect.disabled = availableConfigs.length === 0;
   }
 
   function renderSequences(payload) {
@@ -1059,11 +962,8 @@
     const representative = transcripts.find((item) => item.isRepresentative) || transcripts[0];
     sequenceTranscript.value = representative?.transcriptId || '';
     sequenceTranscript.disabled = transcripts.length === 0;
-    currentSequenceType = Array.isArray(representative?.sequenceTypes)
-      ? representative.sequenceTypes[0] || ''
-      : '';
-    renderSequenceTabs();
-    renderSequenceIdle();
+    renderSequenceTypeOptions('cds');
+    loadSequence();
   }
 
   async function loadSequence() {
@@ -1102,7 +1002,7 @@
       sequenceCache.set(key, payload);
       const selectionIsCurrent = requestNumber === currentSequenceRequest
         && sequenceTranscript.value === transcript.transcriptId
-        && currentSequenceType === sequenceType;
+        && sequenceTypeSelect.value === sequenceType;
       if (selectionIsCurrent) {
         renderSequencePayload(payload);
       }
@@ -1125,7 +1025,6 @@
 
   function resetDetailState() {
     detailPayload = null;
-    currentAnnotationKey = ANNOTATION_TYPES[0].key;
     currentAnnotationPage = 0;
     currentPaperLimit = PAPER_PAGE_SIZE;
     currentSimilarityLimit = SIMILARITY_PAGE_SIZE;
@@ -1142,9 +1041,10 @@
   function renderGeneDetail(payload) {
     detailPayload = payload;
     renderDetailHeader(payload);
+    renderSymbols(payload);
+    renderReportedIds(payload);
+    renderTranscripts(Array.isArray(payload.transcripts) ? payload.transcripts : []);
     renderDescription(payload);
-    renderIdentifiers(payload);
-    renderAnnotationTabs();
     renderAnnotations();
     renderExpression(payload);
     renderPapers();
@@ -1206,16 +1106,26 @@
           throw new Error('Copy failed');
         }
       }
-      sequenceCopy.textContent = 'Copied';
+      sequenceCopyIcon.src = ICON_COPIED_PATH;
+      sequenceCopy.setAttribute('aria-label', 'Sequence copied');
+      sequenceCopy.title = 'Sequence copied';
     } catch (_error) {
-      sequenceCopy.textContent = 'Copy failed';
+      sequenceCopy.setAttribute('aria-label', 'Copy failed');
+      sequenceCopy.title = 'Copy failed';
     }
     if (copyResetTimer) {
       window.clearTimeout(copyResetTimer);
     }
     copyResetTimer = window.setTimeout(() => {
-      sequenceCopy.textContent = 'Copy';
-    }, 1800);
+      resetSequenceCopyFeedback();
+      copyResetTimer = null;
+    }, 3000);
+  }
+
+  function resetSequenceCopyFeedback() {
+    sequenceCopyIcon.src = ICON_COPY_PATH;
+    sequenceCopy.setAttribute('aria-label', 'Copy sequence');
+    sequenceCopy.title = 'Copy sequence';
   }
 
   function handleRoute() {
@@ -1297,8 +1207,12 @@
       activeSequenceController = null;
     }
     currentSequenceRequest += 1;
-    renderSequenceTabs();
-    renderSequenceIdle();
+    renderSequenceTypeOptions('cds');
+    loadSequence();
+  });
+  sequenceTypeSelect.addEventListener('change', () => {
+    currentSequenceType = sequenceTypeSelect.value;
+    loadSequence();
   });
   sequenceCopy.addEventListener('click', copySequenceToClipboard);
   detailBack.addEventListener('click', () => {
