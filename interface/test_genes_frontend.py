@@ -16,6 +16,9 @@ def test_genes_page_and_deep_link_serve_the_gene_catalog_frontend() -> None:
             response = client.get(path)
             assert response.status_code == 200, response.text
             assert 'id="gene-search-form"' in response.text
+            assert 'id="genes-heading"' not in response.text
+            assert 'class="gene-search-heading"' not in response.text
+            assert 'aria-label="Gene search"' in response.text
             assert 'id="gene-detail-section"' in response.text
             assert 'id="gene-predicted-function"' in response.text
             assert 'id="gene-sequence-panel"' in response.text
@@ -25,7 +28,23 @@ def test_genes_page_and_deep_link_serve_the_gene_catalog_frontend() -> None:
         script = client.get("/static/genes/app.js")
         assert styles.status_code == 200
         assert script.status_code == 200
+        assert "DMv8.2 Gene Catalog" not in response.text
+        assert 'id="catalog-summary"' not in response.text
+        assert "MAX_SYMBOLS" not in script.text
+        assert "MAX_REPORTED_IDS" not in script.text
+        assert "createResultRow('Gene ID:')" in script.text
+        assert "createResultField('Symbol:', gene.symbols)" in script.text
+        assert "createResultField('Reported ID:', gene.reportedIds, reportedIdLabel)" in script.text
+        assert (
+            "appendValueList(row.value, values, Number.POSITIVE_INFINITY, formatter)"
+            in script.text
+        )
+        assert "createResultRow('Summary:')" in script.text
+        assert "createResultRow('Description:')" not in script.text
         assert "descriptionExcerpt" in script.text
+        assert "-webkit-line-clamp" not in styles.text
+        assert "border-bottom: 1px solid #e5e7eb" in styles.text
+        assert ".gene-results-section {\n  width: 100%;\n  min-width: 0;" in styles.text
         assert "mode: 'detail'" in script.text
         assert "loadGeneDetail" in script.text
         assert "transcript_id" in script.text

@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Genes | Potato Research</title>
     <link rel="icon" type="image/png" href="/static/favicon.png" />
-    <link rel="stylesheet" href="/static/genes/styles.css?v=20260727-gene-details" />
+    <link rel="stylesheet" href="/static/genes/styles.css?v=20260727-genes-search-no-title" />
   </head>
   <body>
     <div class="genes-app">
@@ -28,15 +28,7 @@
       </header>
 
       <main class="genes-main">
-        <section id="gene-search-panel" class="gene-search-panel" aria-labelledby="genes-heading">
-          <div class="gene-search-heading">
-            <div>
-              <div class="section-label">DMv8.2 Gene Catalog</div>
-              <h2 id="genes-heading">Genes</h2>
-            </div>
-            <div id="catalog-summary" class="catalog-summary" aria-live="polite">Loading catalog</div>
-          </div>
-
+        <section id="gene-search-panel" class="gene-search-panel" aria-label="Gene search">
           <form id="gene-search-form" class="gene-search-form" role="search">
             <label class="visually-hidden" for="gene-search-input">Search genes</label>
             <div class="gene-search-row">
@@ -230,6 +222,6 @@
       </main>
     </div>
 
-    <script src="/static/genes/app.js?v=20260727-gene-details"></script>
+    <script src="/static/genes/app.js?v=20260727-gene-summary-label"></script>
   </body>
 </html>

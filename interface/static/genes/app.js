@@ -2,8 +2,6 @@
   'use strict';
 
   const PAGE_SIZE = 20;
-  const MAX_SYMBOLS = 4;
-  const MAX_REPORTED_IDS = 4;
   const ANNOTATION_PAGE_SIZE = 30;
   const PAPER_PAGE_SIZE = 10;
   const SIMILARITY_PAGE_SIZE = 10;
@@ -49,7 +47,6 @@
   const searchForm = document.getElementById('gene-search-form');
   const searchInput = document.getElementById('gene-search-input');
   const searchButton = document.getElementById('gene-search-button');
-  const catalogSummary = document.getElementById('catalog-summary');
   const searchStatus = document.getElementById('gene-search-status');
   const resultsSection = document.getElementById('gene-results-section');
   const resultsSummary = document.getElementById('gene-results-summary');
@@ -106,7 +103,6 @@
   let currentQuery = '';
   let currentOffset = 0;
   let currentHasMore = false;
-  let catalogLoaded = false;
   let detailPayload = null;
   let currentAnnotationKey = ANNOTATION_TYPES[0].key;
   let currentAnnotationPage = 0;
@@ -232,7 +228,12 @@
     return identifier;
   }
 
-  function appendValueList(target, values, limit, formatter = (value) => String(value)) {
+  function appendValueList(
+    target,
+    values,
+    limit = Number.POSITIVE_INFINITY,
+    formatter = (value) => String(value),
+  ) {
     const filtered = Array.isArray(values) ? values.filter((value) => formatter(value)) : [];
     if (!filtered.length) {
       target.textContent = 'Not assigned';
@@ -253,15 +254,20 @@
     }
   }
 
-  function createResultField(label, values, limit, formatter) {
+  function createResultRow(label) {
     const wrapper = document.createElement('div');
     wrapper.className = 'gene-result-field';
     const term = document.createElement('dt');
     term.textContent = label;
-    const description = document.createElement('dd');
-    appendValueList(description, values, limit, formatter);
-    wrapper.append(term, description);
-    return wrapper;
+    const value = document.createElement('dd');
+    wrapper.append(term, value);
+    return { wrapper, value };
+  }
+
+  function createResultField(label, values, formatter) {
+    const row = createResultRow(label);
+    appendValueList(row.value, values, Number.POSITIVE_INFINITY, formatter);
+    return row.wrapper;
   }
 
   function createGeneResult(gene) {
@@ -274,18 +280,24 @@
     title.textContent = String(gene.geneId || 'Unknown gene');
     title.setAttribute('aria-label', `Open ${title.textContent}`);
 
+    const geneIdRow = createResultRow('Gene ID:');
+    geneIdRow.value.append(title);
+    const descriptionRow = createResultRow('Summary:');
+    descriptionRow.value.classList.add('gene-description');
+    descriptionRow.value.textContent = String(
+      gene.descriptionExcerpt || 'No predicted description available.',
+    );
+
     const fields = document.createElement('dl');
     fields.className = 'gene-result-fields';
     fields.append(
-      createResultField('Gene symbols', gene.symbols, MAX_SYMBOLS),
-      createResultField('Reported IDs', gene.reportedIds, MAX_REPORTED_IDS, reportedIdLabel),
+      geneIdRow.wrapper,
+      createResultField('Symbol:', gene.symbols),
+      createResultField('Reported ID:', gene.reportedIds, reportedIdLabel),
+      descriptionRow.wrapper,
     );
 
-    const description = document.createElement('p');
-    description.className = 'gene-description';
-    description.textContent = String(gene.descriptionExcerpt || 'No predicted description available.');
-
-    article.append(title, fields, description);
+    article.append(fields);
     return article;
   }
 
@@ -328,24 +340,6 @@
       throw new Error(detail);
     }
     return payload;
-  }
-
-  async function loadCatalogSummary() {
-    if (catalogLoaded) {
-      return;
-    }
-    catalogLoaded = true;
-    try {
-      const response = await fetch('/api/v1/gene-catalog', { headers: { Accept: 'application/json' } });
-      const payload = await responseJson(response, 'Gene catalog is unavailable.');
-      const assembly = String(payload.assembly || 'DMv8.2');
-      const count = payload.counts?.genes;
-      catalogSummary.textContent = count === undefined
-        ? assembly
-        : `${assembly} | ${formatCount(count)} genes`;
-    } catch (_error) {
-      catalogSummary.textContent = 'DMv8.2 Gene Catalog';
-    }
   }
 
   async function searchGenes(query, offset = 0) {
@@ -1233,7 +1227,6 @@
 
     showSearchView();
     setStatus('');
-    loadCatalogSummary();
     if (route.query) {
       searchGenes(route.query, route.offset);
       return;
