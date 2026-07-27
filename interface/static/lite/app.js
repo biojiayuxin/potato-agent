@@ -1991,6 +1991,7 @@ const handlePortalNavClick = (event) => {
     ? event.target.closest('.portal-nav-item')
     : null;
   if (!item || !dom.portalNav?.contains(item) || item.classList.contains('active')) return;
+  if (item.getAttribute('data-mobile-supported') === 'true') return;
 
   event.preventDefault();
   window.location.assign(HIGH_RESOLUTION_NOTICE_PATH);

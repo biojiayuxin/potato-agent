@@ -1,0 +1,235 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Genes | Potato Research</title>
+    <link rel="icon" type="image/png" href="/static/favicon.png" />
+    <link rel="stylesheet" href="/static/genes/styles.css?v=20260727-gene-details" />
+  </head>
+  <body>
+    <div class="genes-app">
+      <header class="portal-header">
+        <section class="portal-hero" aria-labelledby="portal-title">
+          <div class="portal-hero-content">
+            <h1 id="portal-title">Integration of Multi-Omics Data For Potato Gene Discovery</h1>
+          </div>
+        </section>
+        <nav class="portal-nav" aria-label="Portal modules">
+          <a class="portal-nav-item" href="/lite">Potato Agent</a>
+          <a class="portal-nav-item active" href="/genes" aria-current="page">Genes</a>
+          <a class="portal-nav-item" href="/spatial">Spatial Expression</a>
+          <a class="portal-nav-item" href="/wgcna">WGCNA Network</a>
+          <a class="portal-nav-item" href="/bulk-rnaseq">Bulk RNA-Seq</a>
+          <a class="portal-nav-item" href="/genome-browser">Genome Browser</a>
+          <button class="portal-nav-item" type="button" disabled>Variants</button>
+          <button class="portal-nav-item" type="button" disabled>Germplasm</button>
+        </nav>
+      </header>
+
+      <main class="genes-main">
+        <section id="gene-search-panel" class="gene-search-panel" aria-labelledby="genes-heading">
+          <div class="gene-search-heading">
+            <div>
+              <div class="section-label">DMv8.2 Gene Catalog</div>
+              <h2 id="genes-heading">Genes</h2>
+            </div>
+            <div id="catalog-summary" class="catalog-summary" aria-live="polite">Loading catalog</div>
+          </div>
+
+          <form id="gene-search-form" class="gene-search-form" role="search">
+            <label class="visually-hidden" for="gene-search-input">Search genes</label>
+            <div class="gene-search-row">
+              <input
+                id="gene-search-input"
+                type="search"
+                name="q"
+                maxlength="256"
+                autocomplete="off"
+                spellcheck="false"
+                placeholder="Gene ID, gene symbol, or reported ID"
+                required
+              />
+              <button id="gene-search-button" class="primary" type="submit">Search</button>
+            </div>
+            <div class="gene-examples" aria-label="Example gene searches">
+              <span class="gene-examples-label">Examples</span>
+              <button type="button" data-gene-example="CDF1">CDF1</button>
+              <button type="button" data-gene-example="GAME9">GAME9</button>
+              <button type="button" data-gene-example="GBSS1">GBSS1</button>
+              <button type="button" data-gene-example="DM8.2_chr01G00060">DM8.2_chr01G00060</button>
+              <button type="button" data-gene-example="PGSC0003DMG400023365">PGSC0003DMG400023365</button>
+            </div>
+          </form>
+        </section>
+
+        <div id="gene-search-status" class="gene-search-status" role="status" aria-live="polite" hidden></div>
+
+        <section id="gene-results-section" class="gene-results-section" aria-labelledby="gene-results-heading" hidden>
+          <header class="gene-results-header">
+            <div>
+              <h2 id="gene-results-heading">Search results</h2>
+              <p id="gene-results-summary"></p>
+            </div>
+          </header>
+          <div id="gene-results" class="gene-results"></div>
+          <nav id="gene-pagination" class="gene-pagination" aria-label="Gene search result pages" hidden>
+            <button id="gene-previous-page" type="button">Previous</button>
+            <span id="gene-page-summary"></span>
+            <button id="gene-next-page" type="button">Next</button>
+          </nav>
+        </section>
+
+        <section id="gene-detail-section" class="gene-detail-section" aria-labelledby="gene-detail-heading" hidden>
+          <a id="gene-detail-back" class="gene-detail-back" href="/genes">Back to gene search</a>
+
+          <div id="gene-detail-loading" class="gene-detail-loading" role="status" aria-live="polite" hidden>
+            <div class="gene-detail-loading-line"></div>
+            <div class="gene-detail-loading-line"></div>
+            <div class="gene-detail-loading-line"></div>
+          </div>
+
+          <div id="gene-detail-content" hidden>
+            <header class="gene-detail-header">
+              <div class="gene-detail-title-group">
+                <div id="gene-detail-assembly" class="section-label">DMv8.2 Gene</div>
+                <h2 id="gene-detail-heading">Gene details</h2>
+                <div id="gene-detail-symbols" class="gene-detail-symbols"></div>
+              </div>
+              <a
+                id="gene-genome-browser-link"
+                class="gene-genome-browser-link"
+                href="/genome-browser"
+                target="_blank"
+                rel="noopener noreferrer"
+                hidden
+              >Genome Browser</a>
+            </header>
+
+            <dl id="gene-detail-overview" class="gene-detail-overview"></dl>
+
+            <section class="gene-detail-block gene-description-block" aria-labelledby="gene-description-heading">
+              <header class="gene-block-header">
+                <div>
+                  <div class="gene-block-label">Functional prediction</div>
+                  <h3 id="gene-description-heading">Description</h3>
+                </div>
+                <span id="gene-reliability-grade" class="gene-reliability-grade" hidden></span>
+              </header>
+              <p id="gene-predicted-function" class="gene-predicted-function"></p>
+            </section>
+
+            <section class="gene-detail-block" aria-labelledby="gene-identifiers-heading">
+              <header class="gene-block-header">
+                <div>
+                  <div class="gene-block-label">Catalog mapping</div>
+                  <h3 id="gene-identifiers-heading">Identifiers and transcripts</h3>
+                </div>
+              </header>
+              <div class="gene-identifiers-layout">
+                <dl id="gene-identifier-list" class="gene-identifier-list"></dl>
+                <div id="gene-transcript-list" class="gene-transcript-list"></div>
+              </div>
+            </section>
+
+            <section class="gene-detail-block" aria-labelledby="gene-annotations-heading">
+              <header class="gene-block-header">
+                <div>
+                  <div class="gene-block-label">Functional annotation</div>
+                  <h3 id="gene-annotations-heading">GO, KEGG, and InterPro</h3>
+                </div>
+              </header>
+              <div id="gene-annotation-tabs" class="gene-annotation-tabs" role="tablist" aria-label="Annotation types"></div>
+              <div id="gene-annotation-toolbar" class="gene-annotation-toolbar" hidden>
+                <label class="visually-hidden" for="gene-annotation-filter">Filter annotations</label>
+                <input id="gene-annotation-filter" type="search" autocomplete="off" spellcheck="false" />
+                <span id="gene-annotation-count"></span>
+              </div>
+              <div id="gene-annotation-list" class="gene-annotation-list" role="tabpanel"></div>
+              <nav id="gene-annotation-pagination" class="gene-inline-pagination" aria-label="Annotation pages" hidden>
+                <button id="gene-annotation-previous" class="gene-secondary-button" type="button">Previous</button>
+                <span id="gene-annotation-page"></span>
+                <button id="gene-annotation-next" class="gene-secondary-button" type="button">Next</button>
+              </nav>
+            </section>
+
+            <section class="gene-detail-block" aria-labelledby="gene-expression-heading">
+              <header class="gene-block-header">
+                <div>
+                  <div class="gene-block-label">Expression Atlas</div>
+                  <h3 id="gene-expression-heading">Tissue expression</h3>
+                </div>
+                <span id="gene-expression-unit" class="gene-block-meta">Mean TPM</span>
+              </header>
+              <div id="gene-expression-chart" class="gene-expression-chart"></div>
+              <p id="gene-expression-statistic" class="gene-expression-statistic"></p>
+            </section>
+
+            <section class="gene-detail-block" aria-labelledby="gene-literature-heading">
+              <header class="gene-block-header">
+                <div>
+                  <div class="gene-block-label">Potato gene evidence</div>
+                  <h3 id="gene-literature-heading">Literature</h3>
+                </div>
+                <span id="gene-paper-count" class="gene-block-meta"></span>
+              </header>
+              <ol id="gene-paper-list" class="gene-paper-list"></ol>
+              <button id="gene-paper-more" class="gene-secondary-button" type="button" hidden></button>
+            </section>
+
+            <section class="gene-detail-block" aria-labelledby="gene-similarity-heading">
+              <header class="gene-block-header">
+                <div>
+                  <div class="gene-block-label">Protein homology</div>
+                  <h3 id="gene-similarity-heading">UniRef100 similarity</h3>
+                </div>
+                <span id="gene-similarity-count" class="gene-block-meta"></span>
+              </header>
+              <div id="gene-similarity-table-wrap" class="gene-table-wrap">
+                <table class="gene-similarity-table">
+                  <thead>
+                    <tr>
+                      <th scope="col">Subject</th>
+                      <th scope="col">Identity</th>
+                      <th scope="col">E-value</th>
+                      <th scope="col">Description</th>
+                    </tr>
+                  </thead>
+                  <tbody id="gene-similarity-body"></tbody>
+                </table>
+              </div>
+              <div id="gene-similarity-empty" class="gene-detail-empty" hidden></div>
+              <button id="gene-similarity-more" class="gene-secondary-button" type="button" hidden></button>
+            </section>
+
+            <section class="gene-detail-block gene-sequence-block" aria-labelledby="gene-sequences-heading">
+              <header class="gene-block-header">
+                <div>
+                  <div class="gene-block-label">Sequence data</div>
+                  <h3 id="gene-sequences-heading">Sequences</h3>
+                </div>
+              </header>
+              <div class="gene-sequence-controls">
+                <label class="gene-sequence-transcript-label" for="gene-sequence-transcript">Transcript</label>
+                <select id="gene-sequence-transcript"></select>
+                <div id="gene-sequence-tabs" class="gene-sequence-tabs" role="tablist" aria-label="Sequence types"></div>
+              </div>
+              <div id="gene-sequence-panel" class="gene-sequence-panel" role="tabpanel">
+                <div id="gene-sequence-state" class="gene-sequence-state"></div>
+                <div id="gene-sequence-content" hidden>
+                  <div class="gene-sequence-toolbar">
+                    <dl id="gene-sequence-metadata" class="gene-sequence-metadata"></dl>
+                    <button id="gene-sequence-copy" class="gene-secondary-button" type="button">Copy</button>
+                  </div>
+                  <pre id="gene-sequence-value" tabindex="0"></pre>
+                </div>
+              </div>
+            </section>
+          </div>
+        </section>
+      </main>
+    </div>
+
+    <script src="/static/genes/app.js?v=20260727-gene-details"></script>
+  </body>
+</html>
