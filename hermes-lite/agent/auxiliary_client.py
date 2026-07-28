@@ -229,6 +229,17 @@ def _enforce_runtime_auxiliary_policy(
 # with gateway-side mode selection (thinking → 1.0, non-thinking → 0.6).
 OMIT_TEMPERATURE: object = object()
 
+# Keep this small model-contract check in the shared auxiliary layer. Potato
+# Lite deliberately excludes the native Anthropic provider adapter, while
+# OpenAI-wire and Codex auxiliary calls still pass through this module.
+_NO_SAMPLING_PARAMS_MODEL_MARKERS = ("4-7", "4.7", "4-8", "4.8")
+
+
+def _model_forbids_sampling_params(model: Optional[str]) -> bool:
+    """Return whether an Anthropic model rejects sampling parameters."""
+    normalized = str(model or "").lower()
+    return any(marker in normalized for marker in _NO_SAMPLING_PARAMS_MODEL_MARKERS)
+
 
 def _is_kimi_model(model: Optional[str]) -> bool:
     """True for any Kimi / Moonshot model that manages temperature server-side."""
@@ -5063,10 +5074,8 @@ def _build_call_kwargs(
     # drop here so auxiliary callers that hardcode temperature (e.g. 0 on
     # structured-JSON extraction) don't 400 the moment
     # the aux model is flipped to 4.7.
-    if temperature is not None:
-        from agent.anthropic_adapter import _forbids_sampling_params
-        if _forbids_sampling_params(model):
-            temperature = None
+    if temperature is not None and _model_forbids_sampling_params(model):
+        temperature = None
 
     if temperature is not None:
         kwargs["temperature"] = temperature

@@ -82,20 +82,23 @@ runtime 在 `HERMES_RUNTIME_PROFILE_PATH` 缺失或 provider/API mode 不在 all
 当前生产状态：
 
 ```text
-release:      /opt/potato-hermes-lite/releases/20260726T042411Z-0.19.0-potato.lite.1-1cd02812
+release:      /opt/potato-hermes-lite/releases/20260728T141258Z-0.19.0-potato.lite.2-a96c1091
 current:      /opt/potato-hermes-lite/current
-version:      0.19.0+potato.lite.1
-wheel SHA256: 1cd02812d7438aee3855241620103b732671ce612c30dd6f8c01a5c42e35d112
+version:      0.19.0+potato.lite.2
+wheel SHA256: a96c10915d288d6effc7890d1bbd997c9867c5322ad2e1f023beefe59bc683ce
 ```
 
 本次切换前基线是
-`20260725T090240Z-0.19.0-potato.lite.1-8ae648f3`；该 immutable release 在新版本验收和观察期结束前保留作
+`20260726T042411Z-0.19.0-potato.lite.1-1cd02812`；该 immutable release 在新版本验收和观察期结束前保留作
 回滚目标。11 个 mapped unit 和 Interface gateway Python 均使用 Lite。构建、切换、验收和回滚流程见
 本文第 6.3 至 6.7 小节及 [`hermes-lite/README.md`](hermes-lite/README.md)。
 
+`0.19.0+potato.lite.2` 修复辅助请求参数构造器对已裁剪 `agent.anthropic_adapter` 的无条件导入；
+`vision_analyze` 和 `browser_vision` 在允许的 `custom` Codex/OpenAI-wire 路径上不再于 API 调用前报模块缺失。
+
 ### 0.19.0 Potato Lite 依赖更新
 
-`0.19.0+potato.lite.1` 不使用安装时动态解析的依赖集合。Lite 与 Interface 均以 Python 3.12、Linux x86_64
+`0.19.0+potato.lite.2` 不使用安装时动态解析的依赖集合。Lite 与 Interface 均以 Python 3.12、Linux x86_64
 全量 hash lock 安装，wheelhouse 文件名、大小和 SHA256 另由 manifest 绑定：
 
 | 边界 | 固定版本或范围 | 说明 |
