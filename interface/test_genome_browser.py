@@ -52,6 +52,7 @@ def _write_genome_browser_fixture(root: Path) -> None:
                         "chromSizes": "monoploid/Test/reference/Test.chrom.sizes",
                         "annotation": "monoploid/Test/annotation/Test.gff3.bgz",
                         "annotationIndex": "monoploid/Test/annotation/Test.gff3.bgz.tbi",
+                        "doi": "10.1234/test.1",
                         "featureCount": 2,
                         "note": "internal note",
                         "sourceReferences": ["/source/Test.fa"],
@@ -71,7 +72,17 @@ def _write_genome_browser_fixture(root: Path) -> None:
 
 def test_genome_browser_entry_and_static_paths_are_prefixed() -> None:
     lite_index = (REPO_ROOT / "interface/static/lite/index.html").read_text(encoding="utf-8")
-    assert '<a class="portal-nav-item" href="/genome-browser">Genome Browser</a>' in lite_index
+    assert '<a class="portal-nav-item" href="/genomes" data-mobile-supported="true">Genomes</a>' in lite_index
+
+    genomes_index = (REPO_ROOT / "interface/static/genomes/index.html").read_text(
+        encoding="utf-8"
+    )
+    assert 'href="/static/genomes/styles.css' in genomes_index
+    assert 'src="/static/genomes/app.js' in genomes_index
+    assert 'href="/genomes" aria-current="page"' in genomes_index
+    assert 'class="browser-button" href="/genomes/browser"' in genomes_index
+    assert 'src="/static/genomes/assets/pan_core_accumulation_compact.svg"' in genomes_index
+    assert 'src="/static/genomes/assets/pangenome_gene_family_distribution_ybreak.svg"' in genomes_index
 
     genome_index = (REPO_ROOT / "interface/static/genome_browser/index.html").read_text(
         encoding="utf-8"
@@ -81,12 +92,48 @@ def test_genome_browser_entry_and_static_paths_are_prefixed() -> None:
     assert 'src="/static/genome_browser/vendor/react-dom.production.min.js"' in genome_index
     assert 'src="/static/genome_browser/vendor/react-linear-genome-view.umd.production.min.js"' in genome_index
     assert 'src="/static/genome_browser/app.js' in genome_index
-    assert 'href="/genome-browser" aria-current="page"' in genome_index
+    assert 'href="/genomes" aria-current="page"' in genome_index
+    assert 'class="parent-page-link" href="/genomes"' in genome_index
 
     genome_css = (REPO_ROOT / "interface/static/genome_browser/styles.css").read_text(
         encoding="utf-8"
     )
     assert "background: url('../background.png')" in genome_css
+
+    genomes_css = (REPO_ROOT / "interface/static/genomes/styles.css").read_text(
+        encoding="utf-8"
+    )
+    assert ".genomes-main {\n  width: 100%;\n  max-width: 1120px;" in genomes_css
+
+    genomes_app = (REPO_ROOT / "interface/static/genomes/app.js").read_text(
+        encoding="utf-8"
+    )
+    assert "assembly.sample" in genomes_app
+    assert "new URLSearchParams({ assembly: assemblyId })" in genomes_app
+    assert "`/genomes/browser?${params.toString()}`" in genomes_app
+
+    genes_index = (REPO_ROOT / "interface/static/genes/index.html").read_text(
+        encoding="utf-8"
+    )
+    genes_app = (REPO_ROOT / "interface/static/genes/app.js").read_text(
+        encoding="utf-8"
+    )
+    assert 'href="/genomes/browser"' in genes_index
+    assert "`/genomes/browser?${params.toString()}`" in genes_app
+
+
+def test_portal_navigation_uses_genomes_as_the_primary_page() -> None:
+    portal_indexes = [
+        "interface/static/lite/high-resolution-required.html",
+        "interface/static/genes/index.html",
+        "interface/static/spatial/index.html",
+        "interface/static/wgcna/index.html",
+        "interface/static/bulk_rnaseq/index.html",
+    ]
+    for relative_path in portal_indexes:
+        content = (REPO_ROOT / relative_path).read_text(encoding="utf-8")
+        assert 'href="/genomes">Genomes</a>' in content
+        assert '<a class="portal-nav-item" href="/genome-browser">' not in content
 
 
 def test_genome_browser_viewer_height_follows_jbrowse_content() -> None:
@@ -109,14 +156,60 @@ def test_genome_browser_assembly_detail_omits_haplotypes() -> None:
     assert "assembly.haplotypes" not in genome_app
 
 
-def test_genome_browser_page_route_serves_static_page() -> None:
+def test_genome_browser_page_uses_canonical_genomes_route() -> None:
     client = TestClient(interface_app_mod.app)
     try:
-        response = client.get("/genome-browser")
+        response = client.get("/genomes/browser")
         assert response.status_code == 200
         assert "Genome Browser" in response.text
-        head_response = client.head("/genome-browser")
+        assert "Genomes - Genome Browser" in response.text
+        head_response = client.head("/genomes/browser")
         assert head_response.status_code == 200
+    finally:
+        client.close()
+
+
+def test_legacy_genome_browser_route_redirects_with_query() -> None:
+    client = TestClient(interface_app_mod.app)
+    try:
+        response = client.get(
+            "/genome-browser?assembly=monoploid%2FTest&loc=chr1%3A1..10",
+            follow_redirects=False,
+        )
+        assert response.status_code == 308
+        assert response.headers["location"] == (
+            "/genomes/browser?assembly=monoploid%2FTest&loc=chr1%3A1..10"
+        )
+
+        head_response = client.head("/genome-browser", follow_redirects=False)
+        assert head_response.status_code == 308
+        assert head_response.headers["location"] == "/genomes/browser"
+    finally:
+        client.close()
+
+
+def test_genomes_page_route_serves_static_page() -> None:
+    client = TestClient(interface_app_mod.app)
+    try:
+        response = client.get("/genomes")
+        assert response.status_code == 200
+        assert "Genome accessions" in response.text
+        head_response = client.head("/genomes")
+        assert head_response.status_code == 200
+
+        stylesheet = client.get("/static/genomes/styles.css")
+        assert stylesheet.status_code == 200
+        assert ".genomes-main" in stylesheet.text
+
+        script = client.get("/static/genomes/app.js")
+        assert script.status_code == 200
+        assert "assembly.sample" in script.text
+
+        figure = client.get(
+            "/static/genomes/assets/pan_core_accumulation_compact.svg"
+        )
+        assert figure.status_code == 200
+        assert figure.headers["content-type"].startswith("image/svg+xml")
     finally:
         client.close()
 
@@ -138,6 +231,9 @@ def test_genome_browser_manifest_adds_default_location(monkeypatch, tmp_path) ->
         payload = response.json()
         assert payload["counts"]["assemblies"] == 1
         assert payload["assemblies"][0]["id"] == "monoploid/Test"
+        assert payload["assemblies"][0]["sample"] == "Test"
+        assert payload["assemblies"][0]["ploidy"] == "monoploid"
+        assert payload["assemblies"][0]["doi"] == "10.1234/test.1"
         assert payload["assemblies"][0]["defaultLocation"] == "chr1:1..1000"
         assert payload["assemblies"][0]["geneCount"] == 10
         assert payload["assemblies"][0]["transcriptCount"] == 12

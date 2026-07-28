@@ -1,0 +1,511 @@
+:root {
+  color-scheme: light;
+  --page: #eef3f9;
+  --panel: rgba(255, 255, 255, 0.92);
+  --surface: #ffffff;
+  --surface-muted: #f6f8fb;
+  --border: #d6dfeb;
+  --border-strong: #bdcadb;
+  --text: #14213d;
+  --muted: #64748b;
+  --primary: #166534;
+  --primary-hover: #18713a;
+  --danger: #b42318;
+  --shadow: 0 18px 42px rgba(8, 15, 30, 0.12);
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  min-width: 0;
+  min-height: 100%;
+  margin: 0;
+  overflow-x: hidden;
+  color: var(--text);
+  background: var(--page);
+  font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+}
+
+button,
+input,
+select {
+  font: inherit;
+}
+
+button {
+  cursor: pointer;
+}
+
+.genomes-app {
+  width: 100%;
+  min-width: 0;
+  min-height: 100vh;
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+  gap: 18px;
+  padding: 24px;
+  background: url('../background.png') center center / cover fixed no-repeat;
+}
+
+.portal-header {
+  width: 100%;
+  max-width: 1180px;
+  min-width: 0;
+  justify-self: center;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  position: relative;
+  z-index: 2;
+}
+
+.portal-hero {
+  min-width: 0;
+  position: relative;
+  text-align: center;
+}
+
+.portal-hero-content {
+  min-width: 0;
+  max-width: 960px;
+  margin: 0 auto;
+  padding: 4px 16px 2px;
+  color: #12203b;
+}
+
+.portal-hero h1 {
+  margin: 0;
+  font-size: 32px;
+  font-weight: 800;
+  line-height: 1.08;
+  letter-spacing: 0;
+}
+
+.portal-nav {
+  width: 100%;
+  min-width: 0;
+  min-height: 58px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px;
+  overflow-x: auto;
+  border: 1px solid rgba(255, 255, 255, 0.46);
+  border-radius: 14px;
+  background: rgba(255, 255, 255, 0.52);
+  box-shadow: var(--shadow);
+  backdrop-filter: blur(18px) saturate(150%);
+  scrollbar-width: thin;
+}
+
+.portal-nav-item {
+  flex: 0 0 auto;
+  min-height: 40px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0 16px;
+  border: 1px solid rgba(22, 101, 52, 0.18);
+  border-radius: 8px;
+  color: #17324d;
+  background: rgba(255, 255, 255, 0.62);
+  font-size: 14px;
+  font-weight: 800;
+  line-height: 1;
+  letter-spacing: 0;
+  text-decoration: none;
+  white-space: nowrap;
+  transition: background 140ms ease, border-color 140ms ease, color 140ms ease, box-shadow 140ms ease;
+}
+
+.portal-nav-item:hover {
+  border-color: rgba(22, 101, 52, 0.34);
+  background: rgba(255, 255, 255, 0.84);
+}
+
+.portal-nav-item.active {
+  border-color: rgba(22, 101, 52, 0.58);
+  color: #ffffff;
+  background: var(--primary);
+  box-shadow: 0 10px 24px rgba(22, 101, 52, 0.28);
+}
+
+.portal-nav-item:disabled {
+  cursor: default;
+  opacity: 0.58;
+  color: rgba(23, 50, 77, 0.72);
+  background: rgba(255, 255, 255, 0.38);
+}
+
+.genomes-main {
+  width: 100%;
+  max-width: 1120px;
+  min-width: 0;
+  justify-self: center;
+  align-self: start;
+  display: grid;
+  gap: 14px;
+}
+
+.page-toolbar {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 3px 0;
+}
+
+.page-toolbar h2,
+.catalog-heading h3 {
+  margin: 0;
+  letter-spacing: 0;
+}
+
+.page-toolbar h2 {
+  font-size: 26px;
+  line-height: 1.15;
+}
+
+.browser-button {
+  min-height: 42px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0 18px;
+  border: 1px solid var(--primary);
+  border-radius: 8px;
+  color: #ffffff;
+  background: var(--primary);
+  font-size: 14px;
+  font-weight: 800;
+  line-height: 1;
+  text-decoration: none;
+  white-space: nowrap;
+}
+
+.browser-button:hover {
+  background: var(--primary-hover);
+}
+
+.figures-grid {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: minmax(0, 1.45fr) minmax(0, 1fr);
+  gap: 14px;
+}
+
+.pangenome-figure {
+  min-width: 0;
+  margin: 0;
+  overflow: hidden;
+  border: 1px solid rgba(214, 223, 235, 0.9);
+  border-radius: 8px;
+  background: var(--surface);
+  box-shadow: 0 16px 36px rgba(8, 15, 30, 0.09);
+}
+
+.figure-frame {
+  width: 100%;
+  height: 340px;
+  display: grid;
+  place-items: center;
+  padding: 12px;
+  overflow: hidden;
+  background: #ffffff;
+}
+
+.figure-frame img {
+  width: 100%;
+  height: 100%;
+  display: block;
+  object-fit: contain;
+}
+
+.pangenome-figure figcaption {
+  padding: 12px 14px;
+  border-top: 1px solid var(--border);
+  color: #334155;
+  background: var(--surface-muted);
+  font-size: 13px;
+  font-weight: 800;
+  line-height: 1.3;
+}
+
+.catalog-panel {
+  min-width: 0;
+  padding: 20px;
+  border: 1px solid rgba(214, 223, 235, 0.9);
+  border-radius: 8px;
+  background: var(--panel);
+  box-shadow: 0 16px 36px rgba(8, 15, 30, 0.1);
+  backdrop-filter: blur(16px) saturate(140%);
+}
+
+.catalog-heading {
+  min-width: 0;
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.catalog-heading h3 {
+  font-size: 19px;
+  line-height: 1.2;
+}
+
+.catalog-heading p {
+  margin: 5px 0 0;
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.3;
+}
+
+.catalog-heading p.is-error {
+  color: var(--danger);
+}
+
+.catalog-controls {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 220px;
+  gap: 12px;
+  margin-top: 18px;
+}
+
+.field {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+}
+
+.field span {
+  color: #334155;
+  font-size: 12px;
+  font-weight: 800;
+}
+
+input,
+select {
+  width: 100%;
+  min-width: 0;
+  min-height: 42px;
+  padding: 0 12px;
+  border: 1px solid var(--border-strong);
+  border-radius: 8px;
+  outline: none;
+  color: var(--text);
+  background: rgba(255, 255, 255, 0.96);
+}
+
+input:focus,
+select:focus {
+  border-color: rgba(22, 101, 52, 0.55);
+  box-shadow: 0 0 0 3px rgba(22, 101, 52, 0.14);
+}
+
+input:disabled,
+select:disabled {
+  cursor: default;
+  opacity: 0.58;
+}
+
+.table-shell {
+  max-height: 560px;
+  margin-top: 16px;
+  overflow: auto;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface);
+}
+
+table {
+  width: 100%;
+  min-width: 680px;
+  border-collapse: separate;
+  border-spacing: 0;
+}
+
+th,
+td {
+  padding: 12px 14px;
+  border-bottom: 1px solid #e5eaf1;
+  text-align: left;
+  vertical-align: middle;
+}
+
+th {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  color: #334155;
+  background: #f2f5f9;
+  font-size: 12px;
+  font-weight: 850;
+}
+
+td {
+  color: #263449;
+  background: rgba(255, 255, 255, 0.98);
+  font-size: 13px;
+  line-height: 1.35;
+}
+
+tbody tr:last-child td {
+  border-bottom: 0;
+}
+
+tbody tr:hover td {
+  background: #f8fafc;
+}
+
+th:nth-child(1),
+td:nth-child(1) {
+  width: 30%;
+}
+
+th:nth-child(2),
+td:nth-child(2) {
+  width: 25%;
+}
+
+.accession-link,
+.doi-link {
+  color: #155e75;
+  font-weight: 750;
+  text-decoration: none;
+}
+
+.accession-link:hover,
+.doi-link:hover {
+  text-decoration: underline;
+}
+
+.ploidy-badge {
+  display: inline-flex;
+  min-height: 26px;
+  align-items: center;
+  padding: 3px 8px;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  font-size: 12px;
+  font-weight: 800;
+  line-height: 1.2;
+  white-space: nowrap;
+}
+
+.ploidy-monoploid {
+  border-color: #b9dec4;
+  color: #166534;
+  background: #edf7f0;
+}
+
+.ploidy-phased-diploid {
+  border-color: #bfd3f7;
+  color: #1d4ed8;
+  background: #eff5ff;
+}
+
+.ploidy-phased-tetraploid {
+  border-color: #f1d29b;
+  color: #92400e;
+  background: #fff7e8;
+}
+
+.muted-value {
+  color: var(--muted);
+}
+
+.table-message {
+  height: 96px;
+  color: var(--muted);
+  text-align: center;
+}
+
+.table-message.is-error {
+  color: var(--danger);
+}
+
+@media (max-width: 860px) {
+  .genomes-app {
+    padding: 16px;
+  }
+
+  .portal-hero h1 {
+    font-size: 24px;
+  }
+
+  .figures-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .figure-frame {
+    height: auto;
+  }
+
+  .figure-wide .figure-frame {
+    aspect-ratio: 2.5 / 1;
+  }
+
+  .figure-tall .figure-frame {
+    aspect-ratio: 1.39 / 1;
+  }
+}
+
+@media (max-width: 580px) {
+  .genomes-app {
+    gap: 14px;
+    padding: 12px;
+    background-attachment: scroll;
+  }
+
+  .portal-hero-content {
+    padding-inline: 4px;
+  }
+
+  .portal-hero h1 {
+    font-size: 21px;
+    line-height: 1.16;
+  }
+
+  .portal-nav {
+    min-height: 54px;
+    border-radius: 8px;
+  }
+
+  .portal-nav-item {
+    min-height: 36px;
+    padding: 0 12px;
+    font-size: 13px;
+  }
+
+  .page-toolbar {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .browser-button {
+    width: 100%;
+    min-height: 44px;
+  }
+
+  .figure-frame {
+    padding: 6px;
+  }
+
+  .catalog-panel {
+    padding: 15px;
+  }
+
+  .catalog-controls {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .table-shell {
+    max-height: 520px;
+  }
+}

@@ -173,6 +173,20 @@ button {
   margin-bottom: 16px;
 }
 
+.parent-page-link {
+  display: inline-flex;
+  margin-bottom: 7px;
+  color: var(--primary);
+  font-size: 12px;
+  font-weight: 800;
+  line-height: 1.2;
+  text-decoration: none;
+}
+
+.parent-page-link:hover {
+  text-decoration: underline;
+}
+
 h2,
 h3 {
   margin: 0;

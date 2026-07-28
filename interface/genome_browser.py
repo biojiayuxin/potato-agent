@@ -5,11 +5,12 @@ import os
 from pathlib import Path, PurePosixPath
 from typing import Any
 
-from fastapi import APIRouter, HTTPException
-from fastapi.responses import FileResponse
+from fastapi import APIRouter, HTTPException, Request
+from fastapi.responses import FileResponse, RedirectResponse
 
 
 STATIC_ROOT = Path(__file__).resolve().parent / "static" / "genome_browser"
+GENOMES_STATIC_ROOT = Path(__file__).resolve().parent / "static" / "genomes"
 DEFAULT_DB_ROOT = Path("/mnt/data/public_data/Genome_browser_DB")
 MAX_DEFAULT_REGION_BP = 100_000
 
@@ -80,12 +81,30 @@ def media_type_for_path(path: Path) -> str | None:
     return None
 
 
-@router.head("/genome-browser", include_in_schema=False)
-@router.get("/genome-browser", include_in_schema=False)
+@router.head("/genomes/browser", include_in_schema=False)
+@router.get("/genomes/browser", include_in_schema=False)
 async def serve_genome_browser_index() -> FileResponse:
     index_path = STATIC_ROOT / "index.html"
     if not index_path.is_file():
         raise HTTPException(status_code=404, detail="Genome browser frontend not found")
+    return FileResponse(index_path)
+
+
+@router.head("/genome-browser", include_in_schema=False)
+@router.get("/genome-browser", include_in_schema=False)
+async def redirect_legacy_genome_browser(request: Request) -> RedirectResponse:
+    destination = "/genomes/browser"
+    if request.url.query:
+        destination = f"{destination}?{request.url.query}"
+    return RedirectResponse(destination, status_code=308)
+
+
+@router.head("/genomes", include_in_schema=False)
+@router.get("/genomes", include_in_schema=False)
+async def serve_genomes_index() -> FileResponse:
+    index_path = GENOMES_STATIC_ROOT / "index.html"
+    if not index_path.is_file():
+        raise HTTPException(status_code=404, detail="Genomes frontend not found")
     return FileResponse(index_path)
 
 

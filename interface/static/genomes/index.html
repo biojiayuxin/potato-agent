@@ -1,0 +1,104 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Genomes | Potato Research</title>
+    <link rel="icon" type="image/png" href="/static/favicon.png" />
+    <link rel="stylesheet" href="/static/genomes/styles.css?v=20260728-genomes-page" />
+  </head>
+  <body>
+    <div class="genomes-app">
+      <header class="portal-header">
+        <section class="portal-hero" aria-labelledby="portal-title">
+          <div class="portal-hero-content">
+            <h1 id="portal-title">Integration of Multi-Omics Data For Potato Gene Discovery</h1>
+          </div>
+        </section>
+        <nav class="portal-nav" aria-label="Portal modules">
+          <a class="portal-nav-item" href="/lite">Potato Agent</a>
+          <a class="portal-nav-item" href="/genes">Genes</a>
+          <a class="portal-nav-item" href="/spatial">Spatial Expression</a>
+          <a class="portal-nav-item" href="/wgcna">WGCNA Network</a>
+          <a class="portal-nav-item" href="/bulk-rnaseq">Bulk RNA-Seq</a>
+          <a class="portal-nav-item active" href="/genomes" aria-current="page">Genomes</a>
+          <button class="portal-nav-item" type="button" disabled>Variants</button>
+          <button class="portal-nav-item" type="button" disabled>Germplasm</button>
+        </nav>
+      </header>
+
+      <main class="genomes-main">
+        <header class="page-toolbar">
+          <h2>Genomes</h2>
+          <a class="browser-button" href="/genomes/browser">Genome Browser</a>
+        </header>
+
+        <section class="figures-grid" aria-label="Pangenome overview">
+          <figure class="pangenome-figure figure-wide">
+            <div class="figure-frame">
+              <img
+                src="/static/genomes/assets/pan_core_accumulation_compact.svg"
+                alt="Pan-genome and core-genome accumulation curves"
+              />
+            </div>
+            <figcaption>Pan- and core-genome accumulation</figcaption>
+          </figure>
+
+          <figure class="pangenome-figure figure-tall">
+            <div class="figure-frame">
+              <img
+                src="/static/genomes/assets/pangenome_gene_family_distribution_ybreak.svg"
+                alt="Pangenome gene-family distribution"
+              />
+            </div>
+            <figcaption>Pangenome gene-family distribution</figcaption>
+          </figure>
+        </section>
+
+        <section class="catalog-panel" aria-labelledby="catalog-heading">
+          <header class="catalog-heading">
+            <div>
+              <h3 id="catalog-heading">Genome accessions</h3>
+              <p id="catalog-status" role="status" aria-live="polite">Loading accessions</p>
+            </div>
+          </header>
+
+          <div class="catalog-controls">
+            <label class="field">
+              <span>Search</span>
+              <input id="accession-search" type="search" autocomplete="off" spellcheck="false" placeholder="Search accession or DOI" disabled />
+            </label>
+            <label class="field">
+              <span>Ploidy</span>
+              <select id="ploidy-filter" disabled>
+                <option value="all">All ploidy levels</option>
+                <option value="monoploid">Monoploid</option>
+                <option value="phased_diploid">Phased diploid</option>
+                <option value="phased_tetraploid">Phased tetraploid</option>
+              </select>
+            </label>
+          </div>
+
+          <div class="table-shell">
+            <table>
+              <thead>
+                <tr>
+                  <th scope="col">Accession</th>
+                  <th scope="col">Ploidy</th>
+                  <th scope="col">DOI</th>
+                </tr>
+              </thead>
+              <tbody id="accession-table-body">
+                <tr>
+                  <td class="table-message" colspan="3">Loading genome accessions</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </section>
+      </main>
+    </div>
+
+    <script src="/static/genomes/app.js?v=20260728-shared-browser-route"></script>
+  </body>
+</html>

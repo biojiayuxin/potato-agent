@@ -17,7 +17,8 @@
 - WGCNA 共表达网络查看器：公开页面 `/wgcna`，运行时通过 `WGCNA_DATABASE_URL` 查询 PostgreSQL
 - Bulk RNA-Seq 表达查看器：公开页面 `/bulk-rnaseq`，数据从
   `/srv/bulk_rnaseq/current/bulk_rnaseq.sqlite` 只读加载
-- Genome Browser：公开页面 `/genome-browser`，数据从
+- Genome Browser：Genomes 二级页面 `/genomes/browser`（旧 `/genome-browser`
+  地址保留兼容跳转），数据从
   `/mnt/data/public_data/Genome_browser_DB` 只读加载
 
 ## 目录
