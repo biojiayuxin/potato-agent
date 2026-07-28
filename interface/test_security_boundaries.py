@@ -11,7 +11,7 @@ from pathlib import Path
 
 import pytest
 
-from interface import file_stream_worker
+from interface import file_stream_worker, file_upload_worker
 from interface.file_browser_policy import FileBrowserAccessError
 from interface.file_stream_worker import (
     build_file_stream_worker_command,
@@ -255,6 +255,55 @@ def test_upload_worker_enforces_limit_and_cleans_temporary_file(tmp_path: Path) 
     upload_root = tmp_path / "uploads" / "alice"
     assert upload_root.is_dir()
     assert list(upload_root.iterdir()) == []
+
+
+def test_upload_command_does_not_require_access_to_worker_source(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    home = tmp_path / "home"
+    home.mkdir()
+    private_source_dir = tmp_path / "private-source"
+    private_source_dir.mkdir()
+    private_worker = private_source_dir / "file_upload_worker.py"
+    private_worker.write_text(
+        Path(file_upload_worker.__file__).read_text(encoding="utf-8"),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(file_upload_worker, "__file__", str(private_worker))
+
+    command = file_upload_worker.build_file_upload_worker_command(
+        linux_user="unused",
+        home=home,
+        mapping_username="alice",
+        filename="notes.txt",
+        upload_dir_name="uploads",
+        max_bytes=1024,
+        python_bin=sys.executable,
+        use_runuser=False,
+    )
+    assert "-I" in command
+    assert "-c" in command
+    assert not any(str(private_worker) in argument for argument in command)
+
+    private_source_dir.chmod(0)
+    try:
+        result = subprocess.run(
+            command,
+            input=b"isolated-upload",
+            capture_output=True,
+            check=False,
+            timeout=5,
+        )
+    finally:
+        private_source_dir.chmod(0o700)
+
+    assert result.returncode == 0, result.stderr.decode("utf-8", errors="replace")
+    payload = json.loads(result.stdout)
+    assert payload["ok"] is True
+    assert payload["name"] == "notes.txt"
+    assert payload["size"] == len(b"isolated-upload")
+    assert Path(payload["path"]).read_bytes() == b"isolated-upload"
 
 
 @pytest.mark.parametrize(

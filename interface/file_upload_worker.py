@@ -22,6 +22,10 @@ class UploadTooLargeError(RuntimeError):
     pass
 
 
+def _load_worker_source() -> str:
+    return Path(__file__).read_text(encoding="utf-8")
+
+
 def build_file_upload_worker_command(
     *,
     linux_user: str,
@@ -40,7 +44,9 @@ def build_file_upload_worker_command(
         "PATH=/usr/local/bin:/usr/bin:/bin",
         "PYTHONUNBUFFERED=1",
         python_bin or sys.executable,
-        str(Path(__file__).resolve()),
+        "-I",
+        "-c",
+        _load_worker_source(),
         "--home",
         str(home),
         "--mapping-username",
