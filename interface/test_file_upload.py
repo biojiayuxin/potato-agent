@@ -134,6 +134,7 @@ users:
     workdir: {workdir}
     api_port: 8655
     api_key: sk-user
+    model_proxy_token: pmp_alice_0123456789abcdefghijklmnopqrstuvwxyz
     api_server_model_name: Hermes
     systemd_service: hermes-alice.service
 """.lstrip(),

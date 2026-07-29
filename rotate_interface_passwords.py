@@ -37,12 +37,13 @@ from manage_interface_users import (
 )
 
 
-MAIL_ENV_KEYS = (
-    "INTERFACE_RESEND_API_KEY",
+SYSTEMD_MAIL_ENV_KEYS = (
     "INTERFACE_MAIL_FROM",
     "INTERFACE_MAIL_REPLY_TO",
 )
-REQUIRED_MAIL_ENV_KEYS = ("INTERFACE_RESEND_API_KEY", "INTERFACE_MAIL_FROM")
+DEFAULT_RESEND_API_KEY_FILE = Path(
+    "/etc/potato-agent/credentials/resend-api-key"
+)
 
 
 @dataclass(frozen=True)
@@ -87,7 +88,7 @@ def _parse_cutoff_timestamp(value: str) -> int:
 
 
 def _load_missing_mail_env_from_systemd(unit: str) -> bool:
-    if all((os.getenv(key) or "").strip() for key in REQUIRED_MAIL_ENV_KEYS):
+    if (os.getenv("INTERFACE_MAIL_FROM") or "").strip():
         return False
     normalized_unit = unit.strip()
     if not normalized_unit:
@@ -110,10 +111,24 @@ def _load_missing_mail_env_from_systemd(unit: str) -> bool:
         if "=" not in item:
             continue
         key, value = item.split("=", 1)
-        if key in MAIL_ENV_KEYS and not os.getenv(key):
+        if key in SYSTEMD_MAIL_ENV_KEYS and not os.getenv(key):
             os.environ[key] = value
             loaded = True
     return loaded
+
+
+def _configure_mail_secret_file(path: Path) -> bool:
+    if (os.getenv("INTERFACE_RESEND_API_KEY") or "").strip():
+        return False
+    if (os.getenv("INTERFACE_RESEND_API_KEY_FILE") or "").strip():
+        return False
+    credentials_directory = (os.getenv("CREDENTIALS_DIRECTORY") or "").strip()
+    if credentials_directory:
+        credential_path = Path(credentials_directory) / "resend-api-key"
+        if credential_path.exists():
+            return False
+    os.environ["INTERFACE_RESEND_API_KEY_FILE"] = str(path.expanduser())
+    return True
 
 
 def _load_user_target(login: str, *, db_path: Path) -> RotationTarget:
@@ -247,37 +262,44 @@ async def _run(args: argparse.Namespace) -> int:
 
     if not args.no_systemd_env:
         _load_missing_mail_env_from_systemd(args.systemd_unit)
-    get_resend_settings()
+    auto_configured_secret_file = _configure_mail_secret_file(
+        args.resend_api_key_file
+    )
+    try:
+        get_resend_settings()
 
-    successes: list[RotationOutcome] = []
-    failures: list[tuple[RotationTarget, Exception]] = []
-    for target in targets:
-        try:
-            outcome = await _rotate_one(
-                target,
-                db_path=db_path,
-                password_length=args.length,
-                site_url=args.site_url.strip(),
-            )
-        except Exception as exc:
-            failures.append((target, exc))
+        successes: list[RotationOutcome] = []
+        failures: list[tuple[RotationTarget, Exception]] = []
+        for target in targets:
+            try:
+                outcome = await _rotate_one(
+                    target,
+                    db_path=db_path,
+                    password_length=args.length,
+                    site_url=args.site_url.strip(),
+                )
+            except Exception as exc:
+                failures.append((target, exc))
+                print(
+                    f"FAILED {target.user.username} <{target.user.email}>: {exc}",
+                    file=sys.stderr,
+                )
+                if not args.continue_on_error:
+                    break
+                continue
+            successes.append(outcome)
             print(
-                f"FAILED {target.user.username} <{target.user.email}>: {exc}",
-                file=sys.stderr,
+                f"Rotated {outcome.user.username} <{outcome.user.email}>; "
+                f"session {outcome.user.auth_session_version} -> "
+                f"{outcome.updated_user.auth_session_version}; "
+                f"email_id={outcome.email_id or '-'}"
             )
-            if not args.continue_on_error:
-                break
-            continue
-        successes.append(outcome)
-        print(
-            f"Rotated {outcome.user.username} <{outcome.user.email}>; "
-            f"session {outcome.user.auth_session_version} -> "
-            f"{outcome.updated_user.auth_session_version}; "
-            f"email_id={outcome.email_id or '-'}"
-        )
 
-    print(f"Completed: {len(successes)} succeeded, {len(failures)} failed.")
-    return 1 if failures else 0
+        print(f"Completed: {len(successes)} succeeded, {len(failures)} failed.")
+        return 1 if failures else 0
+    finally:
+        if auto_configured_secret_file:
+            os.environ.pop("INTERFACE_RESEND_API_KEY_FILE", None)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -341,6 +363,15 @@ def build_parser() -> argparse.ArgumentParser:
         "--no-systemd-env",
         action="store_true",
         help="Do not load missing Resend mail settings from systemd.",
+    )
+    parser.add_argument(
+        "--resend-api-key-file",
+        type=Path,
+        default=DEFAULT_RESEND_API_KEY_FILE,
+        help=(
+            "Read the Resend API key from this private file when no API key source "
+            f"is configured (default: {DEFAULT_RESEND_API_KEY_FILE})."
+        ),
     )
     parser.add_argument(
         "--continue-on-error",

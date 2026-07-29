@@ -64,6 +64,7 @@ def _write_mapping(tmp_path: Path, target: HermesTarget) -> Path:
                         "workdir": str(target.workdir),
                         "api_port": target.api_port,
                         "api_key": target.api_key,
+                        "model_proxy_token": target.model_proxy_token,
                     }
                 ]
             },
@@ -390,7 +391,7 @@ def test_main_apply_requires_root(monkeypatch, tmp_path: Path) -> None:
         apply_script.main(["--apply", "--all", "--mapping", str(mapping_path)])
 
 
-def test_select_targets_rejects_users_silently_filtered_by_mapping_store(
+def test_select_targets_rejects_incomplete_mapping_user(
     tmp_path: Path,
 ) -> None:
     mapping_path = tmp_path / "users_mapping.yaml"
@@ -402,7 +403,7 @@ def test_select_targets_rejects_users_silently_filtered_by_mapping_store(
         encoding="utf-8",
     )
 
-    with pytest.raises(RuntimeError, match="could not be loaded.*incomplete"):
+    with pytest.raises(RuntimeError, match="incomplete.*api_port"):
         apply_script._select_targets(mapping_path, None)
 
 

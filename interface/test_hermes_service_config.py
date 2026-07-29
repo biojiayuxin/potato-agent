@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import os
+import stat
 from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
@@ -9,8 +11,10 @@ import yaml
 
 from interface.hermes_service import (
     DEFAULT_APPROVAL_MODE,
+    REQUIRED_INACCESSIBLE_PATHS,
     build_config_data,
     build_systemd_unit,
+    ensure_user_runtime_temp_dir,
     install_public_data_link,
     install_user_runtime_files,
 )
@@ -65,6 +69,7 @@ def _target() -> HermesTarget:
         systemd_service="hermes-alice.service",
         extra_env={},
         config_overrides={},
+        model_proxy_token="pmp_alice_0123456789abcdefghijklmnopqrstuvwxyz",
     )
 
 
@@ -248,7 +253,7 @@ def test_build_config_data_disables_fallbacks_and_uses_proxy_credentials() -> No
         "default": "gpt-5.4",
         "provider": "custom",
         "base_url": "http://127.0.0.1:8765/v1",
-        "api_key": "alice-local-token",
+        "api_key": "pmp_alice_0123456789abcdefghijklmnopqrstuvwxyz",
         "api_mode": "codex_responses",
     }
     assert "fallback_providers" not in data
@@ -258,10 +263,80 @@ def test_build_systemd_unit_hides_interface_paths() -> None:
     unit = build_systemd_unit({"hermes": {}}, _target())
 
     assert "PrivateTmp=yes" in unit
+    assert "UMask=0077" in unit
+    assert "Environment=TMPDIR=/home/hmx_alice/.hermes/tmp" in unit
+    assert (
+        "ExecStartPre=/usr/bin/install -d -m 0700 -- "
+        "/home/hmx_alice/.hermes/tmp"
+    ) in unit
     assert "NoNewPrivileges=yes" in unit
-    assert "InaccessiblePaths=-/srv/potato_agent" in unit
-    assert "InaccessiblePaths=-/var/lib/potato-agent" in unit
-    assert "InaccessiblePaths=-/opt/interface-env" in unit
+    for path in REQUIRED_INACCESSIBLE_PATHS:
+        assert f"InaccessiblePaths=-{path}" in unit
+
+
+def test_build_systemd_unit_only_appends_configured_inaccessible_paths() -> None:
+    unit = build_systemd_unit(
+        {
+            "hermes": {
+                "service": {
+                    "inaccessible_paths": [
+                        "/srv/custom-private",
+                        "/srv/potato_agent",
+                    ]
+                }
+            }
+        },
+        _target(),
+    )
+
+    for path in REQUIRED_INACCESSIBLE_PATHS:
+        assert unit.count(f"InaccessiblePaths=-{path}\n") == 1
+    assert "InaccessiblePaths=-/srv/custom-private\n" in unit
+
+
+def test_ensure_user_runtime_temp_dir_creates_as_target_user(
+    monkeypatch, tmp_path
+) -> None:
+    target = replace(
+        _target(),
+        linux_user="hmx_alice",
+        home_dir=tmp_path / "home",
+        hermes_home=tmp_path / "home" / ".hermes",
+        workdir=tmp_path / "home" / "work",
+    )
+    target.hermes_home.mkdir(parents=True)
+    commands: list[list[str]] = []
+
+    def fake_run(command: list[str]) -> str:
+        commands.append(command)
+        temp_dir = target.hermes_home / "tmp"
+        temp_dir.mkdir(mode=0o700)
+        temp_dir.chmod(0o700)
+        return ""
+
+    monkeypatch.setattr("interface.hermes_service._run_command", fake_run)
+    monkeypatch.setattr(
+        "interface.hermes_service.pwd.getpwnam",
+        lambda _username: SimpleNamespace(pw_uid=os.getuid(), pw_gid=os.getgid()),
+    )
+
+    result = ensure_user_runtime_temp_dir(target)
+
+    assert result == target.hermes_home / "tmp"
+    assert commands == [
+        [
+            "runuser",
+            "-u",
+            "hmx_alice",
+            "--",
+            "install",
+            "-d",
+            "-m",
+            "0700",
+            "--",
+            str(target.hermes_home / "tmp"),
+        ]
+    ]
 
 
 @pytest.mark.parametrize(
@@ -396,6 +471,8 @@ def test_build_systemd_unit_prioritizes_agent_runtime() -> None:
     assert "Nice=-5" in unit
     assert "IOSchedulingClass=best-effort" in unit
     assert "IOSchedulingPriority=0" in unit
+    assert "ProtectProc=invisible" in unit
+    assert "ProcSubset=pid" in unit
 
 
 def test_build_systemd_unit_allows_gateway_drain_before_stop_timeout() -> None:
@@ -441,7 +518,6 @@ def test_install_user_runtime_files_writes_only_user_runtime_paths(
         extra_env={"OPENAI_API_KEY": "sk-user"},
         config_overrides={},
     )
-    touched_paths: list[Path] = []
     soul_template = tmp_path / "SOUL.template.md"
     soul_template.write_text("Template soul\n", encoding="utf-8")
     skills_template = _write_bioinformatics_skills_template(tmp_path)
@@ -451,10 +527,6 @@ def test_install_user_runtime_files_writes_only_user_runtime_paths(
     monkeypatch.setattr(
         "interface.hermes_service.pwd.getpwnam",
         lambda username: SimpleNamespace(pw_uid=123, pw_gid=456),
-    )
-    monkeypatch.setattr(
-        "interface.hermes_service._set_owner_and_mode",
-        lambda path, uid, gid, mode: touched_paths.append(path),
     )
     monkeypatch.setattr(
         "interface.hermes_service._run_command",
@@ -498,7 +570,7 @@ def test_install_user_runtime_files_writes_only_user_runtime_paths(
     assert "OPENAI_API_KEY" not in env_body
     assert "sk-user" not in env_body
     assert config_data["model"]["base_url"] == "http://127.0.0.1:8765/v1"
-    assert config_data["model"]["api_key"] == "alice-local-token"
+    assert config_data["model"]["api_key"] == user.model_proxy_token
     assert "sk-user" not in config_body
     assert (
         user.hermes_home / "SOUL.md"
@@ -516,8 +588,10 @@ def test_install_user_runtime_files_writes_only_user_runtime_paths(
     public_data_link = user.home_dir / "public_data"
     assert public_data_link.is_symlink()
     assert public_data_link.resolve() == public_data
-    assert touched_paths
-    assert all(tmp_path in path.parents or path == tmp_path for path in touched_paths)
+    assert stat.S_IMODE((user.hermes_home / ".env").stat().st_mode) == 0o600
+    assert stat.S_IMODE((user.hermes_home / "config.yaml").stat().st_mode) == 0o600
+    assert stat.S_IMODE((user.hermes_home / "SOUL.md").stat().st_mode) == 0o600
+    assert stat.S_IMODE(user.hermes_home.stat().st_mode) == 0o700
 
 
 def test_install_user_runtime_files_overwrites_soul_file_with_template(
@@ -546,15 +620,10 @@ def test_install_user_runtime_files_overwrites_soul_file_with_template(
     public_data = _write_public_data_template(tmp_path)
     user.hermes_home.mkdir(parents=True)
     (user.hermes_home / "SOUL.md").write_text("Old user soul\n", encoding="utf-8")
-    touched_modes: dict[Path, int] = {}
 
     monkeypatch.setattr(
         "interface.hermes_service.pwd.getpwnam",
         lambda username: SimpleNamespace(pw_uid=123, pw_gid=456),
-    )
-    monkeypatch.setattr(
-        "interface.hermes_service._set_owner_and_mode",
-        lambda path, uid, gid, mode: touched_modes.__setitem__(path, mode),
     )
     monkeypatch.setattr(
         "interface.hermes_service.DEFAULT_SOUL_TEMPLATE_PATH",
@@ -577,7 +646,7 @@ def test_install_user_runtime_files_overwrites_soul_file_with_template(
 
     soul_path = user.hermes_home / "SOUL.md"
     assert soul_path.read_text(encoding="utf-8") == "Current template\n"
-    assert touched_modes[soul_path] == 0o600
+    assert stat.S_IMODE(soul_path.stat().st_mode) == 0o600
 
 
 def test_install_user_runtime_files_replaces_managed_bioinformatics_skills(
@@ -610,15 +679,10 @@ def test_install_user_runtime_files_replaces_managed_bioinformatics_skills(
     old_plan_mode_dir = user.hermes_home / "skills" / "plan-mode"
     old_plan_mode_dir.mkdir(parents=True)
     (old_plan_mode_dir / "old.txt").write_text("stale\n", encoding="utf-8")
-    touched_modes: dict[Path, int] = {}
 
     monkeypatch.setattr(
         "interface.hermes_service.pwd.getpwnam",
         lambda username: SimpleNamespace(pw_uid=123, pw_gid=456),
-    )
-    monkeypatch.setattr(
-        "interface.hermes_service._set_owner_and_mode",
-        lambda path, uid, gid, mode: touched_modes.__setitem__(path, mode),
     )
     monkeypatch.setattr(
         "interface.hermes_service.DEFAULT_SOUL_TEMPLATE_PATH",
@@ -653,8 +717,8 @@ def test_install_user_runtime_files_replaces_managed_bioinformatics_skills(
     assert (
         plan_mode_target / "plan" / "SKILL.md"
     ).read_text(encoding="utf-8").startswith("---\nname: plan\n")
-    assert touched_modes[user.hermes_home / "skills"] == 0o700
-    assert touched_modes[target_script] == 0o755
+    assert stat.S_IMODE((user.hermes_home / "skills").stat().st_mode) == 0o700
+    assert stat.S_IMODE(target_script.stat().st_mode) == 0o700
 
 
 def test_install_public_data_link_creates_home_symlink(monkeypatch, tmp_path) -> None:

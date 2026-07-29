@@ -7,6 +7,7 @@ import secrets
 import sys
 
 from interface.auth_db import DEFAULT_AUTH_DB_PATH, email_exists, upsert_user, username_exists
+from interface.cli_secrets import add_password_source_arguments, read_password
 from interface.hermes_service import (
     get_linux_user_info,
     install_user_files,
@@ -16,14 +17,15 @@ from interface.hermes_service import (
 from interface.mapping import (
     DEFAULT_MAPPING_PATH,
     DEFAULT_MODEL_NAME,
-    infer_shared_api_key_placeholder,
     MappingStore,
+    build_targets_from_config,
     load_mapping,
     select_next_port,
     slugify_username,
     write_mapping,
 )
 from interface.password_policy import validate_password_complexity
+from interface.model_proxy_config import generate_model_proxy_token
 
 
 class BindExistingUserError(RuntimeError):
@@ -36,7 +38,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("username", help="Interface/web username, e.g. alice")
     parser.add_argument("email", help="Interface login email")
-    parser.add_argument("password", help="Interface login password")
+    add_password_source_arguments(parser)
     parser.add_argument(
         "--linux-user",
         required=True,
@@ -47,7 +49,8 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main() -> int:
     args = build_parser().parse_args()
-    validate_password_complexity(args.password)
+    password = read_password(args)
+    validate_password_complexity(password)
     require_root()
     require_binary("systemctl")
 
@@ -92,13 +95,18 @@ def main() -> int:
     mapping_entry["api_port"] = select_next_port(config)
     mapping_entry["api_server_model_name"] = DEFAULT_MODEL_NAME
     mapping_entry["systemd_service"] = f"hermes-{slugify_username(username)}.service"
-    mapping_entry["api_key"] = (
-        infer_shared_api_key_placeholder(config)
-        or mapping_entry.get("api_key")
-        or secrets.token_urlsafe(24)
-    )
+    existing_api_keys = {
+        str(item.get("api_key") or "").strip()
+        for item in users
+        if isinstance(item, dict)
+    }
+    mapping_entry["api_key"] = secrets.token_urlsafe(32)
+    while mapping_entry["api_key"] in existing_api_keys:
+        mapping_entry["api_key"] = secrets.token_urlsafe(32)
+    mapping_entry["model_proxy_token"] = generate_model_proxy_token()
 
     users.append(mapping_entry)
+    build_targets_from_config(config)
     write_mapping(mapping_path, config)
 
     resolved_config = load_mapping(mapping_path, resolve_env=True)
@@ -110,7 +118,7 @@ def main() -> int:
     upsert_user(
         username=username,
         email=email,
-        password=args.password,
+        password=password,
         mapping_username=username,
         name=display_name,
         db_path=auth_db_path,

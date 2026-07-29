@@ -17,6 +17,8 @@
 - WGCNA 共表达网络查看器：公开页面 `/wgcna`，运行时通过 `WGCNA_DATABASE_URL` 查询 PostgreSQL
 - Bulk RNA-Seq 表达查看器：公开页面 `/bulk-rnaseq`，数据从
   `/srv/bulk_rnaseq/current/bulk_rnaseq.sqlite` 只读加载
+- Gene Catalog：公开页面 `/genes` 及 `/genes/<gene-id>`，数据从
+  `/srv/gene_catalog/current/gene_catalog.sqlite` 以 SQLite immutable read-only mode 加载
 - Genome Browser：Genomes 二级页面 `/genomes/browser`（旧 `/genome-browser`
   地址保留兼容跳转），数据从
   `/mnt/data/public_data/Genome_browser_DB` 只读加载
@@ -38,19 +40,28 @@
 - `hermes_service.py`
   写入每用户 `~/.hermes/config.yaml`、`.env` 和 systemd service；模型凭据写为本地 proxy token
 - `model_proxy.py`
-  root/systemd 运行的本地 OpenAI-compatible model proxy，负责校验 `{username}-local-token` 并转发到真实上游
+  由独立 `potato-model-proxy` systemd 身份运行的本地 OpenAI-compatible proxy，负责校验逐用户随机
+  `pmp_...` token、执行配额并转发到真实上游
+- `secret_config.py`
+  从 systemd credential 或私有 `*_FILE` 加载 Interface session secret 和 Resend key
 - `spatial_viewer.py`
   空间转录组查看器的公开 FastAPI router；只读查询外部数据目录
 - `wgcna_viewer.py`
   WGCNA 共表达网络查看器的公开 FastAPI router；只读查询 PostgreSQL
 - `bulk_rnaseq_viewer.py`
   Bulk RNA-Seq 表达查看器的公开 FastAPI router；只读查询外部 SQLite
+- `gene_catalog.py`
+  Gene Catalog 的公开页面和 `/api/v1/genes/` API；以 immutable read-only connection 查询外部 SQLite
+- `build_gene_catalog_db.py`
+  从经过审查的注释、序列、文献、相似性和功能预测来源构建版本化 Gene Catalog SQLite
 - `genome_browser.py`
   Genome Browser 的公开 FastAPI router；只读加载 bgzip FASTA/GFF3 及索引文件
 - `build_bulk_rnaseq_db.py`
   从整理后的 bulk RNA-Seq TSV 构建只读 SQLite；默认排除非马铃薯材料
 - `requirements.txt`
-  最小运行依赖
+  直接依赖维护输入；不能用于生产安装
+- `requirements-py312-linux-x86_64.lock`、`wheelhouse-py312-linux-x86_64.json`
+  CPython 3.12/Linux x86_64 生产依赖的全量 hash lock 和精确 wheel inventory
 - `static/lite/`
   Lite 前端页面、样式、脚本、图标
 - `static/spatial/`
@@ -59,57 +70,126 @@
   WGCNA 共表达网络查看器前端页面、样式、脚本和 vendor 资源
 - `static/bulk_rnaseq/`
   Bulk RNA-Seq 表达热图前端页面、样式和脚本
+- `static/genes/`
+  Gene Catalog 搜索、详情和 deep-link 前端页面、样式及脚本
 - `static/genome_browser/`
   Genome Browser 前端页面、样式、脚本和 JBrowse vendor 资源
 
 ## 依赖的数据源
 
-- `users_mapping.yaml`
-- `model_proxy.yaml`
-- `interface/data/interface.db`
-- `interface/data/archive.db`
+- `/var/lib/potato-agent/config/users_mapping.yaml`
+- `/var/lib/potato-agent/config/model_proxy.yaml`
+- `/var/lib/potato-agent/data/interface.db`
+- `/var/lib/potato-agent/data/archive.db`
+- `/var/lib/potato-agent/model-proxy/usage.db`
 - 每用户 `~/.hermes/state.db`
 - 空间转录组数据目录，默认 `/srv/spatial_data/current`
 - WGCNA PostgreSQL 数据库，默认通过 `WGCNA_DATABASE_URL` 配置
 - Bulk RNA-Seq SQLite 数据库，默认 `/srv/bulk_rnaseq/current/bulk_rnaseq.sqlite`
+- Gene Catalog SQLite 数据库，默认 `/srv/gene_catalog/current/gene_catalog.sqlite`
 - Genome Browser 数据库，默认 `/mnt/data/public_data/Genome_browser_DB`
 
 ## 关键环境变量
 
+- `POTATO_AGENT_STATE_DIR`
 - `POTATO_AGENT_MAPPING_PATH`
+- `POTATO_MODEL_PROXY_CONFIG_PATH`
+- `POTATO_MODEL_PROXY_USAGE_DB`
 - `INTERFACE_AUTH_DB`
-- `INTERFACE_SESSION_SECRET`
+- `INTERFACE_ARCHIVE_DB`
+- `INTERFACE_ENVIRONMENT`
+- `INTERFACE_ALLOW_INSECURE_HTTP`
+- `INTERFACE_BIND_HOST`
+- `INTERFACE_SESSION_SECRET_FILE`
+- `INTERFACE_SESSION_COOKIE_SECURE`
+- `INTERFACE_RESEND_API_KEY_FILE`
 - `INTERFACE_SESSION_TTL_SECONDS`
 - `INTERFACE_MAX_UPLOAD_BYTES`
 - `INTERFACE_FILE_BROWSER_MODE`
 - `INTERFACE_UPLOAD_DIR_NAME`
 - `INTERFACE_ARCHIVE_RETENTION_DAYS`
+- `INTERFACE_ARCHIVE_STORAGE_RETENTION_DAYS`
 - `INTERFACE_ARCHIVE_SCHEDULE_HOUR`
 - `SPATIAL_VIEWER_DATA_ROOT`
 - `WGCNA_DATABASE_URL`
 - `BULK_RNASEQ_DB_PATH`
+- `GENE_CATALOG_DB_PATH`
 - `GENOME_BROWSER_DB_ROOT`
 
 说明：
 
-- 如果不设置 `INTERFACE_SESSION_SECRET`，进程启动时会临时生成一个随机值；生产环境通常应该固定它
+- 开发环境未设置 session secret 时会临时生成随机值；生产环境缺少 credential/私有文件、直接把 secret
+  放进进程环境，或 secret 少于 32 bytes 时都会拒绝启动
+- 生产默认 profile 使用 `INTERFACE_ALLOW_INSECURE_HTTP=false`、`Secure` Cookie 和
+  `127.0.0.1:3000`，由 HTTPS 反向代理提供外部入口
+- 无域名隔离测试服务器只有同时显式设置 `INTERFACE_ALLOW_INSECURE_HTTP=true`、
+  `INTERFACE_SESSION_COOKIE_SECURE=false` 并通过 `INTERFACE_BIND_HOST` 指定一个明确的非 loopback IPv4
+  时才能启动；该 profile 会明文传输密码、session 和聊天内容，只能用于可信隔离 LAN
+- 归档正文默认保留 30 天；启动和每日归档任务都会清理更早的数据
 - `INTERFACE_FILE_BROWSER_MODE` 默认为 `home_only`
   - `home_only`：Files 面板只显示 `~/`，不显示目录输入框
   - `home_and_public_data`：在 `~/` 之外额外允许解析到 `/mnt/data/public_data` 的路径，仍不显示目录输入框
   - `user_readable`：显示目录输入框，允许打开任意当前 Linux 用户有权限读取的目录
 - `INTERFACE_MAX_UPLOAD_BYTES` 默认为 200 MB，用于限制单个上传请求，并限制单条消息的附件总大小
 - 上传文件会保存到每用户工作区下的 `.<INTERFACE_UPLOAD_DIR_NAME>` 目录，默认是 `.potato-interface-uploads/`
+- `POTATO_AGENT_STATE_DIR` 只为未显式配置的 mapping、auth/archive DB、proxy 配置和 usage DB 推导默认前缀；
+  它不会重定位 credentials、外部数据集、每用户状态、源码或 release。生产 unit 应使用各专用路径变量
 - `SPATIAL_VIEWER_DATA_ROOT` 默认 `/srv/spatial_data/current`；建议目录 owner 为 `root`、group 为 `potato-interface`，目录 `0750`、文件 `0640`
 - `WGCNA_DATABASE_URL` 指向 WGCNA PostgreSQL 数据库，例如 `postgresql:///potato_wgcna?host=/var/run/postgresql`
 - `BULK_RNASEQ_DB_PATH` 默认 `/srv/bulk_rnaseq/current/bulk_rnaseq.sqlite`；建议 `/srv/bulk_rnaseq` owner 为 `root`、group 为 `potato-interface`，目录 `0750`、SQLite 文件 `0640`
+- `GENE_CATALOG_DB_PATH` 默认 `/srv/gene_catalog/current/gene_catalog.sqlite`；建议 `/srv/gene_catalog` owner
+  为 `root`、group 为 `potato-interface`，目录 `0750`、SQLite 文件 `0640`
 - `GENOME_BROWSER_DB_ROOT` 默认 `/mnt/data/public_data/Genome_browser_DB`；目录内 FASTA/GFF3 需要是 bgzip 压缩并带 `.fai/.gzi/.tbi` 索引
 
 ## 当前边界
 
 - Hermes 每用户运行时由 systemd 管理；会话列表不是走 Hermes HTTP，而是直接读 `state.db`
-- `interface` 当前默认假设自己能够读取各用户的 home、`work` 和 `.hermes/state.db`
+- `interface` 只能按已认证用户的唯一 `mapping_username` 解析目标；mapping 中共享 Linux 用户、home、
+  `HERMES_HOME/state.db`、systemd service、API port 或 proxy token 的条目会 fail closed
+- `interface` 服务身份能够按 mapping 读取目标用户的 home、`work` 和 `.hermes/state.db`，普通用户之间不能
+  互读；归档状态和正文查询也按当前 `mapping_username` 隔离
+- 真实模型 API key 仅允许独立 proxy 身份读取；`potato-interface` 和普通 Hermes 用户都不应有权限
+- proxy 专用 `usage.db` 只保存计量和配额，不保存认证表、聊天正文或 Interface session
 - signup worker 会调用系统级用户开通逻辑；如果进程权限不足，注册任务会失败
 - `users_mapping.yaml` 里仍保留一些历史 `openwebui_*` 字段；`interface` 运行时不会使用它们
+
+## 生产部署要求
+
+- Interface 生产 venv 只支持 CPython 3.12/Linux x86_64，并必须按
+  `requirements-py312-linux-x86_64.lock` 使用 `--require-hashes --no-index` 从通过
+  `wheelhouse-py312-linux-x86_64.json` 精确校验的 wheelhouse 安装；不得直接安装 `requirements.txt`
+- 正式生产必须使用 HTTPS 反向代理、loopback listener 和 Secure Cookie；owner 明确批准的无域名隔离测试
+  环境可使用根目录 README 记录的显式 HTTP site drop-in，不得改成 development 绕过生产 secret 检查
+- HTTP profile 必须从实际 LAN origin 验证登录后刷新、Cookie 的 `Secure=false`/`HttpOnly=true`/
+  `SameSite=Lax`/`Path=/` 和退出清除；不得记录 Cookie 值，完整步骤见根目录 README
+- 宿主 `/proc` 必须持久化 `hidepid=2`；unit 级 `ProtectProc` 不能替代宿主隔离，必要的监控例外只能使用
+  不包含普通用户或 Potato 服务身份的专用 GID
+- session secret 和 Resend key 使用 root-only systemd credentials 或私有 `*_FILE`，不能放进 unit
+  `Environment=`、argv、源码或日志
+- `model_proxy.yaml` 必须为 `root:potato-model-proxy 0640`，专用 proxy 目录为
+  `potato-model-proxy:potato-model-proxy 0700`，`usage.db` 为 `0600`
+- 首次升级会轮换 session secret并注销现有浏览器会话；现有 Resend key 保留原值，只迁移 secret source
+- Resend key 是本次升级中唯一明确保留的旧 key；曾写入普通用户目录的 primary、fallback 和所有 model
+  option 上游 key 都必须创建新值，并在代理验收后撤销旧值
+- 最终验收必须逐用户确认 `model.api_key` 精确等于 mapping 中的随机 proxy token，配置其它位置没有
+  `api_key`，`.env` 没有 `OPENAI_API_KEY`；不能只看 cleanup dry-run 的布尔摘要
+- 新版首次启动会清理归档时间超过 30 天的正文，启动前必须先完成独立备份和保留策略确认
+- 生产 unit 固定使用 7 天在线会话归档和 30 天归档正文保留；cutover 会清除旧 drop-in 中包括 `365000`
+  在内的历史覆盖值
+- 一次性迁移、严格停服顺序、随机 proxy token 下发、usage/quota 迁移和普通用户权限复测见根目录
+  `README.md` 的“升级已有部署”章节
+
+### Gene Catalog 数据发布
+
+- builder 的个人开发默认路径不是生产配置；生产构建必须显式传入全部来源文件、catalog version、prediction
+  release 和新的 staging output
+- 发布前必须关闭 builder connection，执行 SQLite `integrity_check`、schema/metadata 校验，并确认不存在
+  `-wal`、`-shm` 或 `-journal` sidecar
+- 每版数据库安装到 `/srv/gene_catalog/releases/<release-id>/gene_catalog.sqlite`，owner/mode 为
+  `root:potato-interface 0640`，版本目录为 `root:potato-interface 0750`；通过原子替换 `current` symlink 发布，
+  不得原地修改活动数据库
+- Interface 必须可读该文件，普通 mapped Linux 用户必须不可读；发布后验收 `/genes`、
+  `/api/v1/gene-catalog` 和 `/api/v1/genes/search`，完整构建、发布及回滚保留命令见根 README
 
 ## 新增的 TUI Gateway Bridge 骨架
 
@@ -126,7 +206,11 @@
 
 ### 已验证的最小 bridge 探针
 
-- 脚本：`python3 interface/test_tui_bridge.py <mapping_username>`
+- 默认探针：`python3 interface/test_tui_bridge.py <mapping_username>`
+- 自定义 prompt 必须通过 `--prompt-stdin` 或 caller-only 的 `--prompt-file` 提供；三个 bridge 诊断脚本都拒绝
+  明文 `--prompt`，避免内容进入进程 argv
+- `tui_bridge_trace.py` 默认只记录事件结构和长度；只有显式使用 `--include-content` 才会把完整 prompt、回复、
+  stderr 和 RPC payload 写入 trace，且 `--log-file` 的直接父目录必须由调用者所有并为 `0700`
 - 当前已确认：
   - bridge 能以目标 Linux 用户身份启动
   - `session.create` 能返回 live `tui_gateway` session id

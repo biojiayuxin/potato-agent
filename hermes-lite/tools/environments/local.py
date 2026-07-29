@@ -8,6 +8,7 @@ import shutil
 import signal
 import subprocess
 import tempfile
+import threading
 import time
 from pathlib import Path
 
@@ -539,9 +540,31 @@ class LocalEnvironment(BaseEnvironment):
     """
 
     def __init__(self, cwd: str = "", timeout: int = 60, env: dict = None):
+        self._session_temp_dir: str | None = None
         if cwd:
             cwd = os.path.expanduser(cwd)
         super().__init__(cwd=cwd or os.getcwd(), timeout=timeout, env=env)
+
+        # Keep every environment's shell state and persisted tool results in
+        # an atomically-created private directory.  This remains safe when a
+        # caller has not supplied TMPDIR and the only available root is the
+        # host's shared, sticky /tmp.
+        temp_root = self.get_temp_dir()
+        session_temp_dir = tempfile.mkdtemp(
+            prefix=f"hermes-runtime-{self._session_id}-",
+            dir=temp_root,
+        )
+        try:
+            os.chmod(session_temp_dir, 0o700)
+        except OSError:
+            if not _IS_WINDOWS:
+                shutil.rmtree(session_temp_dir, ignore_errors=True)
+                raise
+        if _IS_WINDOWS:
+            session_temp_dir = session_temp_dir.replace("\\", "/")
+        self._session_temp_dir = session_temp_dir
+        self._snapshot_path = f"{session_temp_dir}/hermes-snapshot.sh"
+        self._cwd_file = f"{session_temp_dir}/cwd.txt"
         self.init_session()
 
     def get_temp_dir(self) -> str:
@@ -563,6 +586,9 @@ class LocalEnvironment(BaseEnvironment):
         ``HERMES_HOME`` instead — single-word path, guaranteed to exist, same
         string resolves in both Git Bash and native Python.
         """
+        if self._session_temp_dir:
+            return self._session_temp_dir
+
         if _IS_WINDOWS:
             # Derive a Windows-safe temp dir under HERMES_HOME.  Using
             # forward slashes makes the same string work unchanged in bash
@@ -606,7 +632,6 @@ class LocalEnvironment(BaseEnvironment):
             init_files = _resolve_shell_init_files()
             if init_files:
                 cmd_string = _prepend_shell_init(cmd_string, init_files)
-        args = [bash, "-l", "-c", cmd_string] if login else [bash, "-c", cmd_string]
         run_env = _make_run_env(self.env)
 
         # Recover when the cwd has been deleted out from under us — usually by
@@ -636,21 +661,71 @@ class LocalEnvironment(BaseEnvironment):
 
         _popen_cwd = self.cwd
 
-        _popen_kwargs = {"creationflags": windows_hide_flags()} if _IS_WINDOWS else {}
+        script_read_fd: int | None = None
+        script_write_fd: int | None = None
+        script_path: str | None = None
+        if _IS_WINDOWS:
+            script_fd, script_path = tempfile.mkstemp(
+                prefix="hermes-command-",
+                suffix=".sh",
+                dir=self.get_temp_dir(),
+            )
+            try:
+                os.write(script_fd, cmd_string.encode("utf-8"))
+            finally:
+                os.close(script_fd)
+            args = [bash, *(["-l"] if login else []), script_path]
+            _popen_kwargs = {"creationflags": windows_hide_flags()}
+        else:
+            # Pass the shell program through a dedicated inherited pipe.  The
+            # command text is therefore absent from /proc/<pid>/cmdline while
+            # stdin remains available for commands such as `cat > file`.
+            script_read_fd, script_write_fd = os.pipe()
+            args = [
+                bash,
+                *(["-l"] if login else []),
+                f"/dev/fd/{script_read_fd}",
+            ]
+            _popen_kwargs = {"pass_fds": (script_read_fd,)}
 
-        proc = subprocess.Popen(
-            args,
-            text=True,
-            env=run_env,
-            encoding="utf-8",
-            errors="replace",
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            stdin=subprocess.PIPE if stdin_data is not None else subprocess.DEVNULL,
-            preexec_fn=None if _IS_WINDOWS else os.setsid,
-            cwd=_popen_cwd,
-            **_popen_kwargs,
-        )
+        try:
+            proc = subprocess.Popen(
+                args,
+                text=True,
+                env=run_env,
+                encoding="utf-8",
+                errors="replace",
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                stdin=subprocess.PIPE if stdin_data is not None else subprocess.DEVNULL,
+                preexec_fn=None if _IS_WINDOWS else os.setsid,
+                cwd=_popen_cwd,
+                **_popen_kwargs,
+            )
+        except Exception:
+            if script_path:
+                try:
+                    os.unlink(script_path)
+                except OSError:
+                    pass
+            if script_write_fd is not None:
+                os.close(script_write_fd)
+            raise
+        finally:
+            if script_read_fd is not None:
+                os.close(script_read_fd)
+
+        if script_path:
+            proc._hermes_script_path = script_path
+        if script_write_fd is not None:
+            def _write_script() -> None:
+                try:
+                    with os.fdopen(script_write_fd, "wb") as script_pipe:
+                        script_pipe.write(cmd_string.encode("utf-8"))
+                except (BrokenPipeError, OSError):
+                    pass
+
+            threading.Thread(target=_write_script, daemon=True).start()
         if not _IS_WINDOWS:
             try:
                 proc._hermes_pgid = os.getpgid(proc.pid)
@@ -661,6 +736,17 @@ class LocalEnvironment(BaseEnvironment):
             _pipe_stdin(proc, stdin_data)
 
         return proc
+
+    def _wait_for_process(self, proc, timeout: int = 120) -> dict:
+        try:
+            return super()._wait_for_process(proc, timeout=timeout)
+        finally:
+            script_path = getattr(proc, "_hermes_script_path", None)
+            if script_path:
+                try:
+                    os.unlink(script_path)
+                except OSError:
+                    pass
 
     def _kill_process(self, proc):
         """Kill the entire process group (all children)."""
@@ -785,9 +871,21 @@ class LocalEnvironment(BaseEnvironment):
                 self.cwd = prev_cwd
 
     def cleanup(self):
-        """Clean up temp files."""
-        for f in (self._snapshot_path, self._cwd_file):
+        """Remove the private session temp tree and all persisted results."""
+        session_temp_dir = getattr(self, "_session_temp_dir", None)
+        if session_temp_dir:
             try:
-                os.unlink(f)
+                shutil.rmtree(session_temp_dir)
+            except OSError:
+                pass
+            self._session_temp_dir = None
+            return
+
+        # Handle partially initialized legacy-style instances defensively.
+        for path in (getattr(self, "_snapshot_path", ""), getattr(self, "_cwd_file", "")):
+            if not path:
+                continue
+            try:
+                os.unlink(path)
             except OSError:
                 pass

@@ -12,6 +12,12 @@ hermes-agent/.github/
 
 # Sensitive or machine-local deployment files
 interface/data/interface.db
+interface/data/interface.db-*
 interface/data/archive.db
+interface/data/archive.db-*
+interface/archive.db
+interface/archive.db-*
 users_mapping.yaml
+model_proxy.yaml
 interface/auth.db
+interface/auth.db-*

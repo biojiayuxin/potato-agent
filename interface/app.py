@@ -78,10 +78,10 @@ from interface.auth_db import (
 )
 from interface.archive_store import (
     archive_session_record,
+    cleanup_expired_archived_sessions,
     count_archived_sessions,
     ensure_archive_db,
     finish_archive_run,
-    list_archive_runs,
     start_archive_run,
 )
 from interface.background_jobs import has_active_background_processes
@@ -156,6 +156,10 @@ from interface.runtime_state import (
 from interface.request_limits import RequestBodyLimitMiddleware
 from interface.redaction import force_redact_value
 from interface.subprocess_env import interface_subprocess_env
+from interface.secret_config import (
+    load_session_cookie_secure,
+    load_session_secret,
+)
 from interface.model_options import (
     ModelOptionsError,
     normalize_model_options,
@@ -197,7 +201,8 @@ SPATIAL_STATIC_DIR = STATIC_DIR / "spatial"
 FAVICON_PATH = STATIC_DIR / "favicon.png"
 SESSION_COOKIE_NAME = "potato_interface_token"
 REQUEST_AUTH_RESOLUTION_STATE_KEY = "potato_auth_resolution"
-SESSION_SECRET = os.getenv("INTERFACE_SESSION_SECRET") or secrets.token_urlsafe(32)
+SESSION_SECRET = load_session_secret()
+SESSION_COOKIE_SECURE = load_session_cookie_secure()
 SESSION_TTL_SECONDS = int(
     os.getenv("INTERFACE_SESSION_TTL_SECONDS", str(7 * 24 * 3600))
 )
@@ -221,6 +226,9 @@ FILE_BROWSER_MODE = (
 )
 UPLOAD_DIR_NAME = os.getenv("INTERFACE_UPLOAD_DIR_NAME", ".potato-interface-uploads")
 ARCHIVE_RETENTION_DAYS = int(os.getenv("INTERFACE_ARCHIVE_RETENTION_DAYS", "7"))
+ARCHIVE_STORAGE_RETENTION_DAYS = int(
+    os.getenv("INTERFACE_ARCHIVE_STORAGE_RETENTION_DAYS", "30")
+)
 ARCHIVE_SCHEDULE_HOUR = int(os.getenv("INTERFACE_ARCHIVE_SCHEDULE_HOUR", "3"))
 RUNTIME_IDLE_TIMEOUT_SECONDS = int(
     os.getenv("INTERFACE_RUNTIME_IDLE_TIMEOUT_SECONDS", str(30 * 60))
@@ -641,7 +649,7 @@ def _set_session_cookie(response: Response, token: str) -> None:
         key=SESSION_COOKIE_NAME,
         value=token,
         httponly=True,
-        secure=False,
+        secure=SESSION_COOKIE_SECURE,
         samesite="lax",
         max_age=SESSION_TTL_SECONDS,
         path="/",
@@ -649,7 +657,13 @@ def _set_session_cookie(response: Response, token: str) -> None:
 
 
 def _clear_session_cookie(response: Response) -> None:
-    response.delete_cookie(SESSION_COOKIE_NAME, path="/")
+    response.delete_cookie(
+        SESSION_COOKIE_NAME,
+        path="/",
+        httponly=True,
+        secure=SESSION_COOKIE_SECURE,
+        samesite="lax",
+    )
 
 
 def _extract_request_token(request: Request) -> str | None:
@@ -1046,10 +1060,10 @@ class _UserSessionDBProxy:
                         USER_SESSION_DB_RPC_SOURCE,
                         str(self.spec.state_db_path),
                         method,
-                        json.dumps(kwargs, ensure_ascii=False),
                     ],
                     cwd=str(self.spec.workdir),
                     timeout_seconds=SESSION_DB_INNER_TIMEOUT_SECONDS,
+                    input_text=json.dumps(kwargs, ensure_ascii=False),
                 )
             except subprocess.TimeoutExpired as exc:
                 raise HTTPException(
@@ -2094,7 +2108,7 @@ def _archive_expired_target_sync(
 
             archived = archive_session_record(
                 mapping_username=target.username,
-                email_snapshot=target.email,
+                email_snapshot="",
                 session=session,
                 messages=raw_messages,
                 display_messages=display_messages,
@@ -2117,6 +2131,10 @@ async def _archive_expired_sessions_once() -> None:
     run_id = await asyncio.to_thread(start_archive_run)
     archived_count = 0
     try:
+        await asyncio.to_thread(
+            cleanup_expired_archived_sessions,
+            retention_days=ARCHIVE_STORAGE_RETENTION_DAYS,
+        )
         cutoff = time.time() - (ARCHIVE_RETENTION_DAYS * 86400)
         auth_users = {
             user.mapping_username: user
@@ -2980,6 +2998,10 @@ async def on_startup() -> None:
         "interface restarted before the run completed"
     )
     ensure_archive_db()
+    app.state.archive_cleanup = await asyncio.to_thread(
+        cleanup_expired_archived_sessions,
+        retention_days=ARCHIVE_STORAGE_RETENTION_DAYS,
+    )
     ensure_runtime_state_store()
     app.state.tui_gateway_bridges = TuiGatewayBridgeRegistry()
     app.state.session_run_manager = SessionRunManager(
@@ -3158,7 +3180,10 @@ async def tui_gateway_websocket(websocket: WebSocket) -> None:
 
 @app.get("/api/status")
 async def api_status(user: CurrentUser = Depends(get_current_user)) -> dict[str, Any]:
-    archived_session_count = await asyncio.to_thread(count_archived_sessions)
+    archived_session_count = await asyncio.to_thread(
+        count_archived_sessions,
+        mapping_username=user.mapping_username,
+    )
     return {
         "status": True,
         "user": _serialize_user(user),
@@ -3171,16 +3196,16 @@ async def api_status(user: CurrentUser = Depends(get_current_user)) -> dict[str,
 async def archive_status(
     user: CurrentUser = Depends(get_current_user),
 ) -> dict[str, Any]:
-    archived_session_count, runs = await asyncio.gather(
-        asyncio.to_thread(count_archived_sessions),
-        asyncio.to_thread(list_archive_runs, limit=10),
+    archived_session_count = await asyncio.to_thread(
+        count_archived_sessions,
+        mapping_username=user.mapping_username,
     )
     return {
         "status": True,
         "retention_days": ARCHIVE_RETENTION_DAYS,
+        "storage_retention_days": ARCHIVE_STORAGE_RETENTION_DAYS,
         "schedule_hour": ARCHIVE_SCHEDULE_HOUR,
         "archived_session_count": archived_session_count,
-        "runs": runs,
     }
 
 

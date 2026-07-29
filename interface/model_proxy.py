@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import hmac
 import logging
 import os
 import time
@@ -17,8 +18,8 @@ from interface.model_options import ModelOptionsError, normalize_model_options
 from interface.model_proxy_config import (
     DEFAULT_MODEL_PROXY_CONFIG_PATH,
     ModelProxyConfigError,
+    local_model_proxy_token,
     load_model_proxy_config,
-    username_from_local_token,
 )
 from interface import token_usage_store
 from interface.request_limits import RequestBodyLimitMiddleware
@@ -35,6 +36,7 @@ MAX_SSE_BUFFER_BYTES = 2 * 1024 * 1024
 MAX_SSE_FRAME_BYTES = 1024 * 1024
 MAX_USAGE_CAPTURE_BYTES = 4 * 1024 * 1024
 MAX_NON_SSE_RESPONSE_BYTES = 64 * 1024 * 1024
+REDACTED_SECRET_BYTES = b"[REDACTED]"
 HOP_BY_HOP_HEADERS = {
     "connection",
     "content-length",
@@ -46,6 +48,20 @@ HOP_BY_HOP_HEADERS = {
     "transfer-encoding",
     "upgrade",
 }
+SAFE_UPSTREAM_RESPONSE_HEADERS = {
+    "cache-control",
+    "content-type",
+    "openai-processing-ms",
+    "openai-request-id",
+    "request-id",
+    "retry-after",
+    "x-request-id",
+    "x-should-retry",
+}
+SAFE_UPSTREAM_RESPONSE_HEADER_PREFIXES = (
+    "anthropic-ratelimit-",
+    "x-ratelimit-",
+)
 
 
 @dataclass(frozen=True)
@@ -154,13 +170,26 @@ def _extract_bearer_token(request: Request) -> str:
 
 
 def _require_username(request: Request) -> str:
-    username = username_from_local_token(_extract_bearer_token(request))
-    if username is None:
-        raise HTTPException(status_code=401, detail="Invalid bearer token")
+    supplied_token = _extract_bearer_token(request)
+    try:
+        targets = MappingStore(_mapping_path()).load_targets()
+    except RuntimeError:
+        logger.error("Unable to load model proxy client configuration")
+        raise HTTPException(status_code=503, detail="Model proxy is unavailable")
 
-    if MappingStore(_mapping_path()).get_target_by_username(username) is None:
-        raise HTTPException(status_code=403, detail="Unknown user")
-    return username
+    matches: list[str] = []
+    for target in targets:
+        try:
+            expected_token = local_model_proxy_token(
+                target.username, target.model_proxy_token
+            )
+        except ModelProxyConfigError:
+            continue
+        if hmac.compare_digest(supplied_token, expected_token):
+            matches.append(target.username)
+    if len(matches) != 1:
+        raise HTTPException(status_code=401, detail="Invalid bearer token")
+    return matches[0]
 
 
 def _authorized_model_names(username: str) -> set[str]:
@@ -168,8 +197,9 @@ def _authorized_model_names(username: str) -> set[str]:
     try:
         options = normalize_model_options(load_mapping(_mapping_path(), resolve_env=True))
     except (RuntimeError, ModelOptionsError) as exc:
+        logger.error("Unable to load model whitelist configuration")
         raise HTTPException(
-            status_code=500, detail=f"Invalid model whitelist configuration: {exc}"
+            status_code=503, detail="Model proxy is unavailable"
         ) from exc
     return {option.name for option in options.options}
 
@@ -665,7 +695,8 @@ def _select_model_for_body(username: str, body: bytes) -> tuple[ProxyModel, Any]
     try:
         models = _load_proxy_models()
     except (ModelProxyConfigError, ModelProxyError) as exc:
-        raise HTTPException(status_code=500, detail=f"Invalid proxy config: {exc}") from exc
+        logger.error("Unable to load model proxy route configuration")
+        raise HTTPException(status_code=503, detail="Model proxy is unavailable") from exc
 
     model = models.get(model_name)
     if model is None:
@@ -673,12 +704,67 @@ def _select_model_for_body(username: str, body: bytes) -> tuple[ProxyModel, Any]
     return model, payload
 
 
-def _response_headers(headers: httpx.Headers) -> dict[str, str]:
-    return {
-        key: value
-        for key, value in headers.items()
-        if key.lower() not in HOP_BY_HOP_HEADERS
-    }
+def _enforce_user_quota(username: str) -> None:
+    try:
+        status = token_usage_store.get_user_quota_status(username)
+    except Exception as exc:
+        logger.error("Unable to evaluate model proxy quota")
+        raise HTTPException(status_code=503, detail="Model proxy is unavailable") from exc
+    if status["allowed"]:
+        return
+    reset_at = status.get("reset_at")
+    retry_after = max(1, int(float(reset_at) - time.time())) if reset_at else 60
+    raise HTTPException(
+        status_code=429,
+        detail="Model usage quota exceeded",
+        headers={"Retry-After": str(retry_after)},
+    )
+
+
+def _redact_exact_secret(value: str, secret: str) -> str:
+    return value.replace(secret, "[REDACTED]") if secret else value
+
+
+def _response_headers(headers: httpx.Headers, *, upstream_api_key: str) -> dict[str, str]:
+    safe_headers: dict[str, str] = {}
+    for key, value in headers.items():
+        normalized_key = key.lower()
+        if normalized_key in HOP_BY_HOP_HEADERS:
+            continue
+        if (
+            normalized_key not in SAFE_UPSTREAM_RESPONSE_HEADERS
+            and not normalized_key.startswith(SAFE_UPSTREAM_RESPONSE_HEADER_PREFIXES)
+        ):
+            continue
+        safe_headers[key] = _redact_exact_secret(value, upstream_api_key)
+    return safe_headers
+
+
+async def _redact_response_bytes(source, *, upstream_api_key: str):
+    secret = upstream_api_key.encode("utf-8")
+    if not secret:
+        async for chunk in source:
+            yield chunk
+        return
+
+    pending = b""
+    keep_bytes = len(secret) - 1
+    async for chunk in source:
+        pending += chunk
+        while True:
+            secret_at = pending.find(secret)
+            if secret_at < 0:
+                break
+            if secret_at:
+                yield pending[:secret_at]
+            yield REDACTED_SECRET_BYTES
+            pending = pending[secret_at + len(secret) :]
+        if len(pending) > keep_bytes:
+            emit_length = len(pending) - keep_bytes
+            yield pending[:emit_length]
+            pending = pending[emit_length:]
+    if pending:
+        yield pending.replace(secret, REDACTED_SECRET_BYTES)
 
 
 def _forward_headers(request: Request, model: ProxyModel) -> dict[str, str]:
@@ -696,6 +782,7 @@ async def _forward_model_request(request: Request, endpoint: str) -> Response:
     username = _require_username(request)
     body = await request.body()
     model, payload = _select_model_for_body(username, body)
+    _enforce_user_quota(username)
     route_model = str(payload.get("model") or model.name).strip()
     sanitized_payload, payload_changed = _sanitize_outbound_model_payload(payload)
     if str(sanitized_payload.get("model") or "").strip() != model.model:
@@ -721,9 +808,10 @@ async def _forward_model_request(request: Request, endpoint: str) -> Response:
     started_at = time.time()
     try:
         response = await client.send(req, stream=True)
-    except Exception:
+    except Exception as exc:
         await client.aclose()
-        raise
+        logger.warning("Upstream model request failed (%s)", type(exc).__name__)
+        raise HTTPException(status_code=502, detail="Upstream model request failed") from exc
     response_content_type = str(response.headers.get("content-type") or "").lower()
     is_sse = "text/event-stream" in response_content_type
     should_normalize_sse = (
@@ -741,6 +829,20 @@ async def _forward_model_request(request: Request, endpoint: str) -> Response:
         streaming=is_sse,
         started_at=started_at,
     )
+
+    if not 200 <= response.status_code < 300:
+        status_code = response.status_code if 400 <= response.status_code <= 599 else 502
+        await response.aclose()
+        await client.aclose()
+        return JSONResponse(
+            status_code=status_code,
+            content={
+                "error": {
+                    "message": "Upstream model request failed",
+                    "type": "upstream_error",
+                }
+            },
+        )
 
     upstream_content_length = response.headers.get("content-length")
     if upstream_content_length is not None and not is_sse:
@@ -761,34 +863,43 @@ async def _forward_model_request(request: Request, endpoint: str) -> Response:
         usage_capture_bytes = 0
         try:
             if is_sse:
-                async for chunk in _iter_response_sse_bytes(
+                source = _iter_response_sse_bytes(
                     response,
                     normalize_responses=should_normalize_sse,
                     telemetry=telemetry,
-                ):
-                    yield chunk
+                )
             else:
-                async for chunk in response.aiter_bytes():
-                    response_bytes += len(chunk)
-                    if response_bytes > MAX_NON_SSE_RESPONSE_BYTES:
-                        raise RuntimeError("upstream response exceeded the size limit")
-                    if (
-                        200 <= response.status_code < 300
-                        and usage_capture_bytes + len(chunk) <= MAX_USAGE_CAPTURE_BYTES
-                    ):
-                        body_chunks.append(chunk)
-                        usage_capture_bytes += len(chunk)
-                    elif body_chunks:
-                        body_chunks.clear()
-                    yield chunk
-                if 200 <= response.status_code < 300 and body_chunks:
+                async def non_sse_source():
+                    nonlocal response_bytes, usage_capture_bytes
+                    async for chunk in response.aiter_bytes():
+                        response_bytes += len(chunk)
+                        if response_bytes > MAX_NON_SSE_RESPONSE_BYTES:
+                            raise RuntimeError("upstream response exceeded the size limit")
+                        if usage_capture_bytes + len(chunk) <= MAX_USAGE_CAPTURE_BYTES:
+                            body_chunks.append(chunk)
+                            usage_capture_bytes += len(chunk)
+                        elif body_chunks:
+                            body_chunks.clear()
+                        yield chunk
+
+                source = non_sse_source()
+
+            async for chunk in _redact_response_bytes(
+                source, upstream_api_key=model.api_key
+            ):
+                yield chunk
+
+            if not is_sse:
+                if body_chunks:
                     telemetry.raw_usage = _json_body_usage(b"".join(body_chunks))
             _record_completed_usage(telemetry)
         finally:
             await response.aclose()
             await client.aclose()
 
-    response_headers = _response_headers(response.headers)
+    response_headers = _response_headers(
+        response.headers, upstream_api_key=model.api_key
+    )
     media_type = response_headers.pop("content-type", None)
     return StreamingResponse(
         body_iter(),
@@ -813,7 +924,8 @@ async def list_models(request: Request) -> dict[str, Any]:
     try:
         models = _load_proxy_models()
     except (ModelProxyConfigError, ModelProxyError) as exc:
-        raise HTTPException(status_code=500, detail=f"Invalid proxy config: {exc}") from exc
+        logger.error("Unable to load model proxy route configuration")
+        raise HTTPException(status_code=503, detail="Model proxy is unavailable") from exc
     return {
         "object": "list",
         "data": [
@@ -833,7 +945,8 @@ async def get_model(request: Request, model_name: str) -> dict[str, Any]:
     try:
         model = _load_proxy_models().get(model_name)
     except (ModelProxyConfigError, ModelProxyError) as exc:
-        raise HTTPException(status_code=500, detail=f"Invalid proxy config: {exc}") from exc
+        logger.error("Unable to load model proxy route configuration")
+        raise HTTPException(status_code=503, detail="Model proxy is unavailable") from exc
     if model is None:
         raise HTTPException(status_code=404, detail="Unknown model")
     return model.to_models_api_item()
@@ -870,4 +983,5 @@ app.add_middleware(
 
 @app.exception_handler(ModelProxyConfigError)
 async def config_error_handler(_request: Request, exc: ModelProxyConfigError) -> JSONResponse:
-    return JSONResponse(status_code=500, content={"detail": str(exc)})
+    del exc
+    return JSONResponse(status_code=503, content={"detail": "Model proxy is unavailable"})

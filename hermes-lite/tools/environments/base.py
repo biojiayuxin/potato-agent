@@ -370,14 +370,17 @@ class BaseEnvironment(ABC):
         _quoted_snap = shlex.quote(self._snapshot_path)
         _quoted_cwd_file = shlex.quote(self._cwd_file)
         bootstrap = (
+            "umask 077\n"
             f"export -p > {_quoted_snap}\n"
             f"declare -f | grep -vE '^_[^_]' >> {_quoted_snap}\n"
             f"alias -p >> {_quoted_snap}\n"
             f"echo 'shopt -s expand_aliases' >> {_quoted_snap}\n"
             f"echo 'set +e' >> {_quoted_snap}\n"
             f"echo 'set +u' >> {_quoted_snap}\n"
+            f"chmod 600 {_quoted_snap} 2>/dev/null || true\n"
             f"builtin cd {_quoted_cwd} 2>/dev/null || true\n"
             f"pwd -P > {_quoted_cwd_file} 2>/dev/null || true\n"
+            f"chmod 600 {_quoted_cwd_file} 2>/dev/null || true\n"
             f"printf '\\n{self._cwd_marker}%s{self._cwd_marker}\\n' \"$(pwd -P)\"\n"
         )
         try:
@@ -449,12 +452,20 @@ class BaseEnvironment(ABC):
         parts.append(f"eval '{escaped}'")
         parts.append("__hermes_ec=$?")
 
+        # Session state can contain environment variables and user paths.
+        # Set a restrictive mask after the user's command has completed so
+        # recreating a removed artifact never exposes it under a permissive
+        # process umask, without changing the command's own file semantics.
+        parts.append("umask 077")
+
         # Re-dump env vars to snapshot (last-writer-wins for concurrent calls)
         if self._snapshot_ready:
             parts.append(f"export -p > {_quoted_snap} 2>/dev/null || true")
+            parts.append(f"chmod 600 {_quoted_snap} 2>/dev/null || true")
 
         # Write CWD to file (local reads this) and stdout marker (remote parses this)
         parts.append(f"pwd -P > {_quoted_cwd_file} 2>/dev/null || true")
+        parts.append(f"chmod 600 {_quoted_cwd_file} 2>/dev/null || true")
         # Use a distinct line for the marker. The leading \n ensures
         # the marker starts on its own line even if the command doesn't
         # end with a newline (e.g. printf 'exact'). We'll strip this

@@ -13,6 +13,15 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
+from interface.cli_prompt import add_prompt_source_arguments, read_prompt
+
+
+def _completion_timeout_message(
+    session_id: str, live_state: dict | None
+) -> str:
+    status = str((live_state or {}).get("status") or "unknown")
+    return f"timed out waiting for completion: session_id={session_id} status={status}"
+
 
 async def main_async(username: str, prompt: str, timeout_seconds: float) -> int:
     from interface.app import mapping_store
@@ -74,16 +83,17 @@ async def main_async(username: str, prompt: str, timeout_seconds: float) -> int:
                 break
             await asyncio.sleep(1.0)
         else:
-            raise RuntimeError(f"timed out waiting for completion: {final_live}")
+            raise RuntimeError(_completion_timeout_message(session_id, final_live))
 
         messages = get_display_messages(user.id, session_id) or []
+        last_message = messages[-1] if messages and isinstance(messages[-1], dict) else {}
         print(
             json.dumps(
                 {
                     "session_id": session_id,
-                    "live": final_live,
+                    "status": str((final_live or {}).get("status") or ""),
                     "message_count": len(messages),
-                    "last_message": messages[-1] if messages else None,
+                    "last_message_role": str(last_message.get("role") or ""),
                 },
                 ensure_ascii=False,
             )
@@ -97,13 +107,14 @@ async def main_async(username: str, prompt: str, timeout_seconds: float) -> int:
 def main() -> int:
     parser = argparse.ArgumentParser(description="Verify server-owned background turn flow.")
     parser.add_argument("--username", default="potato_agent")
-    parser.add_argument(
-        "--prompt",
-        default="Reply with exactly: background verification ok",
-    )
+    add_prompt_source_arguments(parser)
     parser.add_argument("--timeout", type=float, default=120.0)
     args = parser.parse_args()
-    return asyncio.run(main_async(args.username, args.prompt, args.timeout))
+    prompt = read_prompt(
+        args,
+        default="Reply with exactly: background verification ok",
+    )
+    return asyncio.run(main_async(args.username, prompt, args.timeout))
 
 
 if __name__ == "__main__":

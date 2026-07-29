@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import sqlite3
+import stat
+from datetime import datetime, timezone
 from pathlib import Path
 
 from interface import token_usage_store
@@ -66,6 +68,9 @@ def test_ensure_token_usage_store_creates_tables_idempotently(tmp_path) -> None:
 
     assert "model_proxy_usage_requests" in tables
     assert "model_proxy_user_quotas" in tables
+    assert "users" not in tables
+    assert stat.S_IMODE(db_path.parent.stat().st_mode) == 0o700
+    assert stat.S_IMODE(db_path.stat().st_mode) == 0o600
     assert {
         "mapping_username",
         "endpoint",
@@ -88,6 +93,54 @@ def test_ensure_token_usage_store_creates_tables_idempotently(tmp_path) -> None:
     assert "idx_model_proxy_usage_user_started" in index_names
     assert "idx_model_proxy_usage_started" in index_names
     assert "idx_model_proxy_usage_route_model_started" in index_names
+
+
+def test_usage_store_discards_arbitrary_raw_upstream_fields(tmp_path) -> None:
+    db_path = tmp_path / "usage.db"
+    sentinel = "sk-must-not-be-persisted"
+
+    request_id = token_usage_store.record_usage_request(
+        mapping_username="alice",
+        endpoint="responses",
+        route_model="Main",
+        upstream_model="gpt-5.4",
+        provider="custom",
+        status_code=200,
+        streaming=False,
+        started_at=1,
+        completed_at=2,
+        duration_ms=1000,
+        input_tokens=3,
+        output_tokens=4,
+        usage_status="present",
+        raw_usage={"authorization": sentinel, "prompt": "private chat"},
+        db_path=db_path,
+    )
+
+    with sqlite3.connect(str(db_path)) as conn:
+        stored = conn.execute(
+            "select raw_usage_json from model_proxy_usage_requests where id = ?",
+            (request_id,),
+        ).fetchone()[0]
+
+    assert sentinel not in stored
+    assert "private chat" not in stored
+    assert stored == (
+        '{"input_tokens":3,"output_tokens":4,'
+        '"cache_read_tokens":0,"cache_write_tokens":0}'
+    )
+
+
+def test_default_usage_db_is_independent_from_interface_auth_db(
+    monkeypatch, tmp_path
+) -> None:
+    usage_path = tmp_path / "proxy" / "usage.db"
+    monkeypatch.setenv("POTATO_MODEL_PROXY_USAGE_DB", str(usage_path))
+    monkeypatch.setenv("INTERFACE_AUTH_DB", str(tmp_path / "auth" / "interface.db"))
+
+    assert token_usage_store.ensure_token_usage_store() == usage_path
+    assert usage_path.exists()
+    assert not (tmp_path / "auth" / "interface.db").exists()
 
 
 def test_get_user_usage_aggregates_single_user(tmp_path) -> None:
@@ -192,3 +245,52 @@ def test_quota_helpers_read_write_and_snapshot(tmp_path) -> None:
 
     assert [quota["mapping_username"] for quota in snapshot] == ["alice", "bob"]
     assert token_usage_store.get_user_quota("alice", db_path=db_path) == alice_quota
+
+
+def test_quota_status_uses_current_utc_period_and_reports_boundary(tmp_path) -> None:
+    db_path = tmp_path / "interface.db"
+    before_period = datetime(2026, 7, 28, 23, 59, tzinfo=timezone.utc).timestamp()
+    in_period = datetime(2026, 7, 29, 1, 0, tzinfo=timezone.utc).timestamp()
+    now = datetime(2026, 7, 29, 12, 0, tzinfo=timezone.utc).timestamp()
+    _record(db_path, started_at=before_period, input_tokens=100)
+    _record(db_path, started_at=in_period, input_tokens=10)
+    token_usage_store.set_user_quota(
+        "alice",
+        input_token_limit=10,
+        period="daily",
+        enabled=True,
+        db_path=db_path,
+    )
+
+    status = token_usage_store.get_user_quota_status(
+        "alice", now=now, db_path=db_path
+    )
+
+    assert status["allowed"] is False
+    assert status["usage"]["input_tokens"] == 10
+    assert status["exceeded"] == ["input_tokens"]
+    assert status["reset_at"] == datetime(
+        2026, 7, 30, tzinfo=timezone.utc
+    ).timestamp()
+
+
+def test_set_user_quota_rejects_invalid_period_and_negative_limit(tmp_path) -> None:
+    db_path = tmp_path / "interface.db"
+
+    try:
+        token_usage_store.set_user_quota(
+            "alice", period="yearly", enabled=True, db_path=db_path
+        )
+    except ValueError as exc:
+        assert "period must be one of" in str(exc)
+    else:
+        raise AssertionError("invalid quota period was accepted")
+
+    try:
+        token_usage_store.set_user_quota(
+            "alice", total_token_limit=-1, enabled=True, db_path=db_path
+        )
+    except ValueError as exc:
+        assert "non-negative" in str(exc)
+    else:
+        raise AssertionError("negative quota was accepted")

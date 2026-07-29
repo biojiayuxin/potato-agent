@@ -36,6 +36,12 @@ from interface.model_proxy_config import (
     get_model_proxy_base_url,
     local_model_proxy_token,
 )
+from interface.user_private_files import (
+    prepare_user_runtime_directories,
+    repair_user_private_file,
+    replace_user_private_tree,
+    write_user_private_text,
+)
 
 
 ROOT_DIR = Path(__file__).resolve().parent
@@ -50,12 +56,14 @@ DEFAULT_GATEWAY_RESTART_DRAIN_TIMEOUT = 180
 DEFAULT_GATEWAY_STOP_GRACE_SECONDS = 30
 DEFAULT_RUNTIME_LOCK_DIR = Path("/run/potato-agent/runtime-start")
 DEFAULT_SOUL_TEMPLATE_PATH = REPO_ROOT / "soul_settings" / "SOUL.md"
-DEFAULT_INACCESSIBLE_PATHS = (
+REQUIRED_INACCESSIBLE_PATHS = (
     "/srv/potato_agent",
     "/var/lib/potato-agent",
     "/etc/potato-agent",
     "/opt/interface-env",
 )
+# Kept as a compatibility alias for callers that treated these as defaults.
+DEFAULT_INACCESSIBLE_PATHS = REQUIRED_INACCESSIBLE_PATHS
 AGENT_SERVICE_PRIORITY_DIRECTIVES = (
     "CPUWeight=1000",
     "IOWeight=10000",
@@ -148,6 +156,47 @@ def require_root() -> None:
         raise RuntimeError("This script must be run as root.")
 
 
+def user_runtime_temp_dir(user: HermesTarget) -> Path:
+    return user.hermes_home / "tmp"
+
+
+def ensure_user_runtime_temp_dir(user: HermesTarget) -> Path:
+    """Create and verify the gateway temp root as the target Linux user.
+
+    Running ``install`` after dropping privileges avoids a root-level symlink
+    traversal if an existing user has replaced the expected path.  The
+    read-only lstat checks then make the ownership and mode contract explicit.
+    """
+    temp_dir = user_runtime_temp_dir(user)
+    _run_command(
+        [
+            "runuser",
+            "-u",
+            user.linux_user,
+            "--",
+            "install",
+            "-d",
+            "-m",
+            "0700",
+            "--",
+            str(temp_dir),
+        ]
+    )
+    try:
+        pw = pwd.getpwnam(user.linux_user)
+        temp_stat = temp_dir.lstat()
+    except (KeyError, OSError) as exc:
+        raise RuntimeError("Failed to verify the user runtime temp directory.") from exc
+    if (
+        not stat.S_ISDIR(temp_stat.st_mode)
+        or temp_stat.st_uid != pw.pw_uid
+        or temp_stat.st_gid != pw.pw_gid
+        or stat.S_IMODE(temp_stat.st_mode) != 0o700
+    ):
+        raise RuntimeError("User runtime temp directory has unsafe ownership or mode.")
+    return temp_dir
+
+
 def deep_merge(base: dict[str, Any], overlay: dict[str, Any]) -> dict[str, Any]:
     for key, value in overlay.items():
         if isinstance(value, dict) and isinstance(base.get(key), dict):
@@ -203,58 +252,43 @@ def _set_owner_and_mode(path: Path, uid: int, gid: int, mode: int) -> None:
     os.chmod(path, mode)
 
 
-def _set_owner_preserving_mode(path: Path, uid: int, gid: int) -> None:
-    _set_owner_and_mode(path, uid, gid, stat.S_IMODE(path.stat().st_mode))
-
-
-def _set_owner_recursive(path: Path, uid: int, gid: int) -> None:
-    _set_owner_preserving_mode(path, uid, gid)
-    for child in path.rglob("*"):
-        _set_owner_preserving_mode(child, uid, gid)
-
-
-def install_soul_file(user: HermesTarget, *, uid: int, gid: int) -> None:
+def install_soul_file(user: HermesTarget, *, password_entry: Any) -> None:
     if not DEFAULT_SOUL_TEMPLATE_PATH.is_file():
         raise RuntimeError(f"SOUL template not found: {DEFAULT_SOUL_TEMPLATE_PATH}")
 
     soul_path = user.hermes_home / "SOUL.md"
-    shutil.copyfile(DEFAULT_SOUL_TEMPLATE_PATH, soul_path)
-    _set_owner_and_mode(soul_path, uid, gid, 0o600)
+    write_user_private_text(
+        user,
+        soul_path,
+        DEFAULT_SOUL_TEMPLATE_PATH.read_text(encoding="utf-8"),
+    )
 
 
 def _install_managed_skill_dir(
     user: HermesTarget,
     *,
-    uid: int,
-    gid: int,
+    password_entry: Any,
     source_path: Path,
     target_dir_name: str,
 ) -> None:
     if not source_path.is_dir():
         raise RuntimeError(f"Managed skills not found: {source_path}")
-    skills_root = user.hermes_home / "skills"
-    skills_root.mkdir(parents=True, exist_ok=True)
-    _set_owner_and_mode(skills_root, uid, gid, 0o700)
-
-    target_path = skills_root / target_dir_name
-    if target_path.is_dir() and not target_path.is_symlink():
-        shutil.rmtree(target_path)
-    elif target_path.exists() or target_path.is_symlink():
-        target_path.unlink()
-
-    shutil.copytree(source_path, target_path)
-    _set_owner_recursive(target_path, uid, gid)
+    replace_user_private_tree(
+        user,
+        password_entry,
+        source=source_path,
+        destination=user.hermes_home / "skills" / target_dir_name,
+    )
 
 
-def install_managed_skills(user: HermesTarget, *, uid: int, gid: int) -> None:
+def install_managed_skills(user: HermesTarget, *, password_entry: Any) -> None:
     for target_dir_name, source_path in (
         (MANAGED_BIOINFORMATICS_SKILLS_DIR_NAME, DEFAULT_BIOINFORMATICS_SKILLS_PATH),
         (MANAGED_PLAN_MODE_SKILLS_DIR_NAME, DEFAULT_PLAN_MODE_SKILLS_PATH),
     ):
         _install_managed_skill_dir(
             user,
-            uid=uid,
-            gid=gid,
+            password_entry=password_entry,
             source_path=source_path,
             target_dir_name=target_dir_name,
         )
@@ -325,7 +359,7 @@ def build_config_data(config: dict[str, Any], user: HermesTarget) -> dict[str, A
             "default": active_option.name,
             "provider": active_option.provider,
             "base_url": get_model_proxy_base_url(config),
-            "api_key": local_model_proxy_token(user.username),
+            "api_key": local_model_proxy_token(user.username, user.model_proxy_token),
         }
         if active_option.api_mode:
             data["model"]["api_mode"] = active_option.api_mode
@@ -335,7 +369,7 @@ def build_config_data(config: dict[str, Any], user: HermesTarget) -> dict[str, A
         data["model"] = {
             **model_cfg,
             "base_url": get_model_proxy_base_url(config),
-            "api_key": local_model_proxy_token(user.username),
+            "api_key": local_model_proxy_token(user.username, user.model_proxy_token),
         }
     data["terminal"] = terminal_cfg
     data["agent"] = {"reasoning_effort": DEFAULT_REASONING_EFFORT}
@@ -347,7 +381,7 @@ def build_config_data(config: dict[str, Any], user: HermesTarget) -> dict[str, A
     model = data.get("model")
     if isinstance(model, dict):
         model["base_url"] = get_model_proxy_base_url(config)
-        model["api_key"] = local_model_proxy_token(user.username)
+        model["api_key"] = local_model_proxy_token(user.username, user.model_proxy_token)
 
     terminal = data.setdefault("terminal", {})
     if not isinstance(terminal, dict):
@@ -387,11 +421,9 @@ def build_systemd_unit(config: dict[str, Any], user: HermesTarget) -> str:
         hermes_cfg.get("executable") or DEFAULT_HERMES_BIN,
         "hermes.executable",
     )
-    inaccessible_paths = service_cfg.get("inaccessible_paths")
-    if inaccessible_paths is None:
-        inaccessible_paths = DEFAULT_INACCESSIBLE_PATHS
-    if not isinstance(inaccessible_paths, (list, tuple)):
-        inaccessible_paths = DEFAULT_INACCESSIBLE_PATHS
+    configured_inaccessible_paths = service_cfg.get("inaccessible_paths")
+    if not isinstance(configured_inaccessible_paths, (list, tuple)):
+        configured_inaccessible_paths = ()
 
     rendered_description = _systemd_scalar(
         description_template.format(
@@ -407,11 +439,23 @@ def build_systemd_unit(config: dict[str, Any], user: HermesTarget) -> str:
         raise RuntimeError("target.linux_user is not a valid systemd account name.")
     home_dir = _systemd_absolute_path(user.home_dir, "target.home_dir")
     hermes_home = _systemd_absolute_path(user.hermes_home, "target.hermes_home")
-    inaccessible_path_values = [
-        _systemd_absolute_path(path, "hermes.service.inaccessible_paths[]")
-        for path in inaccessible_paths
-        if str(path).strip()
-    ]
+    runtime_temp_dir = _systemd_absolute_path(
+        user_runtime_temp_dir(user), "target.runtime_temp_dir"
+    )
+    inaccessible_path_values = list(
+        dict.fromkeys(
+            [
+                *REQUIRED_INACCESSIBLE_PATHS,
+                *[
+                    _systemd_absolute_path(
+                        path, "hermes.service.inaccessible_paths[]"
+                    )
+                    for path in configured_inaccessible_paths
+                    if str(path).strip()
+                ],
+            ]
+        )
+    )
     configured_profile_path = hermes_cfg.get("runtime_profile_path")
     if configured_profile_path is not None and not isinstance(
         configured_profile_path, (str, os.PathLike)
@@ -440,6 +484,7 @@ def build_systemd_unit(config: dict[str, Any], user: HermesTarget) -> str:
             f"WorkingDirectory={home_dir}",
             f"Environment=HOME={home_dir}",
             f"Environment=HERMES_HOME={hermes_home}",
+            f"Environment=TMPDIR={runtime_temp_dir}",
             f"Environment=HERMES_DISABLE_LAZY_INSTALLS={runtime_env['HERMES_DISABLE_LAZY_INSTALLS']}",
             f"Environment=HERMES_SKIP_NODE_BOOTSTRAP={runtime_env['HERMES_SKIP_NODE_BOOTSTRAP']}",
             f"Environment=HERMES_DISABLE_GATEWAY_PLATFORMS={runtime_env['HERMES_DISABLE_GATEWAY_PLATFORMS']}",
@@ -455,9 +500,13 @@ def build_systemd_unit(config: dict[str, Any], user: HermesTarget) -> str:
             f"Environment=HERMES_AGENT_BROWSER_BIN_DIR={runtime_env['HERMES_AGENT_BROWSER_BIN_DIR']}",
             f"Environment=AGENT_BROWSER_EXECUTABLE_PATH={runtime_env['AGENT_BROWSER_EXECUTABLE_PATH']}",
             *runtime_profile_lines,
+            f"ExecStartPre=/usr/bin/install -d -m 0700 -- {runtime_temp_dir}",
             f"ExecStart={hermes_bin} gateway run --replace",
             *AGENT_SERVICE_PRIORITY_DIRECTIVES,
+            "UMask=0077",
             "PrivateTmp=yes",
+            "ProtectProc=invisible",
+            "ProcSubset=pid",
             "NoNewPrivileges=yes",
             *[
                 f"InaccessiblePaths=-{path}"
@@ -516,37 +565,32 @@ def install_user_runtime_files(config: dict[str, Any], user: HermesTarget) -> No
     except KeyError as exc:
         raise RuntimeError(f"Linux user {user.linux_user!r} does not exist.") from exc
 
-    gid = pw.pw_gid
-
-    for directory in [
-        user.home_dir,
-        user.workdir,
-        user.hermes_home,
-        user.hermes_home / "home",
-    ]:
-        directory.mkdir(parents=True, exist_ok=True)
-        _set_owner_and_mode(directory, pw.pw_uid, gid, 0o700)
+    prepare_user_runtime_directories(user, pw)
 
     env_path = user.hermes_home / ".env"
-    env_path.write_text(strip_openai_api_key_env(build_env_content(user)), encoding="utf-8")
-    _set_owner_and_mode(env_path, pw.pw_uid, gid, 0o600)
+    write_user_private_text(
+        user,
+        env_path,
+        strip_openai_api_key_env(build_env_content(user)),
+    )
 
     config_path = user.hermes_home / "config.yaml"
-    config_path.write_text(
+    write_user_private_text(
+        user,
+        config_path,
         yaml.safe_dump(
             build_config_data(config, user), sort_keys=False, allow_unicode=False
         ),
-        encoding="utf-8",
     )
-    _set_owner_and_mode(config_path, pw.pw_uid, gid, 0o600)
-    install_soul_file(user, uid=pw.pw_uid, gid=gid)
-    install_managed_skills(user, uid=pw.pw_uid, gid=gid)
-    install_public_data_link(user, uid=pw.pw_uid, gid=gid)
+    install_soul_file(user, password_entry=pw)
+    install_managed_skills(user, password_entry=pw)
+    install_public_data_link(user, uid=pw.pw_uid, gid=pw.pw_gid)
 
 
 def install_user_files(config: dict[str, Any], user: HermesTarget) -> None:
     ensure_linux_user(user.linux_user)
     install_user_runtime_files(config, user)
+    ensure_user_runtime_temp_dir(user)
 
     service_path = Path("/etc/systemd/system") / user.systemd_service
     service_path.write_text(build_systemd_unit(config, user), encoding="utf-8")
@@ -658,10 +702,7 @@ def repair_session_db_permissions(user: HermesTarget) -> None:
         user.state_db_path.with_name(f"{user.state_db_path.name}-wal"),
         user.state_db_path.with_name(f"{user.state_db_path.name}-shm"),
     ):
-        if not candidate.exists():
-            continue
-        os.chown(candidate, pw.pw_uid, pw.pw_gid)
-        os.chmod(candidate, 0o600)
+        repair_user_private_file(user, pw, candidate)
 
 
 def wait_for_hermes_models(

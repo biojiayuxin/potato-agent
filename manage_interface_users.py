@@ -19,6 +19,11 @@ from interface.auth_db import (
     update_user_password,
     verify_password,
 )
+from interface.cli_secrets import (
+    CliSecretError,
+    read_private_secret_file,
+    read_secret_from_stdin,
+)
 from interface.password_policy import (
     COMMON_PASSWORD_SYMBOLS,
     PASSWORD_COMPLEXITY_DETAIL,
@@ -122,12 +127,9 @@ def _load_user_with_hash(
 
 def _read_password_file(path: Path) -> str:
     try:
-        password = path.expanduser().read_text(encoding="utf-8").rstrip("\r\n")
-    except OSError as exc:
-        raise ManagementError(f"Failed to read password file: {exc}") from exc
-    if password == "":
-        raise ManagementError("Password file is empty.")
-    return password
+        return read_private_secret_file(path)
+    except CliSecretError as exc:
+        raise ManagementError(str(exc)) from exc
 
 
 def _read_password_from_args(
@@ -139,7 +141,6 @@ def _read_password_from_args(
     source_count = sum(
         bool(source)
         for source in (
-            getattr(args, "password", None) is not None,
             getattr(args, "password_file", None) is not None,
             bool(getattr(args, "password_stdin", False)),
             bool(getattr(args, "generate", False)),
@@ -147,25 +148,19 @@ def _read_password_from_args(
     )
     if source_count > 1:
         raise ManagementError(
-            "Choose only one password source: prompt, --password, "
-            "--password-file, --password-stdin, or --generate."
+            "Choose only one password source: prompt, --password-file, "
+            "--password-stdin, or --generate."
         )
 
     if getattr(args, "generate", False):
         return _generate_password(int(args.length))
-    if getattr(args, "password", None) is not None:
-        print(
-            "warning: --password can be visible in shell history or process "
-            "lists; prefer prompt, --password-file, or --password-stdin.",
-            file=sys.stderr,
-        )
-        password = str(args.password)
-    elif getattr(args, "password_file", None) is not None:
+    if getattr(args, "password_file", None) is not None:
         password = _read_password_file(args.password_file)
     elif getattr(args, "password_stdin", False):
-        password = sys.stdin.read().rstrip("\r\n")
-        if password == "":
-            raise ManagementError("No password was read from stdin.")
+        try:
+            password = read_secret_from_stdin()
+        except CliSecretError as exc:
+            raise ManagementError(str(exc)) from exc
     else:
         password = getpass.getpass(prompt)
         if confirm:
@@ -198,10 +193,6 @@ def _add_password_source_args(
     parser: argparse.ArgumentParser, *, include_generate: bool
 ) -> None:
     group = parser.add_argument_group("password input")
-    group.add_argument(
-        "--password",
-        help="Password value. Prefer prompt or stdin on shared systems.",
-    )
     group.add_argument(
         "--password-file",
         type=Path,

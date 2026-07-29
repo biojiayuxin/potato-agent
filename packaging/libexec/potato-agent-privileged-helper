@@ -1,0 +1,6 @@
+#!/bin/sh
+
+set -eu
+
+export PYTHONPATH=/srv/potato_agent
+exec /opt/interface-env/bin/python -B -m interface.privileged_helper "$@"

@@ -11,6 +11,14 @@ import refresh_hermes_systemd_units as refresh
 from interface.mapping import HermesTarget
 
 
+REQUIRED_ISOLATION_PATHS = (
+    "/srv/potato_agent",
+    "/var/lib/potato-agent",
+    "/etc/potato-agent",
+    "/opt/interface-env",
+)
+
+
 def _target(tmp_path: Path, username: str) -> HermesTarget:
     home = tmp_path / f"home-{username}"
     home.mkdir(exist_ok=True)
@@ -266,6 +274,49 @@ def test_read_only_diff_does_not_modify_unit(tmp_path):
 
     assert "HERMES_RUNTIME_PROFILE_PATH" in diff
     assert (unit_dir / target.systemd_service).read_bytes() == before
+
+
+@pytest.mark.parametrize("missing_path", REQUIRED_ISOLATION_PATHS)
+def test_rendered_unit_validation_requires_isolation_paths(tmp_path, missing_path):
+    target = _target(tmp_path, "one")
+    rendered = refresh.build_systemd_unit({"hermes": {}}, target)
+    rendered = rendered.replace(f"InaccessiblePaths=-{missing_path}\n", "")
+
+    with pytest.raises(refresh.UnitRefreshError, match="lacks runtime policy"):
+        refresh._validate_rendered_unit(rendered.encode("utf-8"), target)
+
+
+@pytest.mark.parametrize(
+    "required_line",
+    (
+        "UMask=0077",
+        "PrivateTmp=yes",
+        "ProtectProc=invisible",
+        "ProcSubset=pid",
+        "NoNewPrivileges=yes",
+    ),
+)
+def test_rendered_unit_validation_requires_process_hardening(
+    tmp_path, required_line
+):
+    target = _target(tmp_path, "one")
+    rendered = refresh.build_systemd_unit({"hermes": {}}, target)
+    rendered = rendered.replace(f"{required_line}\n", "")
+
+    with pytest.raises(refresh.UnitRefreshError, match="lacks runtime policy"):
+        refresh._validate_rendered_unit(rendered.encode("utf-8"), target)
+
+
+def test_rendered_unit_validation_requires_private_runtime_temp(tmp_path):
+    target = _target(tmp_path, "one")
+    rendered = refresh.build_systemd_unit({"hermes": {}}, target)
+    rendered = rendered.replace(
+        f"ExecStartPre=/usr/bin/install -d -m 0700 -- {target.hermes_home}/tmp\n",
+        "",
+    )
+
+    with pytest.raises(refresh.UnitRefreshError, match="lacks runtime policy"):
+        refresh._validate_rendered_unit(rendered.encode("utf-8"), target)
 
 
 def test_apply_updates_units_once_and_preserves_home(tmp_path):

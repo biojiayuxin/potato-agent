@@ -89,7 +89,15 @@ def _write_to_sandbox(content: str, remote_path: str, env) -> bool:
     the exec-arg ceiling.
     """
     storage_dir = os.path.dirname(remote_path)
-    cmd = f"mkdir -p {shlex.quote(storage_dir)} && cat > {shlex.quote(remote_path)}"
+    quoted_storage_dir = shlex.quote(storage_dir)
+    quoted_remote_path = shlex.quote(remote_path)
+    cmd = (
+        "umask 077 && "
+        f"mkdir -p -- {quoted_storage_dir} && "
+        f"chmod 700 -- {quoted_storage_dir} && "
+        f"cat > {quoted_remote_path} && "
+        f"chmod 600 -- {quoted_remote_path}"
+    )
     result = env.execute(cmd, timeout=30, stdin_data=content)
     return result.get("returncode", 1) == 0
 

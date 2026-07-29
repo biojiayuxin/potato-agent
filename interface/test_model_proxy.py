@@ -22,7 +22,7 @@ hermes:
     default: gpt-5.4
     provider: custom
     base_url: http://127.0.0.1:8765/v1
-    api_key: alice-local-token
+    api_key: pmp_alice_0123456789abcdefghijklmnopqrstuvwxyz
   model_options:
     primary: primary
     options:
@@ -48,6 +48,7 @@ users:
     workdir: {home_dir / "work"}
     api_port: 8655
     api_key: sk-user
+    model_proxy_token: pmp_alice_0123456789abcdefghijklmnopqrstuvwxyz
     systemd_service: hermes-alice.service
 """.lstrip(),
         encoding="utf-8",
@@ -79,6 +80,7 @@ models:
 """.lstrip(),
         encoding="utf-8",
     )
+    proxy_path.chmod(0o600)
     return mapping_path, proxy_path
 
 
@@ -86,7 +88,9 @@ def _client(tmp_path: Path, monkeypatch):
     mapping_path, proxy_path = _write_configs(tmp_path)
     monkeypatch.setenv("POTATO_AGENT_MAPPING_PATH", str(mapping_path))
     monkeypatch.setenv("POTATO_MODEL_PROXY_CONFIG_PATH", str(proxy_path))
-    monkeypatch.setenv("INTERFACE_AUTH_DB", str(tmp_path / "interface.db"))
+    monkeypatch.setenv(
+        "POTATO_MODEL_PROXY_USAGE_DB", str(tmp_path / "usage.db")
+    )
     import interface.model_proxy as model_proxy
 
     importlib.reload(model_proxy)
@@ -94,7 +98,7 @@ def _client(tmp_path: Path, monkeypatch):
 
 
 def _usage_rows(tmp_path: Path) -> list[dict]:
-    db_path = tmp_path / "interface.db"
+    db_path = tmp_path / "usage.db"
     if not db_path.exists():
         return []
     with sqlite3.connect(str(db_path)) as conn:
@@ -114,12 +118,34 @@ def test_proxy_rejects_missing_or_invalid_token(monkeypatch, tmp_path) -> None:
     assert client.get(
         "/v1/models", headers={"authorization": "Bearer wrong-token"}
     ).status_code == 401
+    assert client.get(
+        "/v1/models", headers={"authorization": "Bearer alice-local-token"}
+    ).status_code == 401
+
+
+def test_proxy_config_error_does_not_echo_yaml_or_key(monkeypatch, tmp_path) -> None:
+    client, _ = _client(tmp_path, monkeypatch)
+    proxy_path = Path(os.environ["POTATO_MODEL_PROXY_CONFIG_PATH"])
+    proxy_path.write_text(
+        "models:\n  - api_key: [sk-must-not-escape\n", encoding="utf-8"
+    )
+
+    response = client.get(
+        "/v1/models",
+        headers={
+            "authorization": "Bearer pmp_alice_0123456789abcdefghijklmnopqrstuvwxyz"
+        },
+    )
+
+    assert response.status_code == 503
+    assert response.json() == {"detail": "Model proxy is unavailable"}
+    assert "sk-must-not-escape" not in response.text
 
 
 def test_proxy_lists_authorized_models_without_api_keys(monkeypatch, tmp_path) -> None:
     client, _ = _client(tmp_path, monkeypatch)
     response = client.get(
-        "/v1/models", headers={"authorization": "Bearer alice-local-token"}
+        "/v1/models", headers={"authorization": "Bearer pmp_alice_0123456789abcdefghijklmnopqrstuvwxyz"}
     )
 
     assert response.status_code == 200, response.text
@@ -137,7 +163,7 @@ def test_proxy_rejects_unallowed_or_unknown_models(monkeypatch, tmp_path) -> Non
 
     forbidden = client.post(
         "/v1/chat/completions",
-        headers={"authorization": "Bearer alice-local-token"},
+        headers={"authorization": "Bearer pmp_alice_0123456789abcdefghijklmnopqrstuvwxyz"},
         json={"model": "not-whitelisted", "messages": []},
     )
     assert forbidden.status_code == 403
@@ -151,7 +177,7 @@ def test_proxy_rejects_unallowed_or_unknown_models(monkeypatch, tmp_path) -> Non
     )
     unknown = client.post(
         "/v1/chat/completions",
-        headers={"authorization": "Bearer alice-local-token"},
+        headers={"authorization": "Bearer pmp_alice_0123456789abcdefghijklmnopqrstuvwxyz"},
         json={"model": "Fast", "messages": []},
     )
     assert unknown.status_code == 404
@@ -191,7 +217,7 @@ def test_proxy_sanitizes_null_required_in_responses_tool_schemas(
 
     response = client.post(
         "/v1/responses",
-        headers={"authorization": "Bearer alice-local-token"},
+        headers={"authorization": "Bearer pmp_alice_0123456789abcdefghijklmnopqrstuvwxyz"},
         json={
             "model": "Main",
             "input": [{"role": "user", "content": "hi"}],
@@ -273,7 +299,7 @@ def test_proxy_normalizes_malformed_responses_sse_terminal_output(
 
     response = client.post(
         "/v1/responses",
-        headers={"authorization": "Bearer alice-local-token"},
+        headers={"authorization": "Bearer pmp_alice_0123456789abcdefghijklmnopqrstuvwxyz"},
         json={"model": "Main", "input": [{"role": "user", "content": "hi"}]},
     )
 
@@ -343,7 +369,7 @@ def test_proxy_forwards_original_model_and_upstream_key(monkeypatch, tmp_path) -
 
     response = client.post(
         "/v1/chat/completions",
-        headers={"authorization": "Bearer alice-local-token"},
+        headers={"authorization": "Bearer pmp_alice_0123456789abcdefghijklmnopqrstuvwxyz"},
         json={"model": "Fast", "messages": [{"role": "user", "content": "hi"}]},
     )
 
@@ -398,7 +424,7 @@ def test_proxy_records_non_streaming_chat_completion_usage(
 
     response = client.post(
         "/v1/chat/completions",
-        headers={"authorization": "Bearer alice-local-token"},
+        headers={"authorization": "Bearer pmp_alice_0123456789abcdefghijklmnopqrstuvwxyz"},
         json={"model": "Main", "messages": [{"role": "user", "content": "hi"}]},
     )
 
@@ -418,7 +444,12 @@ def test_proxy_records_non_streaming_chat_completion_usage(
     assert row["cache_read_tokens"] == 4
     assert row["cache_write_tokens"] == 0
     assert row["usage_status"] == "present"
-    assert json.loads(row["raw_usage_json"])["prompt_tokens"] == 12
+    assert json.loads(row["raw_usage_json"]) == {
+        "input_tokens": 8,
+        "output_tokens": 5,
+        "cache_read_tokens": 4,
+        "cache_write_tokens": 0,
+    }
 
 
 def test_proxy_records_streaming_chat_completion_final_usage(
@@ -459,7 +490,7 @@ def test_proxy_records_streaming_chat_completion_final_usage(
 
     response = client.post(
         "/v1/chat/completions",
-        headers={"authorization": "Bearer alice-local-token"},
+        headers={"authorization": "Bearer pmp_alice_0123456789abcdefghijklmnopqrstuvwxyz"},
         json={
             "model": "Main",
             "stream": True,
@@ -512,7 +543,7 @@ def test_proxy_records_missing_usage_for_successful_response(
 
     response = client.post(
         "/v1/chat/completions",
-        headers={"authorization": "Bearer alice-local-token"},
+        headers={"authorization": "Bearer pmp_alice_0123456789abcdefghijklmnopqrstuvwxyz"},
         json={"model": "Main", "messages": [{"role": "user", "content": "hi"}]},
     )
 
@@ -533,10 +564,15 @@ def test_proxy_does_not_record_upstream_error_usage(monkeypatch, tmp_path) -> No
 
     class FakeResponse:
         status_code = 500
-        headers = {"content-type": "application/json"}
+        headers = {
+            "content-type": "application/json",
+            "authorization": "Bearer sk-primary",
+            "set-cookie": "upstream=sk-primary",
+            "x-request-id": "sk-primary",
+        }
 
         async def aiter_bytes(self):
-            yield b'{"error":{"message":"boom"}}'
+            yield b'{"error":{"message":"authorization failed for sk-primary"}}'
 
         async def aclose(self):
             return None
@@ -558,12 +594,110 @@ def test_proxy_does_not_record_upstream_error_usage(monkeypatch, tmp_path) -> No
 
     response = client.post(
         "/v1/chat/completions",
-        headers={"authorization": "Bearer alice-local-token"},
+        headers={"authorization": "Bearer pmp_alice_0123456789abcdefghijklmnopqrstuvwxyz"},
         json={"model": "Main", "messages": [{"role": "user", "content": "hi"}]},
     )
 
     assert response.status_code == 500, response.text
+    assert response.json() == {
+        "error": {
+            "message": "Upstream model request failed",
+            "type": "upstream_error",
+        }
+    }
+    assert "sk-primary" not in response.text
+    assert "authorization" not in response.headers
+    assert "set-cookie" not in response.headers
+    assert "x-request-id" not in response.headers
     assert _usage_rows(tmp_path) == []
+
+
+def test_proxy_redacts_upstream_key_from_success_body_and_headers(
+    monkeypatch, tmp_path
+) -> None:
+    client, model_proxy = _client(tmp_path, monkeypatch)
+
+    class FakeResponse:
+        status_code = 200
+        headers = {
+            "content-type": "application/json",
+            "authorization": "Bearer sk-primary",
+            "set-cookie": "upstream=sk-primary",
+            "x-internal-debug": "sk-primary",
+            "x-request-id": "request-sk-primary",
+            "x-ratelimit-limit-requests": "100",
+        }
+
+        async def aiter_bytes(self):
+            yield b'{"message":"upstream key sk-pr'
+            yield b'imary must not escape"}'
+
+        async def aclose(self):
+            return None
+
+    class FakeAsyncClient:
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+
+        def build_request(self, method, url, *, content, headers, params):
+            return SimpleNamespace()
+
+        async def send(self, request, *, stream):
+            return FakeResponse()
+
+        async def aclose(self):
+            return None
+
+    monkeypatch.setattr(model_proxy.httpx, "AsyncClient", FakeAsyncClient)
+
+    response = client.post(
+        "/v1/chat/completions",
+        headers={
+            "authorization": "Bearer pmp_alice_0123456789abcdefghijklmnopqrstuvwxyz"
+        },
+        json={"model": "Main", "messages": [{"role": "user", "content": "hi"}]},
+    )
+
+    assert response.status_code == 200, response.text
+    assert response.json() == {
+        "message": "upstream key [REDACTED] must not escape"
+    }
+    assert response.headers["x-request-id"] == "request-[REDACTED]"
+    assert response.headers["x-ratelimit-limit-requests"] == "100"
+    assert "authorization" not in response.headers
+    assert "set-cookie" not in response.headers
+    assert "x-internal-debug" not in response.headers
+    assert "sk-primary" not in response.text
+
+
+def test_proxy_enforces_enabled_quota_before_upstream_request(
+    monkeypatch, tmp_path
+) -> None:
+    client, model_proxy = _client(tmp_path, monkeypatch)
+    model_proxy.token_usage_store.set_user_quota(
+        "alice",
+        total_token_limit=0,
+        enabled=True,
+        period="daily",
+        db_path=tmp_path / "usage.db",
+    )
+
+    class UnexpectedAsyncClient:
+        def __init__(self, **kwargs):
+            raise AssertionError("quota enforcement must run before creating a client")
+
+    monkeypatch.setattr(model_proxy.httpx, "AsyncClient", UnexpectedAsyncClient)
+    response = client.post(
+        "/v1/chat/completions",
+        headers={
+            "authorization": "Bearer pmp_alice_0123456789abcdefghijklmnopqrstuvwxyz"
+        },
+        json={"model": "Main", "messages": [{"role": "user", "content": "hi"}]},
+    )
+
+    assert response.status_code == 429
+    assert response.json() == {"detail": "Model usage quota exceeded"}
+    assert int(response.headers["retry-after"]) > 0
 
 
 def test_proxy_usage_record_failure_does_not_break_response(
@@ -606,7 +740,7 @@ def test_proxy_usage_record_failure_does_not_break_response(
 
     response = client.post(
         "/v1/chat/completions",
-        headers={"authorization": "Bearer alice-local-token"},
+        headers={"authorization": "Bearer pmp_alice_0123456789abcdefghijklmnopqrstuvwxyz"},
         json={"model": "Main", "messages": [{"role": "user", "content": "hi"}]},
     )
 
@@ -648,7 +782,7 @@ def test_proxy_routes_duplicate_upstream_models_by_name(monkeypatch, tmp_path) -
 
     response = client.post(
         "/v1/chat/completions",
-        headers={"authorization": "Bearer alice-local-token"},
+        headers={"authorization": "Bearer pmp_alice_0123456789abcdefghijklmnopqrstuvwxyz"},
         json={"model": "Alt", "messages": [{"role": "user", "content": "hi"}]},
     )
 

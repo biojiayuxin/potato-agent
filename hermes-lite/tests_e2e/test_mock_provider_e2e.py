@@ -66,6 +66,7 @@ def _chat_chunk(
 class _MockProviderState:
     def __init__(self, plans: list[dict[str, Any]]) -> None:
         self.plans = plans
+        self.streaming_request_count = 0
         self.requests: list[dict[str, Any]] = []
         self.request_paths: list[str] = []
         self.request_headers: list[dict[str, str]] = []
@@ -77,14 +78,23 @@ class _MockProviderState:
         self, body: dict[str, Any], headers: dict[str, str], path: str
     ) -> dict[str, Any]:
         with self.condition:
-            index = len(self.requests)
             self.requests.append(body)
             self.request_paths.append(path)
             self.request_headers.append(headers)
+            if body.get("stream") is True:
+                plan_index = self.streaming_request_count
+                self.streaming_request_count += 1
+            else:
+                plan_index = None
             self.condition.notify_all()
-        if index >= len(self.plans):
-            return {"kind": "text", "text": f"Mock reply {index + 1}"}
-        return self.plans[index]
+        # Hermes generates titles through a separate non-streaming request.
+        # Do not let that asynchronous auxiliary call consume a conversation
+        # plan and make the E2E outcome depend on thread scheduling.
+        if plan_index is None:
+            return {"kind": "text", "text": "Mock session title"}
+        if plan_index >= len(self.plans):
+            return {"kind": "text", "text": f"Mock reply {plan_index + 1}"}
+        return self.plans[plan_index]
 
     def wait_for_requests(self, count: int, timeout: float = 15.0) -> None:
         deadline = time.monotonic() + timeout

@@ -141,7 +141,9 @@ def main() -> int:
     try:
         db_path = Path(sys.argv[1])
         method = str(sys.argv[2] or "").strip()
-        kwargs = json.loads(sys.argv[3]) if len(sys.argv) > 3 else {}
+        kwargs = json.loads(sys.stdin.read() or "{}")
+        if not isinstance(kwargs, dict):
+            raise RuntimeError("Session DB kwargs must be a JSON object")
         db = SessionDB(
             db_path=db_path,
             read_only=method in READ_ONLY_METHODS and db_path.exists(),

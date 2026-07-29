@@ -4,14 +4,37 @@ After=network.target
 
 [Service]
 Type=simple
-User=root
-Group=potato-interface
+User=potato-model-proxy
+Group=potato-model-proxy
+SupplementaryGroups=potato-interface
 WorkingDirectory=/srv/potato_agent
+UMask=0077
 Environment=POTATO_AGENT_MAPPING_PATH=/var/lib/potato-agent/config/users_mapping.yaml
 Environment=POTATO_MODEL_PROXY_CONFIG_PATH=/var/lib/potato-agent/config/model_proxy.yaml
+Environment=POTATO_MODEL_PROXY_USAGE_DB=/var/lib/potato-agent/model-proxy/usage.db
 ExecStart=/opt/interface-env/bin/python -m uvicorn interface.model_proxy:app --host 127.0.0.1 --port 8765
 Restart=always
 RestartSec=3
+LimitCORE=0
+NoNewPrivileges=true
+PrivateDevices=true
+PrivateTmp=true
+ProtectProc=invisible
+ProcSubset=pid
+ProtectControlGroups=true
+ProtectHome=true
+ProtectKernelLogs=true
+ProtectKernelModules=true
+ProtectKernelTunables=true
+ProtectSystem=strict
+ReadWritePaths=/var/lib/potato-agent/model-proxy
+CapabilityBoundingSet=
+LockPersonality=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+RestrictNamespaces=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+SystemCallArchitectures=native
 
 [Install]
 WantedBy=multi-user.target

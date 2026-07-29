@@ -37,6 +37,11 @@ def _target() -> HermesTarget:
 def test_exec_tui_gateway_chdirs_to_target_workdir(monkeypatch) -> None:
     calls: list[tuple[str, object]] = []
 
+    monkeypatch.setattr(
+        privileged_helper,
+        "ensure_user_runtime_temp_dir",
+        lambda target: calls.append(("ensure_temp", target)),
+    )
     monkeypatch.setattr(privileged_helper.os, "chdir", lambda path: calls.append(("chdir", path)))
     monkeypatch.setattr(
         privileged_helper.os,
@@ -46,12 +51,14 @@ def test_exec_tui_gateway_chdirs_to_target_workdir(monkeypatch) -> None:
 
     privileged_helper._exec_tui_gateway(_target())
 
-    assert calls[0] == ("chdir", Path("/home/hmx_alice"))
-    assert calls[1][0] == "execvp"
-    binary, command = calls[1][1]
+    assert calls[0][0] == "ensure_temp"
+    assert calls[1] == ("chdir", Path("/home/hmx_alice"))
+    assert calls[2][0] == "execvp"
+    binary, command = calls[2][1]
     assert binary == "runuser"
     assert command[:4] == ["runuser", "-u", "hmx_alice", "--"]
     assert "TERMINAL_CWD=/home/hmx_alice" in command
+    assert "TMPDIR=/home/hmx_alice/.hermes/tmp" in command
     assert "HERMES_DISABLE_LAZY_INSTALLS=1" in command
     assert "HERMES_SKIP_NODE_BOOTSTRAP=1" in command
     assert "HERMES_DISABLE_GATEWAY_PLATFORMS=1" in command
@@ -98,6 +105,7 @@ def test_helper_tui_gateway_command_injects_explicit_profile_path(monkeypatch) -
     assert "HERMES_DISABLE_CRON=1" in command
     assert "HERMES_DISABLE_KANBAN=1" in command
     assert "TERMINAL_ENV=local" in command
+    assert "TMPDIR=/home/hmx_alice/.hermes/tmp" in command
     assert "AGENT_BROWSER_ENGINE=chrome" in command
     assert (
         "BROWSER_CDP_URL=ws://127.0.0.1:9222/devtools/browser/local"
@@ -125,11 +133,16 @@ def test_helper_tui_gateway_command_injects_explicit_profile_path(monkeypatch) -
 
 
 def test_session_db_rpc_source_is_passed_without_repo_path(monkeypatch) -> None:
+    sentinel = "SESSION_DB_TARGET_ARGV_SENTINEL_session_1"
     captured: list[str] = []
+    captured_input: list[str | None] = []
 
-    def fake_run_as_user(target, command, *, cwd=None, timeout_seconds=None):
+    def fake_run_as_user(
+        target, command, *, cwd=None, timeout_seconds=None, input_text=None
+    ):
         assert timeout_seconds == 60.0
         captured.extend(command)
+        captured_input.append(input_text)
         return subprocess.CompletedProcess(
             command,
             0,
@@ -140,13 +153,49 @@ def test_session_db_rpc_source_is_passed_without_repo_path(monkeypatch) -> None:
     monkeypatch.setattr(privileged_helper, "_run_as_user", fake_run_as_user)
 
     result = privileged_helper._session_db_call(
-        _target(), "get_session", {"session_id": "session-1"}
+        _target(), "get_session", {"session_id": sentinel}
     )
 
     assert result == {"id": "session-1"}
     assert captured[1] == "-c"
     assert "from hermes_state import SessionDB" in captured[2]
     assert str(privileged_helper.USER_SESSION_DB_RPC_PATH) not in captured
+    assert all(sentinel not in argument for argument in captured)
+    assert json.loads(str(captured_input[0])) == {"session_id": sentinel}
+
+
+def test_session_db_helper_reads_kwargs_from_stdin(monkeypatch, capsys) -> None:
+    sentinel = "SESSION_DB_HELPER_ARGV_SENTINEL_session_1"
+    received: list[dict[str, object]] = []
+    argv = [
+        "privileged-helper",
+        "session-db",
+        "--username",
+        "alice",
+        "--method",
+        "get_session",
+    ]
+    monkeypatch.setattr(privileged_helper, "require_root", lambda: None)
+    monkeypatch.setattr(privileged_helper, "require_binary", lambda binary: None)
+    monkeypatch.setattr(privileged_helper, "_load_target", lambda username: _target())
+    monkeypatch.setattr(privileged_helper.sys, "argv", argv)
+    monkeypatch.setattr(
+        privileged_helper.sys,
+        "stdin",
+        io.StringIO(json.dumps({"session_id": sentinel})),
+    )
+    monkeypatch.setattr(
+        privileged_helper,
+        "_session_db_call",
+        lambda target, method, kwargs: received.append(kwargs) or {"id": sentinel},
+    )
+
+    assert privileged_helper.main() == 0
+
+    payload = json.loads(capsys.readouterr().out)
+    assert payload == {"ok": True, "result": {"id": sentinel}}
+    assert received == [{"session_id": sentinel}]
+    assert all(sentinel not in argument for argument in argv)
 
 
 def test_stop_idle_runtime_cli_rechecks_with_requested_timeout(

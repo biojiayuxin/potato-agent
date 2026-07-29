@@ -30,6 +30,7 @@ def _target(tmp_path: Path) -> HermesTarget:
         systemd_service="hermes-alice.service",
         extra_env={},
         config_overrides={},
+        model_proxy_token="pmp_alice_0123456789abcdefghijklmnopqrstuvwxyz",
     )
 
 
@@ -228,11 +229,6 @@ fallback_providers:
         "interface.model_options.pwd.getpwnam",
         lambda username: SimpleNamespace(pw_uid=123, pw_gid=456),
     )
-    monkeypatch.setattr(
-        "interface.model_options._set_owner_and_mode",
-        lambda path, uid, gid, mode: None,
-    )
-    monkeypatch.setattr("interface.model_options.atomic_yaml_write", None)
 
     patch_user_active_model(target, options.get("fast"))
 
@@ -241,7 +237,7 @@ fallback_providers:
         "default": "Fast",
         "provider": "custom",
         "base_url": "http://127.0.0.1:8765/v1",
-        "api_key": "alice-local-token",
+        "api_key": "pmp_alice_0123456789abcdefghijklmnopqrstuvwxyz",
         "api_mode": "chat_completions",
         "context_length": 500000,
     }
@@ -299,17 +295,12 @@ auxiliary:
         "interface.model_options.pwd.getpwnam",
         lambda username: SimpleNamespace(pw_uid=123, pw_gid=456),
     )
-    monkeypatch.setattr(
-        "interface.model_options._set_owner_and_mode",
-        lambda path, uid, gid, mode: None,
-    )
-    monkeypatch.setattr("interface.model_options.atomic_yaml_write", None)
 
     patch_user_active_model(target, options.primary)
 
     data = yaml.safe_load(config_path.read_text(encoding="utf-8"))
     assert data["model"]["base_url"] == "http://127.0.0.1:8765/v1"
-    assert data["model"]["api_key"] == "alice-local-token"
+    assert data["model"]["api_key"] == target.model_proxy_token
     assert data["model"]["api_mode"] == "codex_responses"
     assert "context_length" not in data["model"]
     assert "context_length" not in data["auxiliary"]["compression"]
@@ -329,7 +320,7 @@ model:
   default: Alt
   provider: custom
   base_url: http://127.0.0.1:8765/v1
-  api_key: alice-local-token
+  api_key: pmp_alice_0123456789abcdefghijklmnopqrstuvwxyz
   api_mode: codex_responses
 """.lstrip(),
         encoding="utf-8",

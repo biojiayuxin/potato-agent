@@ -13,6 +13,7 @@ from interface.hermes_profile import (
     runtime_profile_environment,
 )
 from interface.hermes_service import (
+    ensure_user_runtime_temp_dir,
     ensure_service_ready,
     install_user_files,
     is_service_active,
@@ -21,7 +22,13 @@ from interface.hermes_service import (
     stop_and_remove_service,
     stop_service,
 )
-from interface.mapping import DEFAULT_MAPPING_PATH, HermesTarget, MappingStore, load_mapping
+from interface.mapping import (
+    DEFAULT_MAPPING_PATH,
+    HermesTarget,
+    MappingStore,
+    build_targets_from_config,
+    load_mapping,
+)
 from interface.mapping import remove_user_mapping_entry
 from interface.mapping import upsert_user_mapping_entry, write_mapping
 from interface.model_options import (
@@ -85,6 +92,7 @@ def build_direct_tui_gateway_command(target: HermesTarget) -> list[str]:
         "-i",
         f"HOME={target.home_dir}",
         f"HERMES_HOME={target.hermes_home}",
+        f"TMPDIR={target.hermes_home / 'tmp'}",
         f"TERMINAL_CWD={target.workdir}",
         f"PATH={os.environ.get('PATH', '')}",
         "PYTHONUNBUFFERED=1",
@@ -182,6 +190,7 @@ class PrivilegedClient:
                     email=email,
                     display_name=display_name or username,
                 )
+                build_targets_from_config(config)
                 write_mapping(DEFAULT_MAPPING_PATH, config)
             config = load_mapping(DEFAULT_MAPPING_PATH, resolve_env=True)
             target = MappingStore(DEFAULT_MAPPING_PATH).get_target_by_username(username)
@@ -367,9 +376,8 @@ class PrivilegedClient:
                 username,
                 "--method",
                 method,
-                "--kwargs-json",
-                json.dumps(kwargs, ensure_ascii=False),
             ],
+            input_text=json.dumps(kwargs, ensure_ascii=False),
             timeout_seconds=SESSION_DB_HELPER_TIMEOUT_SECONDS,
         )
         return payload.get("result")
@@ -442,6 +450,7 @@ class PrivilegedClient:
 
     def tui_gateway_command(self, target: HermesTarget) -> list[str]:
         if self._can_call_directly():
+            ensure_user_runtime_temp_dir(target)
             return build_direct_tui_gateway_command(target)
         else:
             return self.helper_exec_command(

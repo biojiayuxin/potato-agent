@@ -5,6 +5,7 @@ import asyncio
 import json
 from pathlib import Path
 
+from interface.cli_prompt import add_prompt_source_arguments, read_prompt
 from interface.mapping import MappingStore, DEFAULT_MAPPING_PATH
 from interface.tui_gateway_bridge import TuiGatewayBridge, TuiGatewayBridgeError
 
@@ -37,7 +38,7 @@ async def main_async(username: str, prompt: str, mapping_path: Path) -> int:
         print("[ok] bridge started")
 
         create_result = await bridge.rpc("session.create", {"cols": 100})
-        print("[ok] session.create", create_result)
+        print("[ok] session.create keys=", sorted(create_result))
         session_id = str(create_result.get("session_id") or "")
         if not session_id:
             raise TuiGatewayBridgeError("session.create returned no session_id")
@@ -50,12 +51,22 @@ async def main_async(username: str, prompt: str, mapping_path: Path) -> int:
                 "text": prompt,
             },
         )
-        print("[ok] prompt.submit", submit_result)
+        print("[ok] prompt.submit status=", str(submit_result.get("status") or ""))
 
         events = await collector
         print(f"[ok] collected {len(events)} bridge event(s)")
         for event in events:
-            print(json.dumps(event, ensure_ascii=False))
+            payload = event.get("payload") if isinstance(event.get("payload"), dict) else {}
+            print(
+                json.dumps(
+                    {
+                        "type": str(event.get("type") or ""),
+                        "session_id": str(event.get("session_id") or ""),
+                        "payload_keys": sorted(str(key) for key in payload),
+                    },
+                    ensure_ascii=False,
+                )
+            )
 
         has_complete = any(event.get("type") == "message.complete" for event in events)
         if not has_complete:
@@ -68,18 +79,15 @@ async def main_async(username: str, prompt: str, mapping_path: Path) -> int:
 def main() -> int:
     parser = argparse.ArgumentParser(description="Minimal tui_gateway bridge probe")
     parser.add_argument("username", help="mapping username to test")
-    parser.add_argument(
-        "--prompt",
-        default="Reply with exactly: TUI bridge probe ok",
-        help="prompt to submit through the bridge",
-    )
+    add_prompt_source_arguments(parser)
     parser.add_argument(
         "--mapping-path",
         default=str(DEFAULT_MAPPING_PATH),
         help="users_mapping.yaml path",
     )
     args = parser.parse_args()
-    return asyncio.run(main_async(args.username, args.prompt, Path(args.mapping_path)))
+    prompt = read_prompt(args, default="Reply with exactly: TUI bridge probe ok")
+    return asyncio.run(main_async(args.username, prompt, Path(args.mapping_path)))
 
 
 if __name__ == "__main__":

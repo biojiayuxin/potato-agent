@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import io
+import json
+import subprocess
 import sys
 import threading
 from pathlib import Path
@@ -13,6 +16,8 @@ for path in (REPO_ROOT, HERMES_ROOT):
 
 from hermes_state import SessionDB
 
+from interface import session_db_rpc
+from interface.mapping import HermesTarget
 from interface.session_db_rpc import execute
 
 
@@ -140,3 +145,84 @@ def test_composite_context_uses_one_read_snapshot_during_compression(tmp_path) -
     assert not writer.is_alive()
     assert result["logical_session"]["end_reason"] is None
     assert result["tip_session_id"] == "parent-session"
+
+
+def test_main_reads_kwargs_from_stdin_not_argv(monkeypatch, capsys, tmp_path) -> None:
+    sentinel = "SESSION_DB_RPC_ARGV_SENTINEL_session_1"
+    received: list[tuple[str, dict[str, object]]] = []
+
+    class FakeSessionDB:
+        def __init__(self, *, db_path, read_only):
+            self.db_path = db_path
+            self.read_only = read_only
+
+        def close(self) -> None:
+            return None
+
+    argv = ["session_db_rpc.py", str(tmp_path / "state.db"), "get_session"]
+    monkeypatch.setattr(session_db_rpc.sys, "argv", argv)
+    monkeypatch.setattr(
+        session_db_rpc.sys,
+        "stdin",
+        io.StringIO(json.dumps({"session_id": sentinel})),
+    )
+    monkeypatch.setattr(session_db_rpc, "SessionDB", FakeSessionDB)
+    monkeypatch.setattr(
+        session_db_rpc,
+        "execute",
+        lambda db, method, kwargs: received.append((method, kwargs)) or {"id": sentinel},
+    )
+
+    assert session_db_rpc.main() == 0
+
+    payload = json.loads(capsys.readouterr().out)
+    assert payload == {"ok": True, "result": {"id": sentinel}}
+    assert received == [("get_session", {"session_id": sentinel})]
+    assert all(sentinel not in argument for argument in argv)
+
+
+def test_web_session_db_proxy_direct_call_keeps_kwargs_out_of_argv(
+    monkeypatch, tmp_path
+) -> None:
+    from interface import app as interface_app
+
+    sentinel = "SESSION_DB_WEB_ARGV_SENTINEL_session_1"
+    captured: list[tuple[list[str], dict[str, object]]] = []
+    target = HermesTarget(
+        username="alice",
+        email="alice@example.com",
+        display_name="Alice",
+        linux_user="hmx_alice",
+        home_dir=tmp_path,
+        hermes_home=tmp_path / ".hermes",
+        workdir=tmp_path,
+        api_server_host="127.0.0.1",
+        api_port=8655,
+        api_key="sk-user",
+        api_server_model_name="Hermes",
+        systemd_service="hermes-alice.service",
+        extra_env={},
+        config_overrides={},
+    )
+
+    def fake_run_process_group(command, **kwargs):
+        captured.append((command, kwargs))
+        return subprocess.CompletedProcess(
+            command,
+            0,
+            stdout=json.dumps({"ok": True, "result": {"id": sentinel}}),
+            stderr="",
+        )
+
+    monkeypatch.setattr(interface_app.os, "geteuid", lambda: 0)
+    monkeypatch.delenv("INTERFACE_FORCE_PRIVILEGED_HELPER", raising=False)
+    monkeypatch.setattr(interface_app, "run_process_group", fake_run_process_group)
+
+    result = interface_app._UserSessionDBProxy(target)._call(
+        "get_session", session_id=sentinel
+    )
+
+    assert result == {"id": sentinel}
+    command, call_kwargs = captured[0]
+    assert all(sentinel not in argument for argument in command)
+    assert json.loads(str(call_kwargs["input_text"])) == {"session_id": sentinel}

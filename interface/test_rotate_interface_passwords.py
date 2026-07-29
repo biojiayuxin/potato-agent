@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import sqlite3
 from pathlib import Path
 
@@ -52,6 +53,28 @@ def _create_user(
     return reloaded
 
 
+def test_systemd_mail_loader_ignores_secret_environment(monkeypatch) -> None:
+    monkeypatch.delenv("INTERFACE_RESEND_API_KEY", raising=False)
+    monkeypatch.delenv("INTERFACE_MAIL_FROM", raising=False)
+    monkeypatch.setattr(
+        rotate_interface_passwords.subprocess,
+        "check_output",
+        lambda *args, **kwargs: (
+            "Environment=INTERFACE_RESEND_API_KEY=must-not-import "
+            '"INTERFACE_MAIL_FROM=Potato Agent <noreply@example.com>"\n'
+        ),
+    )
+
+    assert rotate_interface_passwords._load_missing_mail_env_from_systemd(
+        "potato-interface.service"
+    )
+    assert "INTERFACE_RESEND_API_KEY" not in os.environ
+    assert (
+        os.environ["INTERFACE_MAIL_FROM"]
+        == "Potato Agent <noreply@example.com>"
+    )
+
+
 def test_dry_run_selects_users_before_cutoff_without_updating(tmp_path, capsys) -> None:
     db_path = tmp_path / "interface.db"
     before = _create_user(
@@ -92,7 +115,11 @@ def test_execute_rotates_password_and_sends_notice(tmp_path, monkeypatch, capsys
     )
     old_hash = _password_hash_for_user(db_path, user.id)
     sent: list[dict[str, object]] = []
-    monkeypatch.setenv("INTERFACE_RESEND_API_KEY", "sk_test")
+    resend_key_path = tmp_path / "resend-api-key"
+    resend_key_path.write_text("sk_test\n", encoding="utf-8")
+    resend_key_path.chmod(0o600)
+    monkeypatch.delenv("INTERFACE_RESEND_API_KEY", raising=False)
+    monkeypatch.delenv("INTERFACE_RESEND_API_KEY_FILE", raising=False)
     monkeypatch.setenv("INTERFACE_MAIL_FROM", "Potato Agent <noreply@example.com>")
 
     async def fake_send_password_rotation_notice_email(**kwargs):
@@ -113,6 +140,8 @@ def test_execute_rotates_password_and_sends_notice(tmp_path, monkeypatch, capsys
             "alice",
             "--execute",
             "--no-systemd-env",
+            "--resend-api-key-file",
+            str(resend_key_path),
             "--site-url",
             "https://potato.example/lite",
         ]

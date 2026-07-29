@@ -12,13 +12,14 @@ from interface.privileged_client import PrivilegedClient, build_direct_tui_gatew
 
 
 def test_privileged_client_uses_helper_when_not_root(monkeypatch) -> None:
-    calls: list[list[str]] = []
+    sentinel = "SESSION_DB_ARGV_SENTINEL_s1"
+    calls: list[tuple[list[str], dict[str, object]]] = []
 
     monkeypatch.setattr("interface.privileged_client.os.geteuid", lambda: 1000)
 
     def fake_run_process_group(command, **kwargs):
         assert kwargs.get("timeout_seconds") == 70.0
-        calls.append(command)
+        calls.append((command, kwargs))
         return subprocess.CompletedProcess(
             command,
             0,
@@ -31,19 +32,25 @@ def test_privileged_client_uses_helper_when_not_root(monkeypatch) -> None:
     )
 
     client = PrivilegedClient(helper_python="/opt/interface-env/bin/python")
-    result = client.session_db_call("alice", "get_session", {"session_id": "s1"})
+    result = client.session_db_call(
+        "alice", "get_session", {"session_id": sentinel}
+    )
 
     assert result == {"status": "ready"}
     assert calls
-    assert calls[0][:4] == [
+    command, call_kwargs = calls[0]
+    assert command[:4] == [
         "sudo",
         "-n",
         "/opt/interface-env/bin/python",
         "-m",
     ]
-    assert "interface.privileged_helper" in calls[0]
-    assert "--username" in calls[0]
-    assert "alice" in calls[0]
+    assert "interface.privileged_helper" in command
+    assert "--username" in command
+    assert "alice" in command
+    assert "--kwargs-json" not in command
+    assert all(sentinel not in argument for argument in command)
+    assert json.loads(str(call_kwargs["input_text"])) == {"session_id": sentinel}
 
 
 def test_tui_gateway_command_uses_exec_helper_when_not_root(monkeypatch) -> None:
@@ -142,6 +149,7 @@ def test_direct_tui_gateway_command_injects_runtime_profile_guards(monkeypatch) 
     assert "HERMES_DISABLE_CRON=1" in command
     assert "HERMES_DISABLE_KANBAN=1" in command
     assert "TERMINAL_ENV=local" in command
+    assert "TMPDIR=/home/hmx_alice/.hermes/tmp" in command
     assert "AGENT_BROWSER_ENGINE=chrome" in command
     assert (
         "BROWSER_CDP_URL=ws://127.0.0.1:9222/devtools/browser/local"
@@ -196,6 +204,7 @@ def test_direct_tui_gateway_command_uses_required_default_profile(monkeypatch) -
     assert "HERMES_DISABLE_CRON=1" in command
     assert "HERMES_DISABLE_KANBAN=1" in command
     assert "TERMINAL_ENV=local" in command
+    assert "TMPDIR=/home/hmx_alice/.hermes/tmp" in command
     assert "AGENT_BROWSER_ENGINE=chrome" in command
     assert "BROWSER_CDP_URL=" in command
     assert "CAMOFOX_URL=" in command
@@ -204,6 +213,36 @@ def test_direct_tui_gateway_command_uses_required_default_profile(monkeypatch) -
         "HERMES_RUNTIME_PROFILE_PATH=/opt/potato-hermes-lite/current/config/runtime-profile.yaml"
         in command
     )
+
+
+def test_direct_tui_gateway_command_prepares_private_temp_dir(monkeypatch) -> None:
+    target = HermesTarget(
+        username="alice",
+        email="alice@example.com",
+        display_name="Alice",
+        linux_user="hmx_alice",
+        home_dir=Path("/home/hmx_alice"),
+        hermes_home=Path("/home/hmx_alice/.hermes"),
+        workdir=Path("/home/hmx_alice"),
+        api_server_host="127.0.0.1",
+        api_port=8655,
+        api_key="sk-user",
+        api_server_model_name="Hermes",
+        systemd_service="hermes-alice.service",
+        extra_env={},
+        config_overrides={},
+    )
+    prepared: list[HermesTarget] = []
+    monkeypatch.setattr("interface.privileged_client.os.geteuid", lambda: 0)
+    monkeypatch.setattr(
+        "interface.privileged_client.ensure_user_runtime_temp_dir",
+        lambda candidate: prepared.append(candidate),
+    )
+
+    command = PrivilegedClient().tui_gateway_command(target)
+
+    assert prepared == [target]
+    assert "TMPDIR=/home/hmx_alice/.hermes/tmp" in command
 
 
 def test_has_active_background_processes_uses_helper_when_not_root(monkeypatch) -> None:

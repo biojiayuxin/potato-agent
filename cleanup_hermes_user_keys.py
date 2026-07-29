@@ -13,6 +13,7 @@ import yaml
 from interface.mapping import DEFAULT_MAPPING_PATH, MappingStore, load_mapping
 from interface.model_options import normalize_model_options, patch_user_active_model
 from interface.model_proxy_config import get_model_proxy_base_url
+from interface.user_private_files import UserPrivateFileError, read_user_private_text
 
 
 class CleanupHermesUserKeysError(RuntimeError):
@@ -41,11 +42,21 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def _load_yaml_mapping(path: Path) -> dict[str, Any]:
-    if not path.exists():
+def _read_user_text(target: Any, path: Path) -> str | None:
+    try:
+        return read_user_private_text(target, path)
+    except UserPrivateFileError as exc:
+        raise CleanupHermesUserKeysError(
+            f"Refusing unsafe mapped user file: {path}"
+        ) from exc
+
+
+def _load_yaml_mapping(target: Any, path: Path) -> dict[str, Any]:
+    raw = _read_user_text(target, path)
+    if raw is None:
         return {}
     try:
-        data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+        data = yaml.safe_load(raw) or {}
     except yaml.YAMLError as exc:
         raise CleanupHermesUserKeysError(f"Invalid YAML in {path}: {exc}") from exc
     if not isinstance(data, dict):
@@ -78,7 +89,7 @@ def main() -> int:
     for target in targets:
         config_path = target.hermes_home / "config.yaml"
         env_path = target.hermes_home / ".env"
-        before_config = _load_yaml_mapping(config_path)
+        before_config = _load_yaml_mapping(target, config_path)
         active_id = model_options.primary_id
         model_cfg = before_config.get("model")
         if isinstance(model_cfg, dict):
@@ -96,9 +107,8 @@ def main() -> int:
                     break
 
         option = model_options.get(active_id) or model_options.primary
-        env_had_key = False
-        if env_path.exists():
-            env_had_key = "OPENAI_API_KEY" in env_path.read_text(encoding="utf-8")
+        env_text = _read_user_text(target, env_path)
+        env_had_key = bool(env_text and "OPENAI_API_KEY" in env_text)
         config_had_key = _contains_key_name(before_config, "api_key")
 
         print(

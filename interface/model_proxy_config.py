@@ -1,16 +1,17 @@
 from __future__ import annotations
 
+import grp
 import os
+import stat
+import tempfile
 from pathlib import Path
 from typing import Any
 
 import yaml
 
 from interface.secure_paths import (
-    DEFAULT_MAPPING_FILE_MODE,
     DEFAULT_STATE_DIR,
     ensure_private_directory,
-    ensure_private_file,
 )
 
 
@@ -20,26 +21,36 @@ DEFAULT_MODEL_PROXY_CONFIG_PATH = Path(
     os.getenv("POTATO_MODEL_PROXY_CONFIG_PATH")
     or (DEFAULT_STATE_DIR / "config" / "model_proxy.yaml")
 )
-TOKEN_SUFFIX = "-local-token"
+MODEL_PROXY_TOKEN_PREFIX = "pmp_"
+MODEL_PROXY_TOKEN_MIN_LENGTH = 40
+MODEL_PROXY_TOKEN_PLACEHOLDER = "{model_proxy_token}"
+MODEL_PROXY_SERVICE_GROUP = "potato-model-proxy"
+MAX_MODEL_PROXY_CONFIG_BYTES = 1024 * 1024
 
 
 class ModelProxyConfigError(RuntimeError):
     pass
 
 
-def local_model_proxy_token(username: str) -> str:
-    normalized = str(username or "").strip()
-    if not normalized:
+def generate_model_proxy_token() -> str:
+    import secrets
+
+    return f"{MODEL_PROXY_TOKEN_PREFIX}{secrets.token_urlsafe(32)}"
+
+
+def local_model_proxy_token(username: str, configured_token: str | None = None) -> str:
+    normalized_username = str(username or "").strip()
+    if not normalized_username:
         raise ModelProxyConfigError("username is required for local model proxy token.")
-    return f"{normalized}{TOKEN_SUFFIX}"
-
-
-def username_from_local_token(token: str) -> str | None:
-    normalized = str(token or "").strip()
-    if not normalized.endswith(TOKEN_SUFFIX):
-        return None
-    username = normalized[: -len(TOKEN_SUFFIX)]
-    return username or None
+    normalized_token = str(configured_token or "").strip()
+    if (
+        not normalized_token.startswith(MODEL_PROXY_TOKEN_PREFIX)
+        or len(normalized_token) < MODEL_PROXY_TOKEN_MIN_LENGTH
+    ):
+        raise ModelProxyConfigError(
+            f"User {normalized_username!r} is missing a valid model proxy token."
+        )
+    return normalized_token
 
 
 def default_model_proxy_base_url() -> str:
@@ -69,22 +80,118 @@ def get_model_proxy_config_path(mapping_path: Path | None = None) -> Path:
 
 
 def load_model_proxy_config(path: Path = DEFAULT_MODEL_PROXY_CONFIG_PATH) -> dict[str, Any]:
+    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
     try:
-        with path.open("r", encoding="utf-8") as handle:
-            data = yaml.safe_load(handle) or {}
+        descriptor = os.open(path, flags)
     except FileNotFoundError as exc:
         raise ModelProxyConfigError(f"Model proxy config not found: {path}") from exc
+    except OSError as exc:
+        raise ModelProxyConfigError("Unable to load model proxy configuration.") from exc
+
+    try:
+        file_stat = os.fstat(descriptor)
+        if not stat.S_ISREG(file_stat.st_mode):
+            raise ModelProxyConfigError("Model proxy config must be a regular file.")
+        _validate_proxy_config_access(file_stat)
+        if file_stat.st_size > MAX_MODEL_PROXY_CONFIG_BYTES:
+            raise ModelProxyConfigError("Model proxy config exceeds the size limit.")
+        with os.fdopen(descriptor, "r", encoding="utf-8") as handle:
+            descriptor = -1
+            raw_config = handle.read(MAX_MODEL_PROXY_CONFIG_BYTES + 1)
+    except UnicodeError as exc:
+        raise ModelProxyConfigError("Model proxy config must be valid UTF-8.") from exc
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+
+    if len(raw_config.encode("utf-8")) > MAX_MODEL_PROXY_CONFIG_BYTES:
+        raise ModelProxyConfigError("Model proxy config exceeds the size limit.")
+    try:
+        data = yaml.safe_load(raw_config) or {}
     except yaml.YAMLError as exc:
-        raise ModelProxyConfigError(f"Invalid YAML in {path}: {exc}") from exc
+        raise ModelProxyConfigError("Unable to load model proxy configuration.") from exc
     if not isinstance(data, dict):
         raise ModelProxyConfigError("Model proxy config must be a mapping/object.")
     return data
 
 
+def _validate_proxy_config_access(file_stat: os.stat_result) -> None:
+    mode = stat.S_IMODE(file_stat.st_mode)
+    if mode not in {0o400, 0o440, 0o600, 0o640}:
+        raise ModelProxyConfigError(
+            "Model proxy config permissions must be 0400, 0440, 0600, or 0640."
+        )
+
+    if mode & 0o040:
+        try:
+            expected_gid = grp.getgrnam(MODEL_PROXY_SERVICE_GROUP).gr_gid
+        except KeyError as exc:
+            raise ModelProxyConfigError(
+                f"Required model proxy group does not exist: {MODEL_PROXY_SERVICE_GROUP}"
+            ) from exc
+        if file_stat.st_gid != expected_gid:
+            raise ModelProxyConfigError(
+                "Group-readable model proxy config must use the dedicated service group."
+            )
+
+    effective_uid = os.geteuid()
+    if effective_uid == 0:
+        if file_stat.st_uid != 0:
+            raise ModelProxyConfigError("Model proxy config must be owned by root.")
+        return
+
+    if file_stat.st_uid not in {0, effective_uid}:
+        raise ModelProxyConfigError(
+            "Model proxy config must be owned by root or the current service user."
+        )
+    if mode & 0o040:
+        readable_groups = set(os.getgroups()) | {os.getegid()}
+        if file_stat.st_gid not in readable_groups:
+            raise ModelProxyConfigError(
+                "Model proxy config group is not assigned to the current service user."
+            )
+
+
+def _proxy_config_owner_and_mode() -> tuple[int, int, int]:
+    if os.geteuid() != 0:
+        return os.geteuid(), os.getegid(), 0o600
+    try:
+        service_group = grp.getgrnam(MODEL_PROXY_SERVICE_GROUP)
+    except KeyError as exc:
+        raise ModelProxyConfigError(
+            f"Required model proxy group does not exist: {MODEL_PROXY_SERVICE_GROUP}"
+        ) from exc
+    return 0, service_group.gr_gid, 0o640
+
+
 def write_model_proxy_config(path: Path, config: dict[str, Any]) -> None:
     ensure_private_directory(path.parent)
-    path.write_text(
-        yaml.safe_dump(config, sort_keys=False, allow_unicode=False),
-        encoding="utf-8",
+    body = yaml.safe_dump(config, sort_keys=False, allow_unicode=False)
+    owner_uid, owner_gid, file_mode = _proxy_config_owner_and_mode()
+    fd, raw_tmp_path = tempfile.mkstemp(
+        prefix=f".{path.name}.", suffix=".tmp", dir=path.parent
     )
-    ensure_private_file(path, mode=DEFAULT_MAPPING_FILE_MODE)
+    tmp_path = Path(raw_tmp_path)
+    try:
+        os.fchmod(fd, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            fd = -1
+            handle.write(body)
+            handle.flush()
+            os.fsync(handle.fileno())
+            if os.geteuid() == 0:
+                os.fchown(handle.fileno(), owner_uid, owner_gid)
+            os.fchmod(handle.fileno(), file_mode)
+        os.replace(tmp_path, path)
+        directory_fd = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            os.fsync(directory_fd)
+        finally:
+            os.close(directory_fd)
+    finally:
+        if fd >= 0:
+            os.close(fd)
+        try:
+            tmp_path.unlink()
+        except FileNotFoundError:
+            pass

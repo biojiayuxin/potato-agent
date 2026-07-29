@@ -28,6 +28,7 @@ from interface.hermes_profile import (
     runtime_profile_environment,
 )
 from interface.hermes_service import (
+    ensure_user_runtime_temp_dir,
     ensure_service_ready,
     install_user_files,
     is_service_active,
@@ -42,6 +43,7 @@ from interface.mapping import (
     DEFAULT_MAPPING_PATH,
     HermesTarget,
     MappingStore,
+    build_targets_from_config,
     load_mapping,
     remove_user_mapping_entry,
     upsert_user_mapping_entry,
@@ -92,6 +94,7 @@ def _run_as_user(
     *,
     cwd: Path | None = None,
     timeout_seconds: float | None = None,
+    input_text: str | None = None,
 ) -> subprocess.CompletedProcess[str]:
     full_command = [
         "runuser",
@@ -112,11 +115,13 @@ def _run_as_user(
             full_command,
             timeout_seconds=timeout_seconds,
             cwd=cwd or target.workdir,
+            input_text=input_text,
         )
     return subprocess.run(
         full_command,
         capture_output=True,
         text=True,
+        input=input_text,
         cwd=str(cwd or target.workdir),
         check=False,
         env=interface_subprocess_env(),
@@ -132,9 +137,9 @@ def _session_db_call(target: HermesTarget, method: str, kwargs: dict[str, Any]) 
             USER_SESSION_DB_RPC_SOURCE,
             str(target.state_db_path),
             method,
-            json.dumps(kwargs, ensure_ascii=False),
         ],
         timeout_seconds=SESSION_DB_INNER_TIMEOUT_SECONDS,
+        input_text=json.dumps(kwargs, ensure_ascii=False),
     )
     stdout_lines = [line for line in result.stdout.splitlines() if line.strip()]
     raw_payload = stdout_lines[-1] if stdout_lines else ""
@@ -295,6 +300,7 @@ def _tui_gateway_command(target: HermesTarget) -> list[str]:
         "-i",
         f"HOME={target.home_dir}",
         f"HERMES_HOME={target.hermes_home}",
+        f"TMPDIR={target.hermes_home / 'tmp'}",
         f"TERMINAL_CWD={target.workdir}",
         f"PATH={os.environ.get('PATH', '')}",
         "PYTHONUNBUFFERED=1",
@@ -306,6 +312,7 @@ def _tui_gateway_command(target: HermesTarget) -> list[str]:
 
 
 def _exec_tui_gateway(target: HermesTarget) -> None:
+    ensure_user_runtime_temp_dir(target)
     os.chdir(target.workdir)
     command = _tui_gateway_command(target)
     os.execvp(command[0], command)
@@ -353,7 +360,6 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("session-db")
     p.add_argument("--username", required=True)
     p.add_argument("--method", required=True)
-    p.add_argument("--kwargs-json", default="{}")
 
     p = sub.add_parser("file-tree")
     p.add_argument("--username", required=True)
@@ -394,6 +400,7 @@ def main() -> int:
                     email=args.email,
                     display_name=args.display_name or args.username,
                 )
+                build_targets_from_config(config)
                 write_mapping(DEFAULT_MAPPING_PATH, config)
             config = load_mapping(DEFAULT_MAPPING_PATH, resolve_env=True)
             target = _load_target(args.username)
@@ -512,7 +519,10 @@ def main() -> int:
 
         if args.command == "session-db":
             target = _load_target(args.username)
-            result = _session_db_call(target, args.method, json.loads(args.kwargs_json or "{}"))
+            kwargs = json.loads(sys.stdin.read() or "{}")
+            if not isinstance(kwargs, dict):
+                raise RuntimeError("Session DB kwargs must be a JSON object")
+            result = _session_db_call(target, args.method, kwargs)
             return _emit({"ok": True, "result": result})
 
         if args.command == "file-tree":

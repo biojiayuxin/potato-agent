@@ -7,6 +7,7 @@ import sys
 from pathlib import Path
 
 from interface.auth_db import DEFAULT_AUTH_DB_PATH, upsert_user
+from interface.cli_secrets import add_password_source_arguments, read_password
 from interface.hermes_service import (
     install_user_files,
     require_binary,
@@ -15,6 +16,7 @@ from interface.hermes_service import (
 from interface.mapping import (
     DEFAULT_MAPPING_PATH,
     MappingStore,
+    build_targets_from_config,
     load_mapping,
     upsert_user_mapping_entry,
     write_mapping,
@@ -32,7 +34,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("username", help="Short username, e.g. alice or user_test")
     parser.add_argument("email", help="Interface login email")
-    parser.add_argument("password", help="Interface login password")
+    add_password_source_arguments(parser)
     parser.add_argument(
         "--display-name",
         help="Optional display name shown in the interface. Defaults to username.",
@@ -49,16 +51,13 @@ def build_parser() -> argparse.ArgumentParser:
         default=DEFAULT_AUTH_DB_PATH,
         help=f"Path to interface auth DB (default: {DEFAULT_AUTH_DB_PATH})",
     )
-    parser.add_argument(
-        "--api-key",
-        help="Optional per-user Hermes API key override. Defaults to the shared placeholder or a generated key.",
-    )
     return parser
 
 
 def main() -> int:
     args = build_parser().parse_args()
-    validate_password_complexity(args.password)
+    password = read_password(args)
+    validate_password_complexity(password)
     require_root()
     require_binary("systemctl")
     require_binary("useradd")
@@ -71,8 +70,8 @@ def main() -> int:
         username=args.username,
         email=args.email,
         display_name=display_name,
-        api_key=args.api_key,
     )
+    build_targets_from_config(config)
     write_mapping(args.mapping, config)
 
     resolved_config = load_mapping(args.mapping, resolve_env=True)
@@ -85,7 +84,7 @@ def main() -> int:
     upsert_user(
         username=args.username,
         email=args.email,
-        password=args.password,
+        password=password,
         mapping_username=args.username,
         name=display_name,
         db_path=args.auth_db,

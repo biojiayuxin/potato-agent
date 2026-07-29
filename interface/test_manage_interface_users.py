@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import sqlite3
+import io
 from pathlib import Path
+
+import pytest
 
 import interface.auth_db as auth_db
 import manage_interface_users
@@ -46,19 +49,21 @@ def test_show_user_does_not_print_password_hash_by_default(tmp_path, capsys) -> 
     assert "$2" not in captured.out
 
 
-def test_reset_password_rejects_weak_password_without_update(tmp_path, capsys) -> None:
+def test_reset_password_rejects_weak_password_without_update(
+    tmp_path, capsys, monkeypatch
+) -> None:
     db_path = tmp_path / "interface.db"
     user = _create_user(db_path)
     old_hash = _password_hash_for_user(db_path, user.id)
 
+    monkeypatch.setattr("sys.stdin", io.StringIO("newpassword\n"))
     result = manage_interface_users.main(
         [
             "--auth-db",
             str(db_path),
             "reset-password",
             "alice",
-            "--password",
-            "newpassword",
+            "--password-stdin",
         ]
     )
 
@@ -71,19 +76,21 @@ def test_reset_password_rejects_weak_password_without_update(tmp_path, capsys) -
     assert reloaded.auth_session_version == user.auth_session_version
 
 
-def test_reset_password_updates_hash_and_revokes_sessions(tmp_path, capsys) -> None:
+def test_reset_password_updates_hash_and_revokes_sessions(
+    tmp_path, capsys, monkeypatch
+) -> None:
     db_path = tmp_path / "interface.db"
     user = _create_user(db_path)
     old_hash = _password_hash_for_user(db_path, user.id)
 
+    monkeypatch.setattr("sys.stdin", io.StringIO("Newpassword1!\n"))
     result = manage_interface_users.main(
         [
             "--auth-db",
             str(db_path),
             "reset-password",
             "alice@example.com",
-            "--password",
-            "Newpassword1!",
+            "--password-stdin",
         ]
     )
 
@@ -99,28 +106,28 @@ def test_reset_password_updates_hash_and_revokes_sessions(tmp_path, capsys) -> N
     assert reloaded.auth_session_version == user.auth_session_version + 1
 
 
-def test_check_password_returns_match_status(tmp_path, capsys) -> None:
+def test_check_password_returns_match_status(tmp_path, capsys, monkeypatch) -> None:
     db_path = tmp_path / "interface.db"
     _create_user(db_path)
 
+    monkeypatch.setattr("sys.stdin", io.StringIO("Oldpassword1\n"))
     matched = manage_interface_users.main(
         [
             "--auth-db",
             str(db_path),
             "check-password",
             "alice",
-            "--password",
-            "Oldpassword1",
+            "--password-stdin",
         ]
     )
+    monkeypatch.setattr("sys.stdin", io.StringIO("Wrongpassword1\n"))
     mismatched = manage_interface_users.main(
         [
             "--auth-db",
             str(db_path),
             "check-password",
             "alice",
-            "--password",
-            "Wrongpassword1",
+            "--password-stdin",
         ]
     )
 
@@ -143,3 +150,12 @@ def test_audit_passwords_reports_common_password_match(tmp_path, capsys) -> None
     assert result == 1
     assert "Weak/common password matches found:" in captured.out
     assert "alice <alice@example.com>" in captured.out
+
+
+def test_plaintext_password_argument_is_rejected() -> None:
+    with pytest.raises(SystemExit) as exc_info:
+        manage_interface_users.main(
+            ["check-password", "alice", "--password", "VisiblePassword1!"]
+        )
+
+    assert exc_info.value.code == 2

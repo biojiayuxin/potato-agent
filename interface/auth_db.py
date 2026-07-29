@@ -148,6 +148,10 @@ class EmailVerificationError(ValueError):
         self.message = message
 
 
+class MappingUsernameConflictError(RuntimeError):
+    pass
+
+
 def _row_to_user(row: sqlite3.Row | None) -> InterfaceUser | None:
     if row is None:
         return None
@@ -180,6 +184,35 @@ def _add_column_if_missing(
     if column_name in _table_columns(conn, table_name):
         return
     conn.execute(f"alter table {table_name} add column {column_name} {definition}")
+
+
+def _ensure_unique_mapping_username_index(conn: sqlite3.Connection) -> None:
+    duplicates = conn.execute(
+        "select mapping_username, count(*) as user_count "
+        "from users group by mapping_username having count(*) > 1 "
+        "order by mapping_username"
+    ).fetchall()
+    if duplicates:
+        summary = ", ".join(
+            f"{str(row[0])!r} ({int(row[1])} users)" for row in duplicates
+        )
+        raise MappingUsernameConflictError(
+            "Auth DB contains duplicate mapping_username assignments. Resolve them "
+            f"before starting the interface: {summary}"
+        )
+
+    existing = conn.execute(
+        "select sql from sqlite_master where type = 'index' "
+        "and name = 'idx_interface_users_mapping_username' limit 1"
+    ).fetchone()
+    existing_sql = str(existing[0] or "") if existing is not None else ""
+    if "create unique index" in existing_sql.lower():
+        return
+    conn.execute("drop index if exists idx_interface_users_mapping_username")
+    conn.execute(
+        "create unique index idx_interface_users_mapping_username "
+        "on users(mapping_username)"
+    )
 
 
 def _database_identity(db_path: Path) -> tuple[int, int] | None:
@@ -219,6 +252,7 @@ def ensure_auth_db(db_path: Path = DEFAULT_AUTH_DB_PATH) -> Path:
             )
             _add_column_if_missing(conn, "signup_jobs", "email_verification_id", "TEXT")
             _add_column_if_missing(conn, "signup_jobs", "email_verified_at", "INTEGER")
+            _ensure_unique_mapping_username_index(conn)
             for index_name, column_name in (
                 ("idx_signup_jobs_username", "username"),
                 ("idx_signup_jobs_email", "email"),

@@ -85,6 +85,7 @@ users:
     workdir: {workdir}
     api_port: 8655
     api_key: sk-user
+    model_proxy_token: pmp_alice_0123456789abcdefghijklmnopqrstuvwxyz
     api_server_model_name: Hermes
     systemd_service: hermes-alice.service
 """.lstrip(),
@@ -147,10 +148,19 @@ def _build_client_and_user(monkeypatch):
         lambda username: SimpleNamespace(pw_uid=123, pw_gid=456),
     )
     monkeypatch.setattr(
-        "interface.model_options._set_owner_and_mode",
-        lambda path, uid, gid, mode: None,
+        "interface.model_options.prepare_user_runtime_directories",
+        lambda target, password_entry: None,
     )
-    monkeypatch.setattr("interface.model_options.atomic_yaml_write", None)
+    monkeypatch.setattr(
+        "interface.model_options.read_user_private_text",
+        lambda target, path: path.read_text(encoding="utf-8")
+        if path.exists()
+        else None,
+    )
+    monkeypatch.setattr(
+        "interface.model_options.write_user_private_text",
+        lambda target, path, body: path.write_text(body, encoding="utf-8"),
+    )
 
     client = TestClient(interface_app_mod.app)
     token = interface_app_mod._create_session_token(user.id)
@@ -167,7 +177,7 @@ model:
   default: gpt-5.4-mini
   provider: custom
   base_url: http://127.0.0.1:8765/v1
-  api_key: alice-local-token
+  api_key: pmp_alice_0123456789abcdefghijklmnopqrstuvwxyz
   context_length: 500000
   api_mode: codex_responses
 """.lstrip(),
@@ -521,7 +531,7 @@ def test_put_active_model_updates_user_config(monkeypatch) -> None:
             "default": "Fast",
             "provider": "custom",
             "base_url": "http://127.0.0.1:8765/v1",
-            "api_key": "alice-local-token",
+            "api_key": "pmp_alice_0123456789abcdefghijklmnopqrstuvwxyz",
             "context_length": 500000,
             "api_mode": "codex_responses",
         }

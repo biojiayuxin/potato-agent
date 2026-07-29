@@ -1,10 +1,8 @@
 from __future__ import annotations
 
 import contextlib
-import os
 import pwd
 import re
-import uuid
 from copy import deepcopy
 from dataclasses import dataclass
 from pathlib import Path
@@ -18,11 +16,11 @@ from interface.model_proxy_config import (
     get_model_proxy_base_url,
     local_model_proxy_token,
 )
-
-try:
-    from utils import atomic_yaml_write
-except Exception:  # pragma: no cover - depends on Hermes source import path
-    atomic_yaml_write = None
+from interface.user_private_files import (
+    prepare_user_runtime_directories,
+    read_user_private_text,
+    write_user_private_text,
+)
 
 
 MAX_MODEL_OPTIONS = 4
@@ -326,7 +324,7 @@ def get_active_model_option_id(
 ) -> str:
     config_path = target.hermes_home / "config.yaml"
     try:
-        user_config = _load_yaml_mapping(config_path)
+        user_config = _load_yaml_mapping(config_path, target=target)
     except ModelOptionsError:
         return model_options.primary_id
 
@@ -352,11 +350,18 @@ def _ensure_mapping(parent: dict[str, Any], key: str, path: str) -> dict[str, An
     return value
 
 
-def _load_yaml_mapping(path: Path) -> dict[str, Any]:
-    if not path.exists():
+def _load_yaml_mapping(
+    path: Path, *, target: HermesTarget | None = None
+) -> dict[str, Any]:
+    raw = (
+        read_user_private_text(target, path)
+        if target is not None
+        else path.read_text(encoding="utf-8") if path.exists() else None
+    )
+    if raw is None:
         return {}
     try:
-        data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+        data = yaml.safe_load(raw) or {}
     except yaml.YAMLError as exc:
         raise ModelOptionsError(f"Invalid YAML in {path}: {exc}") from exc
     if not isinstance(data, dict):
@@ -389,7 +394,9 @@ def _patch_user_hermes_config(
     model["default"] = option.name
     model["provider"] = option.provider
     model["base_url"] = (proxy_base_url or get_model_proxy_base_url()).rstrip("/")
-    model["api_key"] = local_model_proxy_token(target.username)
+    model["api_key"] = local_model_proxy_token(
+        target.username, target.model_proxy_token
+    )
 
     if option.api_mode:
         model["api_mode"] = option.api_mode
@@ -435,47 +442,6 @@ def strip_openai_api_key_env(existing: str | None) -> str:
     return "".join(lines)
 
 
-def _set_owner_and_mode(path: Path, uid: int, gid: int, mode: int) -> None:
-    os.chown(path, uid, gid)
-    os.chmod(path, mode)
-
-
-def _write_text_atomic(path: Path, body: str, *, uid: int, gid: int, mode: int) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp_path = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
-    try:
-        tmp_path.write_text(body, encoding="utf-8")
-        _set_owner_and_mode(tmp_path, uid, gid, mode)
-        os.replace(tmp_path, path)
-        _set_owner_and_mode(path, uid, gid, mode)
-    finally:
-        with contextlib.suppress(FileNotFoundError):
-            tmp_path.unlink()
-
-
-def _write_yaml_atomic(
-    path: Path, data: dict[str, Any], *, uid: int, gid: int, mode: int
-) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    writer = atomic_yaml_write
-    if writer is None:
-        with contextlib.suppress(Exception):
-            from utils import atomic_yaml_write as imported_writer
-
-            writer = imported_writer
-    if writer is not None:
-        writer(path, data, sort_keys=False)
-        _set_owner_and_mode(path, uid, gid, mode)
-        return
-    _write_text_atomic(
-        path,
-        yaml.safe_dump(data, sort_keys=False, allow_unicode=False),
-        uid=uid,
-        gid=gid,
-        mode=mode,
-    )
-
-
 def patch_user_active_model(
     target: HermesTarget,
     option: ModelOption,
@@ -489,36 +455,25 @@ def patch_user_active_model(
             f"Linux user {target.linux_user!r} does not exist."
         ) from exc
 
-    for directory in (
-        target.home_dir,
-        target.workdir,
-        target.hermes_home,
-        target.hermes_home / "home",
-    ):
-        directory.mkdir(parents=True, exist_ok=True)
-        _set_owner_and_mode(directory, pw.pw_uid, pw.pw_gid, 0o700)
+    prepare_user_runtime_directories(target, pw)
 
     config_path = target.hermes_home / "config.yaml"
     patched_config = _patch_user_hermes_config(
-        _load_yaml_mapping(config_path),
+        _load_yaml_mapping(config_path, target=target),
         target,
         option,
         proxy_base_url=proxy_base_url,
     )
-    _write_yaml_atomic(
+    write_user_private_text(
+        target,
         config_path,
-        patched_config,
-        uid=pw.pw_uid,
-        gid=pw.pw_gid,
-        mode=0o600,
+        yaml.safe_dump(patched_config, sort_keys=False, allow_unicode=False),
     )
 
     env_path = target.hermes_home / ".env"
-    existing_env = env_path.read_text(encoding="utf-8") if env_path.exists() else None
-    _write_text_atomic(
+    existing_env = read_user_private_text(target, env_path)
+    write_user_private_text(
+        target,
         env_path,
         strip_openai_api_key_env(existing_env),
-        uid=pw.pw_uid,
-        gid=pw.pw_gid,
-        mode=0o600,
     )

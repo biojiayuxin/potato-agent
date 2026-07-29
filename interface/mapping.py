@@ -4,8 +4,9 @@ import os
 import re
 import secrets
 import socket
+import tempfile
 from copy import deepcopy
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -21,6 +22,11 @@ from interface.secure_paths import (
     DEFAULT_STATE_DIR,
     ensure_private_directory,
     ensure_private_file,
+)
+from interface.model_proxy_config import (
+    ModelProxyConfigError,
+    generate_model_proxy_token,
+    local_model_proxy_token,
 )
 
 
@@ -79,6 +85,7 @@ class HermesTarget:
     config_overrides: dict[str, Any]
     runtime_profile_path: Path = DEFAULT_ACTIVATION_RUNTIME_PROFILE_PATH
     browser_cdp_url: str = ""
+    model_proxy_token: str = field(default_factory=generate_model_proxy_token)
 
     @property
     def api_base_url(self) -> str:
@@ -140,11 +147,113 @@ def load_mapping(
 
 def write_mapping(path: Path, config: dict[str, Any]) -> None:
     ensure_private_directory(path.parent)
-    path.write_text(
-        yaml.safe_dump(config, sort_keys=False, allow_unicode=False),
-        encoding="utf-8",
+    body = yaml.safe_dump(config, sort_keys=False, allow_unicode=False)
+    fd, raw_tmp_path = tempfile.mkstemp(
+        prefix=f".{path.name}.", suffix=".tmp", dir=path.parent
     )
-    ensure_private_file(path, mode=DEFAULT_MAPPING_FILE_MODE)
+    tmp_path = Path(raw_tmp_path)
+    try:
+        os.fchmod(fd, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            fd = -1
+            handle.write(body)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(tmp_path, path)
+        ensure_private_file(path, mode=DEFAULT_MAPPING_FILE_MODE)
+        directory_fd = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            os.fsync(directory_fd)
+        finally:
+            os.close(directory_fd)
+    finally:
+        if fd >= 0:
+            os.close(fd)
+        try:
+            tmp_path.unlink()
+        except FileNotFoundError:
+            pass
+
+
+def ensure_model_proxy_tokens(config: dict[str, Any]) -> int:
+    users = config.get("users") or []
+    if not isinstance(users, list):
+        raise RuntimeError("users_mapping.yaml has invalid users structure.")
+
+    valid_tokens: dict[str, list[int]] = {}
+    rotate_indexes: set[int] = set()
+    for index, raw_user in enumerate(users):
+        if not isinstance(raw_user, dict):
+            continue
+        username = str(raw_user.get("username") or "").strip()
+        if not username:
+            continue
+        token = str(raw_user.get("model_proxy_token") or "").strip()
+        try:
+            token = local_model_proxy_token(username, token)
+        except ModelProxyConfigError:
+            token = ""
+        if not token:
+            rotate_indexes.add(index)
+            continue
+        valid_tokens.setdefault(token, []).append(index)
+
+    for indexes in valid_tokens.values():
+        if len(indexes) > 1:
+            rotate_indexes.update(indexes)
+
+    reserved_tokens = {
+        token
+        for token, indexes in valid_tokens.items()
+        if len(indexes) == 1 and indexes[0] not in rotate_indexes
+    }
+    for index in sorted(rotate_indexes):
+        raw_user = users[index]
+        if not isinstance(raw_user, dict):
+            continue
+        token = generate_model_proxy_token()
+        while token in reserved_tokens:
+            token = generate_model_proxy_token()
+        raw_user["model_proxy_token"] = token
+        reserved_tokens.add(token)
+    return len(rotate_indexes)
+
+
+def ensure_unique_user_api_keys(config: dict[str, Any]) -> int:
+    users = config.get("users") or []
+    if not isinstance(users, list):
+        raise RuntimeError("users_mapping.yaml has invalid users structure.")
+
+    literal_keys: dict[str, list[int]] = {}
+    rotate_indexes: set[int] = set()
+    for index, raw_user in enumerate(users):
+        if not isinstance(raw_user, dict):
+            continue
+        api_key = str(raw_user.get("api_key") or "").strip()
+        if not api_key or ENV_PLACEHOLDER_RE.fullmatch(api_key):
+            rotate_indexes.add(index)
+            continue
+        literal_keys.setdefault(api_key, []).append(index)
+
+    for indexes in literal_keys.values():
+        if len(indexes) > 1:
+            rotate_indexes.update(indexes)
+
+    reserved_keys = {
+        api_key
+        for api_key, indexes in literal_keys.items()
+        if len(indexes) == 1 and indexes[0] not in rotate_indexes
+    }
+    for index in sorted(rotate_indexes):
+        raw_user = users[index]
+        if not isinstance(raw_user, dict):
+            continue
+        api_key = secrets.token_urlsafe(32)
+        while api_key in reserved_keys:
+            api_key = secrets.token_urlsafe(32)
+        raw_user["api_key"] = api_key
+        reserved_keys.add(api_key)
+    return len(rotate_indexes)
 
 
 def slugify_username(username: str) -> str:
@@ -172,28 +281,6 @@ def _is_port_available(port: int, host: str = DEFAULT_API_SERVER_HOST) -> bool:
         except OSError:
             return False
     return True
-
-
-def infer_shared_api_key_placeholder(config: dict[str, Any]) -> str | None:
-    candidates: list[str] = []
-    hermes_cfg = config.get("hermes") or {}
-    model_cfg = hermes_cfg.get("model") or {}
-    extra_env = hermes_cfg.get("extra_env") or {}
-
-    if isinstance(model_cfg, dict):
-        candidates.append(str(model_cfg.get("api_key") or ""))
-    if isinstance(extra_env, dict):
-        candidates.extend(str(value or "") for value in extra_env.values())
-
-    for item in config.get("users") or []:
-        if isinstance(item, dict):
-            candidates.append(str(item.get("api_key") or ""))
-
-    for candidate in candidates:
-        match = ENV_PLACEHOLDER_RE.fullmatch(candidate.strip())
-        if match is not None:
-            return candidate.strip()
-    return None
 
 
 def _build_target(config: dict[str, Any], raw_user: dict[str, Any]) -> HermesTarget:
@@ -265,7 +352,128 @@ def _build_target(config: dict[str, Any], raw_user: dict[str, Any]) -> HermesTar
         browser_cdp_url=local_browser_cdp_url(
             hermes_cfg.get("browser_cdp_url")
         ),
+        model_proxy_token=str(raw_user.get("model_proxy_token") or "").strip(),
     )
+
+
+def _validate_target(
+    target: HermesTarget,
+    *,
+    entry_index: int,
+) -> None:
+    entry_name = target.username or f"users[{entry_index}]"
+    required_text_fields = {
+        "username": target.username,
+        "linux_user": target.linux_user,
+        "api_server_host": target.api_server_host,
+        "api_key": target.api_key,
+        "api_server_model_name": target.api_server_model_name,
+        "systemd_service": target.systemd_service,
+    }
+    for field_name, value in required_text_fields.items():
+        if not str(value or "").strip():
+            raise RuntimeError(
+                f"Mapping entry {entry_name!r} is missing required field "
+                f"{field_name!r}."
+            )
+
+    if not 1 <= target.api_port <= 65535:
+        raise RuntimeError(
+            f"Mapping entry {entry_name!r} has an invalid api_port."
+        )
+
+    try:
+        local_model_proxy_token(target.username, target.model_proxy_token)
+    except ModelProxyConfigError as exc:
+        raise RuntimeError(
+            f"Mapping entry {entry_name!r} is missing a valid model_proxy_token."
+        ) from exc
+
+
+def _validate_unique_targets(targets: list[HermesTarget]) -> None:
+    seen: dict[str, dict[Any, str]] = {
+        "username": {},
+        "email": {},
+        "linux_user": {},
+        "home_dir": {},
+        "hermes_home": {},
+        "workdir": {},
+        "state_db_path": {},
+        "systemd_service": {},
+        "api_endpoint": {},
+        "api_key": {},
+        "model_proxy_token": {},
+    }
+    for target in targets:
+        values: dict[str, Any] = {
+            "username": target.username.casefold(),
+            "email": target.email.casefold(),
+            "linux_user": target.linux_user,
+            "home_dir": target.home_dir.resolve(),
+            "hermes_home": target.hermes_home.resolve(),
+            "workdir": target.workdir.resolve(),
+            "state_db_path": target.state_db_path.resolve(),
+            "systemd_service": target.systemd_service,
+            "api_endpoint": (target.api_server_host.casefold(), target.api_port),
+            "api_key": target.api_key,
+            "model_proxy_token": target.model_proxy_token,
+        }
+        for field_name, value in values.items():
+            if field_name == "email" and not value:
+                continue
+            previous_username = seen[field_name].get(value)
+            if previous_username is not None:
+                raise RuntimeError(
+                    f"Mapping users {previous_username!r} and {target.username!r} "
+                    f"must not share {field_name!r}."
+                )
+            seen[field_name][value] = target.username
+
+
+def build_targets_from_config(
+    config: dict[str, Any],
+    *,
+    resolve_env: bool = True,
+) -> list[HermesTarget]:
+    if not isinstance(config, dict):
+        raise RuntimeError("Top-level mapping structure must be an object.")
+    if resolve_env:
+        config = resolve_env_placeholders(config, "users_mapping")
+
+    raw_users = config.get("users")
+    if not isinstance(raw_users, list):
+        raise RuntimeError("users_mapping.yaml has invalid users structure.")
+
+    hermes_config = config.get("hermes")
+    if hermes_config is not None and not isinstance(hermes_config, dict):
+        raise RuntimeError("users_mapping.yaml has invalid hermes structure.")
+
+    targets: list[HermesTarget] = []
+    for index, raw_user in enumerate(raw_users):
+        if not isinstance(raw_user, dict):
+            raise RuntimeError(f"Mapping entry users[{index}] must be an object.")
+        username = str(raw_user.get("username") or "").strip()
+        if not username:
+            raise RuntimeError(
+                f"Mapping entry users[{index}] is missing required field 'username'."
+            )
+        if raw_user.get("api_port") is None or isinstance(
+            raw_user.get("api_port"), bool
+        ):
+            raise RuntimeError(
+                f"Mapping entry {username!r} is missing a valid api_port."
+            )
+        try:
+            target = _build_target(config, raw_user)
+        except (OSError, TypeError, ValueError) as exc:
+            raise RuntimeError(
+                f"Mapping entry {username!r} contains an invalid value."
+            ) from exc
+        _validate_target(target, entry_index=index)
+        targets.append(target)
+
+    _validate_unique_targets(targets)
+    return targets
 
 
 class MappingStore:
@@ -287,15 +495,7 @@ class MappingStore:
             return self._targets
 
         config = self.load_config(resolve_env=True)
-        targets: list[HermesTarget] = []
-        for raw_user in config.get("users") or []:
-            if not isinstance(raw_user, dict):
-                continue
-            if not raw_user.get("username") or raw_user.get("api_port") is None:
-                continue
-            target = _build_target(config, raw_user)
-            if target.username and target.api_key:
-                targets.append(target)
+        targets = build_targets_from_config(config, resolve_env=False)
 
         self._targets = targets
         self._mtime_ns = stat.st_mtime_ns
@@ -317,12 +517,13 @@ class MappingStore:
         normalized_email = (email or "").strip().lower()
         normalized_username = (username or "").strip()
         normalized_mapping_username = (mapping_username or "").strip()
-        for target in self.load_targets():
-            if (
-                normalized_mapping_username
-                and target.username == normalized_mapping_username
-            ):
-                return target
+        targets = self.load_targets()
+        if normalized_mapping_username:
+            for target in targets:
+                if target.username == normalized_mapping_username:
+                    return target
+            return None
+        for target in targets:
             if normalized_email and target.email and target.email == normalized_email:
                 return target
             if normalized_username and target.username == normalized_username:
@@ -344,9 +545,16 @@ def upsert_user_mapping_entry(
 
     entry = None
     for item in users:
-        if isinstance(item, dict) and item.get("username") == username:
+        if not isinstance(item, dict):
+            continue
+        existing_username = str(item.get("username") or "").strip()
+        if existing_username == username:
             entry = item
             break
+        if existing_username.casefold() == username.casefold():
+            raise RuntimeError(
+                f"Mapping username {username!r} conflicts with an existing user."
+            )
 
     slug = slugify_username(username)
     default_linux_user = f"hmx_{username}"
@@ -368,6 +576,16 @@ def upsert_user_mapping_entry(
 
     entry["email"] = email
     entry["display_name"] = display_name
+    normalized_email = str(email or "").strip().casefold()
+    if normalized_email and any(
+        isinstance(item, dict)
+        and item is not entry
+        and str(item.get("email") or "").strip().casefold() == normalized_email
+        for item in users
+    ):
+        raise RuntimeError(
+            f"Mapping user {username!r} must not share 'email' with another user."
+        )
     entry.setdefault("linux_user", default_linux_user)
     home_dir = Path(
         str(entry.get("home_dir") or _default_home_dir(str(entry["linux_user"])))
@@ -380,13 +598,42 @@ def upsert_user_mapping_entry(
     entry.setdefault("api_server_model_name", DEFAULT_MODEL_NAME)
     entry.setdefault("systemd_service", f"hermes-{slug}.service")
 
+    other_api_keys = {
+        str(item.get("api_key") or "").strip()
+        for item in users
+        if isinstance(item, dict) and item is not entry
+    }
     if api_key:
-        entry["api_key"] = api_key
-    else:
-        entry.setdefault(
-            "api_key",
-            infer_shared_api_key_placeholder(config) or secrets.token_urlsafe(24),
+        entry["api_key"] = str(api_key).strip()
+    elif not str(entry.get("api_key") or "").strip():
+        generated_api_key = secrets.token_urlsafe(32)
+        while generated_api_key in other_api_keys:
+            generated_api_key = secrets.token_urlsafe(32)
+        entry["api_key"] = generated_api_key
+    if str(entry.get("api_key") or "").strip() in other_api_keys:
+        raise RuntimeError(
+            f"Mapping user {username!r} must not share 'api_key' with another user."
         )
+    token = str(entry.get("model_proxy_token") or "").strip()
+    try:
+        token = local_model_proxy_token(username, token)
+    except ModelProxyConfigError:
+        token = ""
+    other_tokens = {
+        str(item.get("model_proxy_token") or "").strip()
+        for item in users
+        if isinstance(item, dict) and item is not entry
+    }
+    if token and token in other_tokens:
+        raise RuntimeError(
+            f"Mapping user {username!r} must not share 'model_proxy_token' "
+            "with another user."
+        )
+    if not token:
+        token = generate_model_proxy_token()
+        while token in other_tokens:
+            token = generate_model_proxy_token()
+        entry["model_proxy_token"] = token
 
     return entry
 

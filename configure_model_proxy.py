@@ -6,7 +6,9 @@ import argparse
 import getpass
 import os
 import pwd
+import stat
 import sys
+import tempfile
 from copy import deepcopy
 from pathlib import Path
 from typing import Any
@@ -30,6 +32,9 @@ from interface.mapping import (
     DEFAULT_MODEL_NAME,
     DEFAULT_START_PORT,
     MappingStore,
+    build_targets_from_config,
+    ensure_model_proxy_tokens,
+    ensure_unique_user_api_keys,
     load_mapping,
     write_mapping,
 )
@@ -46,10 +51,16 @@ from interface.model_options import (
 )
 from interface.model_proxy_config import (
     DEFAULT_MODEL_PROXY_PORT,
+    MODEL_PROXY_TOKEN_PLACEHOLDER,
     get_model_proxy_base_url,
     get_model_proxy_config_path,
     load_model_proxy_config,
     write_model_proxy_config,
+)
+from interface.user_private_files import (
+    prepare_user_runtime_directories,
+    read_user_private_text,
+    write_user_private_text,
 )
 
 
@@ -59,15 +70,16 @@ DEFAULT_MODEL_OPTION_ID = "primary"
 FALLBACK_ACTION_PRESERVE = "preserve"
 FALLBACK_ACTION_SET = "set"
 FALLBACK_ACTION_CLEAR = "clear"
-class ConfigureHermesModelError(RuntimeError):
+class ConfigureModelProxyError(RuntimeError):
     pass
 
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
+        allow_abbrev=False,
         description=(
-            "Create or update the Hermes upstream model configuration in "
-            "users_mapping.yaml without changing user mappings."
+            "Create or update the centralized model proxy configuration and "
+            "public model metadata."
         )
     )
     parser.add_argument(
@@ -98,9 +110,16 @@ def build_parser() -> argparse.ArgumentParser:
         "--model",
         help="Default upstream model name, e.g. gpt-5.4",
     )
-    parser.add_argument(
-        "--api-key",
-        help="Upstream API key written only to root-owned model_proxy.yaml",
+    primary_secret = parser.add_mutually_exclusive_group()
+    primary_secret.add_argument(
+        "--api-key-file",
+        type=Path,
+        help="Read the upstream API key from a private regular file.",
+    )
+    primary_secret.add_argument(
+        "--api-key-fd",
+        type=int,
+        help="Read the upstream API key from an already-open file descriptor.",
     )
     parser.add_argument(
         "--context-length",
@@ -135,7 +154,8 @@ def build_parser() -> argparse.ArgumentParser:
         metavar="KEY=VALUE,...",
         help=(
             "Additional whitelisted model option. May be passed at most three times. "
-            "Required keys: id,model,base_url,api_key. Optional keys: "
+            "Required keys: id,model,base_url and api_key_file or api_key_fd. "
+            "Optional keys: "
             "name,provider,context_length,api_mode,reasoning_effort. "
             f"api_mode defaults to {DEFAULT_MODEL_API_MODE}; "
             f"reasoning_effort defaults to {DEFAULT_REASONING_EFFORT}."
@@ -152,9 +172,16 @@ def build_parser() -> argparse.ArgumentParser:
         "--fallback-model",
         help="Fallback model name written to root-owned model_proxy.yaml only",
     )
-    parser.add_argument(
-        "--fallback-api-key",
-        help="Fallback API key written to root-owned model_proxy.yaml only",
+    fallback_secret = parser.add_mutually_exclusive_group()
+    fallback_secret.add_argument(
+        "--fallback-api-key-file",
+        type=Path,
+        help="Read the fallback API key from a private regular file.",
+    )
+    fallback_secret.add_argument(
+        "--fallback-api-key-fd",
+        type=int,
+        help="Read the fallback API key from an already-open file descriptor.",
     )
     parser.add_argument(
         "--fallback-provider",
@@ -185,7 +212,8 @@ def fallback_args_requested(args: argparse.Namespace) -> bool:
         for value in (
             args.fallback_base_url,
             args.fallback_model,
-            args.fallback_api_key,
+            args.fallback_api_key_file,
+            args.fallback_api_key_fd,
             args.fallback_provider,
         )
     )
@@ -229,7 +257,7 @@ def resolve_value(
     if not sys.stdin.isatty():
         if fallback:
             return fallback
-        raise ConfigureHermesModelError(
+        raise ConfigureModelProxyError(
             f"{label} is required when stdin is not interactive."
         )
 
@@ -244,11 +272,92 @@ def resolve_value(
     return prompt_value(label, default=fallback, secret=secret)
 
 
+MAX_SECRET_BYTES = 16 * 1024
+
+
+def _validate_secret_file_stat(file_stat: os.stat_result, *, label: str) -> None:
+    if not stat.S_ISREG(file_stat.st_mode):
+        raise ConfigureModelProxyError(f"{label} must be a regular file.")
+    if file_stat.st_mode & 0o077:
+        raise ConfigureModelProxyError(
+            f"{label} must not be accessible by group or other users."
+        )
+    if file_stat.st_uid not in {0, os.geteuid()}:
+        raise ConfigureModelProxyError(f"{label} must be owned by root or the caller.")
+
+
+def _read_secret_bytes(fd: int, *, label: str) -> str:
+    chunks: list[bytes] = []
+    size = 0
+    while True:
+        chunk = os.read(fd, min(4096, MAX_SECRET_BYTES + 1 - size))
+        if not chunk:
+            break
+        chunks.append(chunk)
+        size += len(chunk)
+        if size > MAX_SECRET_BYTES:
+            raise ConfigureModelProxyError(f"{label} is too large.")
+    try:
+        value = b"".join(chunks).decode("utf-8").strip()
+    except UnicodeDecodeError as exc:
+        raise ConfigureModelProxyError(f"{label} must contain UTF-8 text.") from exc
+    if not value or "\x00" in value or "\n" in value or "\r" in value:
+        raise ConfigureModelProxyError(f"{label} must contain exactly one non-empty line.")
+    return value
+
+
+def read_secret_file(path: Path, *, label: str) -> str:
+    resolved = path.expanduser()
+    try:
+        before = os.lstat(resolved)
+        _validate_secret_file_stat(before, label=label)
+        flags = os.O_RDONLY | os.O_CLOEXEC
+        if hasattr(os, "O_NOFOLLOW"):
+            flags |= os.O_NOFOLLOW
+        fd = os.open(resolved, flags)
+    except OSError as exc:
+        raise ConfigureModelProxyError(f"Unable to open {label}.") from exc
+    try:
+        opened = os.fstat(fd)
+        _validate_secret_file_stat(opened, label=label)
+        if (before.st_dev, before.st_ino) != (opened.st_dev, opened.st_ino):
+            raise ConfigureModelProxyError(f"{label} changed while it was being opened.")
+        return _read_secret_bytes(fd, label=label)
+    finally:
+        os.close(fd)
+
+
+def read_secret_fd(fd: int, *, label: str) -> str:
+    if fd < 0:
+        raise ConfigureModelProxyError(f"{label} file descriptor must be non-negative.")
+    try:
+        duplicate = os.dup(fd)
+    except OSError as exc:
+        raise ConfigureModelProxyError(f"Unable to read {label} file descriptor.") from exc
+    try:
+        descriptor_stat = os.fstat(duplicate)
+        if stat.S_ISREG(descriptor_stat.st_mode):
+            _validate_secret_file_stat(descriptor_stat, label=label)
+        return _read_secret_bytes(duplicate, label=label)
+    finally:
+        os.close(duplicate)
+
+
+def resolve_secret_source(
+    *, path: Path | None, fd: int | None, label: str
+) -> str | None:
+    if path is not None:
+        return read_secret_file(path, label=label)
+    if fd is not None:
+        return read_secret_fd(fd, label=label)
+    return None
+
+
 def validate_base_url(value: str) -> str:
     normalized = value.strip().rstrip("/")
     parsed = urlparse(normalized)
     if parsed.scheme not in {"http", "https"} or not parsed.netloc:
-        raise ConfigureHermesModelError(
+        raise ConfigureModelProxyError(
             "Base URL must be a full http(s) URL, e.g. https://gateway.example/v1"
         )
     return normalized
@@ -263,11 +372,11 @@ def parse_context_length(value: str | None) -> int | None:
     try:
         context_length = int(normalized)
     except ValueError as exc:
-        raise ConfigureHermesModelError(
+        raise ConfigureModelProxyError(
             "--context-length must be a plain positive integer, e.g. 1050000"
         ) from exc
     if context_length <= 0:
-        raise ConfigureHermesModelError(
+        raise ConfigureModelProxyError(
             "--context-length must be a plain positive integer, e.g. 1050000"
         )
     return context_length
@@ -281,21 +390,21 @@ def parse_option_argument(value: str) -> dict[str, Any]:
             continue
         key, separator, raw_value = part.partition("=")
         if not separator:
-            raise ConfigureHermesModelError(
+            raise ConfigureModelProxyError(
                 "--option entries must use key=value pairs separated by commas."
             )
         normalized_key = key.strip()
         if not normalized_key:
-            raise ConfigureHermesModelError("--option contains an empty key.")
+            raise ConfigureModelProxyError("--option contains an empty key.")
         parsed[normalized_key] = raw_value.strip()
     if not parsed:
-        raise ConfigureHermesModelError("--option cannot be empty.")
+        raise ConfigureModelProxyError("--option cannot be empty.")
     return parsed
 
 
 def parse_option_arguments(values: list[str]) -> list[dict[str, Any]]:
     if len(values) > MAX_MODEL_OPTIONS - 1:
-        raise ConfigureHermesModelError(
+        raise ConfigureModelProxyError(
             "--option may be provided at most three times; the whitelist supports "
             "1 primary and up to 3 optional models."
         )
@@ -303,6 +412,30 @@ def parse_option_arguments(values: list[str]) -> list[dict[str, Any]]:
     options: list[dict[str, Any]] = []
     for index, raw_value in enumerate(values):
         option = parse_option_argument(raw_value)
+        if "api_key" in option:
+            raise ConfigureModelProxyError(
+                f"--option[{index}] must not contain api_key; use api_key_file or api_key_fd."
+            )
+        key_file = option.pop("api_key_file", None)
+        key_fd = option.pop("api_key_fd", None)
+        if key_file is not None and key_fd is not None:
+            raise ConfigureModelProxyError(
+                f"--option[{index}] cannot combine api_key_file and api_key_fd."
+            )
+        if key_file is not None:
+            option["api_key"] = read_secret_file(
+                Path(str(key_file)), label=f"--option[{index}] API key file"
+            )
+        elif key_fd is not None:
+            try:
+                parsed_fd = int(key_fd)
+            except ValueError as exc:
+                raise ConfigureModelProxyError(
+                    f"--option[{index}] api_key_fd must be an integer."
+                ) from exc
+            option["api_key"] = read_secret_fd(
+                parsed_fd, label=f"--option[{index}] API key"
+            )
         try:
             parsed_context_length = parse_model_context_length(
                 option.get("context_length"), path=f"--option[{index}].context_length"
@@ -313,7 +446,7 @@ def parse_option_arguments(values: list[str]) -> list[dict[str, Any]]:
                 option.pop("context_length", None)
             normalized = model_option_from_mapping(option, path=f"--option[{index}]")
         except ModelOptionsError as exc:
-            raise ConfigureHermesModelError(str(exc)) from exc
+            raise ConfigureModelProxyError(str(exc)) from exc
         options.append(normalized.to_config())
     return options
 
@@ -366,7 +499,7 @@ def build_proxy_config(
             model, path=f"model_proxy.models[{index}]"
         )
         if not normalized.base_url or not normalized.api_key:
-            raise ConfigureHermesModelError(
+            raise ConfigureModelProxyError(
                 f"model_proxy.models[{index}] is missing required field(s): "
                 "base_url, api_key."
             )
@@ -406,7 +539,7 @@ def extract_current_fallback_provider(config: dict[str, Any]) -> dict[str, Any] 
 def standardize_fallback_config(hermes: dict[str, Any]) -> None:
     providers = hermes.get("fallback_providers")
     if providers is not None and not isinstance(providers, list):
-        raise ConfigureHermesModelError(
+        raise ConfigureModelProxyError(
             "users_mapping.yaml has invalid hermes.fallback_providers structure."
         )
 
@@ -418,7 +551,7 @@ def standardize_fallback_config(hermes: dict[str, Any]) -> None:
         return
 
     if fallback_model is not None and not isinstance(fallback_model, dict):
-        raise ConfigureHermesModelError(
+        raise ConfigureModelProxyError(
             "users_mapping.yaml has invalid hermes.fallback_model structure."
         )
 
@@ -437,7 +570,7 @@ def _ensure_mapping(parent: dict[str, Any], key: str, path: str) -> dict[str, An
         value = {}
         parent[key] = value
     elif not isinstance(value, dict):
-        raise ConfigureHermesModelError(f"{path} must be a mapping/object.")
+        raise ConfigureModelProxyError(f"{path} must be a mapping/object.")
     return value
 
 
@@ -481,7 +614,7 @@ def set_model_options(
 ) -> None:
     model = hermes.get("model")
     if not isinstance(model, dict):
-        raise ConfigureHermesModelError("users_mapping.yaml has invalid hermes.model structure.")
+        raise ConfigureModelProxyError("users_mapping.yaml has invalid hermes.model structure.")
 
     primary_option: dict[str, Any] = {
         "id": primary_id,
@@ -520,7 +653,7 @@ def set_model_options(
             seen_ids.add(normalized.id)
             normalized_options.append(normalized.to_config(include_private=False))
     except ModelOptionsError as exc:
-        raise ConfigureHermesModelError(str(exc)) from exc
+        raise ConfigureModelProxyError(str(exc)) from exc
 
     hermes["model_options"] = {
         "primary": primary.id,
@@ -533,13 +666,13 @@ def extract_existing_additional_model_options(hermes: dict[str, Any]) -> list[di
     if raw_model_options is None:
         return []
     if not isinstance(raw_model_options, dict):
-        raise ConfigureHermesModelError("hermes.model_options must be a mapping/object.")
+        raise ConfigureModelProxyError("hermes.model_options must be a mapping/object.")
     primary_id = str(raw_model_options.get("primary") or "").strip()
     raw_options = raw_model_options.get("options")
     if not isinstance(raw_options, list):
-        raise ConfigureHermesModelError("hermes.model_options.options must be a list.")
+        raise ConfigureModelProxyError("hermes.model_options.options must be a list.")
     if len(raw_options) > MAX_MODEL_OPTIONS:
-        raise ConfigureHermesModelError(
+        raise ConfigureModelProxyError(
             "hermes.model_options.options supports at most 4 entries "
             "(1 primary and up to 3 optional models)."
         )
@@ -554,13 +687,13 @@ def extract_existing_additional_model_options(hermes: dict[str, Any]) -> list[di
                 continue
             additional.append(normalized.to_config())
     except ModelOptionsError as exc:
-        raise ConfigureHermesModelError(str(exc)) from exc
+        raise ConfigureModelProxyError(str(exc)) from exc
     return additional[: MAX_MODEL_OPTIONS - 1]
 
 
 def ensure_mapping_structure(config: dict) -> tuple[dict, list]:
     if not isinstance(config, dict):
-        raise ConfigureHermesModelError(
+        raise ConfigureModelProxyError(
             "Top-level YAML structure must be a mapping/object."
         )
 
@@ -569,7 +702,7 @@ def ensure_mapping_structure(config: dict) -> tuple[dict, list]:
         users = []
         config["users"] = users
     elif not isinstance(users, list):
-        raise ConfigureHermesModelError("users_mapping.yaml has invalid users structure.")
+        raise ConfigureModelProxyError("users_mapping.yaml has invalid users structure.")
 
     config.setdefault("start_port", DEFAULT_START_PORT)
 
@@ -578,7 +711,7 @@ def ensure_mapping_structure(config: dict) -> tuple[dict, list]:
         hermes = {}
         config["hermes"] = hermes
     elif not isinstance(hermes, dict):
-        raise ConfigureHermesModelError("users_mapping.yaml has invalid hermes structure.")
+        raise ConfigureModelProxyError("users_mapping.yaml has invalid hermes structure.")
 
     hermes.setdefault("executable", DEFAULT_HERMES_BIN)
     hermes.setdefault("api_server_host", DEFAULT_API_SERVER_HOST)
@@ -589,7 +722,7 @@ def ensure_mapping_structure(config: dict) -> tuple[dict, list]:
         config_overrides = {}
         hermes["config_overrides"] = config_overrides
     elif not isinstance(config_overrides, dict):
-        raise ConfigureHermesModelError(
+        raise ConfigureModelProxyError(
             "users_mapping.yaml has invalid hermes.config_overrides structure."
         )
 
@@ -598,7 +731,7 @@ def ensure_mapping_structure(config: dict) -> tuple[dict, list]:
         agent = {}
         config_overrides["agent"] = agent
     elif not isinstance(agent, dict):
-        raise ConfigureHermesModelError(
+        raise ConfigureModelProxyError(
             "users_mapping.yaml has invalid hermes.config_overrides.agent structure."
         )
     agent["reasoning_effort"] = DEFAULT_REASONING_EFFORT
@@ -608,7 +741,7 @@ def ensure_mapping_structure(config: dict) -> tuple[dict, list]:
         terminal = {}
         hermes["terminal"] = terminal
     elif not isinstance(terminal, dict):
-        raise ConfigureHermesModelError(
+        raise ConfigureModelProxyError(
             "users_mapping.yaml has invalid hermes.terminal structure."
         )
     terminal.setdefault("backend", "local")
@@ -619,7 +752,7 @@ def ensure_mapping_structure(config: dict) -> tuple[dict, list]:
         model = {}
         hermes["model"] = model
     elif not isinstance(model, dict):
-        raise ConfigureHermesModelError(
+        raise ConfigureModelProxyError(
             "users_mapping.yaml has invalid hermes.model structure."
         )
 
@@ -628,7 +761,7 @@ def ensure_mapping_structure(config: dict) -> tuple[dict, list]:
         extra_env = {}
         hermes["extra_env"] = extra_env
     elif not isinstance(extra_env, dict):
-        raise ConfigureHermesModelError(
+        raise ConfigureModelProxyError(
             "users_mapping.yaml has invalid hermes.extra_env structure."
         )
 
@@ -660,11 +793,7 @@ def build_new_config() -> dict:
 
 
 def mask_secret(value: str | None) -> str:
-    if not value:
-        return "<empty>"
-    if len(value) <= 8:
-        return "*" * len(value)
-    return f"{value[:4]}...{value[-4:]}"
+    return "<set>" if value else "<empty>"
 
 
 def format_fallback_provider(value: dict[str, Any] | None) -> str:
@@ -722,7 +851,7 @@ def confirm_apply_to_users(
     new_fallback_provider: dict[str, Any] | None,
 ) -> bool:
     if not sys.stdin.isatty():
-        raise ConfigureHermesModelError(
+        raise ConfigureModelProxyError(
             "--apply-to-users requires an interactive terminal for confirmation."
         )
 
@@ -757,22 +886,18 @@ def confirm_apply_to_users(
     return answer == "APPLY"
 
 
-def _set_owner_and_mode(path: Path, uid: int, gid: int, mode: int) -> None:
-    os.chown(path, uid, gid)
-    os.chmod(path, mode)
-
-
-def _load_user_config(config_path: Path) -> dict[str, Any]:
-    if not config_path.exists():
+def _load_user_config(target, config_path: Path) -> dict[str, Any]:
+    raw = read_user_private_text(target, config_path)
+    if raw is None:
         return {}
     try:
-        data = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
+        data = yaml.safe_load(raw) or {}
     except yaml.YAMLError as exc:
-        raise ConfigureHermesModelError(
+        raise ConfigureModelProxyError(
             f"Invalid YAML in user Hermes config {config_path}: {exc}"
         ) from exc
     if not isinstance(data, dict):
-        raise ConfigureHermesModelError(
+        raise ConfigureModelProxyError(
             f"User Hermes config {config_path} must be a mapping/object."
         )
     return data
@@ -804,7 +929,7 @@ def _patch_user_hermes_config(
 
     generated_model = generated.get("model")
     if not isinstance(generated_model, dict):
-        raise ConfigureHermesModelError("Generated Hermes config is missing model.")
+        raise ConfigureModelProxyError("Generated Hermes config is missing model.")
 
     model = _ensure_mapping(patched, "model", "model")
     for key in ("default", "provider", "base_url", "api_key"):
@@ -834,7 +959,7 @@ def _patch_user_hermes_config(
         patched.pop("fallback_providers", None)
         patched.pop("fallback_model", None)
     elif fallback_action != FALLBACK_ACTION_PRESERVE:
-        raise ConfigureHermesModelError(f"Unknown fallback action: {fallback_action}")
+        raise ConfigureModelProxyError(f"Unknown fallback action: {fallback_action}")
 
     patched.pop("fallback_providers", None)
     patched.pop("fallback_model", None)
@@ -854,36 +979,31 @@ def apply_user_runtime_model_patch(
     except KeyError as exc:
         raise RuntimeError(f"Linux user {target.linux_user!r} does not exist.") from exc
 
-    gid = pw.pw_gid
-    for directory in [
-        target.home_dir,
-        target.workdir,
-        target.hermes_home,
-        target.hermes_home / "home",
-    ]:
-        directory.mkdir(parents=True, exist_ok=True)
-        _set_owner_and_mode(directory, pw.pw_uid, gid, 0o700)
+    prepare_user_runtime_directories(target, pw)
 
     generated = build_config_data(resolved_config, target)
 
     config_path = target.hermes_home / "config.yaml"
-    config_exists = config_path.exists()
+    existing_config = _load_user_config(target, config_path)
     patched_config = _patch_user_hermes_config(
-        _load_user_config(config_path) if config_exists else deepcopy(generated),
+        existing_config if existing_config else deepcopy(generated),
         generated,
         context_length=context_length,
         fallback_action=fallback_action,
     )
-    config_path.write_text(
+    write_user_private_text(
+        target,
+        config_path,
         yaml.safe_dump(patched_config, sort_keys=False, allow_unicode=False),
-        encoding="utf-8",
     )
-    _set_owner_and_mode(config_path, pw.pw_uid, gid, 0o600)
 
     env_path = target.hermes_home / ".env"
-    existing_env = env_path.read_text(encoding="utf-8") if env_path.exists() else None
-    env_path.write_text(strip_openai_api_key_env(existing_env), encoding="utf-8")
-    _set_owner_and_mode(env_path, pw.pw_uid, gid, 0o600)
+    existing_env = read_user_private_text(target, env_path)
+    write_user_private_text(
+        target,
+        env_path,
+        strip_openai_api_key_env(existing_env),
+    )
 
 
 def apply_model_config_to_users(
@@ -901,6 +1021,7 @@ def apply_model_config_to_users(
     new_fallback_provider: dict[str, Any] | None,
     context_length_provided: bool = True,
     fallback_action: str = FALLBACK_ACTION_PRESERVE,
+    confirmation_complete: bool = False,
 ) -> None:
     mapping_store = MappingStore(mapping_path)
     targets = mapping_store.load_targets()
@@ -911,7 +1032,7 @@ def apply_model_config_to_users(
     require_root()
     require_binary("systemctl")
 
-    if not confirm_apply_to_users(
+    if not confirmation_complete and not confirm_apply_to_users(
         mapping_path,
         targets,
         old_base_url=old_base_url,
@@ -925,7 +1046,7 @@ def apply_model_config_to_users(
         old_fallback_provider=old_fallback_provider,
         new_fallback_provider=new_fallback_provider,
     ):
-        print("Skipped applying config to existing users. users_mapping.yaml was updated.")
+        print("Skipped applying config to existing users.")
         return
 
     resolved_config = load_mapping(mapping_path, resolve_env=True)
@@ -962,8 +1083,12 @@ def extract_current_values(
     current_api_key = str(model.get("api_key") or extra_env.get("OPENAI_API_KEY") or "").strip() or None
     if current_base_url == get_model_proxy_base_url(config):
         current_base_url = None
-    if current_api_key == "{username}-local-token" or (
-        current_api_key and current_api_key.endswith("-local-token")
+    if current_api_key == MODEL_PROXY_TOKEN_PLACEHOLDER or (
+        current_api_key
+        and (
+            current_api_key.endswith("-local-token")
+            or current_api_key.startswith("pmp_")
+        )
     ):
         current_api_key = None
     current_context_length = model.get("context_length")
@@ -996,12 +1121,12 @@ def main() -> int:
     )
 
     if args.clear_fallback and fallback_args_requested(args):
-        raise ConfigureHermesModelError(
+        raise ConfigureModelProxyError(
             "--clear-fallback cannot be combined with --fallback-* options."
         )
 
     if not mapping_path.parent.exists():
-        raise ConfigureHermesModelError(
+        raise ConfigureModelProxyError(
             f"Parent directory does not exist: {mapping_path.parent}"
         )
 
@@ -1015,6 +1140,17 @@ def main() -> int:
     ) = extract_current_values(config, proxy_config_path)
     current_fallback_provider = extract_current_fallback_provider(config)
     model, users = ensure_mapping_structure(config)
+    generated_user_tokens = ensure_model_proxy_tokens(config)
+    generated_user_api_keys = ensure_unique_user_api_keys(config)
+    if (
+        (generated_user_tokens or generated_user_api_keys)
+        and users
+        and not args.apply_to_users
+    ):
+        raise ConfigureModelProxyError(
+            "Existing users need new private credentials; rerun with "
+            "--apply-to-users to update their private Hermes configs."
+        )
     hermes = config["hermes"]
     extra_env = hermes["extra_env"]
     hermes["model_proxy"] = {
@@ -1036,8 +1172,13 @@ def main() -> int:
         current=current_model_name,
         default=DEFAULT_UPSTREAM_MODEL_NAME,
     )
+    provided_api_key = resolve_secret_source(
+        path=args.api_key_file,
+        fd=args.api_key_fd,
+        label="Upstream API key",
+    )
     api_key = resolve_value(
-        args.api_key,
+        provided_api_key,
         label="Upstream API key",
         current=current_api_key,
         secret=True,
@@ -1067,7 +1208,7 @@ def main() -> int:
     model["default"] = model_name
     model["provider"] = "custom"
     model["base_url"] = get_model_proxy_base_url(config)
-    model["api_key"] = "{username}-local-token"
+    model["api_key"] = MODEL_PROXY_TOKEN_PLACEHOLDER
     context_length = parse_context_length(args.context_length)
     if context_length is not None:
         model["context_length"] = context_length
@@ -1115,8 +1256,13 @@ def main() -> int:
                 current=str(existing_fallback.get("base_url") or "").strip() or None,
             )
         )
+        provided_fallback_api_key = resolve_secret_source(
+            path=args.fallback_api_key_file,
+            fd=args.fallback_api_key_fd,
+            label="Fallback API key",
+        )
         fallback_api_key = resolve_value(
-            args.fallback_api_key,
+            provided_fallback_api_key,
             label="Fallback API key",
             current=str(existing_fallback.get("api_key") or "").strip() or None,
             secret=True,
@@ -1178,6 +1324,30 @@ def main() -> int:
         port=args.proxy_port,
         models=proxy_models,
     )
+
+    targets = build_targets_from_config(config) if users else []
+    apply_confirmed = False
+    if args.apply_to_users and users:
+        require_root()
+        require_binary("systemctl")
+        if not confirm_apply_to_users(
+            mapping_path,
+            targets,
+            old_base_url=current_base_url,
+            new_base_url=base_url,
+            old_model_name=current_model_name,
+            new_model_name=model_name,
+            old_context_length=current_context_length,
+            new_context_length=new_context_length,
+            old_api_key=current_api_key,
+            new_api_key=api_key,
+            old_fallback_provider=current_fallback_provider,
+            new_fallback_provider=new_fallback_provider,
+        ):
+            print("No configuration files were changed.")
+            return 0
+        apply_confirmed = True
+
     write_model_proxy_config(proxy_config_path, proxy_config)
 
     write_mapping(mapping_path, config)
@@ -1198,7 +1368,10 @@ def main() -> int:
         "hermes.config_overrides.auxiliary.compression.context_length, "
         "model_proxy.yaml.models"
     )
-    print("File mode: 640")
+    if os.geteuid() == 0:
+        print("Proxy config owner/mode: root:potato-model-proxy 0640")
+    else:
+        print("Proxy config mode: 0600 (development caller)")
     if created:
         print("Users section: []")
 
@@ -1217,6 +1390,7 @@ def main() -> int:
             new_fallback_provider=new_fallback_provider,
             context_length_provided=context_length is not None,
             fallback_action=fallback_action,
+            confirmation_complete=apply_confirmed,
         )
 
     return 0

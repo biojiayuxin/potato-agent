@@ -25,6 +25,7 @@ DEFAULT_ARCHIVE_DB_PATH = Path(
 def _connect_archive_db(db_path: Path = DEFAULT_ARCHIVE_DB_PATH) -> sqlite3.Connection:
     ensure_private_directory(db_path.parent, mode=DEFAULT_PRIVATE_WRITABLE_DIR_MODE)
     conn = sqlite3.connect(str(db_path))
+    conn.execute("PRAGMA secure_delete = ON")
     conn.row_factory = sqlite3.Row
     return conn
 
@@ -84,6 +85,7 @@ def archive_session_record(
     draft_title: str,
     db_path: Path = DEFAULT_ARCHIVE_DB_PATH,
 ) -> bool:
+    del email_snapshot
     ensure_archive_db(db_path)
     archived_at = int(time.time())
     original_session_id = str(session.get("id") or "")
@@ -108,7 +110,7 @@ insert into archived_sessions (
                 str(uuid.uuid4()),
                 archived_at,
                 mapping_username,
-                email_snapshot,
+                "",
                 original_session_id,
                 str(session.get("source") or ""),
                 str(session.get("model") or ""),
@@ -171,8 +173,54 @@ def list_archive_runs(
     return [dict(row) for row in rows]
 
 
-def count_archived_sessions(db_path: Path = DEFAULT_ARCHIVE_DB_PATH) -> int:
+def cleanup_expired_archived_sessions(
+    *,
+    retention_days: int,
+    now: int | None = None,
+    db_path: Path = DEFAULT_ARCHIVE_DB_PATH,
+) -> dict[str, int]:
+    normalized_retention_days = int(retention_days)
+    if normalized_retention_days < 1:
+        raise ValueError("archive storage retention must be at least one day")
+
+    ensure_archive_db(db_path)
+    checked_at = int(time.time()) if now is None else int(now)
+    cutoff = checked_at - (normalized_retention_days * 86400)
+    with _connect_archive_db(db_path) as conn:
+        conn.execute("begin immediate")
+        archived_cursor = conn.execute(
+            "delete from archived_sessions where archived_at <= ?",
+            (cutoff,),
+        )
+        runs_cursor = conn.execute(
+            "delete from archive_runs "
+            "where coalesce(finished_at, started_at) <= ?",
+            (cutoff,),
+        )
+        conn.commit()
+        conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+    ensure_sqlite_sidecar_modes(db_path)
+    return {
+        "archived_sessions_deleted": max(int(archived_cursor.rowcount), 0),
+        "archive_runs_deleted": max(int(runs_cursor.rowcount), 0),
+    }
+
+
+def count_archived_sessions(
+    db_path: Path = DEFAULT_ARCHIVE_DB_PATH,
+    *,
+    mapping_username: str | None = None,
+) -> int:
     ensure_archive_db(db_path)
     with _connect_archive_db(db_path) as conn:
-        row = conn.execute("select count(*) as count from archived_sessions").fetchone()
+        if mapping_username is None:
+            row = conn.execute(
+                "select count(*) as count from archived_sessions"
+            ).fetchone()
+        else:
+            row = conn.execute(
+                "select count(*) as count from archived_sessions "
+                "where mapping_username = ?",
+                (mapping_username.strip(),),
+            ).fetchone()
     return int(row["count"] or 0) if row is not None else 0

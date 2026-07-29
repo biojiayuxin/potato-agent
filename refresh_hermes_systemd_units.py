@@ -509,6 +509,17 @@ def _validate_rendered_unit(content: bytes, target: HermesTarget) -> None:
         "Environment=HERMES_AGENT_BROWSER_BIN_DIR=/opt/potato-hermes-lite/current/browser/bin",
         "Environment=AGENT_BROWSER_EXECUTABLE_PATH=/opt/potato-hermes-lite/current/browser/chrome/chrome-linux64/chrome",
         f"Environment=HERMES_RUNTIME_PROFILE_PATH={target.runtime_profile_path}",
+        f"Environment=TMPDIR={target.hermes_home}/tmp",
+        f"ExecStartPre=/usr/bin/install -d -m 0700 -- {target.hermes_home}/tmp",
+        "UMask=0077",
+        "PrivateTmp=yes",
+        "ProtectProc=invisible",
+        "ProcSubset=pid",
+        "NoNewPrivileges=yes",
+        "InaccessiblePaths=-/srv/potato_agent",
+        "InaccessiblePaths=-/var/lib/potato-agent",
+        "InaccessiblePaths=-/etc/potato-agent",
+        "InaccessiblePaths=-/opt/interface-env",
     }
     lines = set(rendered.splitlines())
     missing = sorted(required_lines - lines)

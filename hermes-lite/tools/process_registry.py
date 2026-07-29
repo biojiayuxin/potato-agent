@@ -35,7 +35,9 @@ import os
 import platform
 import shlex
 import signal
+import stat
 import subprocess
+import tempfile
 import threading
 import time
 import uuid
@@ -74,6 +76,148 @@ WATCH_STRIKE_LIMIT = 3            # Strikes in a row → disable watch + promote
 WATCH_GLOBAL_MAX_PER_WINDOW = 15
 WATCH_GLOBAL_WINDOW_SECONDS = 10
 WATCH_GLOBAL_COOLDOWN_SECONDS = 30
+
+
+@dataclass
+class _PrivateShellProgram:
+    """Shell program source that keeps command text out of process argv."""
+
+    source_arg: str
+    payload: bytes = field(default=b"", repr=False)
+    read_fd: Optional[int] = field(default=None, repr=False)
+    write_fd: Optional[int] = field(default=None, repr=False)
+    script_path: Optional[str] = field(default=None, repr=False)
+    script_dir: Optional[str] = field(default=None, repr=False)
+
+    @classmethod
+    def create(cls, command: str) -> "_PrivateShellProgram":
+        payload = f"set +m\n{command}".encode("utf-8")
+        if not _IS_WINDOWS:
+            read_fd, write_fd = os.pipe()
+            return cls(
+                source_arg=f"/dev/fd/{read_fd}",
+                payload=payload,
+                read_fd=read_fd,
+                write_fd=write_fd,
+            )
+
+        script_dir = tempfile.mkdtemp(prefix="hermes-background-")
+        script_path = None
+        script_fd = None
+        try:
+            try:
+                os.chmod(script_dir, 0o700)
+            except OSError:
+                # Windows permission enforcement comes from the user's temp
+                # directory ACL; chmod is only a best-effort extra guard.
+                pass
+            script_fd, script_path = tempfile.mkstemp(
+                prefix="command-",
+                suffix=".sh",
+                dir=script_dir,
+            )
+            if hasattr(os, "fchmod"):
+                os.fchmod(script_fd, 0o600)
+            with os.fdopen(script_fd, "wb") as script_file:
+                script_fd = None
+                script_file.write(payload)
+            return cls(
+                source_arg=script_path.replace("\\", "/"),
+                script_path=script_path,
+                script_dir=script_dir,
+            )
+        except BaseException:
+            if script_fd is not None:
+                try:
+                    os.close(script_fd)
+                except OSError:
+                    pass
+            if script_path:
+                try:
+                    os.unlink(script_path)
+                except OSError:
+                    pass
+            try:
+                os.rmdir(script_dir)
+            except OSError:
+                pass
+            raise
+
+    def argv(self, shell: str) -> List[str]:
+        if _IS_WINDOWS:
+            return [shell, "-li", self.source_arg]
+        # Keep the login/interactive/-c behavior used historically, but make
+        # the -c text fixed and source the private pipe instead of embedding
+        # the user command in argv.
+        return [shell, "-lic", f". {self.source_arg}"]
+
+    def pass_fds(self) -> tuple[int, ...]:
+        return (self.read_fd,) if self.read_fd is not None else ()
+
+    def complete_spawn(self, session: "ProcessSession") -> None:
+        """Close parent-only FDs and start feeding a successfully spawned shell."""
+        if self.read_fd is not None:
+            os.close(self.read_fd)
+            self.read_fd = None
+
+        session._script_path = self.script_path
+        session._script_dir = self.script_dir
+        self.script_path = None
+        self.script_dir = None
+
+        if self.write_fd is None:
+            self.payload = b""
+            return
+
+        write_fd = self.write_fd
+        payload = self.payload
+        self.write_fd = None
+        self.payload = b""
+
+        def _write_program() -> None:
+            try:
+                with os.fdopen(write_fd, "wb") as script_pipe:
+                    script_pipe.write(payload)
+            except (BrokenPipeError, OSError):
+                pass
+
+        writer = threading.Thread(
+            target=_write_program,
+            daemon=True,
+            name=f"proc-script-writer-{session.id}",
+        )
+        try:
+            writer.start()
+        except BaseException:
+            try:
+                os.close(write_fd)
+            except OSError:
+                pass
+            raise
+
+    def cleanup(self) -> None:
+        """Release resources when spawning did not complete."""
+        for fd_name in ("read_fd", "write_fd"):
+            fd = getattr(self, fd_name)
+            if fd is not None:
+                try:
+                    os.close(fd)
+                except OSError:
+                    pass
+                setattr(self, fd_name, None)
+        if self.script_path:
+            try:
+                os.unlink(self.script_path)
+            except OSError:
+                pass
+            self.script_path = None
+        if self.script_dir:
+            try:
+                os.rmdir(self.script_dir)
+            except OSError:
+                pass
+            self.script_dir = None
+        self.payload = b""
 
 
 def format_uptime_short(seconds: int) -> str:
@@ -136,6 +280,8 @@ class ProcessSession:
     _lock: threading.Lock = field(default_factory=threading.Lock)
     _reader_thread: Optional[threading.Thread] = field(default=None, repr=False)
     _pty: Any = field(default=None, repr=False)  # ptyprocess handle (when use_pty=True)
+    _script_path: Optional[str] = field(default=None, repr=False)
+    _script_dir: Optional[str] = field(default=None, repr=False)
 
 
 class ProcessRegistry:
@@ -582,6 +728,9 @@ class ProcessRegistry:
 
         if use_pty:
             # Try PTY mode for interactive CLI tools
+            shell_program = None
+            pty_proc = None
+            pty_succeeded = False
             try:
                 if _IS_WINDOWS:
                     from winpty import PtyProcess as _PtyProcessCls
@@ -590,12 +739,28 @@ class ProcessRegistry:
                 user_shell = _find_shell()
                 pty_env = _sanitize_subprocess_env(os.environ, env_vars)
                 pty_env["PYTHONUNBUFFERED"] = "1"
+                shell_program = _PrivateShellProgram.create(command)
+                pty_spawn_kwargs = {}
+                if not _IS_WINDOWS:
+                    pty_spawn_kwargs["pass_fds"] = shell_program.pass_fds()
+                    script_read_fd = shell_program.read_fd
+
+                    def _make_script_fd_inheritable() -> None:
+                        # ptyprocess preserves pass_fds while closing other
+                        # descriptors, but unlike Popen it does not clear
+                        # FD_CLOEXEC. Do that in the child only, avoiding an
+                        # inheritable-FD race with other gateway threads.
+                        os.set_inheritable(script_read_fd, True)
+
+                    pty_spawn_kwargs["preexec_fn"] = _make_script_fd_inheritable
                 pty_proc = _PtyProcessCls.spawn(
-                    [user_shell, "-lic", f"set +m; {command}"],
+                    shell_program.argv(user_shell),
                     cwd=session.cwd,
                     env=pty_env,
                     dimensions=(30, 120),
+                    **pty_spawn_kwargs,
                 )
+                shell_program.complete_spawn(session)
                 session.pid = pty_proc.pid
                 session.pid_start_time = self._get_host_pid_start_time(session.pid)
                 # Store the pty handle on the session for read/write
@@ -616,12 +781,24 @@ class ProcessRegistry:
                     self._running[session.id] = session
 
                 self._write_checkpoint()
+                pty_succeeded = True
                 return session
 
             except ImportError:
                 logger.warning("ptyprocess not installed, falling back to pipe mode")
             except Exception as e:
                 logger.warning("PTY spawn failed (%s), falling back to pipe mode", e)
+            finally:
+                if not pty_succeeded and pty_proc is not None:
+                    try:
+                        pty_proc.terminate(force=True)
+                    except Exception:
+                        pass
+                if not pty_succeeded:
+                    session._pty = None
+                    if shell_program is not None:
+                        shell_program.cleanup()
+                    self._cleanup_session_script(session)
 
         # Standard Popen path (non-PTY or PTY fallback)
         # Use the user's login shell for consistency with LocalEnvironment --
@@ -632,21 +809,48 @@ class ProcessRegistry:
         # stdout is a pipe, hiding output from process(action="poll")).
         bg_env = _sanitize_subprocess_env(os.environ, env_vars)
         bg_env["PYTHONUNBUFFERED"] = "1"
-        _popen_kwargs = {"creationflags": windows_hide_flags()} if _IS_WINDOWS else {}
-
-        proc = subprocess.Popen(
-            [user_shell, "-lic", f"set +m; {command}"],
-            text=True,
-            cwd=session.cwd,
-            env=bg_env,
-            encoding="utf-8",
-            errors="replace",
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            stdin=subprocess.DEVNULL,
-            preexec_fn=None if _IS_WINDOWS else os.setsid,
-            **_popen_kwargs,
+        shell_program = _PrivateShellProgram.create(command)
+        _popen_kwargs = (
+            {"creationflags": windows_hide_flags()}
+            if _IS_WINDOWS
+            else {"pass_fds": shell_program.pass_fds()}
         )
+
+        proc = None
+        try:
+            proc = subprocess.Popen(
+                shell_program.argv(user_shell),
+                text=True,
+                cwd=session.cwd,
+                env=bg_env,
+                encoding="utf-8",
+                errors="replace",
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                stdin=subprocess.DEVNULL,
+                preexec_fn=None if _IS_WINDOWS else os.setsid,
+                **_popen_kwargs,
+            )
+            shell_program.complete_spawn(session)
+        except BaseException:
+            if proc is not None:
+                try:
+                    if not _IS_WINDOWS:
+                        try:
+                            os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+                        except (ProcessLookupError, PermissionError, OSError):
+                            proc.kill()
+                    else:
+                        proc.kill()
+                except Exception:
+                    pass
+                try:
+                    proc.wait(timeout=5)
+                except Exception:
+                    pass
+            shell_program.cleanup()
+            self._cleanup_session_script(session)
+            raise
 
         session.process = proc
         session.pid = proc.pid
@@ -687,6 +891,8 @@ class ProcessRegistry:
                 proc.wait(timeout=5)
             except Exception:
                 pass
+            shell_program.cleanup()
+            self._cleanup_session_script(session)
             raise
 
         return session
@@ -903,6 +1109,42 @@ class ProcessRegistry:
         session.exit_code = pty.exitstatus if hasattr(pty, 'exitstatus') else -1
         self._move_to_finished(session)
 
+    @staticmethod
+    def _cleanup_session_script(session: ProcessSession) -> None:
+        """Remove a Windows command script and its private directory."""
+        with session._lock:
+            script_path = session._script_path
+            script_dir = session._script_dir
+
+        path_removed = not script_path
+        if script_path:
+            try:
+                os.unlink(script_path)
+                path_removed = True
+            except FileNotFoundError:
+                path_removed = True
+            except OSError:
+                # A terminating Windows shell may still hold the script open.
+                # Keep the path on the session so its reader thread can retry
+                # cleanup after the process has fully exited.
+                path_removed = False
+
+        dir_removed = not script_dir
+        if script_dir and path_removed:
+            try:
+                os.rmdir(script_dir)
+                dir_removed = True
+            except FileNotFoundError:
+                dir_removed = True
+            except OSError:
+                dir_removed = False
+
+        with session._lock:
+            if path_removed and session._script_path == script_path:
+                session._script_path = None
+            if dir_removed and session._script_dir == script_dir:
+                session._script_dir = None
+
     def _move_to_finished(self, session: ProcessSession):
         """Move a session from running to finished.
 
@@ -910,6 +1152,7 @@ class ProcessRegistry:
         with the reader thread), the second call is a no-op — no duplicate
         completion notification is enqueued.
         """
+        self._cleanup_session_script(session)
         with self._lock:
             was_running = self._running.pop(session.id, None) is not None
             self._finished[session.id] = session
@@ -1464,7 +1707,7 @@ class ProcessRegistry:
             
             # Atomic write to avoid corruption on crash
             from utils import atomic_json_write
-            atomic_json_write(CHECKPOINT_PATH, entries)
+            atomic_json_write(CHECKPOINT_PATH, entries, mode=0o600)
         except Exception as e:
             logger.debug("Failed to write checkpoint file: %s", e, exc_info=True)
 
@@ -1474,12 +1717,39 @@ class ProcessRegistry:
 
         Returns the number of processes recovered as detached.
         """
-        if not CHECKPOINT_PATH.exists():
-            return 0
-
+        descriptor = -1
         try:
-            entries = json.loads(CHECKPOINT_PATH.read_text(encoding="utf-8"))
+            flags = (
+                os.O_RDONLY
+                | getattr(os, "O_CLOEXEC", 0)
+                | getattr(os, "O_NONBLOCK", 0)
+            )
+            if hasattr(os, "O_NOFOLLOW"):
+                flags |= os.O_NOFOLLOW
+            descriptor = os.open(CHECKPOINT_PATH, flags)
+            checkpoint_stat = os.fstat(descriptor)
+            if not stat.S_ISREG(checkpoint_stat.st_mode):
+                return 0
+            if hasattr(os, "fchmod"):
+                # Legacy releases could leave the raw command checkpoint at
+                # 0644. Tighten the already-open inode before parsing it, and
+                # refuse symlinks via O_NOFOLLOW to avoid chmod/read races.
+                os.fchmod(descriptor, 0o600)
+            with os.fdopen(descriptor, "r", encoding="utf-8") as checkpoint_file:
+                descriptor = -1
+                entries = json.load(checkpoint_file)
+        except FileNotFoundError:
+            return 0
         except Exception:
+            return 0
+        finally:
+            if descriptor >= 0:
+                try:
+                    os.close(descriptor)
+                except OSError:
+                    pass
+
+        if not isinstance(entries, list):
             return 0
 
         recovered = 0

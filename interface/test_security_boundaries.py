@@ -90,7 +90,11 @@ def test_request_body_limit_rejects_forged_or_oversize_bodies(
 
 def test_interface_subprocess_env_drops_static_and_dynamic_secrets(monkeypatch) -> None:
     sentinels = {
+        "CREDENTIALS_DIRECTORY": "/run/credentials/potato-interface.service",
+        "INTERFACE_RESEND_API_KEY": "resend-secret",
         "INTERFACE_SESSION_SECRET": "interface-secret",
+        "INTERFACE_SESSION_SECRET_FILE": "/private/session-secret",
+        "INTERFACE_RESEND_API_KEY_FILE": "/private/resend-api-key",
         "OPENAI_API_KEY": "provider-secret",
         "GITHUB_TOKEN": "github-secret",
         "AUXILIARY_TEST_TOKEN": "aux-secret",
