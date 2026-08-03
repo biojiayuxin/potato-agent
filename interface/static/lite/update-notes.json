@@ -1,6 +1,13 @@
 {
   "updates": [
     {
+      "version": "2026-08-03-001",
+      "title": "Security fixes",
+      "date": "August 3, 2026",
+      "summary": "Fixed several security issues.",
+      "items": []
+    },
+    {
       "version": "2026-07-26-001",
       "title": "Hermes v0.19",
       "date": "July 26, 2026",
