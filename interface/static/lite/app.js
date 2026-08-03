@@ -369,8 +369,6 @@ const DAILY_UPDATES_COPY = {
     empty: 'No potato research updates are available yet.',
     error: 'Daily updates are unavailable.',
     retry: 'Retry',
-    pubmedDate: 'PubMed',
-    publicationDate: 'Published',
     undated: 'Date unavailable',
     untitled: 'Untitled study',
     noSummary: 'Summary unavailable.',
@@ -390,8 +388,6 @@ const DAILY_UPDATES_COPY = {
     empty: '暂时没有可用的马铃薯研究更新。',
     error: 'Daily Updates 暂时不可用。',
     retry: '重试',
-    pubmedDate: 'PubMed 收录',
-    publicationDate: '发表',
     undated: '日期未知',
     untitled: '未命名研究',
     noSummary: '暂无总结。',
@@ -609,18 +605,6 @@ const createDailyUpdateArticle = (item, position) => {
   const meta = document.createElement('div');
   meta.className = 'daily-update-meta';
   appendDailyUpdateMeta(meta, item.journal);
-  if (item.pubmedDate) {
-    appendDailyUpdateMeta(
-      meta,
-      `${getDailyUpdatesCopy('pubmedDate')}: ${formatDailyUpdateDate(item.pubmedDate)}`,
-    );
-  }
-  if (item.publicationDate && item.publicationDate !== item.pubmedDate) {
-    appendDailyUpdateMeta(
-      meta,
-      `${getDailyUpdatesCopy('publicationDate')}: ${formatDailyUpdateDate(item.publicationDate)}`,
-    );
-  }
   if (item.doi) appendDailyUpdateMeta(meta, `DOI: ${item.doi}`);
   article.append(meta);
 

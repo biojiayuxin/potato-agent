@@ -83,6 +83,9 @@ def test_genome_browser_entry_and_static_paths_are_prefixed() -> None:
     assert 'class="browser-button" href="/genomes/browser"' in genomes_index
     assert 'src="/static/genomes/assets/pan_core_accumulation_compact.svg"' in genomes_index
     assert 'src="/static/genomes/assets/pangenome_gene_family_distribution_ybreak.svg"' in genomes_index
+    assert genomes_index.count("Assembly Ploidy") == 2
+    assert "All assembly ploidies" in genomes_index
+    assert "All ploidy levels" not in genomes_index
 
     genome_index = (REPO_ROOT / "interface/static/genome_browser/index.html").read_text(
         encoding="utf-8"

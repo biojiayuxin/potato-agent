@@ -34,8 +34,45 @@ def test_daily_updates_layout_keeps_login_first_on_small_screens() -> None:
     assert ".daily-updates-panel" in mobile
     assert "order: 2;" in mobile
     assert ".high-resolution-view .login-stage" in styles
-    assert "styles.css?v=20260802-daily-updates" in index
-    assert "app.js?v=20260803-daily-updates-refresh" in index
+    assert "styles.css?v=20260803-daily-research-meta-type" in index
+    assert "app.js?v=20260803-daily-research-meta" in index
+
+
+def test_daily_updates_hides_redundant_pubmed_metadata_and_uses_larger_type() -> None:
+    index = LITE_INDEX_PATH.read_text(encoding="utf-8")
+    source = LITE_APP_PATH.read_text(encoding="utf-8")
+    styles = LITE_STYLES_PATH.read_text(encoding="utf-8")
+    copy = source[source.index("const DAILY_UPDATES_COPY =") : source.index("const getDailyUpdatesCopy =")]
+    article = source[source.index("const createDailyUpdateArticle =") : source.index("const getDailyUpdateDateKey =")]
+
+    assert "daily-updates-kicker" not in index
+    assert "pubmedDate:" not in copy
+    assert "publicationDate:" not in copy
+    assert "PubMed 收录" not in copy
+    assert "Published" not in copy
+    assert "getDailyUpdatesCopy('pubmedDate')" not in article
+    assert "getDailyUpdatesCopy('publicationDate')" not in article
+    assert ".daily-updates-heading h2 {\n  margin: 0;\n  color: #12203b;\n  font-size: 24px;" in styles
+    expected_sizes = {
+        ".daily-updates-language-button": "13px",
+        ".daily-updates-run-status": "13px",
+        ".daily-updates-date-group": "13px",
+        ".daily-update-title": "17px",
+        ".daily-update-meta": "15px",
+        ".daily-update-summary": "15px",
+        ".daily-update-translation-pending": "12px",
+        ".daily-update-link": "13px",
+        ".daily-updates-feedback p": "15px",
+        ".daily-updates-retry": "14px",
+        ".daily-updates-loading-more": "13px",
+    }
+    for selector, size in expected_sizes.items():
+        rule = styles[styles.index(f"{selector} {{") :]
+        rule = rule[: rule.index("}")]
+        assert f"font-size: {size};" in rule
+    meta_rule = styles[styles.index(".daily-update-meta {") :]
+    meta_rule = meta_rule[: meta_rule.index("}")]
+    assert "color: rgba(18, 32, 59, 0.6);" in meta_rule
 
 
 def test_daily_updates_uses_cursor_pagination_and_lifecycle_cancellation() -> None:
