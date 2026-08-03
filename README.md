@@ -158,6 +158,9 @@ Interface 完整闭包见
    HTTP profile；该例外仍保留 `HttpOnly` 和 `SameSite=Lax`，但网络传输不再加密。
 11. 宿主 `/proc` 使用 `hidepid=2`，普通登录用户看不到其它 UID 的进程目录、argv 或 environ；即使每用户 unit
     另设 `ProtectProc=invisible`/`ProcSubset=pid`，也只是纵深防御，不能替代宿主级挂载选项。
+12. Daily Updates 由 `potato-daily-updates` oneshot 独占写入 `/srv/daily_updates`；Interface 仅通过专用
+   数据组读取，模型调用使用独立 systemd credential，不借用普通 Web 用户 token。完整部署、历史三库迁移、
+   验收和回滚步骤见 [`interface/DAILY_UPDATES.md`](interface/DAILY_UPDATES.md)。
 
 推荐权限：
 
@@ -1705,6 +1708,37 @@ systemctl enable --now potato-interface.service
 systemctl status potato-interface.service
 ```
 
+#### Daily Updates（需单独部署）
+
+Daily Updates 不是只需同步一个 SQLite 的静态数据集。同步源码、重建 Interface venv 或执行 Lite cutover
+都不会在新主机上自动创建采集账号、安装定时任务或配置模型代理凭据；只复制数据库只能让前端读取已有内容，
+不能产生后续的每日更新。
+
+当前统一数据库及生产目标路径均为：
+
+```text
+/srv/daily_updates/data/daily_updates.sqlite
+```
+
+首次在生产主机启用时还必须完成以下站点设置：
+
+- 创建 `potato-daily-updates` 系统用户、同名数据组和 `/srv/daily_updates` 权限结构；数据库使用
+  `potato-daily-updates:potato-daily-updates 0640`。
+- 创建 root-only 的 `daily-updates-model-proxy-token` systemd credential，并让 collector 与 model proxy
+  加载同一个 credential；真实上游模型 key 仍只保留在 `model_proxy.yaml`。
+- 配置 NCBI 要求的 `DAILY_UPDATES_PUBMED_EMAIL`；NCBI API key 可选，但只能通过独立 systemd
+  credential 提供。
+- 安装 `potato-daily-updates.service`、`potato-daily-updates.timer`、Interface 数据组 drop-in 和 model proxy
+  credential drop-in；确认主机可访问 PubMed，collector 可访问本地模型代理。
+- 依次重启 model proxy 和 Interface，手动成功运行一次 collector，再启用每天 `08:00 Asia/Shanghai`
+  执行且支持宕机补跑的 timer。
+
+完整命令、权限验收和回滚步骤见
+[`interface/DAILY_UPDATES.md`](interface/DAILY_UPDATES.md)。从本服务器向另一台生产服务器同步已经生成的统一
+SQLite 时，应先按该文档生成一致性快照，再传输快照；不要在线直接复制正在写入的数据库或其 journal。
+目标端应先停止 collector，将快照校验后原子发布到上述路径，再恢复服务。同步统一数据库时跳过旧 Knowledge
+Hub 三库迁移步骤。
+
 首次对外开放前还必须执行“一次性安全升级”中的“宿主 `/proc` 隔离（部署时必做）”，完成临时兼容性测试、
 `/etc/fstab` 持久化、受控重启和两个普通 mapped 用户的跨 UID 复测；空主机部署也不能跳过。
 
@@ -2627,6 +2661,10 @@ unit 中应包含：
 - 上述 SQLite 对应的 `-wal`、`-shm` 和 `-journal` sidecar
 - `/etc/potato-agent/credentials/interface-session-secret`
 - `/etc/potato-agent/credentials/resend-api-key`
+- `/etc/potato-agent/credentials/daily-updates-model-proxy-token`
+- `/etc/potato-agent/credentials/daily-updates-pubmed-api-key`（可选）
+- `/srv/daily_updates/data/daily_updates.sqlite` 及其 journal sidecar
+- `/srv/daily_updates/legacy/` 中的只读迁移快照
 
 仓库内的 `users_mapping.yaml` 和 `interface/data/*.db` 只属于旧部署位置。当前安全部署应把它们
 放在 `/var/lib/potato-agent` 下。

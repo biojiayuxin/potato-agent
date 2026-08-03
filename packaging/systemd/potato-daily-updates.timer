@@ -1,0 +1,12 @@
+[Unit]
+Description=Run Potato Agent Daily Updates at 08:00 Asia/Shanghai
+
+[Timer]
+OnCalendar=*-*-* 08:00:00 Asia/Shanghai
+AccuracySec=1min
+RandomizedDelaySec=0
+Persistent=true
+Unit=potato-daily-updates.service
+
+[Install]
+WantedBy=timers.target

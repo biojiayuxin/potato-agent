@@ -86,6 +86,10 @@ models:
 
 def _client(tmp_path: Path, monkeypatch):
     mapping_path, proxy_path = _write_configs(tmp_path)
+    monkeypatch.delenv("CREDENTIALS_DIRECTORY", raising=False)
+    monkeypatch.delenv("INTERFACE_ENVIRONMENT", raising=False)
+    monkeypatch.delenv("POTATO_DAILY_UPDATES_MODEL_PROXY_TOKEN", raising=False)
+    monkeypatch.delenv("POTATO_DAILY_UPDATES_MODEL_PROXY_TOKEN_FILE", raising=False)
     monkeypatch.setenv("POTATO_AGENT_MAPPING_PATH", str(mapping_path))
     monkeypatch.setenv("POTATO_MODEL_PROXY_CONFIG_PATH", str(proxy_path))
     monkeypatch.setenv(
@@ -95,6 +99,18 @@ def _client(tmp_path: Path, monkeypatch):
 
     importlib.reload(model_proxy)
     return TestClient(model_proxy.app), model_proxy
+
+
+def _configure_daily_updates_credential(
+    tmp_path: Path, monkeypatch, token: str
+) -> None:
+    credentials_dir = tmp_path / "credentials"
+    credentials_dir.mkdir()
+    credential_path = credentials_dir / "daily-updates-model-proxy-token"
+    credential_path.write_text(f"{token}\n", encoding="utf-8")
+    credential_path.chmod(0o440)
+    credentials_dir.chmod(0o550)
+    monkeypatch.setenv("CREDENTIALS_DIRECTORY", str(credentials_dir))
 
 
 def _usage_rows(tmp_path: Path) -> list[dict]:
@@ -156,6 +172,224 @@ def test_proxy_lists_authorized_models_without_api_keys(monkeypatch, tmp_path) -
     ]
     assert "sk-primary" not in response.text
     assert "https://primary.example" not in response.text
+
+
+def test_daily_updates_service_lists_only_primary_model(
+    monkeypatch, tmp_path
+) -> None:
+    client, _ = _client(tmp_path, monkeypatch)
+    service_token = "daily-updates-service-token-0123456789"
+    _configure_daily_updates_credential(tmp_path, monkeypatch, service_token)
+
+    response = client.get(
+        "/v1/models",
+        headers={"authorization": f"Bearer {service_token}"},
+    )
+
+    assert response.status_code == 200, response.text
+    assert [item["id"] for item in response.json()["data"]] == ["Main"]
+
+    forbidden = client.get(
+        "/v1/models/Fast",
+        headers={"authorization": f"Bearer {service_token}"},
+    )
+    assert forbidden.status_code == 403
+
+
+def test_daily_updates_service_rejects_non_primary_model(
+    monkeypatch, tmp_path
+) -> None:
+    client, _ = _client(tmp_path, monkeypatch)
+    service_token = "daily-updates-service-token-0123456789"
+    _configure_daily_updates_credential(tmp_path, monkeypatch, service_token)
+
+    response = client.post(
+        "/v1/chat/completions",
+        headers={"authorization": f"Bearer {service_token}"},
+        json={"model": "Fast", "messages": []},
+    )
+
+    assert response.status_code == 403
+    assert response.json() == {"detail": "Model is not allowed"}
+
+
+def test_daily_updates_service_has_independent_usage_and_quota_identity(
+    monkeypatch, tmp_path
+) -> None:
+    client, model_proxy = _client(tmp_path, monkeypatch)
+    service_token = "daily-updates-service-token-0123456789"
+    _configure_daily_updates_credential(tmp_path, monkeypatch, service_token)
+    model_proxy.token_usage_store.set_user_quota(
+        "alice",
+        total_token_limit=0,
+        enabled=True,
+        period="daily",
+        db_path=tmp_path / "usage.db",
+    )
+    captured = {}
+
+    class FakeResponse:
+        status_code = 200
+        headers = {"content-type": "application/json"}
+
+        async def aiter_bytes(self):
+            yield b'{"usage":{"prompt_tokens":7,"completion_tokens":3}}'
+
+        async def aclose(self):
+            return None
+
+    class FakeAsyncClient:
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+
+        def build_request(self, method, url, *, content, headers, params):
+            captured["headers"] = headers
+            return SimpleNamespace()
+
+        async def send(self, request, *, stream):
+            return FakeResponse()
+
+        async def aclose(self):
+            return None
+
+    monkeypatch.setattr(model_proxy.httpx, "AsyncClient", FakeAsyncClient)
+
+    response = client.post(
+        "/v1/chat/completions",
+        headers={"authorization": f"Bearer {service_token}"},
+        json={"model": "Main", "messages": []},
+    )
+
+    assert response.status_code == 200, response.text
+    assert captured["headers"]["authorization"] == "Bearer sk-primary"
+    assert service_token not in str(captured)
+    assert service_token not in response.text
+    rows = _usage_rows(tmp_path)
+    assert len(rows) == 1
+    assert rows[0]["mapping_username"] == "daily-updates-service"
+    assert rows[0]["input_tokens"] == 7
+    assert rows[0]["output_tokens"] == 3
+
+
+def test_daily_updates_service_enforces_its_own_quota(
+    monkeypatch, tmp_path
+) -> None:
+    client, model_proxy = _client(tmp_path, monkeypatch)
+    service_token = "daily-updates-service-token-0123456789"
+    _configure_daily_updates_credential(tmp_path, monkeypatch, service_token)
+    model_proxy.token_usage_store.set_user_quota(
+        "daily-updates-service",
+        total_token_limit=0,
+        enabled=True,
+        period="daily",
+        db_path=tmp_path / "usage.db",
+    )
+
+    class UnexpectedAsyncClient:
+        def __init__(self, **kwargs):
+            raise AssertionError("service quota must run before the upstream request")
+
+    monkeypatch.setattr(model_proxy.httpx, "AsyncClient", UnexpectedAsyncClient)
+
+    response = client.post(
+        "/v1/chat/completions",
+        headers={"authorization": f"Bearer {service_token}"},
+        json={"model": "Main", "messages": []},
+    )
+
+    assert response.status_code == 429
+    assert response.json() == {"detail": "Model usage quota exceeded"}
+
+
+def test_daily_updates_service_token_must_not_collide_with_user_token(
+    monkeypatch, tmp_path, caplog
+) -> None:
+    client, _ = _client(tmp_path, monkeypatch)
+    colliding_token = "pmp_alice_0123456789abcdefghijklmnopqrstuvwxyz"
+    _configure_daily_updates_credential(tmp_path, monkeypatch, colliding_token)
+
+    response = client.get(
+        "/v1/models",
+        headers={"authorization": f"Bearer {colliding_token}"},
+    )
+
+    assert response.status_code == 503
+    assert response.json() == {"detail": "Model proxy is unavailable"}
+    assert colliding_token not in response.text
+    assert colliding_token not in caplog.text
+
+
+def test_daily_updates_service_principal_must_not_collide_with_mapping_name(
+    monkeypatch, tmp_path, caplog
+) -> None:
+    client, _ = _client(tmp_path, monkeypatch)
+    mapping_path = Path(os.environ["POTATO_AGENT_MAPPING_PATH"])
+    mapping_path.write_text(
+        mapping_path.read_text(encoding="utf-8").replace(
+            "username: alice", "username: daily-updates-service", 1
+        ),
+        encoding="utf-8",
+    )
+    mapped_token = "pmp_alice_0123456789abcdefghijklmnopqrstuvwxyz"
+    service_token = "daily-updates-service-token-0123456789"
+    _configure_daily_updates_credential(tmp_path, monkeypatch, service_token)
+
+    responses = [
+        client.get(
+            "/v1/models",
+            headers={"authorization": f"Bearer {mapped_token}"},
+        ),
+        client.get(
+            "/v1/models",
+            headers={"authorization": f"Bearer {service_token}"},
+        ),
+    ]
+
+    for response in responses:
+        assert response.status_code == 503
+        assert response.json() == {"detail": "Model proxy is unavailable"}
+        assert mapped_token not in response.text
+        assert service_token not in response.text
+    assert mapped_token not in caplog.text
+    assert service_token not in caplog.text
+    assert _usage_rows(tmp_path) == []
+
+
+def test_daily_updates_service_rejects_short_token(
+    monkeypatch, tmp_path, caplog
+) -> None:
+    client, _ = _client(tmp_path, monkeypatch)
+    short_token = "too-short"
+    _configure_daily_updates_credential(tmp_path, monkeypatch, short_token)
+
+    response = client.get(
+        "/v1/models",
+        headers={"authorization": f"Bearer {short_token}"},
+    )
+
+    assert response.status_code == 503
+    assert response.json() == {"detail": "Model proxy is unavailable"}
+    assert short_token not in response.text
+    assert short_token not in caplog.text
+
+
+def test_daily_updates_service_token_is_rejected_from_production_environment(
+    monkeypatch, tmp_path, caplog
+) -> None:
+    client, _ = _client(tmp_path, monkeypatch)
+    service_token = "daily-updates-service-token-from-environment"
+    monkeypatch.setenv("INTERFACE_ENVIRONMENT", "production")
+    monkeypatch.setenv("POTATO_DAILY_UPDATES_MODEL_PROXY_TOKEN", service_token)
+
+    response = client.get(
+        "/v1/models",
+        headers={"authorization": f"Bearer {service_token}"},
+    )
+
+    assert response.status_code == 503
+    assert response.json() == {"detail": "Model proxy is unavailable"}
+    assert service_token not in response.text
+    assert service_token not in caplog.text
 
 
 def test_proxy_rejects_unallowed_or_unknown_models(monkeypatch, tmp_path) -> None:

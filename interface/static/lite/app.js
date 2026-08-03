@@ -58,6 +58,22 @@ const state = {
   renamingTitleError: '',
   mobileOverlayPanel: null,
   passwordChangeSubmitting: false,
+  dailyUpdates: {
+    items: [],
+    seenPmids: new Set(),
+    nextCursor: null,
+    hasMore: true,
+    loading: false,
+    initialized: false,
+    languageInitialized: false,
+    language: 'en',
+    error: '',
+    lastRun: null,
+    active: false,
+    lastSuccessfulFetchAt: 0,
+    loadingMode: '',
+    retryMode: '',
+  },
 };
 
 const MODEL_RESPONSE_ERROR_MESSAGE = '模型响应失败，请稍后重试。';
@@ -83,6 +99,18 @@ const normalizeFileBrowserMode = (mode) => {
 const dom = {
   loginView: document.getElementById('login-view'),
   workspaceView: document.getElementById('workspace-view'),
+  dailyUpdatesPanel: document.getElementById('daily-updates-panel'),
+  dailyUpdatesScroll: document.getElementById('daily-updates-scroll'),
+  dailyUpdatesList: document.getElementById('daily-updates-list'),
+  dailyUpdatesRunStatus: document.getElementById('daily-updates-run-status'),
+  dailyUpdatesFeedback: document.getElementById('daily-updates-feedback'),
+  dailyUpdatesFeedbackCopy: document.getElementById('daily-updates-feedback-copy'),
+  dailyUpdatesRetry: document.getElementById('daily-updates-retry'),
+  dailyUpdatesLoadingMore: document.getElementById('daily-updates-loading-more'),
+  dailyUpdatesLoadingMoreCopy: document.getElementById('daily-updates-loading-more-copy'),
+  dailyUpdatesSentinel: document.getElementById('daily-updates-sentinel'),
+  dailyUpdatesLanguageEn: document.getElementById('daily-updates-language-en'),
+  dailyUpdatesLanguageZh: document.getElementById('daily-updates-language-zh'),
   portalNav: document.querySelector('.portal-nav'),
   portalNavToggle: document.getElementById('portal-nav-toggle'),
   authHomeView: document.getElementById('auth-home-view'),
@@ -262,6 +290,11 @@ let fileTreeChangePollGeneration = 0;
 let fileTreeAcceptedRevision = null;
 let authSessionGeneration = 0;
 let workspacePathNavigationGeneration = 0;
+let dailyUpdatesAbortController = null;
+let dailyUpdatesObserver = null;
+let dailyUpdatesFallbackScrollBound = false;
+let dailyUpdatesRequestGeneration = 0;
+let dailyUpdatesRefreshTimer = null;
 
 const SIDEBAR_WIDTH_KEY = 'lite_sidebar_width';
 const FILES_WIDTH_KEY = 'lite_files_width';
@@ -301,6 +334,12 @@ const MESSAGE_AUTO_SCROLL_THRESHOLD_PX = 48;
 const INITIAL_SESSION_PAGE_SIZE = 50;
 const SESSION_LOAD_MORE_PAGE_SIZE = 10;
 const TUI_DEBUG_STATUS_STORAGE_KEY = 'lite_tui_bridge_debug';
+const DAILY_UPDATES_LANGUAGE_KEY = 'lite_daily_updates_language';
+const DAILY_UPDATES_PATH = '/api/daily-updates';
+const DAILY_UPDATES_PAGE_SIZE = 10;
+const DAILY_UPDATES_STALE_AFTER_MS = 36 * 60 * 60 * 1000;
+const DAILY_UPDATES_FRESHNESS_MS = 5 * 60 * 1000;
+const DAILY_UPDATES_REFRESH_INTERVAL_MS = 15 * 60 * 1000;
 const EMAIL_VERIFICATION_COUNTDOWN_INTERVAL_MS = 1000;
 const MOBILE_PANEL_MEDIA_QUERY = '(max-width: 1180px)';
 const PORTAL_SMALL_SCREEN_MEDIA_QUERY = '(max-width: 800px)';
@@ -320,6 +359,630 @@ const applyThemeMode = () => {
 const initThemeControls = () => {
   localStorage.removeItem(THEME_MODE_KEY);
   applyThemeMode();
+};
+
+const DAILY_UPDATES_COPY = {
+  en: {
+    loading: 'Loading research updates...',
+    loadingMore: 'Loading more updates...',
+    refreshing: 'Refreshing research updates...',
+    empty: 'No potato research updates are available yet.',
+    error: 'Daily updates are unavailable.',
+    retry: 'Retry',
+    pubmedDate: 'PubMed',
+    publicationDate: 'Published',
+    undated: 'Date unavailable',
+    untitled: 'Untitled study',
+    noSummary: 'Summary unavailable.',
+    translationPending: 'Translation pending',
+    pubmedLink: 'View on PubMed',
+    updated: 'Daily update completed',
+    running: 'New research is being processed',
+    partial: 'Latest update is partial',
+    stale: 'Updates may be delayed',
+    scrollLabel: 'Scrollable daily research updates',
+    feedLabel: 'Potato research articles',
+  },
+  zh: {
+    loading: '正在加载研究更新...',
+    loadingMore: '正在加载更多更新...',
+    refreshing: '正在刷新研究更新...',
+    empty: '暂时没有可用的马铃薯研究更新。',
+    error: 'Daily Updates 暂时不可用。',
+    retry: '重试',
+    pubmedDate: 'PubMed 收录',
+    publicationDate: '发表',
+    undated: '日期未知',
+    untitled: '未命名研究',
+    noSummary: '暂无总结。',
+    translationPending: '翻译待补',
+    pubmedLink: '在 PubMed 查看',
+    updated: '每日更新已完成',
+    running: '正在处理新研究',
+    partial: '最近一次更新仅部分完成',
+    stale: '更新可能存在延迟',
+    scrollLabel: '可滚动的每日研究更新',
+    feedLabel: '马铃薯研究文章',
+  },
+};
+
+const getDailyUpdatesCopy = (key) => {
+  const language = state.dailyUpdates.language === 'zh' ? 'zh' : 'en';
+  return DAILY_UPDATES_COPY[language][key] || DAILY_UPDATES_COPY.en[key] || '';
+};
+
+const readDailyUpdatesLanguage = () => {
+  try {
+    return localStorage.getItem(DAILY_UPDATES_LANGUAGE_KEY) === 'zh' ? 'zh' : 'en';
+  } catch {
+    return 'en';
+  }
+};
+
+const setDailyUpdatesLanguage = (language, { persist = true } = {}) => {
+  const normalized = language === 'zh' ? 'zh' : 'en';
+  state.dailyUpdates.language = normalized;
+  state.dailyUpdates.languageInitialized = true;
+  if (persist) {
+    try {
+      localStorage.setItem(DAILY_UPDATES_LANGUAGE_KEY, normalized);
+    } catch {
+      // The selected language still applies when storage is unavailable.
+    }
+  }
+  renderDailyUpdates();
+};
+
+const normalizeDailyUpdateItem = (rawItem) => {
+  if (!rawItem || typeof rawItem !== 'object') return null;
+  const pmid = String(rawItem.pmid ?? '').trim();
+  if (!/^\d+$/.test(pmid)) return null;
+  return {
+    pmid,
+    title: String(rawItem.title ?? '').trim(),
+    titleZh: String(rawItem.titleZh ?? '').trim(),
+    summary: String(rawItem.summary ?? '').trim(),
+    summaryZh: String(rawItem.summaryZh ?? '').trim(),
+    journal: String(rawItem.journal ?? '').trim(),
+    publicationDate: String(rawItem.publicationDate ?? '').trim(),
+    pubmedDate: String(rawItem.pubmedDate ?? '').trim(),
+    doi: String(rawItem.doi ?? '').trim(),
+  };
+};
+
+const DAILY_UPDATE_MONTHS = {
+  jan: 1,
+  feb: 2,
+  mar: 3,
+  apr: 4,
+  may: 5,
+  jun: 6,
+  jul: 7,
+  aug: 8,
+  sep: 9,
+  oct: 10,
+  nov: 11,
+  dec: 12,
+};
+
+const createDailyUpdateUtcDate = (year, month = 1, day = 1) => {
+  if (year < 1000 || year > 9999 || month < 1 || month > 12 || day < 1 || day > 31) {
+    return null;
+  }
+  const date = new Date(Date.UTC(year, month - 1, day));
+  if (
+    date.getUTCFullYear() !== year
+    || date.getUTCMonth() !== month - 1
+    || date.getUTCDate() !== day
+  ) {
+    return null;
+  }
+  return date;
+};
+
+const parseDailyUpdateDate = (value) => {
+  const normalized = String(value || '').trim();
+  if (!normalized) return null;
+
+  const yearMatch = normalized.match(/^(\d{4})$/);
+  if (yearMatch) {
+    const date = createDailyUpdateUtcDate(Number(yearMatch[1]));
+    return date ? { date, precision: 'year' } : null;
+  }
+
+  const monthMatch = normalized.match(/^(\d{4})-(\d{2}|[A-Za-z]{3})$/);
+  if (monthMatch) {
+    const rawMonth = monthMatch[2];
+    const month = /^\d{2}$/.test(rawMonth)
+      ? Number(rawMonth)
+      : DAILY_UPDATE_MONTHS[rawMonth.toLowerCase()];
+    const date = createDailyUpdateUtcDate(Number(monthMatch[1]), month);
+    return date ? { date, precision: 'month' } : null;
+  }
+
+  const dayMatch = normalized.match(/^(\d{4})-(\d{2}|[A-Za-z]{3})-(\d{2})$/);
+  if (dayMatch) {
+    const rawMonth = dayMatch[2];
+    const month = /^\d{2}$/.test(rawMonth)
+      ? Number(rawMonth)
+      : DAILY_UPDATE_MONTHS[rawMonth.toLowerCase()];
+    const date = createDailyUpdateUtcDate(
+      Number(dayMatch[1]),
+      month,
+      Number(dayMatch[3]),
+    );
+    return date ? { date, precision: 'day' } : null;
+  }
+
+  const date = new Date(normalized);
+  return Number.isNaN(date.getTime()) ? null : { date, precision: 'timestamp' };
+};
+
+const formatDailyUpdateDate = (value, { includeTime = false, long = false } = {}) => {
+  const parsed = parseDailyUpdateDate(value);
+  if (!parsed) return String(value || '').trim();
+  const language = state.dailyUpdates.language === 'zh' ? 'zh-CN' : 'en-US';
+  let options;
+  if (parsed.precision === 'year') {
+    options = { year: 'numeric', timeZone: 'UTC' };
+  } else if (parsed.precision === 'month') {
+    options = { year: 'numeric', month: long ? 'long' : 'short', timeZone: 'UTC' };
+  } else if (includeTime && parsed.precision === 'timestamp') {
+    options = {
+      year: 'numeric',
+      month: long ? 'long' : 'short',
+      day: 'numeric',
+      hour: '2-digit',
+      minute: '2-digit',
+    };
+  } else {
+    options = { year: 'numeric', month: long ? 'long' : 'short', day: 'numeric' };
+    if (parsed.precision === 'day') options.timeZone = 'UTC';
+  }
+  return new Intl.DateTimeFormat(language, options).format(parsed.date);
+};
+
+const getDailyUpdatesRunPresentation = () => {
+  const lastRun = state.dailyUpdates.lastRun;
+  if (!lastRun || typeof lastRun !== 'object') return null;
+  const status = String(lastRun.status || '').trim().toLowerCase();
+  if (!status || status === 'never') return null;
+  const completedAt = String(lastRun.completedAt || '').trim();
+  const parsedCompletedAt = parseDailyUpdateDate(completedAt);
+  const staleByAge = parsedCompletedAt
+    ? Date.now() - parsedCompletedAt.date.getTime() > DAILY_UPDATES_STALE_AFTER_MS
+    : false;
+
+  let kind = 'updated';
+  if (status === 'partial') {
+    kind = 'partial';
+  } else if (status === 'failed' || status === 'stale' || staleByAge) {
+    kind = 'stale';
+  } else if (status === 'running' || status === 'pending' || status === 'started') {
+    kind = 'running';
+  }
+
+  const completedLabel = completedAt
+    ? formatDailyUpdateDate(completedAt, { includeTime: true })
+    : '';
+  return {
+    kind,
+    copy: completedLabel
+      ? `${getDailyUpdatesCopy(kind)} · ${completedLabel}`
+      : getDailyUpdatesCopy(kind),
+  };
+};
+
+const appendDailyUpdateMeta = (container, text) => {
+  if (!text) return;
+  const item = document.createElement('span');
+  item.textContent = text;
+  container.append(item);
+};
+
+const createDailyUpdateArticle = (item, position) => {
+  const language = state.dailyUpdates.language;
+  const useChinese = language === 'zh';
+  const title = useChinese ? (item.titleZh || item.title) : item.title;
+  const summary = useChinese ? (item.summaryZh || item.summary) : item.summary;
+  const translationPending = useChinese && (!item.titleZh || !item.summaryZh);
+  const article = document.createElement('article');
+  const titleId = `daily-update-title-${item.pmid}`;
+  article.className = 'daily-update-item';
+  article.dataset.pmid = item.pmid;
+  article.lang = useChinese ? 'zh-CN' : 'en';
+  article.setAttribute('role', 'article');
+  article.setAttribute('aria-labelledby', titleId);
+  article.setAttribute('aria-posinset', String(position));
+  article.setAttribute(
+    'aria-setsize',
+    state.dailyUpdates.hasMore ? '-1' : String(state.dailyUpdates.items.length),
+  );
+
+  const heading = document.createElement('h4');
+  heading.id = titleId;
+  heading.className = 'daily-update-title';
+  heading.textContent = title || getDailyUpdatesCopy('untitled');
+  heading.lang = useChinese && (item.titleZh || !title) ? 'zh-CN' : 'en';
+  article.append(heading);
+
+  const meta = document.createElement('div');
+  meta.className = 'daily-update-meta';
+  appendDailyUpdateMeta(meta, item.journal);
+  if (item.pubmedDate) {
+    appendDailyUpdateMeta(
+      meta,
+      `${getDailyUpdatesCopy('pubmedDate')}: ${formatDailyUpdateDate(item.pubmedDate)}`,
+    );
+  }
+  if (item.publicationDate && item.publicationDate !== item.pubmedDate) {
+    appendDailyUpdateMeta(
+      meta,
+      `${getDailyUpdatesCopy('publicationDate')}: ${formatDailyUpdateDate(item.publicationDate)}`,
+    );
+  }
+  if (item.doi) appendDailyUpdateMeta(meta, `DOI: ${item.doi}`);
+  article.append(meta);
+
+  const summaryNode = document.createElement('p');
+  summaryNode.className = 'daily-update-summary';
+  summaryNode.textContent = summary || getDailyUpdatesCopy('noSummary');
+  summaryNode.lang = useChinese && (item.summaryZh || !summary) ? 'zh-CN' : 'en';
+  article.append(summaryNode);
+
+  const footer = document.createElement('footer');
+  footer.className = 'daily-update-footer';
+  if (translationPending) {
+    const pending = document.createElement('span');
+    pending.className = 'daily-update-translation-pending';
+    pending.textContent = getDailyUpdatesCopy('translationPending');
+    footer.append(pending);
+  }
+  const link = document.createElement('a');
+  link.className = 'daily-update-link';
+  link.href = `https://pubmed.ncbi.nlm.nih.gov/${encodeURIComponent(item.pmid)}/`;
+  link.target = '_blank';
+  link.rel = 'noopener noreferrer';
+  link.textContent = getDailyUpdatesCopy('pubmedLink');
+  footer.append(link);
+  article.append(footer);
+  return article;
+};
+
+const getDailyUpdateDateKey = (item) => item.pubmedDate || item.publicationDate || '';
+
+const createDailyUpdateDateHeading = (dateKey) => {
+  const dateHeading = document.createElement('h3');
+  dateHeading.className = 'daily-updates-date-group';
+  dateHeading.textContent = dateKey
+    ? formatDailyUpdateDate(dateKey, { long: true })
+    : getDailyUpdatesCopy('undated');
+  return dateHeading;
+};
+
+const updateDailyUpdatesFeedMetadata = () => {
+  if (!dom.dailyUpdatesList) return;
+  const setSize = state.dailyUpdates.hasMore ? '-1' : String(state.dailyUpdates.items.length);
+  const articles = dom.dailyUpdatesList.querySelectorAll('.daily-update-item');
+  articles.forEach((article, index) => {
+    article.setAttribute('aria-posinset', String(index + 1));
+    article.setAttribute('aria-setsize', setSize);
+  });
+};
+
+const renderDailyUpdatesList = () => {
+  if (!dom.dailyUpdatesList) return;
+  const activeElement = document.activeElement;
+  const focusedArticle = activeElement instanceof Element && dom.dailyUpdatesList.contains(activeElement)
+    ? activeElement.closest('.daily-update-item')
+    : null;
+  const focusedPmid = focusedArticle?.dataset.pmid || '';
+  const restoreLinkFocus = Boolean(focusedPmid && activeElement?.classList.contains('daily-update-link'));
+  const previousScrollTop = dom.dailyUpdatesScroll?.scrollTop || 0;
+  const fragment = document.createDocumentFragment();
+  let previousDate = null;
+  state.dailyUpdates.items.forEach((item, index) => {
+    const dateKey = getDailyUpdateDateKey(item);
+    if (dateKey !== previousDate) {
+      fragment.append(createDailyUpdateDateHeading(dateKey));
+      previousDate = dateKey;
+    }
+    fragment.append(createDailyUpdateArticle(item, index + 1));
+  });
+  dom.dailyUpdatesList.replaceChildren(fragment);
+  if (restoreLinkFocus) {
+    const replacementLink = dom.dailyUpdatesList.querySelector(
+      `[data-pmid="${focusedPmid}"] .daily-update-link`,
+    );
+    replacementLink?.focus({ preventScroll: true });
+    if (dom.dailyUpdatesScroll) dom.dailyUpdatesScroll.scrollTop = previousScrollTop;
+  }
+};
+
+const appendDailyUpdatesList = (items, startIndex) => {
+  if (!dom.dailyUpdatesList || items.length === 0) return;
+  const fragment = document.createDocumentFragment();
+  let previousDate = startIndex > 0
+    ? getDailyUpdateDateKey(state.dailyUpdates.items[startIndex - 1])
+    : null;
+  items.forEach((item, index) => {
+    const dateKey = getDailyUpdateDateKey(item);
+    if (dateKey !== previousDate) {
+      fragment.append(createDailyUpdateDateHeading(dateKey));
+      previousDate = dateKey;
+    }
+    fragment.append(createDailyUpdateArticle(item, startIndex + index + 1));
+  });
+  dom.dailyUpdatesList.append(fragment);
+};
+
+const renderDailyUpdates = ({ renderList = true } = {}) => {
+  if (!dom.dailyUpdatesPanel) return;
+  const language = state.dailyUpdates.language;
+  const contentLanguage = language === 'zh' ? 'zh-CN' : 'en';
+  const hasItems = state.dailyUpdates.items.length > 0;
+
+  dom.dailyUpdatesPanel.lang = 'en';
+  if (dom.dailyUpdatesScroll) {
+    dom.dailyUpdatesScroll.lang = contentLanguage;
+    dom.dailyUpdatesScroll.setAttribute('aria-label', getDailyUpdatesCopy('scrollLabel'));
+  }
+  if (dom.dailyUpdatesList) {
+    dom.dailyUpdatesList.lang = contentLanguage;
+    dom.dailyUpdatesList.setAttribute('aria-label', getDailyUpdatesCopy('feedLabel'));
+  }
+
+  for (const button of [dom.dailyUpdatesLanguageEn, dom.dailyUpdatesLanguageZh]) {
+    if (!button) continue;
+    const active = button.dataset.language === language;
+    button.classList.toggle('active', active);
+    button.setAttribute('aria-pressed', active ? 'true' : 'false');
+  }
+
+  if (renderList) renderDailyUpdatesList();
+  if (dom.dailyUpdatesList) {
+    dom.dailyUpdatesList.setAttribute('aria-busy', state.dailyUpdates.loading ? 'true' : 'false');
+  }
+
+  const runPresentation = getDailyUpdatesRunPresentation();
+  if (dom.dailyUpdatesRunStatus) {
+    dom.dailyUpdatesRunStatus.lang = contentLanguage;
+    dom.dailyUpdatesRunStatus.hidden = !runPresentation;
+    dom.dailyUpdatesRunStatus.classList.toggle('partial', runPresentation?.kind === 'partial');
+    dom.dailyUpdatesRunStatus.classList.toggle('stale', runPresentation?.kind === 'stale');
+    dom.dailyUpdatesRunStatus.textContent = runPresentation?.copy || '';
+  }
+
+  let feedbackKey = '';
+  if (state.dailyUpdates.error) {
+    feedbackKey = 'error';
+  } else if (state.dailyUpdates.loading && !hasItems) {
+    feedbackKey = 'loading';
+  } else if (state.dailyUpdates.initialized && !hasItems) {
+    feedbackKey = 'empty';
+  }
+  if (dom.dailyUpdatesFeedback && dom.dailyUpdatesFeedbackCopy) {
+    dom.dailyUpdatesFeedback.hidden = !feedbackKey;
+    dom.dailyUpdatesFeedback.classList.toggle('error', feedbackKey === 'error');
+    dom.dailyUpdatesFeedbackCopy.textContent = feedbackKey ? getDailyUpdatesCopy(feedbackKey) : '';
+  }
+  if (dom.dailyUpdatesRetry) {
+    dom.dailyUpdatesRetry.hidden = feedbackKey !== 'error';
+    dom.dailyUpdatesRetry.textContent = getDailyUpdatesCopy('retry');
+  }
+  if (dom.dailyUpdatesLoadingMore) {
+    dom.dailyUpdatesLoadingMore.hidden = !(state.dailyUpdates.loading && hasItems);
+  }
+  if (dom.dailyUpdatesLoadingMoreCopy) {
+    const loadingCopy = state.dailyUpdates.loadingMode === 'refresh'
+      ? 'refreshing'
+      : 'loadingMore';
+    dom.dailyUpdatesLoadingMoreCopy.textContent = getDailyUpdatesCopy(loadingCopy);
+  }
+  if (dom.dailyUpdatesSentinel) {
+    dom.dailyUpdatesSentinel.hidden = (
+      !state.dailyUpdates.active
+      || state.dailyUpdates.loading
+      || Boolean(state.dailyUpdates.error)
+      || !state.dailyUpdates.hasMore
+    );
+  }
+};
+
+const handleDailyUpdatesFallbackScroll = () => {
+  if (!state.dailyUpdates.active || state.dailyUpdates.loading || !state.dailyUpdates.hasMore) return;
+  const scroll = dom.dailyUpdatesScroll;
+  if (!scroll || scroll.scrollTop + scroll.clientHeight < scroll.scrollHeight - 160) return;
+  loadDailyUpdatesPage().catch(() => {});
+};
+
+const ensureDailyUpdatesObserver = () => {
+  if (!dom.dailyUpdatesSentinel || !dom.dailyUpdatesScroll) return;
+  if (typeof IntersectionObserver !== 'function') {
+    if (!dailyUpdatesFallbackScrollBound) {
+      dom.dailyUpdatesScroll.addEventListener('scroll', handleDailyUpdatesFallbackScroll, { passive: true });
+      dailyUpdatesFallbackScrollBound = true;
+    }
+    return;
+  }
+  if (!dailyUpdatesObserver) {
+    dailyUpdatesObserver = new IntersectionObserver((entries) => {
+      if (!entries.some((entry) => entry.isIntersecting)) return;
+      if (!state.dailyUpdates.active || state.dailyUpdates.loading || !state.dailyUpdates.hasMore) return;
+      loadDailyUpdatesPage().catch(() => {});
+    }, {
+      root: dom.dailyUpdatesScroll,
+      rootMargin: '0px 0px 160px 0px',
+    });
+  }
+  dailyUpdatesObserver.observe(dom.dailyUpdatesSentinel);
+};
+
+const replaceDailyUpdatesFirstPage = (pageItems, pagePmids, nextCursor, hasMore) => {
+  state.dailyUpdates.items = pageItems;
+  state.dailyUpdates.seenPmids = new Set(pagePmids);
+  state.dailyUpdates.nextCursor = nextCursor;
+  state.dailyUpdates.hasMore = hasMore;
+};
+
+const loadDailyUpdatesPage = async ({ reset = false, refresh = false } = {}) => {
+  if (!state.dailyUpdates.active || state.dailyUpdates.loading) return;
+  const refreshFirstPage = refresh && !reset;
+  if (!reset && !refreshFirstPage && !state.dailyUpdates.hasMore) return;
+
+  const requestedCursor = reset || refreshFirstPage ? null : state.dailyUpdates.nextCursor;
+  const requestGeneration = ++dailyUpdatesRequestGeneration;
+  const controller = new AbortController();
+  dailyUpdatesAbortController = controller;
+  state.dailyUpdates.loading = true;
+  state.dailyUpdates.loadingMode = reset || refreshFirstPage ? 'refresh' : 'page';
+  state.dailyUpdates.error = '';
+  renderDailyUpdates({ renderList: false });
+
+  try {
+    const query = new URLSearchParams({ limit: String(DAILY_UPDATES_PAGE_SIZE) });
+    if (requestedCursor) query.set('cursor', requestedCursor);
+    const response = await fetch(`${DAILY_UPDATES_PATH}?${query.toString()}`, {
+      method: 'GET',
+      credentials: 'same-origin',
+      cache: 'no-store',
+      headers: { Accept: 'application/json' },
+      signal: controller.signal,
+    });
+    const payload = await response.json().catch(() => null);
+    if (!response.ok || !payload || !Array.isArray(payload.items)) {
+      throw new Error('Daily updates request failed');
+    }
+    if (!state.dailyUpdates.active || requestGeneration !== dailyUpdatesRequestGeneration) return;
+
+    const pageItems = [];
+    const pagePmids = new Set();
+    for (const rawItem of payload.items) {
+      const item = normalizeDailyUpdateItem(rawItem);
+      if (!item || pagePmids.has(item.pmid)) continue;
+      pagePmids.add(item.pmid);
+      pageItems.push(item);
+    }
+
+    const nextCursor = typeof payload.nextCursor === 'string' && payload.nextCursor
+      ? payload.nextCursor
+      : null;
+    const payloadHasMore = Boolean(
+      payload.hasMore
+      && nextCursor
+      && nextCursor !== requestedCursor
+    );
+    if (reset || refreshFirstPage) {
+      replaceDailyUpdatesFirstPage(pageItems, pagePmids, nextCursor, payloadHasMore);
+      renderDailyUpdatesList();
+    } else {
+      const startIndex = state.dailyUpdates.items.length;
+      const appendedItems = [];
+      for (const item of pageItems) {
+        if (state.dailyUpdates.seenPmids.has(item.pmid)) continue;
+        state.dailyUpdates.seenPmids.add(item.pmid);
+        state.dailyUpdates.items.push(item);
+        appendedItems.push(item);
+      }
+      state.dailyUpdates.nextCursor = nextCursor;
+      state.dailyUpdates.hasMore = payloadHasMore;
+      appendDailyUpdatesList(appendedItems, startIndex);
+    }
+    state.dailyUpdates.lastRun = payload.lastRun && typeof payload.lastRun === 'object'
+      ? {
+          status: String(payload.lastRun.status || ''),
+          completedAt: payload.lastRun.completedAt == null
+            ? null
+            : String(payload.lastRun.completedAt),
+        }
+      : null;
+    state.dailyUpdates.initialized = true;
+    if (reset || refreshFirstPage) {
+      state.dailyUpdates.lastSuccessfulFetchAt = Date.now();
+    }
+    state.dailyUpdates.error = '';
+    state.dailyUpdates.retryMode = '';
+    if (!state.dailyUpdates.hasMore) updateDailyUpdatesFeedMetadata();
+  } catch (error) {
+    if (error?.name !== 'AbortError' && requestGeneration === dailyUpdatesRequestGeneration) {
+      state.dailyUpdates.error = 'unavailable';
+      state.dailyUpdates.retryMode = reset ? 'reset' : refreshFirstPage ? 'refresh' : 'page';
+    }
+  } finally {
+    if (requestGeneration !== dailyUpdatesRequestGeneration) return;
+    if (dailyUpdatesAbortController === controller) dailyUpdatesAbortController = null;
+    state.dailyUpdates.loading = false;
+    state.dailyUpdates.loadingMode = '';
+    renderDailyUpdates({ renderList: false });
+    if (!dailyUpdatesObserver && state.dailyUpdates.active && state.dailyUpdates.hasMore) {
+      window.requestAnimationFrame(handleDailyUpdatesFallbackScroll);
+    }
+  }
+};
+
+const clearDailyUpdatesRefreshTimer = () => {
+  if (!dailyUpdatesRefreshTimer) return;
+  window.clearTimeout(dailyUpdatesRefreshTimer);
+  dailyUpdatesRefreshTimer = null;
+};
+
+const dailyUpdatesAreFresh = () => (
+  state.dailyUpdates.lastSuccessfulFetchAt > 0
+  && Date.now() - state.dailyUpdates.lastSuccessfulFetchAt < DAILY_UPDATES_FRESHNESS_MS
+);
+
+const refreshDailyUpdatesIfNeeded = async ({ force = false } = {}) => {
+  if (!state.dailyUpdates.active || state.dailyUpdates.loading) return;
+  if (
+    !force
+    && state.dailyUpdates.initialized
+    && !state.dailyUpdates.error
+    && dailyUpdatesAreFresh()
+  ) {
+    return;
+  }
+  await loadDailyUpdatesPage({
+    reset: !state.dailyUpdates.initialized,
+    refresh: state.dailyUpdates.initialized,
+  });
+};
+
+const scheduleDailyUpdatesRefresh = () => {
+  clearDailyUpdatesRefreshTimer();
+  if (!state.dailyUpdates.active) return;
+  dailyUpdatesRefreshTimer = window.setTimeout(async () => {
+    dailyUpdatesRefreshTimer = null;
+    try {
+      await refreshDailyUpdatesIfNeeded({ force: true });
+    } finally {
+      scheduleDailyUpdatesRefresh();
+    }
+  }, DAILY_UPDATES_REFRESH_INTERVAL_MS);
+};
+
+const startDailyUpdates = () => {
+  if (!dom.dailyUpdatesPanel) return;
+  state.dailyUpdates.active = true;
+  if (!state.dailyUpdates.languageInitialized) {
+    setDailyUpdatesLanguage(readDailyUpdatesLanguage(), { persist: false });
+  } else {
+    renderDailyUpdates({ renderList: false });
+  }
+  ensureDailyUpdatesObserver();
+  refreshDailyUpdatesIfNeeded().catch(() => {});
+  scheduleDailyUpdatesRefresh();
+};
+
+const stopDailyUpdates = () => {
+  state.dailyUpdates.active = false;
+  clearDailyUpdatesRefreshTimer();
+  dailyUpdatesRequestGeneration += 1;
+  dailyUpdatesAbortController?.abort();
+  dailyUpdatesAbortController = null;
+  dailyUpdatesObserver?.disconnect();
+  state.dailyUpdates.loading = false;
+  state.dailyUpdates.loadingMode = '';
+  renderDailyUpdates({ renderList: false });
 };
 
 const setCssSize = (name, value) => {
@@ -7155,6 +7818,7 @@ const submitPromptViaTuiBridge = async (prompt) => {
 };
 
 const showWorkspace = () => {
+  stopDailyUpdates();
   dom.loginView.hidden = true;
   dom.loginView.style.display = 'none';
   dom.workspaceView.hidden = false;
@@ -7170,6 +7834,7 @@ const showLogin = () => {
   dom.loginView.hidden = false;
   dom.loginView.style.display = 'grid';
   setAuthViewMode('home');
+  startDailyUpdates();
 };
 
 const initializeWorkspaceData = async () => {
@@ -7253,6 +7918,22 @@ const bootstrapSession = async () => {
 };
 
 dom.portalNav?.addEventListener('click', handlePortalNavClick);
+
+dom.dailyUpdatesLanguageEn?.addEventListener('click', () => {
+  setDailyUpdatesLanguage('en');
+});
+
+dom.dailyUpdatesLanguageZh?.addEventListener('click', () => {
+  setDailyUpdatesLanguage('zh');
+});
+
+dom.dailyUpdatesRetry?.addEventListener('click', () => {
+  const retryMode = state.dailyUpdates.retryMode;
+  loadDailyUpdatesPage({
+    reset: retryMode === 'reset' || !state.dailyUpdates.initialized,
+    refresh: retryMode === 'refresh',
+  }).catch(() => {});
+});
 
 dom.loginForm.addEventListener('submit', async (event) => {
   event.preventDefault();
@@ -7735,6 +8416,10 @@ document.addEventListener('visibilitychange', () => {
       fileTreeRefreshDeferred = true;
     }
     return;
+  }
+  if (state.dailyUpdates.active) {
+    refreshDailyUpdatesIfNeeded().catch(() => {});
+    scheduleDailyUpdatesRefresh();
   }
   refreshFileTreeAfterFocus();
 });

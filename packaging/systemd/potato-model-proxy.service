@@ -9,6 +9,7 @@ Group=potato-model-proxy
 SupplementaryGroups=potato-interface
 WorkingDirectory=/srv/potato_agent
 UMask=0077
+Environment=INTERFACE_ENVIRONMENT=production
 Environment=POTATO_AGENT_MAPPING_PATH=/var/lib/potato-agent/config/users_mapping.yaml
 Environment=POTATO_MODEL_PROXY_CONFIG_PATH=/var/lib/potato-agent/config/model_proxy.yaml
 Environment=POTATO_MODEL_PROXY_USAGE_DB=/var/lib/potato-agent/model-proxy/usage.db

@@ -21,6 +21,7 @@ from interface.model_proxy_config import (
     local_model_proxy_token,
     load_model_proxy_config,
 )
+from interface.secret_config import SecretConfigurationError, load_secret
 from interface import token_usage_store
 from interface.request_limits import RequestBodyLimitMiddleware
 
@@ -37,6 +38,10 @@ MAX_SSE_FRAME_BYTES = 1024 * 1024
 MAX_USAGE_CAPTURE_BYTES = 4 * 1024 * 1024
 MAX_NON_SSE_RESPONSE_BYTES = 64 * 1024 * 1024
 REDACTED_SECRET_BYTES = b"[REDACTED]"
+DAILY_UPDATES_SERVICE_PRINCIPAL = "daily-updates-service"
+DAILY_UPDATES_SERVICE_TOKEN_ENVIRONMENT = "POTATO_DAILY_UPDATES_MODEL_PROXY_TOKEN"
+DAILY_UPDATES_SERVICE_TOKEN_CREDENTIAL = "daily-updates-model-proxy-token"
+DAILY_UPDATES_SERVICE_TOKEN_MIN_BYTES = 32
 HOP_BY_HOP_HEADERS = {
     "connection",
     "content-length",
@@ -91,6 +96,12 @@ class ProxyModel:
 
 class ModelProxyError(RuntimeError):
     pass
+
+
+@dataclass(frozen=True)
+class ProxyPrincipal:
+    name: str
+    is_daily_updates_service: bool = False
 
 
 @dataclass
@@ -169,7 +180,24 @@ def _extract_bearer_token(request: Request) -> str:
     return token.strip()
 
 
-def _require_username(request: Request) -> str:
+def _load_daily_updates_service_token() -> str | None:
+    try:
+        token = load_secret(
+            DAILY_UPDATES_SERVICE_TOKEN_ENVIRONMENT,
+            credential_name=DAILY_UPDATES_SERVICE_TOKEN_CREDENTIAL,
+        )
+    except SecretConfigurationError as exc:
+        logger.error("Unable to load model proxy service credential")
+        raise HTTPException(
+            status_code=503, detail="Model proxy is unavailable"
+        ) from exc
+    if token is not None and len(token.encode("utf-8")) < DAILY_UPDATES_SERVICE_TOKEN_MIN_BYTES:
+        logger.error("Model proxy service credential does not meet length requirements")
+        raise HTTPException(status_code=503, detail="Model proxy is unavailable")
+    return token
+
+
+def _require_principal(request: Request) -> ProxyPrincipal:
     supplied_token = _extract_bearer_token(request)
     try:
         targets = MappingStore(_mapping_path()).load_targets()
@@ -177,7 +205,7 @@ def _require_username(request: Request) -> str:
         logger.error("Unable to load model proxy client configuration")
         raise HTTPException(status_code=503, detail="Model proxy is unavailable")
 
-    matches: list[str] = []
+    user_tokens: list[tuple[str, str]] = []
     for target in targets:
         try:
             expected_token = local_model_proxy_token(
@@ -185,15 +213,46 @@ def _require_username(request: Request) -> str:
             )
         except ModelProxyConfigError:
             continue
-        if hmac.compare_digest(supplied_token, expected_token):
-            matches.append(target.username)
+        user_tokens.append((target.username, expected_token))
+
+    service_token = _load_daily_updates_service_token()
+    if service_token is not None and any(
+        target.username == DAILY_UPDATES_SERVICE_PRINCIPAL for target in targets
+    ):
+        logger.error("Model proxy service principal conflicts with a mapped principal")
+        raise HTTPException(status_code=503, detail="Model proxy is unavailable")
+    service_token_collisions = (
+        [
+            hmac.compare_digest(service_token, user_token)
+            for _, user_token in user_tokens
+        ]
+        if service_token is not None
+        else []
+    )
+    if any(service_token_collisions):
+        logger.error("Model proxy service credential conflicts with a user credential")
+        raise HTTPException(status_code=503, detail="Model proxy is unavailable")
+
+    matches = [
+        ProxyPrincipal(name=username)
+        for username, expected_token in user_tokens
+        if hmac.compare_digest(supplied_token, expected_token)
+    ]
+    if service_token is not None and hmac.compare_digest(
+        supplied_token, service_token
+    ):
+        matches.append(
+            ProxyPrincipal(
+                name=DAILY_UPDATES_SERVICE_PRINCIPAL,
+                is_daily_updates_service=True,
+            )
+        )
     if len(matches) != 1:
         raise HTTPException(status_code=401, detail="Invalid bearer token")
     return matches[0]
 
 
-def _authorized_model_names(username: str) -> set[str]:
-    del username
+def _authorized_model_names(principal: ProxyPrincipal) -> set[str]:
     try:
         options = normalize_model_options(load_mapping(_mapping_path(), resolve_env=True))
     except (RuntimeError, ModelOptionsError) as exc:
@@ -201,6 +260,8 @@ def _authorized_model_names(username: str) -> set[str]:
         raise HTTPException(
             status_code=503, detail="Model proxy is unavailable"
         ) from exc
+    if principal.is_daily_updates_service:
+        return {options.primary.name}
     return {option.name for option in options.options}
 
 
@@ -677,7 +738,9 @@ def _record_completed_usage(telemetry: UsageTelemetry) -> None:
         logger.warning("Failed to record model proxy usage", exc_info=True)
 
 
-def _select_model_for_body(username: str, body: bytes) -> tuple[ProxyModel, Any]:
+def _select_model_for_body(
+    principal: ProxyPrincipal, body: bytes
+) -> tuple[ProxyModel, Any]:
     try:
         payload = json.loads(body.decode("utf-8") or "{}")
     except json.JSONDecodeError as exc:
@@ -689,7 +752,7 @@ def _select_model_for_body(username: str, body: bytes) -> tuple[ProxyModel, Any]
     if not model_name:
         raise HTTPException(status_code=400, detail="model is required")
 
-    if model_name not in _authorized_model_names(username):
+    if model_name not in _authorized_model_names(principal):
         raise HTTPException(status_code=403, detail="Model is not allowed")
 
     try:
@@ -779,10 +842,10 @@ def _forward_headers(request: Request, model: ProxyModel) -> dict[str, str]:
 
 
 async def _forward_model_request(request: Request, endpoint: str) -> Response:
-    username = _require_username(request)
+    principal = _require_principal(request)
     body = await request.body()
-    model, payload = _select_model_for_body(username, body)
-    _enforce_user_quota(username)
+    model, payload = _select_model_for_body(principal, body)
+    _enforce_user_quota(principal.name)
     route_model = str(payload.get("model") or model.name).strip()
     sanitized_payload, payload_changed = _sanitize_outbound_model_payload(payload)
     if str(sanitized_payload.get("model") or "").strip() != model.model:
@@ -819,7 +882,7 @@ async def _forward_model_request(request: Request, endpoint: str) -> Response:
         and is_sse
     )
     telemetry = UsageTelemetry(
-        mapping_username=username,
+        mapping_username=principal.name,
         endpoint=endpoint.strip("/"),
         route_model=route_model,
         upstream_model=model.model,
@@ -919,8 +982,8 @@ async def healthz() -> dict[str, Any]:
 
 @app.get("/v1/models")
 async def list_models(request: Request) -> dict[str, Any]:
-    username = _require_username(request)
-    allowed = _authorized_model_names(username)
+    principal = _require_principal(request)
+    allowed = _authorized_model_names(principal)
     try:
         models = _load_proxy_models()
     except (ModelProxyConfigError, ModelProxyError) as exc:
@@ -938,8 +1001,8 @@ async def list_models(request: Request) -> dict[str, Any]:
 
 @app.get("/v1/models/{model_name:path}")
 async def get_model(request: Request, model_name: str) -> dict[str, Any]:
-    username = _require_username(request)
-    allowed = _authorized_model_names(username)
+    principal = _require_principal(request)
+    allowed = _authorized_model_names(principal)
     if model_name not in allowed:
         raise HTTPException(status_code=403, detail="Model is not allowed")
     try:

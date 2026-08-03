@@ -79,6 +79,7 @@ button {
   min-height: 100vh;
   min-height: 100dvh;
   display: grid;
+  grid-template-columns: minmax(0, 1fr);
   grid-template-rows: auto minmax(0, 1fr);
   align-items: stretch;
   justify-items: center;
@@ -117,6 +118,8 @@ button {
 
 .portal-header {
   width: min(1180px, 100%);
+  min-width: 0;
+  max-width: 100%;
   display: flex;
   flex-direction: column;
   gap: 10px;
@@ -213,14 +216,305 @@ button {
 }
 
 .login-stage {
-  width: 100%;
+  width: min(1180px, 100%);
+  min-width: 0;
+  max-width: 100%;
   min-height: 0;
-  display: flex;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(400px, 480px);
+  gap: 24px;
   align-items: center;
-  justify-content: center;
   position: relative;
   z-index: 1;
   padding-bottom: 24px;
+}
+
+.high-resolution-view .login-stage {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.daily-updates-panel {
+  width: 100%;
+  height: 580px;
+  min-width: 0;
+  display: grid;
+  grid-template-rows: auto auto minmax(0, 1fr);
+  overflow: hidden;
+  border: 1px solid rgba(255, 255, 255, 0.64);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.68);
+  box-shadow: 0 26px 70px rgba(8, 14, 28, 0.18);
+  backdrop-filter: blur(20px) saturate(140%);
+  color: #16233d;
+}
+
+.daily-updates-header {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 18px;
+  padding: 22px 24px 16px;
+  border-bottom: 1px solid rgba(20, 33, 61, 0.1);
+}
+
+.daily-updates-heading {
+  min-width: 0;
+}
+
+.daily-updates-kicker {
+  margin-bottom: 5px;
+  color: #166534;
+  font-size: 11px;
+  font-weight: 800;
+  line-height: 1;
+  letter-spacing: 0;
+  text-transform: uppercase;
+}
+
+.daily-updates-heading h2 {
+  margin: 0;
+  color: #12203b;
+  font-size: 24px;
+  line-height: 1.15;
+  letter-spacing: 0;
+}
+
+.daily-updates-language {
+  flex: 0 0 auto;
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 2px;
+  padding: 3px;
+  border: 1px solid rgba(20, 33, 61, 0.12);
+  border-radius: 8px;
+  background: rgba(20, 33, 61, 0.06);
+}
+
+.daily-updates-language-button {
+  min-height: 32px;
+  padding: 0 11px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: rgba(18, 32, 59, 0.68);
+  font-size: 12px;
+  font-weight: 700;
+  line-height: 1;
+  white-space: nowrap;
+}
+
+.daily-updates-language-button:hover {
+  color: #12203b;
+}
+
+.daily-updates-language-button.active {
+  background: #ffffff;
+  color: #12203b;
+  box-shadow: 0 2px 8px rgba(8, 14, 28, 0.1);
+}
+
+.daily-updates-language-button:focus-visible,
+.daily-updates-retry:focus-visible,
+.daily-updates-scroll:focus-visible,
+.daily-update-link:focus-visible {
+  outline: 3px solid rgba(49, 110, 255, 0.25);
+  outline-offset: 2px;
+}
+
+.daily-updates-run-status {
+  margin: 0;
+  padding: 9px 24px;
+  border-bottom: 1px solid rgba(20, 33, 61, 0.08);
+  background: rgba(22, 101, 52, 0.07);
+  color: #245d38;
+  font-size: 12px;
+  font-weight: 700;
+  line-height: 1.45;
+}
+
+.daily-updates-run-status.partial {
+  background: rgba(180, 83, 9, 0.08);
+  color: #8a460c;
+}
+
+.daily-updates-run-status.stale {
+  background: rgba(180, 35, 72, 0.08);
+  color: #9f2546;
+}
+
+.daily-updates-scroll {
+  min-height: 0;
+  overflow-x: hidden;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
+  scrollbar-width: thin;
+}
+
+.daily-updates-list {
+  min-width: 0;
+}
+
+.daily-updates-date-group {
+  margin: 0;
+  padding: 10px 24px 8px;
+  border-bottom: 1px solid rgba(20, 33, 61, 0.08);
+  background: rgba(238, 244, 255, 0.72);
+  color: rgba(18, 32, 59, 0.68);
+  font-size: 12px;
+  font-weight: 800;
+  line-height: 1.3;
+}
+
+.daily-update-item {
+  min-width: 0;
+  padding: 18px 24px 17px;
+  border-bottom: 1px solid rgba(20, 33, 61, 0.1);
+}
+
+.daily-update-title {
+  margin: 0;
+  overflow-wrap: anywhere;
+  color: #12203b;
+  font-size: 16px;
+  font-weight: 750;
+  line-height: 1.42;
+  letter-spacing: 0;
+}
+
+.daily-update-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px 12px;
+  margin-top: 8px;
+  color: rgba(18, 32, 59, 0.6);
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+.daily-update-meta span {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.daily-update-summary {
+  margin: 11px 0 0;
+  overflow-wrap: anywhere;
+  color: rgba(18, 32, 59, 0.82);
+  font-size: 14px;
+  line-height: 1.62;
+  white-space: pre-line;
+}
+
+.daily-update-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 8px 14px;
+  margin-top: 12px;
+}
+
+.daily-update-translation-pending {
+  color: #8a460c;
+  font-size: 11px;
+  font-weight: 700;
+  line-height: 1.4;
+}
+
+.daily-update-link {
+  margin-left: auto;
+  color: #1c4f98;
+  font-size: 12px;
+  font-weight: 800;
+  line-height: 1.4;
+  text-decoration: none;
+}
+
+.daily-update-link::after {
+  content: ' \2197';
+}
+
+.daily-update-link:hover {
+  color: #166534;
+  text-decoration: underline;
+}
+
+.daily-updates-feedback {
+  min-height: 180px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  padding: 28px 24px;
+  text-align: center;
+}
+
+.daily-updates-feedback p {
+  margin: 0;
+  color: rgba(18, 32, 59, 0.66);
+  font-size: 14px;
+  font-weight: 650;
+  line-height: 1.5;
+}
+
+.daily-updates-feedback.error p {
+  color: #9f2546;
+}
+
+.daily-updates-retry {
+  min-height: 36px;
+  padding: 0 15px;
+  border: 1px solid rgba(20, 33, 61, 0.16);
+  border-radius: 7px;
+  background: rgba(255, 255, 255, 0.72);
+  color: #12203b;
+  font-size: 13px;
+  font-weight: 750;
+}
+
+.daily-updates-retry:hover {
+  border-color: rgba(22, 101, 52, 0.4);
+  background: #ffffff;
+}
+
+.daily-updates-loading-more {
+  min-height: 52px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  color: rgba(18, 32, 59, 0.62);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.daily-updates-spinner {
+  width: 14px;
+  height: 14px;
+  border: 2px solid rgba(20, 33, 61, 0.16);
+  border-top-color: #166534;
+  border-radius: 50%;
+  animation: daily-updates-spin 700ms linear infinite;
+}
+
+.daily-updates-sentinel {
+  width: 100%;
+  height: 1px;
+}
+
+@keyframes daily-updates-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .daily-updates-spinner {
+    animation: none;
+  }
 }
 
 .login-logo-frame {
@@ -2397,8 +2691,40 @@ button.stretch {
 
   .login-stage {
     min-height: 0;
+    grid-template-columns: minmax(0, 1fr);
     align-items: flex-start;
+    gap: 18px;
     padding-bottom: calc(96px + env(safe-area-inset-bottom));
+  }
+
+  .login-card-shell {
+    order: 1;
+  }
+
+  .daily-updates-panel {
+    order: 2;
+    height: min(540px, 68dvh);
+    min-height: 400px;
+  }
+
+  .daily-updates-header {
+    gap: 12px;
+    padding: 18px 18px 14px;
+  }
+
+  .daily-updates-heading h2 {
+    font-size: 21px;
+  }
+
+  .daily-updates-language-button {
+    padding: 0 9px;
+  }
+
+  .daily-updates-run-status,
+  .daily-updates-date-group,
+  .daily-update-item {
+    padding-right: 18px;
+    padding-left: 18px;
   }
 
   .login-card {

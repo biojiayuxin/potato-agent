@@ -22,6 +22,9 @@
 - Genome Browser：Genomes 二级页面 `/genomes/browser`（旧 `/genome-browser`
   地址保留兼容跳转），数据从
   `/mnt/data/public_data/Genome_browser_DB` 只读加载
+- Daily Updates：未登录页公开展示 PubMed 马铃薯研究，由独立 systemd worker 每日生成双语总结，
+  Interface 从 `/srv/daily_updates/data/daily_updates.sqlite` 只读加载；部署和迁移见
+  [`DAILY_UPDATES.md`](DAILY_UPDATES.md)
 
 ## 目录
 
@@ -88,6 +91,7 @@
 - Bulk RNA-Seq SQLite 数据库，默认 `/srv/bulk_rnaseq/current/bulk_rnaseq.sqlite`
 - Gene Catalog SQLite 数据库，默认 `/srv/gene_catalog/current/gene_catalog.sqlite`
 - Genome Browser 数据库，默认 `/mnt/data/public_data/Genome_browser_DB`
+- Daily Updates 数据库，默认 `/srv/daily_updates/data/daily_updates.sqlite`
 
 ## 关键环境变量
 
@@ -115,6 +119,7 @@
 - `BULK_RNASEQ_DB_PATH`
 - `GENE_CATALOG_DB_PATH`
 - `GENOME_BROWSER_DB_ROOT`
+- `DAILY_UPDATES_DB_PATH`
 
 说明：
 

@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Potato Agent</title>
     <link rel="icon" type="image/png" href="./static/favicon.png" />
-    <link rel="stylesheet" href="./static/lite/styles.css?v=20260709-index-document-scroll" />
+    <link rel="stylesheet" href="./static/lite/styles.css?v=20260802-daily-updates" />
   </head>
   <body>
     <div id="app" class="app-shell">
@@ -33,6 +33,31 @@
           </nav>
         </header>
         <div class="login-stage">
+          <section id="daily-updates-panel" class="daily-updates-panel" lang="en" aria-labelledby="daily-updates-title">
+            <header class="daily-updates-header">
+              <div class="daily-updates-heading">
+                <div class="daily-updates-kicker">PubMed</div>
+                <h2 id="daily-updates-title">Daily Updates</h2>
+              </div>
+              <div class="daily-updates-language" role="group" aria-label="Daily Updates language">
+                <button id="daily-updates-language-en" class="daily-updates-language-button active" type="button" data-language="en" lang="en" aria-pressed="true">English</button>
+                <button id="daily-updates-language-zh" class="daily-updates-language-button" type="button" data-language="zh" lang="zh-CN" aria-pressed="false">中文</button>
+              </div>
+            </header>
+            <p id="daily-updates-run-status" class="daily-updates-run-status" aria-live="polite" hidden></p>
+            <div id="daily-updates-scroll" class="daily-updates-scroll" role="region" aria-label="Scrollable daily research updates" tabindex="0">
+              <div id="daily-updates-list" class="daily-updates-list" role="feed" aria-label="Potato research articles" aria-busy="false"></div>
+              <div id="daily-updates-feedback" class="daily-updates-feedback" aria-live="polite" hidden>
+                <p id="daily-updates-feedback-copy"></p>
+                <button id="daily-updates-retry" class="daily-updates-retry" type="button" hidden>Retry</button>
+              </div>
+              <div id="daily-updates-loading-more" class="daily-updates-loading-more" role="status" hidden>
+                <span class="daily-updates-spinner" aria-hidden="true"></span>
+                <span id="daily-updates-loading-more-copy">Loading more updates...</span>
+              </div>
+              <div id="daily-updates-sentinel" class="daily-updates-sentinel" aria-hidden="true" hidden></div>
+            </div>
+          </section>
           <div class="login-card-shell">
             <div id="auth-card" class="login-card login-card-form" data-auth-mode="home">
               <div class="login-card-brand">
@@ -527,6 +552,6 @@
     </template>
 
     <script src="./static/lite/vendor/marked.umd.js"></script>
-    <script type="module" src="./static/lite/app.js?v=20260725-session-auto-title"></script>
+    <script type="module" src="./static/lite/app.js?v=20260803-daily-updates-refresh"></script>
   </body>
 </html>

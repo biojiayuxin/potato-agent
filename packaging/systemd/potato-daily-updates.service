@@ -1,0 +1,44 @@
+[Unit]
+Description=Potato Agent Daily Updates collector
+Wants=network-online.target potato-model-proxy.service
+After=network-online.target potato-model-proxy.service
+StartLimitIntervalSec=3600
+StartLimitBurst=3
+
+[Service]
+Type=oneshot
+User=potato-daily-updates
+Group=potato-daily-updates
+SupplementaryGroups=potato-interface
+WorkingDirectory=/srv/potato_agent
+UMask=0027
+Environment=DAILY_UPDATES_PRODUCTION=1
+Environment=DAILY_UPDATES_DB_PATH=/srv/daily_updates/data/daily_updates.sqlite
+Environment=DAILY_UPDATES_LLM_BASE_URL=http://127.0.0.1:8765/v1
+LoadCredential=daily-updates-model-proxy-token:/etc/potato-agent/credentials/daily-updates-model-proxy-token
+ExecStart=/opt/interface-env/bin/python -m interface.daily_updates_job run
+Restart=on-failure
+RestartSec=900
+TimeoutStartSec=7200
+LimitCORE=0
+NoNewPrivileges=true
+PrivateDevices=true
+PrivateTmp=true
+ProtectProc=invisible
+ProcSubset=pid
+ProtectControlGroups=true
+ProtectHome=true
+ProtectKernelLogs=true
+ProtectKernelModules=true
+ProtectKernelTunables=true
+ProtectSystem=strict
+ReadWritePaths=/srv/daily_updates/data
+ReadOnlyPaths=/srv/potato_agent
+InaccessiblePaths=-/var/lib/potato-agent -/etc/potato-agent
+CapabilityBoundingSet=
+LockPersonality=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+RestrictNamespaces=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+SystemCallArchitectures=native
