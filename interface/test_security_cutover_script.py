@@ -243,23 +243,66 @@ def test_cutover_fails_closed_when_rollback_is_incomplete() -> None:
     assert verify_index < restart_index
 
 
-def test_cutover_serializes_runs_and_requires_idle_stable_services() -> None:
+def test_cutover_serializes_runs_and_drains_only_signup_jobs() -> None:
     script = (
         REPO_ROOT / "hermes-lite" / "scripts" / "cutover_lite_production.sh"
     ).read_text(encoding="utf-8")
 
+    assert 'cutover_lock=${cutover_lock_dir}/maintenance.lock' in script
     assert "flock -n 9" in script
-    assert "another Lite cutover is already running" in script
+    assert "another maintenance transition or Lite cutover is already running" in script
     assert 'if ! mkdir -m 0700 "${backup}"' in script
-    assert script.count("assert_runtime_idle") >= 3
-    assert "session_live_state" in script
-    assert "runtime_leases" in script
-    assert "turn_submission_receipts" in script
-    assert "signup_jobs" in script
+    assert "wait_for_signup_jobs 60" in script
+    assert '"${signup_drain_script}"' in script
+    assert '--db "${auth_db}" wait --timeout "${timeout_seconds}"' in script
+    assert "assert_no_provisioning_signup_jobs" in script
+    assert '--db "${auth_db}" check-provisioning' in script
+    assert "assert_runtime_idle" not in script
+    assert "session_live_state" not in script
+    assert "runtime_leases" not in script
+    assert "turn_submission_receipts" not in script
     assert "read_stable_unit_state" in script
     assert "stable active/inactive state" in script
     assert "active Interface requires an active model proxy" in script
     assert script.count("--connect-timeout 0.5 --max-time 1") == 2
+
+
+def test_cutover_enters_maintenance_after_online_checks_and_before_mutation() -> None:
+    script = (
+        REPO_ROOT / "hermes-lite" / "scripts" / "cutover_lite_production.sh"
+    ).read_text(encoding="utf-8")
+
+    signup_wait = script.index("wait_for_signup_jobs 60")
+    enter = script.index('POTATO_MAINTENANCE_LOCK_FD=9 "${maintenance_ctl}" enter')
+    stop_proxy = script.index('systemctl stop "${model_proxy_unit}"', enter)
+    provisioning_check = script.index("assert_no_provisioning_signup_jobs", enter)
+    fingerprint = script.index('"${backup}/state-before.json"', enter)
+    source_sync = script.index('"${code_source}/" "${repo}/"', fingerprint)
+
+    assert script.index('"${release}/venv/bin/pip" check') < signup_wait
+    assert script.index('cp -a "${mapping}" "${backup}/users_mapping.yaml"') < signup_wait
+    assert signup_wait < enter < stop_proxy < provisioning_check < fingerprint < source_sync
+
+
+def test_cutover_recovers_interface_only_after_runtime_services() -> None:
+    script = (
+        REPO_ROOT / "hermes-lite" / "scripts" / "cutover_lite_production.sh"
+    ).read_text(encoding="utf-8")
+    cutover = script[script.index("wait_for_signup_jobs 60") :]
+
+    start_proxy = cutover.index('systemctl start "${model_proxy_unit}"')
+    start_hermes = cutover.index('systemctl start "${service}"')
+    leave = cutover.index('POTATO_MAINTENANCE_LOCK_FD=9 "${maintenance_ctl}" leave')
+    assert start_proxy < start_hermes < leave
+    assert "maintenance service remained active after Interface recovery" in cutover
+
+    rollback = script[script.index("rollback()") : script.index("trap rollback ERR")]
+    assert "maintenance remains active" in rollback
+    assert 'POTATO_MAINTENANCE_LOCK_FD=9 "${maintenance_ctl}" leave' in rollback
+    stop_interface = rollback.index('systemctl stop "${interface_unit}"')
+    restart_maintenance = rollback.index('systemctl start "${maintenance_unit}"')
+    restore_code = rollback.index('"${backup}/code-before/" "${repo}/"')
+    assert stop_interface < restart_maintenance < restore_code
 
 
 def test_cutover_rejects_runtime_paths_that_overlap_the_deploy_tree() -> None:

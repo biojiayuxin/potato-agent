@@ -2,6 +2,7 @@
 Description=Potato Agent web interface
 Wants=potato-model-proxy.service
 After=network.target potato-model-proxy.service
+Conflicts=potato-maintenance.service
 
 [Service]
 Type=simple

@@ -1,0 +1,135 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="color-scheme" content="light" />
+    <title>Potato Agent | Maintenance</title>
+    <style>
+      :root {
+        color: #20231f;
+        background: #f6f7f4;
+        font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont,
+          "Segoe UI", sans-serif;
+      }
+      * { box-sizing: border-box; }
+      body {
+        min-height: 100vh;
+        margin: 0;
+        display: grid;
+        place-items: center;
+        background:
+          linear-gradient(180deg, #ffffff 0, #f6f7f4 62%, #eef1eb 100%);
+      }
+      main {
+        width: min(720px, calc(100% - 40px));
+        padding: 56px 0 52px;
+        text-align: center;
+      }
+      .logo {
+        width: 112px;
+        height: 112px;
+        object-fit: contain;
+        display: block;
+        margin: 0 auto 24px;
+      }
+      .wordmark {
+        margin: 0 0 36px;
+        color: #555b52;
+        font-size: 14px;
+        font-weight: 700;
+        letter-spacing: 0;
+        text-transform: uppercase;
+      }
+      .status {
+        width: fit-content;
+        margin: 0 auto 26px;
+        display: flex;
+        align-items: center;
+        gap: 9px;
+        color: #415f35;
+        font-size: 14px;
+        font-weight: 650;
+      }
+      .pulse {
+        width: 9px;
+        height: 9px;
+        border-radius: 50%;
+        background: #5f8b4d;
+        box-shadow: 0 0 0 0 rgba(95, 139, 77, 0.32);
+        animation: pulse 2.2s infinite;
+      }
+      h1 {
+        margin: 0;
+        color: #1e211d;
+        font-size: 48px;
+        font-weight: 720;
+        line-height: 1.15;
+        letter-spacing: 0;
+      }
+      .en {
+        margin: 14px 0 0;
+        color: #555b52;
+        font-size: 18px;
+        line-height: 1.45;
+      }
+      .rule {
+        width: 52px;
+        height: 2px;
+        margin: 30px auto;
+        background: #b7c5b0;
+      }
+      .detail {
+        max-width: 520px;
+        margin: 0 auto;
+        color: #656a62;
+        font-size: 15px;
+        line-height: 1.75;
+      }
+      @keyframes pulse {
+        70% { box-shadow: 0 0 0 9px rgba(95, 139, 77, 0); }
+        100% { box-shadow: 0 0 0 0 rgba(95, 139, 77, 0); }
+      }
+      @media (prefers-reduced-motion: reduce) {
+        .pulse { animation: none; }
+      }
+      @media (max-width: 480px) {
+        main { width: min(100% - 32px, 720px); padding: 38px 0; }
+        .logo { width: 88px; height: 88px; margin-bottom: 19px; }
+        .wordmark { margin-bottom: 30px; }
+        h1 { font-size: 36px; }
+        .en { font-size: 16px; }
+        .detail { font-size: 14px; }
+      }
+    </style>
+  </head>
+  <body>
+    <main>
+      <img class="logo" src="/_potato/maintenance-logo.png" alt="Potato Agent" />
+      <p class="wordmark">Potato Agent</p>
+      <div class="status"><span class="pulse" aria-hidden="true"></span>系统维护中</div>
+      <h1>我们很快回来</h1>
+      <p class="en">We'll be back shortly.</p>
+      <div class="rule" aria-hidden="true"></div>
+      <p class="detail">
+        服务正在进行例行维护，请稍后再试。<br />
+        Scheduled maintenance is in progress. Please try again shortly.
+      </p>
+    </main>
+    <script>
+      (() => {
+        const check = async () => {
+          try {
+            const response = await fetch('/health', { cache: 'no-store' });
+            if (response.ok) {
+              window.location.reload();
+              return;
+            }
+          } catch (_) {}
+          window.setTimeout(check, 3000);
+        };
+        window.setTimeout(check, 3000);
+      })();
+    </script>
+  </body>
+</html>

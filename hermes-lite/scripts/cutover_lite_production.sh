@@ -37,6 +37,8 @@ session_credential=${credential_dir}/interface-session-secret
 resend_credential=${credential_dir}/resend-api-key
 privileged_helper=/usr/local/libexec/potato-agent-privileged-helper
 staged_privileged_helper=${code_source}/packaging/libexec/potato-agent-privileged-helper
+maintenance_ctl=/usr/local/sbin/potato-maintenancectl
+maintenance_config=/etc/potato-maintenance.conf
 repo=/srv/potato_agent
 base=/opt/potato-hermes-lite
 release=${base}/releases/${release_id}
@@ -44,6 +46,7 @@ current=${base}/current
 hermes_link=/usr/local/bin/hermes
 interface_unit=potato-interface.service
 model_proxy_unit=potato-model-proxy.service
+maintenance_unit=potato-maintenance.service
 model_proxy_user=potato-model-proxy
 interface_unit_file=/etc/systemd/system/potato-interface.service
 model_proxy_unit_file=/etc/systemd/system/potato-model-proxy.service
@@ -54,9 +57,10 @@ interface_exec_dropin=${interface_dropin_dir}/40-security-entrypoint.conf
 interface_dropin=${interface_dropin_dir}/50-hermes-lite.conf
 fingerprint_script=${code_source}/hermes-lite/scripts/fingerprint_state.py
 usage_migration_script=${code_source}/migrate_model_proxy_usage.py
+signup_drain_script=${code_source}/hermes-lite/scripts/signup_drain_gate.py
 refresh_script=${repo}/refresh_hermes_systemd_units.py
 cutover_lock_dir=/run/lock/potato-agent
-cutover_lock=${cutover_lock_dir}/lite-cutover.lock
+cutover_lock=${cutover_lock_dir}/maintenance.lock
 backup_root=/var/backups/potato-agent/hermes-lite-cutover
 legacy_code_paths=(
   configure_hermes_model.py
@@ -114,52 +118,15 @@ read_stable_unit_state() {
   esac
 }
 
-assert_runtime_idle() {
-  "${interface_python}" -B - "${auth_db}" <<'PY'
-import sqlite3
-import sys
-import time
+wait_for_signup_jobs() {
+  local timeout_seconds=$1
+  "${interface_python}" -B "${signup_drain_script}" \
+    --db "${auth_db}" wait --timeout "${timeout_seconds}"
+}
 
-path = sys.argv[1]
-now = int(time.time())
-with sqlite3.connect(f"file:{path}?mode=ro", uri=True) as conn:
-    tables = {
-        str(row[0])
-        for row in conn.execute(
-            "select name from sqlite_master where type = 'table'"
-        )
-    }
-    required = {
-        "session_live_state",
-        "runtime_leases",
-        "signup_jobs",
-        "turn_submission_receipts",
-    }
-    missing = sorted(required - tables)
-    if missing:
-        raise SystemExit("runtime-idle gate lacks tables: " + ", ".join(missing))
-    counts = {
-        "live": conn.execute(
-            "select count(*) from session_live_state "
-            "where status in ('queued','starting','running','awaiting_approval')"
-        ).fetchone()[0],
-        "leases": conn.execute(
-            "select count(*) from runtime_leases where expires_at > ?", (now,)
-        ).fetchone()[0],
-        "receipts": conn.execute(
-            "select count(*) from turn_submission_receipts "
-            "where status = 'pending' and (expires_at = 0 or expires_at > ?)",
-            (now,),
-        ).fetchone()[0],
-        "signup": conn.execute(
-            "select count(*) from signup_jobs "
-            "where status in ('pending','provisioning')"
-        ).fetchone()[0],
-    }
-if any(counts.values()):
-    detail = ", ".join(f"{key}={value}" for key, value in sorted(counts.items()))
-    raise SystemExit("runtime is not idle: " + detail)
-PY
+assert_no_provisioning_signup_jobs() {
+  "${interface_python}" -B "${signup_drain_script}" \
+    --db "${auth_db}" check-provisioning
 }
 
 if [[ -L ${cutover_lock_dir} || \
@@ -177,7 +144,7 @@ exec 9>"${cutover_lock}"
 chown root:root "${cutover_lock}"
 chmod 0600 "${cutover_lock}"
 if ! flock -n 9; then
-  echo "error: another Lite cutover is already running" >&2
+  echo "error: another maintenance transition or Lite cutover is already running" >&2
   exit 2
 fi
 
@@ -189,6 +156,8 @@ for path in \
   "${session_credential}" \
   "${resend_credential}" \
   "${staged_privileged_helper}" \
+  "${maintenance_ctl}" \
+  "${maintenance_config}" \
   "${staged_interface_unit}" \
   "${staged_model_proxy_unit}" \
   "${release}/manifest.json" \
@@ -199,12 +168,18 @@ for path in \
   "${release}/browser/chrome/chrome-linux64/chrome" \
   "${release}/browser/chrome/chrome-linux64/chrome-sandbox" \
   "${fingerprint_script}" \
-  "${usage_migration_script}"; do
+  "${usage_migration_script}" \
+  "${signup_drain_script}"; do
   if [[ ! -e ${path} ]]; then
     echo "error: required cutover path is missing: ${path}" >&2
     exit 2
   fi
 done
+if ! systemd_file_is_safe "${maintenance_ctl}" || \
+   [[ $(stat -c '%U:%G:%a' "${maintenance_ctl}") != 'root:root:750' ]]; then
+  echo "error: unsafe maintenance control entrypoint" >&2
+  exit 2
+fi
 if ! systemd_file_is_safe "${privileged_helper}" || \
    [[ $(stat -c '%U:%G:%a' "${privileged_helper}") != 'root:root:755' ]]; then
   echo "error: unsafe Interface privileged helper ownership, mode, or file type" >&2
@@ -402,9 +377,40 @@ if [[ $(stat -c '%s' "${session_credential}") -lt 32 ]]; then
   echo "error: Interface session credential is shorter than 32 bytes" >&2
   exit 2
 fi
-for unit in "${interface_unit}" "${model_proxy_unit}"; do
+for unit in "${interface_unit}" "${model_proxy_unit}" "${maintenance_unit}"; do
   if [[ $(systemctl show "${unit}" --property=LoadState --value) == not-found ]]; then
     echo "error: required production unit is not currently loaded: ${unit}" >&2
+    exit 2
+  fi
+done
+maintenance_exec_start=$(
+  systemctl show "${maintenance_unit}" --property=ExecStart --value
+)
+maintenance_conflicts=$(
+  systemctl show "${maintenance_unit}" --property=Conflicts --value
+)
+if [[ ${maintenance_exec_start} != \
+      *'/usr/local/libexec/potato-maintenance-server '* ]] || \
+   [[ ${maintenance_exec_start} == *'/srv/'* ]] || \
+   [[ ${maintenance_exec_start} == *'/home/'* ]]; then
+  echo "error: maintenance unit has an unsafe or stale entrypoint" >&2
+  exit 2
+fi
+if ! printf '%s\n' "${maintenance_conflicts}" | tr ' ' '\n' | \
+  grep -Fxq "${interface_unit}"; then
+  echo "error: maintenance unit does not conflict with Interface" >&2
+  exit 2
+fi
+for property_and_expected in \
+  'DynamicUser=yes' \
+  'NoNewPrivileges=yes' \
+  'ProtectHome=yes' \
+  'ProtectSystem=strict'; do
+  property=${property_and_expected%%=*}
+  expected=${property_and_expected#*=}
+  if [[ $(systemctl show "${maintenance_unit}" \
+      --property="${property}" --value) != "${expected}" ]]; then
+    echo "error: maintenance unit lacks required hardening: ${property_and_expected}" >&2
     exit 2
   fi
 done
@@ -531,6 +537,7 @@ if [[ -L ${current} ]]; then
 fi
 interface_state=$(read_stable_unit_state "${interface_unit}") || exit 2
 model_proxy_state=$(read_stable_unit_state "${model_proxy_unit}") || exit 2
+maintenance_state=$(read_stable_unit_state "${maintenance_unit}") || exit 2
 interface_was_active=0
 if [[ ${interface_state} == active ]]; then
   interface_was_active=1
@@ -541,6 +548,10 @@ if [[ ${model_proxy_state} == active ]]; then
 fi
 if [[ ${interface_was_active} -eq 1 && ${model_proxy_was_active} -ne 1 ]]; then
   echo "error: active Interface requires an active model proxy before cutover" >&2
+  exit 2
+fi
+if [[ ${maintenance_state} != inactive ]]; then
+  echo "error: maintenance service must be inactive before cutover" >&2
   exit 2
 fi
 active_services=()
@@ -640,6 +651,7 @@ atomic_symlink() {
 }
 
 cutover_started=0
+maintenance_entered=0
 rollback() {
   local incoming=$?
   local rc=${1:-${incoming}}
@@ -670,6 +682,11 @@ rollback() {
   }
   echo "cutover failed; restoring legacy runtime from ${backup}" >&2
   rollback_step systemctl stop "${interface_unit}"
+  if [[ ${maintenance_entered} -eq 1 ]]; then
+    rollback_step systemctl start "${maintenance_unit}"
+    systemctl is-active --quiet "${maintenance_unit}" || \
+      rollback_error "maintenance recovery before rollback"
+  fi
   rollback_step systemctl stop "${model_proxy_unit}"
   for service in "${mapped_services[@]}"; do
     rollback_step systemctl stop "${service}"
@@ -799,7 +816,7 @@ rollback() {
   done
   if [[ ${rollback_failed} -ne 0 ]]; then
     printf 'rollback_failed\n' >"${backup}/result.txt" || true
-    echo "cutover rollback was incomplete; services remain stopped" >&2
+    echo "cutover rollback was incomplete; maintenance remains active and services remain stopped" >&2
     exit 125
   fi
   if ! systemctl daemon-reload; then
@@ -816,20 +833,11 @@ rollback() {
   for service in "${active_services[@]}"; do
     rollback_step systemctl start "${service}"
   done
-  if [[ ${interface_was_active} -eq 1 ]]; then
-    rollback_step systemctl start "${interface_unit}"
-  fi
   if [[ ${model_proxy_was_active} -eq 1 ]]; then
     systemctl is-active --quiet "${model_proxy_unit}" || \
       rollback_error "model proxy active-state verification"
   elif systemctl is-active --quiet "${model_proxy_unit}"; then
     rollback_error "model proxy inactive-state verification"
-  fi
-  if [[ ${interface_was_active} -eq 1 ]]; then
-    systemctl is-active --quiet "${interface_unit}" || \
-      rollback_error "Interface active-state verification"
-  elif systemctl is-active --quiet "${interface_unit}"; then
-    rollback_error "Interface inactive-state verification"
   fi
   for service in "${mapped_services[@]}"; do
     if service_was_active_before "${service}"; then
@@ -839,6 +847,24 @@ rollback() {
       rollback_error "mapped service inactive-state verification" "${service}"
     fi
   done
+  if [[ ${rollback_failed} -ne 0 ]]; then
+    printf 'rollback_failed\n' >"${backup}/result.txt" || true
+    echo "cutover rollback was incomplete; maintenance remains active" >&2
+    exit 125
+  fi
+  if [[ ${interface_was_active} -eq 1 ]]; then
+    if [[ ${maintenance_entered} -eq 1 ]]; then
+      if ! POTATO_MAINTENANCE_LOCK_FD=9 "${maintenance_ctl}" leave; then
+        rollback_error "maintenance leave and Interface recovery"
+      fi
+    else
+      rollback_step systemctl start "${interface_unit}"
+    fi
+    systemctl is-active --quiet "${interface_unit}" || \
+      rollback_error "Interface active-state verification"
+  elif systemctl is-active --quiet "${interface_unit}"; then
+    rollback_error "Interface inactive-state verification"
+  fi
   if [[ ${rollback_failed} -ne 0 ]]; then
     printf 'rollback_failed\n' >"${backup}/result.txt" || true
     echo "cutover rollback was incomplete; manual recovery is required" >&2
@@ -853,12 +879,13 @@ rollback() {
 trap rollback ERR
 trap 'rollback 130' INT TERM
 
-assert_runtime_idle
+wait_for_signup_jobs 60
+if [[ ${interface_was_active} -eq 1 ]]; then
+  POTATO_MAINTENANCE_LOCK_FD=9 "${maintenance_ctl}" enter
+  maintenance_entered=1
+fi
 cutover_started=1
 echo "captured ${#active_services[@]} active Hermes service(s) before cutover"
-if [[ ${interface_was_active} -eq 1 ]]; then
-  systemctl stop "${interface_unit}"
-fi
 if [[ ${model_proxy_was_active} -eq 1 ]]; then
   systemctl stop "${model_proxy_unit}"
 fi
@@ -883,7 +910,7 @@ if pgrep -f '[t]ui_gateway.entry|[s]lash_worker' >"${backup}/unexpected-gateway-
   echo "error: a TUI gateway or slash worker remained after stop" >&2
   false
 fi
-assert_runtime_idle
+assert_no_provisioning_signup_jobs
 
 if [[ ${model_proxy_usage_db_existed} -eq 0 ]]; then
   PYTHONPATH="${code_source}" \
@@ -1230,8 +1257,12 @@ for service in "${active_services[@]}"; do
   systemctl is-active --quiet "${service}"
 done
 if [[ ${interface_was_active} -eq 1 ]]; then
-  systemctl start "${interface_unit}"
-  systemctl is-active --quiet "${interface_unit}"
+  if [[ ${maintenance_entered} -eq 1 ]]; then
+    POTATO_MAINTENANCE_LOCK_FD=9 "${maintenance_ctl}" leave
+  else
+    systemctl start "${interface_unit}"
+    systemctl is-active --quiet "${interface_unit}"
+  fi
   health_ok=0
   for _attempt in $(seq 1 40); do
     if curl -fsS --connect-timeout 0.5 --max-time 1 \
@@ -1244,6 +1275,10 @@ if [[ ${interface_was_active} -eq 1 ]]; then
   done
   if [[ ${health_ok} -ne 1 ]]; then
     echo "error: interface health check failed" >&2
+    false
+  fi
+  if systemctl is-active --quiet "${maintenance_unit}"; then
+    echo "error: maintenance service remained active after Interface recovery" >&2
     false
   fi
 fi

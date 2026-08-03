@@ -817,8 +817,34 @@ executable、skills、browser 和 runtime profile 也必须指向 current releas
 
 `cutover_lite_production.sh` 只适用于已有生产：要求现有 `/usr/local/bin/hermes` 是 symlink、mapping 至少有
 一个用户、全部 mapped unit 已存在，并且 inactive release 已由上一小节安装完成。切换会停止 Interface 和
-切换前 active 的 Hermes 服务，应安排维护窗口并先完成独立数据备份。状态指纹用于证明切换期间零变化，
-不是备份；它不读取用户 workdir，`.hermes/home` 只做 metadata tree 摘要。
+切换前 active 的 Hermes 服务；Interface 停止后，同端口的独立维护服务会返回 HTTP 503 页面。应安排维护窗口
+并先完成独立数据备份。状态指纹用于证明停服后的切换期间零变化，不是备份；它不读取用户 workdir，
+`.hermes/home` 只做 metadata tree 摘要。
+
+维护服务首次安装会覆盖 `/etc/systemd/system/potato-maintenance.service` 并写入 `/usr/local`，必须先取得 owner
+明确批准，不能把下列命令当作普通代码部署的一部分自动执行。批准后在 Interface 仍在线时安装；脚本只执行
+`daemon-reload`，不会 start 或 enable 维护服务，也不会修改已有站点配置。首次启用时应先按下文创建
+root-owned `CODE_SOURCE` staging，再从 staging 安装，不能依赖尚未完成 cutover 的旧 `/srv` 源码：
+
+```bash
+sudo "$CODE_SOURCE/packaging/install_maintenance_mode.sh" "$CODE_SOURCE"
+
+test "$(stat -c '%U:%G:%a' /etc/potato-maintenance.conf)" = root:root:644
+grep -Fx 'bind_host = 10.186.0.25' /etc/potato-maintenance.conf
+grep -Fx 'bind_port = 3000' /etc/potato-maintenance.conf
+! systemctl is-active --quiet potato-maintenance.service
+sudo /usr/local/sbin/potato-maintenancectl status
+```
+
+维护 server 使用系统 Python 标准库和安装到 `/usr/local/share/potato-agent/maintenance/` 的只读 HTML/logo，
+不读取 `/srv/potato_agent`、Interface venv、数据库或 Hermes 状态。unit 使用 `DynamicUser`、只读文件系统和空
+capability set；不要为它增加写目录。站点配置只接受具体 IPv4 地址，拒绝 `0.0.0.0`。正常人工切换命令为
+`sudo potato-maintenancectl enter|leave|status`；`enter` 失败会恢复 Interface，`leave` 失败会恢复维护页。
+不要 enable 维护 unit，开机正常入口仍是 `potato-interface.service`。
+
+维护页只保证 LAN `10.186.0.25:3000`；Interface 停止期间，依赖它的 ZeroTier proxy 可以不可用。已经加载且
+没有继续请求服务器的旧标签页不会被主动替换，用户刷新、导航或重新访问后才会看到维护页。未发送草稿和
+进行中的上传不会由维护服务恢复。
 
 常规 runtime 或 wheel 内容变更必须使用新建并验证的 inactive release。只有代码切换不改变 Lite wheel，且
 `verify_lite.py` 已同时证明当前 immutable release 的 wheel inventory、依赖 lock 和 staging source boundary
@@ -922,9 +948,11 @@ sudo "$CODE_SOURCE/hermes-lite/scripts/cutover_lite_production.sh" \
 
 cutover 会：
 
-- 从预检到最终验收持有 root-only 全局锁，拒绝并行 cutover，并要求 Interface、model proxy 和全部 mapped
-  unit 处于稳定的 active/inactive 状态；停服前和全部写入方停止后各确认一次没有 live response、approval、
-  未过期 runtime lease、pending turn receipt 或 signup job；
+- 从预检到最终验收持有 `/run/lock/potato-agent/maintenance.lock`，拒绝并行维护切换或 cutover，并要求
+  Interface、maintenance、model proxy 和全部 mapped unit 处于稳定状态；
+- 在 Interface 在线时最多等待 60 秒，直到没有 `pending` 或 `provisioning` signup job；超时保持 Interface 在线
+  并中止。随后进入维护模式，依靠 Interface graceful shutdown 收尾已经开始的 provisioning，并在停服后确认
+  没有遗留 `provisioning`；活动 Agent 回合、runtime lease 和 turn receipt 不阻塞维护切换；
 - 备份 mapping、全部 mapped unit、旧 `current`/`hermes` target、Interface drop-in，并在停服后把整个现有源码树
   保存到 `code-before/`，写完后才创建 `code-before.complete`；
 - 记录切换前 active 的服务，只停止并最终恢复这些服务，原本 inactive 的 unit 保持 inactive；
@@ -934,7 +962,8 @@ cutover 会：
   和构建残留，再以相同 metadata/checksum 规则 dry run 确认零 drift；随后原子切换 `current` 与
   `/usr/local/bin/hermes` 并刷新既有 unit 集；
 - 再次采集并比较指纹，要求 `added`、`changed`、`removed` 全为空；
-- 检查 `/health`、进程使用的新 release、无 `slash_worker`、`pip check` 和 CLI help。
+- 先恢复 model proxy 和原 active Hermes 服务，最后停止维护服务并恢复 Interface；检查真实 `/health`、进程使用
+  新 release、无 `slash_worker`、`pip check` 和 CLI help。
 
 备份写入 root-only 的
 `/var/backups/potato-agent/hermes-lite-cutover/<timestamp>-<release-id>`。切换开始后的错误、中断或终止信号会
@@ -942,8 +971,9 @@ cutover 会：
 `rsync --delete-delay` 恢复整个旧源码树；因此切换期间新增的代码也会被删除，源码内容和 metadata 回到切换前
 快照。成功后的人工回滚仍没有独立的一键脚本，必须保留旧 immutable release 和对应 backup，在维护窗口中按
 backup 受控执行；`code-before/` 只覆盖源码树，不替代 mapping、Interface DB 和每用户状态的独立备份。
-自动回滚只有在源码、symlink、unit、drop-in 和原服务状态全部恢复并验证后才写 `rolled_back`；任何恢复步骤失败
-都会写 `rollback_failed`、保持服务停止并要求人工恢复，不能把部分回滚当成成功。
+自动回滚只有在源码、symlink、unit、drop-in、model proxy 和 Hermes 服务全部恢复并验证后，才撤下维护页、
+启动旧 Interface、验证真实 `/health` 并写 `rolled_back`；任何前置恢复步骤失败都会写 `rollback_failed` 并继续
+展示维护页，不能把部分回滚当成成功。
 
 #### 6.7 部署后验证
 
@@ -960,6 +990,8 @@ readlink -f /usr/local/bin/hermes
    print(pathlib.Path(tui_gateway.entry.__file__).resolve())'
 
 systemctl is-active potato-interface.service
+! systemctl is-active --quiet potato-maintenance.service
+sudo /usr/local/sbin/potato-maintenancectl status
 test ! -L /usr/local/libexec/potato-agent-privileged-helper
 test "$(stat -c '%U:%G:%a' /usr/local/libexec/potato-agent-privileged-helper)" = root:root:755
 cmp -s \
