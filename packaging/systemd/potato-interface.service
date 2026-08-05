@@ -13,7 +13,7 @@ Environment=INTERFACE_ENVIRONMENT=production
 Environment=INTERFACE_ALLOW_INSECURE_HTTP=false
 Environment=INTERFACE_BIND_HOST=127.0.0.1
 Environment=INTERFACE_SESSION_COOKIE_SECURE=true
-Environment=INTERFACE_ARCHIVE_RETENTION_DAYS=7
+Environment=INTERFACE_ARCHIVE_RETENTION_DAYS=99999
 Environment=INTERFACE_ARCHIVE_STORAGE_RETENTION_DAYS=30
 Environment=INTERFACE_PRIVILEGED_HELPER=/usr/local/libexec/potato-agent-privileged-helper
 LoadCredential=interface-session-secret:/etc/potato-agent/credentials/interface-session-secret

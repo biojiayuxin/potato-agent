@@ -1005,6 +1005,10 @@ systemctl show potato-interface.service --property=Environment --value |
   grep -Fx INTERFACE_PRIVILEGED_HELPER=/usr/local/libexec/potato-agent-privileged-helper
 INTERFACE_EFFECTIVE_ENV=$(systemctl show potato-interface.service --property=Environment --value)
 INTERFACE_EFFECTIVE_EXEC=$(systemctl show potato-interface.service --property=ExecStart --value)
+printf '%s\n' "$INTERFACE_EFFECTIVE_ENV" | tr ' ' '\n' |
+  grep -Fxq INTERFACE_ARCHIVE_RETENTION_DAYS=99999
+printf '%s\n' "$INTERFACE_EFFECTIVE_ENV" | tr ' ' '\n' |
+  grep -Fxq INTERFACE_ARCHIVE_STORAGE_RETENTION_DAYS=30
 INTERFACE_EFFECTIVE_BIND=$(printf '%s\n' "$INTERFACE_EFFECTIVE_ENV" | tr ' ' '\n' |
   sed -n 's/^INTERFACE_BIND_HOST=//p')
 test -n "$INTERFACE_EFFECTIVE_BIND"
@@ -1727,10 +1731,10 @@ ufw show listening
 注册流程通过 Resend HTTPS API 发送邮箱验证码。`INTERFACE_MAIL_FROM` 必须使用已验证域名下的地址；Resend
 credential 或发件地址无效时，发送接口会失败。不要把 credential 的内容复制到 drop-in。
 
-会话归档任务默认每天 03:00 把超过 7 天未活跃的会话移入 `archive.db`，由
-`INTERFACE_ARCHIVE_RETENTION_DAYS` 调整；归档正文默认只保留 30 天，由
-`INTERFACE_ARCHIVE_STORAGE_RETENTION_DAYS` 调整。生产 unit 明确固定为 `7` 和 `30`，两个值都必须至少为
-`1`，含义不同；不要再用 `365000` 等超长覆盖值关闭清理。
+会话归档调度仍每天 03:00 运行，但默认只处理超过 `99999` 天未活跃的会话，即默认
+不开启常规自动会话归档。该阈值由 `INTERFACE_ARCHIVE_RETENTION_DAYS` 调整；未经 owner 明确要求，
+不得将其降低。归档正文默认只保留 30 天，由 `INTERFACE_ARCHIVE_STORAGE_RETENTION_DAYS`
+调整。生产 unit 明确固定为 `99999` 和 `30`，两个值都必须至少为 `1`，且含义不同。
 
 启用服务：
 
@@ -2121,7 +2125,8 @@ PY
 现在按 6.6 小节运行 cutover。脚本会记录原 active 集合后统一停止 Interface、proxy 和 Hermes，使用
 `migrate_model_proxy_usage.py` 从 `interface.db` 幂等迁移 usage/quota 到专用 `usage.db`，再采集状态指纹、
 切换代码、备份并安装两个主 unit，清理旧 secret、`EnvironmentFile=` 和归档保留期 drop-in 后启动服务。
-新版主 unit 会强制恢复 7 天在线会话归档和 30 天归档正文保留，旧的 `365000` 覆盖不会延续。迁移只复制
+新版主 unit 会强制使用 99999 天在线会话归档阈值和 30 天归档正文保留，旧 drop-in 中的归档阈值
+覆盖不会延续。迁移只复制
 usage/quota 表，不复制认证数据或聊天记录。不要在 cutover 前手工运行迁移，否则无法得到维护窗口停写后的
 完整快照。
 

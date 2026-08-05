@@ -130,6 +130,8 @@
 - 无域名隔离测试服务器只有同时显式设置 `INTERFACE_ALLOW_INSECURE_HTTP=true`、
   `INTERFACE_SESSION_COOKIE_SECURE=false` 并通过 `INTERFACE_BIND_HOST` 指定一个明确的非 loopback IPv4
   时才能启动；该 profile 会明文传输密码、session 和聊天内容，只能用于可信隔离 LAN
+- `INTERFACE_ARCHIVE_RETENTION_DAYS` 默认和生产 unit 均为 `99999`，即默认不开启常规自动
+  会话归档；未经 owner 明确要求不得降低该值
 - 归档正文默认保留 30 天；启动和每日归档任务都会清理更早的数据
 - `INTERFACE_FILE_BROWSER_MODE` 默认为 `home_only`
   - `home_only`：Files 面板只显示 `~/`，不显示目录输入框
@@ -179,8 +181,8 @@
 - 最终验收必须逐用户确认 `model.api_key` 精确等于 mapping 中的随机 proxy token，配置其它位置没有
   `api_key`，`.env` 没有 `OPENAI_API_KEY`；不能只看 cleanup dry-run 的布尔摘要
 - 新版首次启动会清理归档时间超过 30 天的正文，启动前必须先完成独立备份和保留策略确认
-- 生产 unit 固定使用 7 天在线会话归档和 30 天归档正文保留；cutover 会清除旧 drop-in 中包括 `365000`
-  在内的历史覆盖值
+- 生产 unit 固定使用 99999 天在线会话归档阈值和 30 天归档正文保留；cutover 会清除旧
+  drop-in 中的历史覆盖值
 - 一次性迁移、严格停服顺序、随机 proxy token 下发、usage/quota 迁移和普通用户权限复测见根目录
   `README.md` 的“升级已有部署”章节
 

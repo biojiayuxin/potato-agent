@@ -11,6 +11,12 @@ import interface.archive_store as archive_store
 DAY_SECONDS = 86400
 
 
+def test_default_archive_retention_does_not_archive_normal_history() -> None:
+    import interface.app as app_mod
+
+    assert app_mod.DEFAULT_ARCHIVE_RETENTION_DAYS == 99999
+
+
 def _archive(
     db_path: Path,
     *,

@@ -62,7 +62,7 @@ def test_cutover_uses_private_service_boundaries() -> None:
     assert "EnvironmentFile[[:space:]]*=" in script
     assert "ARCHIVE_RETENTION_DAYS|ARCHIVE_STORAGE_RETENTION_DAYS" in script
     assert "Interface chat retention policy is not loaded" in script
-    assert "environment_has_exact 'INTERFACE_ARCHIVE_RETENTION_DAYS=7'" in script
+    assert "environment_has_exact 'INTERFACE_ARCHIVE_RETENTION_DAYS=99999'" in script
     assert "environment_has_exact 'INTERFACE_ARCHIVE_STORAGE_RETENTION_DAYS=30'" in script
     assert "INTERFACE privileged helper entrypoint is not loaded".lower() in script.lower()
     assert '"INTERFACE_PRIVILEGED_HELPER=${privileged_helper}"' in script
@@ -119,7 +119,7 @@ def test_packaged_interface_unit_pins_chat_retention_policy() -> None:
         REPO_ROOT / "packaging" / "systemd" / "potato-interface.service"
     ).read_text(encoding="utf-8")
 
-    assert "Environment=INTERFACE_ARCHIVE_RETENTION_DAYS=7" in service
+    assert "Environment=INTERFACE_ARCHIVE_RETENTION_DAYS=99999" in service
     assert "Environment=INTERFACE_ARCHIVE_STORAGE_RETENTION_DAYS=30" in service
     assert "Environment=INTERFACE_ALLOW_INSECURE_HTTP=false" in service
     assert "Environment=INTERFACE_BIND_HOST=127.0.0.1" in service

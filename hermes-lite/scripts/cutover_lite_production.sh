@@ -1108,7 +1108,7 @@ if [[ -z ${interface_bind_host} ]] || [[ ${interface_bind_host} == *$'\n'* ]]; t
   echo "error: Interface bind host is missing or ambiguous" >&2
   false
 fi
-if ! environment_has_exact 'INTERFACE_ARCHIVE_RETENTION_DAYS=7' "${interface_environment}" ||
+if ! environment_has_exact 'INTERFACE_ARCHIVE_RETENTION_DAYS=99999' "${interface_environment}" ||
    ! environment_has_exact 'INTERFACE_ARCHIVE_STORAGE_RETENTION_DAYS=30' "${interface_environment}"; then
   echo "error: Interface chat retention policy is not loaded" >&2
   false
