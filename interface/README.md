@@ -59,6 +59,8 @@
   从经过审查的注释、序列、文献、相似性和功能预测来源构建版本化 Gene Catalog SQLite
 - `genome_browser.py`
   Genome Browser 的公开 FastAPI router；只读加载 bgzip FASTA/GFF3 及索引文件
+- `import_genome_browser_assembly.py`
+  校验、排序并索引单倍体 FASTA/GFF3，成功后原子更新 Genome Browser manifest 和元数据
 - `build_bulk_rnaseq_db.py`
   从整理后的 bulk RNA-Seq TSV 构建只读 SQLite；默认排除非马铃薯材料
 - `requirements.txt`
