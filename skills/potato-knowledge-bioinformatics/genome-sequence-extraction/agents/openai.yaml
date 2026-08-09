@@ -1,0 +1,4 @@
+interface:
+  display_name: "Genome Sequence Extraction"
+  short_description: "Extract genomic, CDS, promoter, and protein sequences"
+  default_prompt: "Use $genome-sequence-extraction to extract a strand-aware sequence from a local genome or the Potato Agent Genome Browser API."

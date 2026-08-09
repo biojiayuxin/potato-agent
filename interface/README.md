@@ -121,6 +121,8 @@
 - `BULK_RNASEQ_DB_PATH`
 - `GENE_CATALOG_DB_PATH`
 - `GENOME_BROWSER_DB_ROOT`
+- `GENOME_BROWSER_FEATURE_INDEX_PATH`
+- `GENOME_BROWSER_SAMTOOLS`
 - `DAILY_UPDATES_DB_PATH`
 
 说明：
@@ -149,6 +151,9 @@
 - `GENE_CATALOG_DB_PATH` 默认 `/srv/gene_catalog/current/gene_catalog.sqlite`；建议 `/srv/gene_catalog` owner
   为 `root`、group 为 `potato-interface`，目录 `0750`、SQLite 文件 `0640`
 - `GENOME_BROWSER_DB_ROOT` 默认 `/mnt/data/public_data/Genome_browser_DB`；目录内 FASTA/GFF3 需要是 bgzip 压缩并带 `.fai/.gzi/.tbi` 索引
+- `GENOME_BROWSER_FEATURE_INDEX_PATH` 指向集中式多 assembly 特征索引；未设置时默认使用
+  `$GENOME_BROWSER_DB_ROOT/feature_index.sqlite`
+- `GENOME_BROWSER_SAMTOOLS` 可指定坐标序列 API 使用的 `samtools` 可执行文件，默认从 `PATH` 解析 `samtools`
 
 ## 当前边界
 
@@ -199,6 +204,25 @@
   不得原地修改活动数据库
 - Interface 必须可读该文件，普通 mapped Linux 用户必须不可读；发布后验收 `/genes`、
   `/api/v1/gene-catalog` 和 `/api/v1/genes/search`，完整构建、发布及回滚保留命令见根 README
+
+### Genome Browser 特征索引与序列 API
+
+- `interface.build_genome_feature_index --full` 从 `assemblies.json` 构建一个集中式 SQLite；
+  `--sync --assembly CATEGORY/SAMPLE` 每次事务性替换一个 assembly，`--check` 用于发布前校验。
+- 有官方代表转录本表时，将表放在数据库根目录内，并在对应 assembly 中用相对路径
+  `representativeMap` 声明；构建器会校验文件哈希，已知 canonical assembly 缺少该声明时直接失败。
+  `--representative-map ASSEMBLY_ID=/absolute/path.tsv` 仅用于一次性构建覆盖；其余基因按最长 CDS、
+  最长 exon、transcript ID 的确定性顺序回退。
+- 构建器先写同目录临时数据库，并在 schema、行为版本、外键和 SQLite 检查通过后原子替换输出；已有输出的
+  owner、group 和 mode 会被保留。生产发布也可先在 staging 路径构建，再用明确 owner/group/mode 安装。
+- `GET /api/genome-browser/features/resolve` 按 assembly + gene/transcript ID 返回基因、代表转录本及有序 exon/CDS 坐标。
+- 当前站点公网边缘只暴露原有 assembly 列表和 JBrowse 数据文件，不会转发新增语义 API；服务器内技能应使用
+  Interface 内部 origin。若后续在边缘放行清晰 API 路径，外部调用方可直接使用同一后端契约。
+- `phased_tetraploid/*` assembly 内跨 `seqid` 重复的原始 gene/transcript ID 会索引为 `raw_id@seqid`，原始 ID 保留为 alias；
+  用未限定的原始 ID 查询时返回 `409` 及全部候选，调用方必须使用响应中的精确候选重试，不能任意选择或合并位点。
+- `POST /api/genome-browser/sequences` 按 1-based inclusive 坐标批量提取正链或反向互补序列；每段及每个请求的
+  总请求长度上限均为 1,000,000 bp，最多 256 段。只有显式 `clip=true` 时才裁剪越界区间。
+- Genome Browser 数据下载路由只允许 manifest 明确列出的 JBrowse 文件；集中索引不会作为静态文件公开。
 
 ## 新增的 TUI Gateway Bridge 骨架
 
