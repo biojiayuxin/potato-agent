@@ -64,7 +64,7 @@ Apply these isoform rules:
 - Use `--isoform all` to emit every transcript.
 - Treat an explicit transcript ID as authoritative and bypass gene-level isoform selection.
 
-The centralized index supplies its representative transcript and `representativeSource` for both local canonical Potato extraction and API extraction. Explicit local files and generic Other species annotations have no shared representative index, so `representative` falls back deterministically to longest CDS for promoter/CDS/protein or longest exon span for transcript. Check `representative_source` in the report; fallback values include `longest_cds_fallback` and `longest_exon_fallback`.
+The centralized index supplies its representative transcript and `representativeSource` for both local canonical Potato extraction and API extraction. Its selection priority is a provenance-backed explicit map, an unambiguous GFF representative marker, longest CDS, longest exon span when no CDS exists, then transcript ID as a deterministic tie-breaker. Do not infer a representative transcript from an isoform suffix or a GO/KEGG ID-normalization map. Explicit local files and generic Other species annotations have no shared representative index, so `representative` falls back deterministically to longest CDS for promoter/CDS/protein or longest exon span for transcript. Check `representative_source` in the report; fallback values include `longest_cds_fallback` and `longest_exon_fallback`.
 
 Promoters exclude the ATG base and contain exactly `--length` upstream bases unless clipping is explicitly enabled. Require CDS coordinates; do not infer an ATG from the transcript or gene boundary.
 

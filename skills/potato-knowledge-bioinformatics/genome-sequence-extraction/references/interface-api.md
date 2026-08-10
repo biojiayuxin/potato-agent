@@ -63,7 +63,7 @@ Coordinates are 1-based inclusive. Segment names must be unique within one reque
 
 The script uses `https://potato-agent.ynnu.edu.cn` as its fixed API default. It does not discover an origin from systemd or environment variables. Pass `--api-base-url http://10.186.0.25:3000` only when directly testing the deployed Interface; do not persist that local IP in skill defaults or routine commands.
 
-With `--source auto`, canonical Potato queries use the local `Genome_browser_DB` first. Feature modes require a readable centralized `feature_index.sqlite` whose recorded reference, FAI, annotation, and representative-map provenance matches the local files; region mode requires a readable indexed reference. The API is selected before extraction when those required local resources are missing, stale, incomplete, or unreadable. Feature-not-found and invalid-coordinate errors are data/query failures and do not trigger a second backend.
+With `--source auto`, canonical Potato queries use the local `Genome_browser_DB` first. Feature modes require a readable centralized `feature_index.sqlite` whose recorded reference, FAI, annotation, and optional representative-map provenance matches the local files; region mode requires a readable indexed reference. The API is selected before extraction when those required local resources are missing, stale, incomplete, or unreadable. Feature-not-found and invalid-coordinate errors are data/query failures and do not trigger a second backend.
 
 The response preserves request order and returns, for every record:
 

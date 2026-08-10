@@ -189,19 +189,82 @@ def test_manifest_representative_map_is_relative_to_database_root(tmp_path: Path
     assert resolved["transcripts"][0]["representativeSource"] == "mapping"
 
 
-def test_known_assembly_requires_manifest_representative_map(tmp_path: Path) -> None:
+def test_unambiguous_gff_representative_marker_precedes_longest_cds(
+    tmp_path: Path,
+) -> None:
+    lines = [
+        line.replace("ID=tx1;Parent=gene1", "ID=tx1;Parent=gene1;representative=true")
+        for line in _basic_annotation()
+    ]
+    assembly = _write_assembly(
+        tmp_path,
+        assembly_id="monoploid/Test",
+        annotation_lines=lines,
+    )
+    _write_manifest(tmp_path, [assembly])
+    output = tmp_path / "feature_index.sqlite"
+
+    build_full_index(db_root=tmp_path, output=output)
+
+    resolved = resolve_feature(
+        output, assembly_id="monoploid/Test", query_id="gene1"
+    )
+    assert resolved["gene"]["representativeTranscriptId"] == "tx1"
+    assert resolved["transcripts"][0]["representativeSource"] == "gff_attribute"
+
+
+def test_known_assembly_without_representative_map_uses_longest_cds(
+    tmp_path: Path,
+) -> None:
     assembly = _write_assembly(
         tmp_path,
         assembly_id="monoploid/DMv8.2",
         annotation_lines=_basic_annotation(),
     )
     _write_manifest(tmp_path, [assembly])
+    output = tmp_path / "feature_index.sqlite"
 
-    with pytest.raises(
-        FeatureIndexError,
-        match="manifest assembly must declare representativeMap: monoploid/DMv8.2",
-    ):
-        build_full_index(db_root=tmp_path, output=tmp_path / "feature_index.sqlite")
+    build_full_index(db_root=tmp_path, output=output)
+
+    resolved = resolve_feature(
+        output, assembly_id="monoploid/DMv8.2", query_id="gene1"
+    )
+    assert resolved["gene"]["representativeTranscriptId"] == "tx2"
+    assert resolved["transcripts"][0]["representativeSource"] == "longest_cds"
+
+
+def test_sync_after_manifest_map_removal_reselects_longest_cds(
+    tmp_path: Path,
+) -> None:
+    assembly = _write_assembly(
+        tmp_path,
+        assembly_id="monoploid/DMv8.2",
+        annotation_lines=_basic_annotation(),
+    )
+    mapping = tmp_path / "metadata" / "representative-maps" / "DMv8.2.tsv"
+    mapping.parent.mkdir(parents=True)
+    mapping.write_text("gene1\ttx1\n", encoding="utf-8")
+    assembly["representativeMap"] = str(mapping.relative_to(tmp_path))
+    _write_manifest(tmp_path, [assembly])
+    output = tmp_path / "feature_index.sqlite"
+    build_full_index(db_root=tmp_path, output=output)
+
+    assembly.pop("representativeMap")
+    _write_manifest(tmp_path, [assembly])
+
+    stale = check_index(db_root=tmp_path, index_path=output)
+    assert stale["staleAssemblies"] == ["monoploid/DMv8.2"]
+
+    sync_assemblies(
+        db_root=tmp_path,
+        index_path=output,
+        assembly_ids={"monoploid/DMv8.2"},
+    )
+    resolved = resolve_feature(
+        output, assembly_id="monoploid/DMv8.2", query_id="gene1"
+    )
+    assert resolved["gene"]["representativeTranscriptId"] == "tx2"
+    assert resolved["transcripts"][0]["representativeSource"] == "longest_cds"
 
 
 def test_manifest_representative_map_cannot_escape_database_root(tmp_path: Path) -> None:
@@ -503,6 +566,49 @@ def test_compact_schema_does_not_create_one_row_per_segment(tmp_path: Path) -> N
         }
     assert "exons" not in tables
     assert "cds_segments" not in tables
+
+
+def test_child_foreign_keys_have_supporting_indexes(tmp_path: Path) -> None:
+    assembly = _write_assembly(
+        tmp_path,
+        assembly_id="monoploid/Test",
+        annotation_lines=_basic_annotation(),
+    )
+    _write_manifest(tmp_path, [assembly])
+    output = tmp_path / "feature_index.sqlite"
+    build_full_index(db_root=tmp_path, output=output)
+
+    with sqlite3.connect(output) as conn:
+        conn.execute("pragma foreign_keys=on")
+        representative_columns = [
+            row[2]
+            for row in conn.execute(
+                "pragma index_info(ix_genes_representative_transcript_pk)"
+            )
+        ]
+        gene_alias_columns = [
+            row[2]
+            for row in conn.execute("pragma index_info(ix_gene_alias_gene_pk)")
+        ]
+        transcript_alias_columns = [
+            row[2]
+            for row in conn.execute(
+                "pragma index_info(ix_transcript_alias_transcript_pk)"
+            )
+        ]
+        delete_plans = [
+            row[3]
+            for statement in (
+                "explain query plan delete from genes where gene_pk=-1",
+                "explain query plan delete from transcripts where transcript_pk=-1",
+            )
+            for row in conn.execute(statement)
+        ]
+
+    assert representative_columns == ["representative_transcript_pk"]
+    assert gene_alias_columns == ["gene_pk"]
+    assert transcript_alias_columns == ["transcript_pk"]
+    assert not [detail for detail in delete_plans if detail.startswith("SCAN ")]
 
 
 def test_named_representative_map_header_is_skipped(tmp_path: Path) -> None:

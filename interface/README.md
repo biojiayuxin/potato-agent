@@ -209,10 +209,10 @@
 
 - `interface.build_genome_feature_index --full` 从 `assemblies.json` 构建一个集中式 SQLite；
   `--sync --assembly CATEGORY/SAMPLE` 每次事务性替换一个 assembly，`--check` 用于发布前校验。
-- 有官方代表转录本表时，将表放在数据库根目录内，并在对应 assembly 中用相对路径
-  `representativeMap` 声明；构建器会校验文件哈希，已知 canonical assembly 缺少该声明时直接失败。
-  `--representative-map ASSEMBLY_ID=/absolute/path.tsv` 仅用于一次性构建覆盖；其余基因按最长 CDS、
-  最长 exon、transcript ID 的确定性顺序回退。
+- 有来源明确、可溯源的代表转录本表时，可将表放在数据库根目录内，并在对应 assembly 中用相对路径
+  `representativeMap` 声明；构建器会校验文件哈希。命令行的 `--representative-map` 仅用于一次性构建
+  覆盖。不能把 GO/KEGG ID 归一化表当作代表转录本依据；没有可信映射或明确 GFF 选择标记时，按最长
+  CDS、最长 exon、transcript ID 的确定性顺序选择。
 - 构建器先写同目录临时数据库，并在 schema、行为版本、外键和 SQLite 检查通过后原子替换输出；已有输出的
   owner、group 和 mode 会被保留。生产发布也可先在 staging 路径构建，再用明确 owner/group/mode 安装。
 - `GET /api/genome-browser/features/resolve` 按 assembly + gene/transcript ID 返回基因、代表转录本及有序 exon/CDS 坐标。

@@ -23,14 +23,6 @@ FEATURE_ID_RULE_VERSION = "raw-or-raw-at-seqid-for-cross-seqid-duplicates-v1"
 STORAGE_LAYOUT = "compact-transcript-segments-v1"
 INSERT_BATCH_SIZE = 5_000
 PARENTLESS_TRANSCRIPT_GENE_RE = re.compile(r"^(.+)\.\d+$")
-REQUIRED_REPRESENTATIVE_MAP_ASSEMBLIES = frozenset(
-    {
-        "monoploid/DMv6.1",
-        "monoploid/DMv8.1",
-        "monoploid/DMv8.2",
-        "monoploid/E4-63",
-    }
-)
 TRANSCRIPT_TYPES = {
     "mrna",
     "transcript",
@@ -420,10 +412,6 @@ def representative_map_path_for(
             db_root,
             assembly.representative_map,
             f"representative map for {assembly.assembly_id}",
-        )
-    elif assembly.assembly_id in REQUIRED_REPRESENTATIVE_MAP_ASSEMBLIES:
-        raise FeatureIndexError(
-            f"manifest assembly must declare representativeMap: {assembly.assembly_id}"
         )
     else:
         path = None
@@ -1142,12 +1130,16 @@ create table transcript_aliases(
 INDEX_SQL = """
 create unique index uq_assemblies_id on assemblies(assembly_id);
 create unique index uq_genes_assembly_id on genes(assembly_pk, gene_id);
+create index ix_genes_representative_transcript_pk
+  on genes(representative_transcript_pk);
 create unique index uq_transcripts_assembly_id on transcripts(assembly_pk, transcript_id);
 create index ix_transcripts_gene on transcripts(gene_pk, transcript_id);
 create unique index uq_gene_representative
   on transcripts(gene_pk) where is_representative = 1;
 create index ix_gene_alias_lookup on gene_aliases(assembly_pk, alias);
+create index ix_gene_alias_gene_pk on gene_aliases(gene_pk);
 create index ix_transcript_alias_lookup on transcript_aliases(assembly_pk, alias);
+create index ix_transcript_alias_transcript_pk on transcript_aliases(transcript_pk);
 """
 
 
