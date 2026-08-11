@@ -18,15 +18,14 @@ THREADS = int(M.get("cpus", 16))
 CSCORE = str(M.get("cscore", 0.9))
 MINSPAN = str(M.get("minspan", 30))
 SEQPAIRS = M.get("seqpairs", "") or ""
-FORMATS = P.get("formats", ["pdf", "png"])
 
 FINAL_OUTPUTS = [
     f"results/{PAIR}.last.filtered",
     f"results/{PAIR}.anchors",
     f"results/{PAIR}.lifted.anchors",
     f"results/{PAIR}.anchors.simple",
+    f"results/{PAIR}.macrosynteny.pdf",
 ]
-FINAL_OUTPUTS += [f"results/{PAIR}.macrosynteny.{fmt}" for fmt in FORMATS]
 if P.get("line_pdf", True):
     FINAL_OUTPUTS.append(f"results/{PAIR}.macrosynteny.line.pdf")
 
@@ -95,21 +94,28 @@ rule check_ids:
     input:
         bed_a=f"work/{AP}.bed",
         fa_a=f"work/{AP}.{SUFFIX}",
+        gff_a=A["gff3"],
         bed_b=f"work/{BP}.bed",
-        fa_b=f"work/{BP}.{SUFFIX}"
+        fa_b=f"work/{BP}.{SUFFIX}",
+        gff_b=B["gff3"]
     output:
         "results/id_check.tsv"
     params:
         ap=AP,
-        bp=BP
+        bp=BP,
+        gff_type_a=A.get("gff_type", "mRNA"),
+        gff_type_b=B.get("gff_type", "mRNA")
     shell:
         r"""
-        python - {input.bed_a} {input.fa_a} {params.ap} {input.bed_b} {input.fa_b} {params.bp} > {output} <<'PY'
+        python - \
+          {input.bed_a} {input.fa_a} {input.gff_a} {params.ap} {params.gff_type_a} \
+          {input.bed_b} {input.fa_b} {input.gff_b} {params.bp} {params.gff_type_b} \
+          > {output} <<'PY'
 import sys
 args = sys.argv[1:]
-print('prefix\tbed_ids\tfasta_ids\tbed_not_in_fasta\tfasta_not_in_bed')
-for i in range(0, len(args), 3):
-    bed, fa, prefix = args[i:i+3]
+print('prefix\tbed_ids\tfasta_ids\tgenes\tbed_not_in_fasta\tfasta_not_in_bed')
+for i in range(0, len(args), 5):
+    bed, fa, gff, prefix, transcript_type = args[i:i+5]
     bed_ids = set()
     with open(bed) as f:
         for line in f:
@@ -120,9 +126,73 @@ for i in range(0, len(args), 3):
         for line in f:
             if line.startswith('>'):
                 fa_ids.add(line[1:].strip().split()[0])
-    print(prefix, len(bed_ids), len(fa_ids), len(bed_ids - fa_ids), len(fa_ids - bed_ids), sep='\t')
+
+    gene_to_transcripts = dict()
+    gff_transcript_ids = set()
+    with open(gff) as f:
+        for line in f:
+            if not line.strip() or line.startswith('#'):
+                continue
+            fields = line.rstrip('\n').split('\t')
+            if len(fields) != 9 or fields[2] != transcript_type:
+                continue
+            attrs = dict()
+            for item in fields[8].split(';'):
+                if '=' in item:
+                    key, value = item.split('=', 1)
+                    attrs[key] = value
+            transcript_id = attrs.get('ID')
+            parents = [x for x in attrs.get('Parent', '').split(',') if x]
+            if not transcript_id or not parents:
+                raise SystemExit(
+                    'ERROR: %s cannot verify representative transcripts: '
+                    '%s feature lacks ID or Parent' % (prefix, transcript_type)
+                )
+            gff_transcript_ids.add(transcript_id)
+            for gene_id in parents:
+                gene_to_transcripts.setdefault(gene_id, set()).add(transcript_id)
+
+    if not gene_to_transcripts:
+        raise SystemExit(
+            'ERROR: %s has no verifiable %s features with ID and Parent'
+            % (prefix, transcript_type)
+        )
+    duplicate_genes = dict(
+        (gene_id, transcripts)
+        for gene_id, transcripts in gene_to_transcripts.items()
+        if len(transcripts) != 1
+    )
+    if duplicate_genes:
+        examples = [
+            '%s:%s' % (gene_id, ','.join(sorted(transcripts)))
+            for gene_id, transcripts in sorted(duplicate_genes.items())[:5]
+        ]
+        raise SystemExit(
+            'ERROR: %s GFF3 is not representative-transcript-only; '
+            'genes with multiple transcripts include %s' % (prefix, examples)
+        )
+    if gff_transcript_ids != bed_ids:
+        raise SystemExit(
+            'ERROR: %s transcript IDs differ between GFF3 and BED; '
+            'GFF3-only=%s, BED-only=%s'
+            % (
+                prefix,
+                sorted(gff_transcript_ids-bed_ids)[:5],
+                sorted(bed_ids-gff_transcript_ids)[:5],
+            )
+        )
+
+    print(prefix, len(bed_ids), len(fa_ids), len(gene_to_transcripts), len(bed_ids - fa_ids), len(fa_ids - bed_ids), sep='\t')
     if bed_ids - fa_ids:
-        raise SystemExit(f'ERROR: {prefix} has BED IDs absent from FASTA, e.g. {sorted(bed_ids-fa_ids)[:5]}')
+        raise SystemExit(
+            'ERROR: %s has BED IDs absent from FASTA, e.g. %s'
+            % (prefix, sorted(bed_ids-fa_ids)[:5])
+        )
+    if fa_ids - bed_ids:
+        raise SystemExit(
+            'ERROR: %s has FASTA IDs absent from representative-transcript BED, e.g. %s'
+            % (prefix, sorted(fa_ids-bed_ids)[:5])
+        )
 PY
         """
 
@@ -216,18 +286,13 @@ rule plot_macrosynteny:
         layout="results/layout",
         simple=f"results/{PAIR}.anchors.simple"
     output:
-        f"results/{PAIR}.macrosynteny.{{fmt}}"
+        f"results/{PAIR}.macrosynteny.pdf"
     log:
-        "logs/plot_{fmt}.log"
+        "logs/plot_pdf.log"
     shell:
         r"""
         cd results
-        fmt={wildcards.fmt}
-        if [ "$fmt" = "pdf" ]; then
-          python -m jcvi.graphics.karyotype seqids layout --notex --chrstyle=rect -o {PAIR}.macrosynteny.pdf > ../{log} 2>&1
-        else
-          python -m jcvi.graphics.karyotype seqids layout --notex --chrstyle=rect --format=$fmt -o {PAIR}.macrosynteny.$fmt > ../{log} 2>&1
-        fi
+        python -m jcvi.graphics.karyotype seqids layout --notex --chrstyle=rect -o {PAIR}.macrosynteny.pdf > ../{log} 2>&1
         """
 
 rule plot_macrosynteny_line:

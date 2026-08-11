@@ -1,7 +1,7 @@
 ---
 name: genome-synteny
-description: 使用 Snakemake 控制基因组共线性分析；当前实现基于 Python MCScan/jcvi 的基因/蛋白序列相似性流程，支持 macrosynteny 和指定基因区间 microsynteny，默认 --cscore=0.9。
-version: 1.2.0
+description: 使用 Snakemake 控制基因组共线性分析；基于 Python MCScan/jcvi 和最长 CDS 代表转录本注释/序列，支持 macrosynteny 和指定基因区间 microsynteny，默认输入蛋白序列、--cscore=0.9，并输出 PDF 矢量图。
+version: 1.3.0
 author: Potato Agent
 license: MIT
 metadata:
@@ -18,7 +18,7 @@ metadata:
 当用户要求：
 
 - 用 Python 版 MCScan / jcvi 做共线性；
-- 输入为 GFF3 + 蛋白序列或 CDS 序列；
+- 输入为代表转录本 GFF3 + 代表转录本蛋白序列（默认）或 CDS 序列；
 - 需要比较两个马铃薯或植物基因组的 macrosynteny；
 - 需要对某个参考基因区间绘制 microsynteny；
 - 需要可重复运行的流程、配置文件或 Snakemake 工作流。
@@ -29,6 +29,24 @@ metadata:
 2. **macrosynteny** 使用 `.anchors.simple` 绘制染色体/大片段层面的 karyotype 图；**microsynteny** 使用 `jcvi.compara.synteny mcscan` 生成的 blocks 文件绘制指定基因区间的局部基因顺序图。
 3. 这不是全基因组 assembly alignment；若研究问题是大片段结构变异，应考虑 SyRI/plotsr 等全基因组比对流程。
 4. 为保证智能体重复性，优先生成并运行 Snakemake 流程，而不是临时拼接一串 shell 命令。
+
+## 输入数据硬性要求：只使用最长 CDS 代表转录本
+
+1. 默认输入**蛋白序列**；只有用户明确提供或要求使用 CDS 时，才将 `mcscan.dbtype` 设为 `nucl` 并改用 CDS FASTA。
+2. 每个 gene 必须且只能保留一个代表转录本。这里的代表转录本严格定义为该 gene 下 **CDS 总长度最长**的转录本，不是任意 `.1` 转录本，也不是简单选择最长 exon/transcript span。
+3. 输入 GFF3 必须是按上述规则过滤后的代表转录本注释，只保留所选 transcript/mRNA 及其对应的 exon/CDS 等子特征；不得直接使用包含全部 isoform 的全量 GFF3。
+4. 输入蛋白或 CDS FASTA 必须由同一份代表转录本 GFF3 生成，只包含这些代表转录本，并与 GFF3 中的 transcript ID 一一对应；不得把代表转录本 GFF3 与全量转录本 FASTA 混用，反之亦然。
+5. 如果只有全量 GFF3/FASTA，必须先按每个 gene 的 CDS 总长度筛选代表转录本，再从筛选后的 GFF3 导出蛋白/CDS。可以复用 `gffread-export-cds-pep` 完成序列导出，但必须先完成最长 CDS 代表转录本筛选。
+6. 运行前必须记录代表转录本的筛选规则，并检查 GFF3 中每个 gene 只有一个 transcript、BED 第 4 列 ID 与 FASTA header 集合完全一致。无法确认时停止流程并向用户说明，不得默认把全量转录本当作代表转录本运行。
+
+全量转录本会让同一 gene 的多个 isoform 作为独立条目进入相似性搜索和基因排序，产生重复匹配、虚假的多拷贝信号或额外 anchors，并改变 synteny block 的数量、边界和连线。因此这项要求会直接影响共线性分析结果，不能作为可选的数据清理步骤。
+
+## 绘图和交付硬性要求
+
+1. macrosynteny 必须使用 JCVI 官方 `python -m jcvi.graphics.karyotype` 绘图；microsynteny 必须使用 JCVI 官方 `python -m jcvi.graphics.synteny` 绘图。
+2. 除非用户明确要求对图像进行深度定制或修改，否则不得自行编写 Python、R、Matplotlib、ggplot2、Plotly 或其他绘图代码替代 JCVI 官方绘图命令。数据筛选和输入文件整理脚本不属于绘图代码，但不得改变 JCVI 的共线性结果语义。
+3. 若用户明确要求 JCVI 官方参数无法完成的深度定制，才可以编写定制绘图代码；执行前应说明将偏离 JCVI 官方绘图流程，并保留 JCVI 官方 PDF 作为基线结果。
+4. 默认只生成并向用户交付 **PDF 矢量图**，不生成 PNG 或 JPEG。除非用户明确要求其他格式，否则不得添加栅格图输出。
 
 
 ## 运行前软件环境检查
@@ -146,7 +164,8 @@ cp "$SKILL_DIR/templates/Snakefile" "$WORK/Snakefile"
 - `mcscan.cscore`：默认 `0.9`；
 - `mcscan.minspan`：默认 `30`；
 - `plot.seqids_a` / `plot.seqids_b`：展示的染色体；
-- `plot.formats`：输出图格式。
+- `plot.layout`：PDF 图中的轨道位置、标签和颜色；
+- `plot.line_pdf`：是否额外输出 JCVI line-style PDF，默认开启。
 
 ## 运行流程
 
@@ -201,10 +220,10 @@ cd "$WORK"
 
 1. GFF3 转 BED。
 2. FASTA 标准化或软链接为 `prefix.pep` / `prefix.cds`。
-3. 检查 BED 第 4 列 ID 是否存在于 FASTA header。
+3. 检查每个 gene 只有一个最长 CDS 代表转录本，并确认 BED 第 4 列 ID 与 FASTA header 集合完全一致。
 4. 运行 `jcvi.compara.catalog ortholog`，使用 `config.yaml` 中的 `mcscan.cscore`。
 5. 生成 `.anchors.simple`。
-6. 写出 `seqids` 与 `layout`，绘制 PDF/PNG/line-style 图。
+6. 写出 `seqids` 与 `layout`，使用 `jcvi.graphics.karyotype` 绘制 PDF 矢量图和可选的 line-style PDF。
 
 ## 特定区间 microsynteny 绘图
 
@@ -288,17 +307,6 @@ python -m jcvi.graphics.synteny blocks ref_query.plot.bed blocks.layout \
   --outputprefix target_region.microsynteny
 ```
 
-推荐同时输出 PNG：
-
-```bash
-python -m jcvi.graphics.synteny blocks ref_query.plot.bed blocks.layout \
-  --notex \
-  --glyphstyle=arrow \
-  --glyphcolor=orthogroup \
-  --format=png \
-  --outputprefix target_region.microsynteny
-```
-
 若需要标记起止基因，可加：
 
 ```bash
@@ -308,7 +316,7 @@ python -m jcvi.graphics.synteny blocks ref_query.plot.bed blocks.layout \
 5. 验证输出：
 
 ```bash
-file target_region.microsynteny.pdf target_region.microsynteny.png
+file target_region.microsynteny.pdf
 wc -l blocks
 ```
 
@@ -331,10 +339,10 @@ results/<pair>.anchors
 results/<pair>.lifted.anchors
 results/<pair>.anchors.simple
 results/<pair>.macrosynteny.pdf
-results/<pair>.macrosynteny.png
+results/<pair>.macrosynteny.line.pdf
 ```
 
-必须用 `file` 或等价方式确认 PNG/PDF 不是空文件，并建议用视觉检查确认图中有两条染色体轨道、染色体编号和共线性连线。
+必须用 `file` 或等价方式确认 PDF 不是空文件，并建议用视觉检查确认图中有两条染色体轨道、染色体编号和共线性连线。向用户返回 PDF 矢量图，不要另外生成或返回 PNG/JPEG 预览图。
 
 同时统计并报告：
 

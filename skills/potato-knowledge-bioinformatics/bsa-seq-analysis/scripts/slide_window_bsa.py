@@ -8,6 +8,8 @@ def parse_args():
     p.add_argument("--input", required=True, help="delta_index.txt path")
     p.add_argument("--output", required=True, help="window_result.txt path")
     p.add_argument("--genome-fasta", required=True, help="reference genome fasta used to derive chromosome lengths")
+    p.add_argument("--chr-prefix", required=True, help="chromosome prefix, e.g. E4-63_chr")
+    p.add_argument("--chr-num", type=int, required=True, help="number of numbered chromosomes")
     p.add_argument("--window-size", type=int, required=True, help="window size in bp")
     p.add_argument("--step-size", type=int, required=True, help="step size in bp")
     return p.parse_args()
@@ -94,10 +96,19 @@ def main():
     args = parse_args()
     lengths = load_fasta_lengths(args.genome_fasta)
     data = load_delta_index(args.input)
+    if args.chr_num < 1:
+        raise ValueError("--chr-num must be at least 1")
+    chromosomes = [f"{args.chr_prefix}{i:02d}" for i in range(1, args.chr_num + 1)]
+    missing_from_fasta = [chrom for chrom in chromosomes if chrom not in lengths]
+    if missing_from_fasta:
+        raise ValueError(
+            "Configured chromosomes are missing from the reference FASTA: "
+            + ", ".join(missing_from_fasta)
+        )
 
     with open(args.output, "w") as out:
         out.write("Chrom\tStart\tEnd\tSNP_index_A_window\tSNP_index_B_window\tDelta_index_window\n")
-        for chrom in sorted(lengths.keys()):
+        for chrom in chromosomes:
             windows = compute_windows(data.get(chrom, []), lengths[chrom], args.window_size, args.step_size)
             for start, end, avg_a, avg_b, avg_d in windows:
                 out.write(f"{chrom}\t{start}\t{end}\t{avg_a:.6f}\t{avg_b:.6f}\t{avg_d:.6f}\n")

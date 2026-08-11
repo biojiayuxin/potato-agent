@@ -9,14 +9,18 @@ species:
   a:
     prefix: "speciesA"
     label: "SpeciesA"
+    # Required: GFF3 filtered to one transcript per gene, chosen by longest total CDS.
     gff3: "/path/to/speciesA.gff3"
+    # Default input is protein. FASTA must contain exactly the same representative transcript IDs.
     fasta: "/path/to/speciesA.pep.fa"
     gff_type: "mRNA"
     gff_key: "ID"
   b:
     prefix: "speciesB"
     label: "SpeciesB"
+    # Required: GFF3 filtered to one transcript per gene, chosen by longest total CDS.
     gff3: "/path/to/speciesB.gff3"
+    # Default input is protein. FASTA must contain exactly the same representative transcript IDs.
     fasta: "/path/to/speciesB.pep.fa"
     gff_type: "mRNA"
     gff_key: "ID"
@@ -70,7 +74,5 @@ plot:
     xend: 0.92
     color_a: ""
     color_b: ""
-  formats:
-    - "pdf"
-    - "png"
+  # JCVI official plotting commands produce PDF vector graphics only.
   line_pdf: true

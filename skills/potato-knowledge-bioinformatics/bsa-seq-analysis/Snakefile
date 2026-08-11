@@ -156,7 +156,7 @@ rule markdup:
         """
 
 # ============================================================
-# Rule 5: 变异检测 (bcftools mpileup + call)
+# Rule 5: 变异检测 (bcftools mpileup + call，每个任务固定使用 2 个 CPU)
 # ============================================================
 rule call_variants:
     input:
@@ -165,7 +165,7 @@ rule call_variants:
     output:
         vcf = "03-call/{sample}.{chrom}.g.vcf.gz",
         csi = "03-call/{sample}.{chrom}.g.vcf.gz.csi"
-    threads: THREADS
+    threads: 2
     params:
         chrom = "{chrom}"
     shell:
@@ -201,7 +201,7 @@ rule filter_variants:
         """
 
 # ============================================================
-# Rule 7: 先计算单样本 SNP-index
+# Rule 7: 先计算单样本 SNP-index（每个任务固定使用 2 个 CPU）
 # ============================================================
 rule calculate_index:
     input:
@@ -209,7 +209,7 @@ rule calculate_index:
     output:
         vcf = "05-index/{sample}.{chrom}.g.vcf.gz",
         csi = "05-index/{sample}.{chrom}.g.vcf.gz.csi"
-    threads: THREADS
+    threads: 2
     shell:
         """
         python3 scripts/calculate_SNP_index.py {input.vcf} | \
@@ -217,17 +217,17 @@ rule calculate_index:
         """
 
 # ============================================================
-# Rule 8: 合并样本
+# Rule 8: 合并样本（按染色体单 CPU 并行）
 # ============================================================
 rule merge_samples:
     input:
         lambda wildcards: expand("05-index/{sample}." + wildcards.chrom + ".g.vcf.gz", sample=SAMPLES)
     output:
         vcf = "06-merge/{chrom}.g.vcf"
-    threads: THREADS
+    threads: 1
     shell:
         """
-        bcftools merge --threads {threads} {input} -Ov -o {output.vcf}
+        bcftools merge {input} -Ov -o {output.vcf}
         """
 
 # ============================================================
@@ -262,13 +262,17 @@ rule slide_window:
         txt = "08-slide_window/window_result.txt"
     params:
         window = WINDOW_SIZE,
-        step = STEP_SIZE
+        step = STEP_SIZE,
+        chr_prefix = config["chr_prefix"],
+        chr_num = config["chr_num"]
     shell:
         """
         python3 scripts/slide_window_bsa.py \
             --input {input.delta} \
             --output {output.txt} \
             --genome-fasta {input.genome} \
+            --chr-prefix '{params.chr_prefix}' \
+            --chr-num {params.chr_num} \
             --window-size {params.window} \
             --step-size {params.step}
         """
@@ -284,9 +288,11 @@ rule visualization:
     params:
         sample_a = config["sample_A"],
         sample_b = config["sample_B"],
-        delta_threshold = config["delta_threshold"]
+        delta_threshold = config["delta_threshold"],
+        chr_prefix = config["chr_prefix"],
+        chr_num = config["chr_num"]
     shell:
         """
-        Rscript scripts/plot_bsa_window_figure.R {input} {output.pdf} {params.sample_a} {params.sample_b} {params.delta_threshold}
+        Rscript scripts/plot_bsa_window_figure.R {input} {output.pdf} {params.sample_a} {params.sample_b} {params.delta_threshold} '{params.chr_prefix}' {params.chr_num}
         """
 

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Query potato literature RAG evidence and PlantScience.ai KG evidence.
+"""Query potato RAG, gene-summary, and PlantScience.ai KG evidence.
 
 The script depends only on the Python standard library so it can be used by
 different agent runtimes without an installation step.
@@ -33,7 +33,12 @@ DEFAULT_KG_RETRIES = 2
 DEFAULT_KG_EDGE_LIMIT = 50
 DEFAULT_MAX_KG_ENTITIES = 5
 
+DEFAULT_GENE_SUMMARY_BASE_URL = "https://potato-agent.ynnu.edu.cn"
+DEFAULT_GENE_SUMMARY_TIMEOUT = 60
+
 DEFAULT_SUMMARY_KG_LIMIT = 5
+
+DMV82_GENE_ID_RE = re.compile(r"DM8\.2_chr[0-9A-Za-z]+G[0-9]+")
 
 TRANSIENT_STATUS = {502, 503, 504}
 BROWSER_UA = (
@@ -195,6 +200,82 @@ def run_rag(args: argparse.Namespace) -> dict[str, Any]:
         "top_k_rerank": args.rag_top_k_rerank,
         "results": results,
         "raw": data,
+    }
+
+
+def normalize_gene_summary_input(value: str) -> str:
+    gene_input = value.strip()
+    if not DMV82_GENE_ID_RE.fullmatch(gene_input):
+        raise ValueError(
+            "--gene-summary must be one DMv8.2 gene ID, such as "
+            "DM8.2_chr01G26640"
+        )
+    return gene_input
+
+
+def run_gene_summary(args: argparse.Namespace) -> dict[str, Any]:
+    gene_id = args.gene_summary
+    endpoint = build_url(
+        DEFAULT_GENE_SUMMARY_BASE_URL,
+        f"/api/v1/genes/{urllib.parse.quote(gene_id, safe='')}/description/evidence",
+    )
+    request = urllib.request.Request(
+        endpoint,
+        headers={"User-Agent": BROWSER_UA, "Accept": "application/json"},
+        method="GET",
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=args.gene_summary_timeout) as response:
+            response_body = response.read().decode("utf-8")
+    except urllib.error.HTTPError as exc:
+        error_body = exc.read().decode("utf-8", errors="replace")
+        return {
+            "success": False,
+            "geneId": gene_id,
+            "error": f"HTTP {exc.code} from Potato Agent gene summary API",
+            "status": exc.code,
+            "body": error_body[:1000],
+        }
+    except (urllib.error.URLError, TimeoutError) as exc:
+        return {
+            "success": False,
+            "geneId": gene_id,
+            "error": f"Failed to connect to Potato Agent gene summary API: {exc}",
+            "status": None,
+            "body": "",
+        }
+
+    try:
+        data = json.loads(response_body)
+    except json.JSONDecodeError:
+        return {
+            "success": False,
+            "geneId": gene_id,
+            "error": "Potato Agent gene summary API returned non-JSON response",
+            "status": None,
+            "body": response_body[:1000],
+        }
+    required_strings = (
+        "geneId",
+        "transcriptId",
+        "predictedFunction",
+        "reliabilityGrade",
+        "gradeReason",
+    )
+    if not isinstance(data, dict):
+        error = "Potato Agent gene summary API returned JSON that is not an object"
+    elif any(not isinstance(data.get(field), str) for field in required_strings):
+        error = "Potato Agent gene summary API response is missing required string fields"
+    elif not isinstance(data.get("evidence"), dict):
+        error = "Potato Agent gene summary API response field 'evidence' is not an object"
+    else:
+        return {"success": True, **data}
+    return {
+        "success": False,
+        "geneId": gene_id,
+        "error": error,
+        "status": None,
+        "body": response_body[:1000],
     }
 
 
@@ -432,6 +513,10 @@ def collect_kg_entities(args: argparse.Namespace) -> list[tuple[str, list[str], 
         title, aliases = parse_entity_spec(value)
         entities.append((title, aliases, "user"))
 
+    for value in getattr(args, "gene_summary_kg_entity", []) or []:
+        title, aliases = parse_entity_spec(value)
+        entities.append((title, aliases, "gene_summary"))
+
     if not args.no_auto_kg_entities:
         for title in auto_extract_kg_entities(args.query):
             entities.append((title, [], "auto"))
@@ -528,6 +613,45 @@ def summarize_neighbor(neighbor: dict[str, Any], *, max_items: int) -> list[str]
     return lines
 
 
+def summarize_gene_prediction(gene_summary: dict[str, Any], args: argparse.Namespace) -> list[str]:
+    evidence = gene_summary.get("evidence") or {}
+    potato_evidence = evidence.get("potato_function_evidence") or {}
+    homolog_evidence = evidence.get("homolog_function_evidence") or {}
+    tissues = evidence.get("expression_by_tissue") or []
+    lines = [
+        f"Gene: {gene_summary.get('geneId', '')}",
+        f"Transcript: {gene_summary.get('transcriptId', '')}",
+        f"Reliability: {gene_summary.get('reliabilityGrade', '')}",
+        f"Grade reason: {truncate(gene_summary.get('gradeReason'), args.max_text_chars)}",
+        "Predicted function:",
+        textwrap.fill(
+            truncate(gene_summary.get("predictedFunction"), args.max_text_chars),
+            width=100,
+            replace_whitespace=False,
+        ),
+    ]
+    if potato_evidence:
+        lines.append(
+            "Direct potato evidence: "
+            + truncate(potato_evidence.get("function_summary"), args.max_text_chars)
+        )
+        citations = potato_evidence.get("citations") or []
+        if citations:
+            lines.append("Direct citations: " + ", ".join(str(item) for item in citations))
+    if isinstance(homolog_evidence, dict) and homolog_evidence:
+        lines.append("Homolog evidence species: " + ", ".join(homolog_evidence.keys()))
+    if isinstance(tissues, list) and tissues:
+        tissue_rows = []
+        for item in tissues[: args.summary_kg_limit]:
+            if isinstance(item, dict):
+                tissue_rows.append(
+                    f"{item.get('tissue', '')}={item.get('mean_tpm', '')} mean TPM"
+                )
+        if tissue_rows:
+            lines.append("Top expression entries: " + "; ".join(tissue_rows))
+    return lines
+
+
 def format_summary(data: dict[str, Any], args: argparse.Namespace) -> str:
     lines: list[str] = [f"Query: {data.get('query', '')}", ""]
 
@@ -552,6 +676,15 @@ def format_summary(data: dict[str, Any], args: argparse.Namespace) -> str:
             )
     else:
         lines.append(f"Unavailable: {rag.get('error', 'RAG lookup was not run')}")
+
+    gene_summary = data.get("gene_summary") or {}
+    lines.extend(["", "Potato Agent gene function prediction:"])
+    if gene_summary.get("skipped"):
+        lines.append("Not requested. This source is only used for a quick predicted-function lookup of one gene.")
+    elif gene_summary.get("success"):
+        lines.extend(summarize_gene_prediction(gene_summary, args))
+    else:
+        lines.append(f"Unavailable: {gene_summary.get('error', 'Gene summary lookup was not run')}")
 
     kg = data.get("kg") or {}
     lines.extend(["", "PlantScience.ai KG evidence:"])
@@ -593,7 +726,7 @@ def format_summary(data: dict[str, Any], args: argparse.Namespace) -> str:
 
     lines.extend([
         "",
-        "Interpretation note: RAG snippets are potato literature retrieval evidence. PlantScience.ai KG entries are automatically extracted graph evidence and should be labeled separately in downstream answers.",
+        "Interpretation note: integrate the three sources only after labeling them separately. RAG snippets are potato literature retrieval evidence; the Potato Agent Summary is a function prediction with a reliability grade and mixed evidence; PlantScience.ai KG entries are automatically extracted graph evidence.",
     ])
     return "\n".join(lines)
 
@@ -612,6 +745,28 @@ def iter_tsv_rows(data: dict[str, Any]) -> Iterable[dict[str, str]]:
                 "relation": "",
                 "text": truncate(row.get("text"), 0),
             }
+
+    gene_summary = data.get("gene_summary") or {}
+    if gene_summary.get("success"):
+        evidence = gene_summary.get("evidence") or {}
+        potato_evidence = evidence.get("potato_function_evidence") or {}
+        yield {
+            "source": "gene_summary",
+            "entity": str(gene_summary.get("geneId", "")),
+            "rank": "",
+            "score": str(gene_summary.get("reliabilityGrade", "")),
+            "title": "Potato Agent predicted function",
+            "doi": doi_sample(potato_evidence.get("citations"), 50),
+            "relation": "predicted_function",
+            "text": " | ".join(
+                value
+                for value in (
+                    truncate(gene_summary.get("predictedFunction"), 0),
+                    truncate(gene_summary.get("gradeReason"), 0),
+                )
+                if value
+            ),
+        }
 
     kg = data.get("kg") or {}
     for item in kg.get("entities") or []:
@@ -686,6 +841,25 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--rag-timeout", type=int, default=DEFAULT_RAG_TIMEOUT, help=f"RAG HTTP timeout seconds. Default: {DEFAULT_RAG_TIMEOUT}.")
 
     parser.add_argument(
+        "--gene-summary",
+        default="",
+        metavar="GENE_ID",
+        help=(
+            "Explicitly add the Potato Agent Summary for one concrete DMv8.2 gene ID. "
+            "Use only for a quick predicted-function lookup; RAG and KG still run by default."
+        ),
+    )
+    parser.add_argument(
+        "--gene-summary-timeout",
+        type=int,
+        default=DEFAULT_GENE_SUMMARY_TIMEOUT,
+        help=(
+            "Potato Agent gene summary HTTP timeout seconds. Default: "
+            f"{DEFAULT_GENE_SUMMARY_TIMEOUT}."
+        ),
+    )
+
+    parser.add_argument(
         "--kg-entity",
         action="append",
         default=[],
@@ -715,6 +889,7 @@ def validate_args(args: argparse.Namespace) -> None:
     positive_int("--rag-top-k-retrieve", args.rag_top_k_retrieve)
     positive_int("--rag-top-k-rerank", args.rag_top_k_rerank)
     positive_int("--rag-timeout", args.rag_timeout)
+    positive_int("--gene-summary-timeout", args.gene_summary_timeout)
     positive_int("--kg-timeout", args.kg_timeout)
     non_negative_int("--kg-retries", args.kg_retries)
     positive_int("--kg-edge-limit", args.kg_edge_limit)
@@ -722,6 +897,8 @@ def validate_args(args: argparse.Namespace) -> None:
     positive_int("--summary-kg-limit", args.summary_kg_limit)
     non_negative_int("--max-text-chars", args.max_text_chars)
     args.kg_base_url = normalize_kg_base_url(args.kg_base_url)
+    if args.gene_summary:
+        args.gene_summary = normalize_gene_summary_input(args.gene_summary)
 
 
 def run(args: argparse.Namespace) -> tuple[int, dict[str, Any]]:
@@ -730,6 +907,7 @@ def run(args: argparse.Namespace) -> tuple[int, dict[str, Any]]:
         "success": False,
         "query": args.query,
         "rag": {"success": None, "skipped": True, "results": []},
+        "gene_summary": {"success": None, "skipped": True},
         "kg": {"success": None, "skipped": True, "entities": []},
         "warnings": warnings,
     }
@@ -739,6 +917,21 @@ def run(args: argparse.Namespace) -> tuple[int, dict[str, Any]]:
         if not data["rag"].get("success"):
             warnings.append(f"RAG lookup failed: {data['rag'].get('error')}")
 
+    if args.gene_summary:
+        data["gene_summary"] = run_gene_summary(args)
+        if not data["gene_summary"].get("success"):
+            warnings.append(
+                "Gene summary lookup failed: "
+                f"{data['gene_summary'].get('error')}"
+            )
+        elif not args.no_auto_kg_entities:
+            evidence = data["gene_summary"].get("evidence") or {}
+            gene_names = evidence.get("potato_gene_names") or []
+            if isinstance(gene_names, list):
+                names = unique_preserve(str(item) for item in gene_names)
+                if names:
+                    args.gene_summary_kg_entity = ["|".join(names)]
+
     if not args.rag_only:
         data["kg"] = run_kg(args)
         if data["kg"].get("skipped"):
@@ -747,9 +940,16 @@ def run(args: argparse.Namespace) -> tuple[int, dict[str, Any]]:
             warnings.append("KG lookup ran but returned no usable node or neighbor results.")
 
     rag_ok = bool(data.get("rag", {}).get("success"))
+    gene_summary_ok = bool(data.get("gene_summary", {}).get("success"))
     kg_ok = bool(data.get("kg", {}).get("success"))
     kg_skipped = bool(data.get("kg", {}).get("skipped"))
-    data["success"] = rag_ok or kg_ok or (args.rag_only and rag_ok) or (kg_skipped and rag_ok)
+    data["success"] = (
+        rag_ok
+        or gene_summary_ok
+        or kg_ok
+        or (args.rag_only and rag_ok)
+        or (kg_skipped and rag_ok)
+    )
     return (0 if data["success"] else 1), data
 
 

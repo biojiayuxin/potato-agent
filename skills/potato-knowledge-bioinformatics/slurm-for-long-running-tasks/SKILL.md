@@ -25,6 +25,8 @@ This host currently has:
 - Do not cancel a job unless the user explicitly asks to cancel that specific job.
 - If the user has not provided enough resource information for a safe submission, use `scripts/submit-job.sh --print-only ...` first and show the command you plan to submit.
 - Do not claim that completed or failed historical jobs can be queried reliably with `sacct` on this host. They cannot, because accounting is disabled.
+- Treat `--cpus` / `--cpus-per-task` as a CPU-count request, not an instruction to pin the payload to particular CPUs. CPU performance on this host can vary substantially, so do not use `--cpu-bind=cores`, CPU masks/maps, `taskset`, `numactl --physcpubind`, or hard-coded CPU IDs by default.
+- This host has been observed with `TaskPlugin=task/affinity`, which can automatically bind an `srun` step. When a payload must be launched through `srun`, use `--cpu-bind=none` unless the user explicitly requests a controlled affinity test. Record any user-requested binding in the job script and report it with the job details.
 
 ## Script Map
 

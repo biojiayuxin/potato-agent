@@ -7,8 +7,8 @@ suppressPackageStartupMessages({
 })
 
 args <- commandArgs(trailingOnly = TRUE)
-if (length(args) < 5) {
-  stop("Usage: Rscript plot_bsa_window_figure.R <window_result.txt> <output.pdf> <sample_A> <sample_B> <delta_threshold>")
+if (length(args) < 7) {
+  stop("Usage: Rscript plot_bsa_window_figure.R <window_result.txt> <output.pdf> <sample_A> <sample_B> <delta_threshold> <chr_prefix> <chr_num>")
 }
 
 input_file <- args[1]
@@ -19,6 +19,12 @@ delta_threshold <- suppressWarnings(as.numeric(args[5]))
 if (is.na(delta_threshold)) {
   stop("delta_threshold must be a numeric value")
 }
+chr_prefix <- args[6]
+chr_num <- suppressWarnings(as.integer(args[7]))
+if (is.na(chr_num) || chr_num < 1) {
+  stop("chr_num must be a positive integer")
+}
+configured_chromosomes <- paste0(chr_prefix, sprintf("%02d", seq_len(chr_num)))
 
 df <- read.table(input_file, header = TRUE, sep = "\t", check.names = FALSE, stringsAsFactors = FALSE)
 if (nrow(df) == 0) {
@@ -31,7 +37,16 @@ if (length(missing_cols) > 0) {
   stop(paste("Missing columns:", paste(missing_cols, collapse = ", ")))
 }
 
-chrom_levels <- unique(df$Chrom)
+missing_chromosomes <- setdiff(configured_chromosomes, unique(df$Chrom))
+if (length(missing_chromosomes) > 0) {
+  stop(paste("Configured chromosomes are missing from the window table:", paste(missing_chromosomes, collapse = ", ")))
+}
+unexpected_chromosomes <- setdiff(unique(df$Chrom), configured_chromosomes)
+if (length(unexpected_chromosomes) > 0) {
+  warning(paste("Ignoring chromosomes not selected by chr_prefix/chr_num:", paste(unexpected_chromosomes, collapse = ", ")))
+}
+df <- df[df$Chrom %in% configured_chromosomes, , drop = FALSE]
+chrom_levels <- configured_chromosomes
 df$Chrom <- factor(df$Chrom, levels = chrom_levels)
 
 COLOR_POOL_A <- "#FF3030"

@@ -60,11 +60,11 @@ scontrol show config | sed -n '/^ProctrackType/p;/^TaskPlugin/p;/^SelectType/p;/
    - `--parallel=24`
    Explain that this avoids excessive internal parallelism and reduces the risk of high I/O pressure on large `merged_nodups.txt` files. Request explicit approval before editing or running the patched copy.
 5. Use a project-local copy or wrapper of the 3D-DNA scripts, not a global environment modification, when changing throttling behavior.
-6. Prefer launching the actual 3D-DNA payload through `srun` so Slurm CPU affinity is applied to the payload process, and wrap it with low CPU/I/O scheduling priority:
+6. Prefer launching the actual 3D-DNA payload through `srun` for Slurm step tracking, but disable CPU binding and wrap it with low CPU/I/O scheduling priority. CPU performance on this host can vary substantially, so binding a long job to particular CPUs can trap it on slow CPUs:
    ```bash
    srun --ntasks=1 \
         --cpus-per-task="${SLURM_CPUS_PER_TASK:-24}" \
-        --cpu-bind=cores \
+        --cpu-bind=none \
         ionice -c2 -n7 nice -n 10 \
         bash "${THREEDDNA_DIR}/run-asm-pipeline.sh" \
           -m haploid \
@@ -75,9 +75,9 @@ scontrol show config | sed -n '/^ProctrackType/p;/^TaskPlugin/p;/^SelectType/p;/
           -g 1000 \
           "${REF}" "${MND}"
    ```
-   Add an affinity check before the real run when diagnosing resource behavior:
+   Do not add `--cpu-bind=cores`, CPU masks/maps, `taskset`, or hard-coded CPU IDs unless the user explicitly requests a controlled affinity test. To verify the normal payload is not pinned by the `srun` step, inspect its allowed CPU list while retaining `--cpu-bind=none`:
    ```bash
-   srun --ntasks=1 --cpus-per-task="${SLURM_CPUS_PER_TASK:-24}" --cpu-bind=verbose,cores \
+   srun --ntasks=1 --cpus-per-task="${SLURM_CPUS_PER_TASK:-24}" --cpu-bind=none \
      bash -lc 'grep Cpus_allowed_list /proc/self/status; nproc'
    ```
 7. Run only one haplotype's 3D-DNA step at a time.
