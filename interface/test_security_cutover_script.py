@@ -76,6 +76,8 @@ def test_cutover_uses_private_service_boundaries() -> None:
     assert "Interface HTTP transport profile is inconsistent" in script
     assert "Interface unit bypasses the site bind host" in script
     assert "insecure HTTP Interface profile lacks a specific IPv4 listener" in script
+    assert 'raw_hosts = sys.argv[1].split(",")' in script
+    assert "interface_probe_host=${interface_bind_hosts[0]}" in script
     assert "migrate_model_proxy_usage.py" in script
     assert "mapping-for-unit-refresh.yaml" in script
     assert "ensure_unique_user_api_keys(config)" in script
@@ -111,7 +113,7 @@ def test_cutover_uses_private_service_boundaries() -> None:
         "--port 3000'"
     ) in script
     assert "interface.serve --host" not in script
-    assert '"http://${interface_bind_host}:3000/health"' in script
+    assert '"http://${interface_probe_host}:3000/health"' in script
 
 
 def test_packaged_interface_unit_pins_chat_retention_policy() -> None:

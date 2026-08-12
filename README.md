@@ -23,6 +23,9 @@ Git checkout 里。
   `/srv/bulk_rnaseq/current/bulk_rnaseq.sqlite`，从公开整理结果目录构建只读 SQLite。
 - Gene Catalog 入口：`/genes`；运行数据库放在
   `/srv/gene_catalog/current/gene_catalog.sqlite`，Interface 以 SQLite immutable read-only mode 查询。
+- Pan-genome Orthogroups 公开 API：`/api/pan-genome/`；运行数据库放在
+  `/srv/pan_genome/current/pan_genome.sqlite`，完整构建和发布见
+  [`interface/PAN_GENOME.md`](interface/PAN_GENOME.md)。
 - 新 Hermes 源码和构建入口：仓库内的 `hermes-lite/`。
 - 当前 immutable 运行时：`/opt/potato-hermes-lite/current`；精确版本和 wheel hash 见下方
   “Hermes Lite 运行时”章节。
@@ -146,19 +149,21 @@ Interface 完整闭包见
    SQLite 不暴露给普通 Linux 用户直接读取。
 6. `/srv/gene_catalog` 由 `root:potato-interface` 只读维护，Gene Catalog 页面可公开访问，但底层
    SQLite 不暴露给普通 Linux 用户直接读取，也不允许 Interface 原地修改。
-7. 每用户 Hermes service 以各自 Linux 用户运行，并在 systemd unit 中隐藏
+7. `/srv/pan_genome` 由 `root:potato-interface` 只读维护，Pan-genome 数据通过公开 API 查询，底层
+   SQLite 不暴露给普通 Linux 用户直接读取，也不允许 Interface 原地修改。
+8. 每用户 Hermes service 以各自 Linux 用户运行，并在 systemd unit 中隐藏
    `/srv/potato_agent`、`/var/lib/potato-agent`、`/etc/potato-agent` 和
    `/opt/interface-env`。
-8. Interface session secret 和 Resend key 只通过 systemd credential 提供，不写入 unit
+9. Interface session secret 和 Resend key 只通过 systemd credential 提供，不写入 unit
    `Environment=`、源码或进程 argv。
-9. 本地模型代理以独立 `potato-model-proxy` 身份运行；真实上游 key 文件为
+10. 本地模型代理以独立 `potato-model-proxy` 身份运行；真实上游 key 文件为
    `root:potato-model-proxy 0640`，`potato-interface` 和普通 Hermes 用户都不能读取。
-10. Interface 默认只监听 `127.0.0.1:3000`，公网入口由 HTTPS 反向代理提供，Cookie 使用 `Secure`、
+11. Interface 默认只监听 `127.0.0.1:3000`，公网入口由 HTTPS 反向代理提供，Cookie 使用 `Secure`、
    `HttpOnly` 和 `SameSite=Lax`。只有经 owner 明确批准的无域名隔离测试环境，才可使用本文记录的显式
    HTTP profile；该例外仍保留 `HttpOnly` 和 `SameSite=Lax`，但网络传输不再加密。
-11. 宿主 `/proc` 使用 `hidepid=2`，普通登录用户看不到其它 UID 的进程目录、argv 或 environ；即使每用户 unit
+12. 宿主 `/proc` 使用 `hidepid=2`，普通登录用户看不到其它 UID 的进程目录、argv 或 environ；即使每用户 unit
     另设 `ProtectProc=invisible`/`ProcSubset=pid`，也只是纵深防御，不能替代宿主级挂载选项。
-12. Daily Updates 由 `potato-daily-updates` oneshot 独占写入 `/srv/daily_updates`；Interface 仅通过专用
+13. Daily Updates 由 `potato-daily-updates` oneshot 独占写入 `/srv/daily_updates`；Interface 仅通过专用
    数据组读取，模型调用使用独立 systemd credential，不借用普通 Web 用户 token。完整部署、历史三库迁移、
    验收和回滚步骤见 [`interface/DAILY_UPDATES.md`](interface/DAILY_UPDATES.md)。
 
@@ -208,6 +213,10 @@ find /srv/bulk_rnaseq -type f -exec chmod 0640 {} + 2>/dev/null || true
 chown -R root:potato-interface /srv/gene_catalog 2>/dev/null || true
 find /srv/gene_catalog -type d -exec chmod 0750 {} + 2>/dev/null || true
 find /srv/gene_catalog -type f -exec chmod 0640 {} + 2>/dev/null || true
+
+chown -R root:potato-interface /srv/pan_genome 2>/dev/null || true
+find /srv/pan_genome -type d -exec chmod 0750 {} + 2>/dev/null || true
+find /srv/pan_genome -type f -exec chmod 0640 {} + 2>/dev/null || true
 ```
 
 共享服务器或公网部署如果需要在 Files 面板访问共享数据，应使用
@@ -1678,6 +1687,7 @@ Environment=SPATIAL_VIEWER_DATA_ROOT=/srv/spatial_data/current
 Environment=WGCNA_DATABASE_URL=postgresql:///potato_wgcna?host=/var/run/postgresql
 Environment=BULK_RNASEQ_DB_PATH=/srv/bulk_rnaseq/current/bulk_rnaseq.sqlite
 Environment=GENE_CATALOG_DB_PATH=/srv/gene_catalog/current/gene_catalog.sqlite
+Environment=PAN_GENOME_DB_PATH=/srv/pan_genome/current/pan_genome.sqlite
 Environment="INTERFACE_MAIL_FROM=Potato Agent <noreply@mail.example.com>"
 Environment=INTERFACE_MAIL_REPLY_TO=support@example.com
 EOF
@@ -2574,6 +2584,7 @@ sudo -u potato-interface test -r /srv/wgcna_data/current/tables/network_genes.ts
 sudo -u potato-interface test -r /srv/wgcna_data/current/tables/coexpression_edges_top.tsv.gz
 sudo -u potato-interface test -r /srv/bulk_rnaseq/current/bulk_rnaseq.sqlite
 sudo -u potato-interface test -r /srv/gene_catalog/current/gene_catalog.sqlite
+sudo -u potato-interface test -r /srv/pan_genome/current/pan_genome.sqlite
 ```
 
 检查普通 Hermes 用户不能读取源码、Interface/proxy 状态、credentials 或另一个用户的聊天数据库。测试账号
@@ -2596,6 +2607,7 @@ sudo -u "$ORDINARY_USER" test ! -r /srv/spatial_data/current/data/expression.sql
 sudo -u "$ORDINARY_USER" test ! -r /srv/wgcna_data/current/tables/coexpression_edges_top.tsv.gz
 sudo -u "$ORDINARY_USER" test ! -r /srv/bulk_rnaseq/current/bulk_rnaseq.sqlite
 sudo -u "$ORDINARY_USER" test ! -r /srv/gene_catalog/current/gene_catalog.sqlite
+sudo -u "$ORDINARY_USER" test ! -r /srv/pan_genome/current/pan_genome.sqlite
 sudo -u potato-interface test ! -r /var/lib/potato-agent/config/model_proxy.yaml
 sudo -u potato-model-proxy test ! -r /var/lib/potato-agent/data/interface.db
 ```

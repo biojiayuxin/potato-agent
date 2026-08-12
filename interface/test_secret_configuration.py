@@ -367,6 +367,86 @@ def test_interface_serve_uses_site_bind_host(monkeypatch) -> None:
     assert args.host == "192.0.2.10"
 
 
+def test_interface_serve_accepts_multiple_explicit_insecure_http_hosts(
+    monkeypatch,
+) -> None:
+    import interface.serve as serve
+
+    _clear_secret_environment(monkeypatch)
+    monkeypatch.setenv("INTERFACE_ENVIRONMENT", "production")
+    monkeypatch.setenv("INTERFACE_ALLOW_INSECURE_HTTP", "true")
+    monkeypatch.setenv("INTERFACE_SESSION_COOKIE_SECURE", "false")
+
+    assert serve._validate_listener("192.0.2.10,198.51.100.20") == (
+        "192.0.2.10",
+        "198.51.100.20",
+    )
+
+
+@pytest.mark.parametrize(
+    "hosts",
+    (
+        "192.0.2.10,",
+        "192.0.2.10,192.0.2.10",
+        "192.0.2.10,127.0.0.1",
+        "192.0.2.10,example.com",
+    ),
+)
+def test_interface_serve_rejects_unsafe_multiple_insecure_http_hosts(
+    monkeypatch, hosts: str
+) -> None:
+    import interface.serve as serve
+
+    _clear_secret_environment(monkeypatch)
+    monkeypatch.setenv("INTERFACE_ENVIRONMENT", "production")
+    monkeypatch.setenv("INTERFACE_ALLOW_INSECURE_HTTP", "true")
+    monkeypatch.setenv("INTERFACE_SESSION_COOKIE_SECURE", "false")
+
+    with pytest.raises(secret_config.SecretConfigurationError):
+        serve._validate_listener(hosts)
+
+
+def test_interface_serve_binds_each_configured_host(monkeypatch) -> None:
+    import interface.serve as serve
+
+    bound_hosts: list[str] = []
+    closed_hosts: list[str] = []
+    observed_sockets: list[object] = []
+
+    class FakeSocket:
+        def __init__(self, host: str):
+            self.host = host
+
+        def close(self) -> None:
+            closed_hosts.append(self.host)
+
+    class FakeConfig:
+        def __init__(self, *args, host: str, **kwargs):
+            self.host = host
+
+        def bind_socket(self):
+            bound_hosts.append(self.host)
+            return FakeSocket(self.host)
+
+    class FakeServer:
+        started = True
+
+        def __init__(self, *, config):
+            self.config = config
+
+        def run(self, *, sockets):
+            observed_sockets.extend(sockets)
+
+    monkeypatch.setattr(serve.uvicorn, "Config", FakeConfig)
+    monkeypatch.setattr(serve.uvicorn, "Server", FakeServer)
+
+    serve._run_server(("192.0.2.10", "198.51.100.20"), 3000)
+
+    assert bound_hosts == ["192.0.2.10", "198.51.100.20"]
+    assert [value.host for value in observed_sockets] == bound_hosts
+    assert closed_hosts == bound_hosts
+
+
 def test_interface_serve_rejects_public_production_listener_without_opt_in(
     monkeypatch,
 ) -> None:

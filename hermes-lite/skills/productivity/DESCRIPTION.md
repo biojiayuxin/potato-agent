@@ -1,3 +1,3 @@
 ---
-description: Skills for document creation, presentations, spreadsheets, and other productivity workflows.
+description: Skills for extracting and analyzing research PDFs, scans, and other documents.
 ---

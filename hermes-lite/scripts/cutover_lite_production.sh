@@ -1127,31 +1127,45 @@ if [[ ${interface_exec_start} != *'-m interface.serve --port 3000'* ]] || \
   echo "error: Interface unit bypasses the site bind host" >&2
   false
 fi
-if [[ ${interface_transport_profile} == https ]]; then
-  if [[ ${interface_bind_host} != 127.0.0.1 ]]; then
-    echo "error: HTTPS Interface profile is not restricted to loopback" >&2
-    false
-  fi
-elif ! "${interface_python}" -B - "${interface_bind_host}" <<'PY'
+validated_interface_hosts=$(
+  "${interface_python}" -B - \
+    "${interface_bind_host}" "${interface_transport_profile}" <<'PY'
 import ipaddress
 import sys
 
+raw_hosts = sys.argv[1].split(",")
+profile = sys.argv[2]
+hosts = [value.strip() for value in raw_hosts]
+if not hosts or any(not value for value in hosts) or len(hosts) != len(set(hosts)):
+    raise SystemExit(1)
 try:
-    address = ipaddress.ip_address(sys.argv[1])
+    addresses = [ipaddress.ip_address(value) for value in hosts]
 except ValueError:
     raise SystemExit(1)
-valid = (
-    address.version == 4
-    and not address.is_loopback
-    and not address.is_unspecified
-    and not address.is_multicast
-)
-raise SystemExit(0 if valid else 1)
+if profile == "https":
+    valid = hosts == ["127.0.0.1"]
+else:
+    valid = all(
+        address.version == 4
+        and not address.is_loopback
+        and not address.is_unspecified
+        and not address.is_multicast
+        for address in addresses
+    )
+if not valid:
+    raise SystemExit(1)
+print("\n".join(hosts))
 PY
-then
-  echo "error: insecure HTTP Interface profile lacks a specific IPv4 listener" >&2
+) || {
+  if [[ ${interface_transport_profile} == https ]]; then
+    echo "error: HTTPS Interface profile is not restricted to loopback" >&2
+  else
+    echo "error: insecure HTTP Interface profile lacks a specific IPv4 listener" >&2
+  fi
   false
-fi
+}
+mapfile -t interface_bind_hosts <<<"${validated_interface_hosts}"
+interface_probe_host=${interface_bind_hosts[0]}
 
 unit_refresh_mapping=${backup}/mapping-for-unit-refresh.yaml
 PYTHONPATH="${repo}" \
@@ -1266,7 +1280,7 @@ if [[ ${interface_was_active} -eq 1 ]]; then
   health_ok=0
   for _attempt in $(seq 1 40); do
     if curl -fsS --connect-timeout 0.5 --max-time 1 \
-      "http://${interface_bind_host}:3000/health" \
+      "http://${interface_probe_host}:3000/health" \
       >"${backup}/interface-health.json"; then
       health_ok=1
       break

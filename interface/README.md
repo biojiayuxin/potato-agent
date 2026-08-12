@@ -19,6 +19,9 @@
   `/srv/bulk_rnaseq/current/bulk_rnaseq.sqlite` 只读加载
 - Gene Catalog：公开页面 `/genes` 及 `/genes/<gene-id>`，数据从
   `/srv/gene_catalog/current/gene_catalog.sqlite` 以 SQLite immutable read-only mode 加载
+- Pan-genome Orthogroups：公开 API `/api/pan-genome/`，数据从
+  `/srv/pan_genome/current/pan_genome.sqlite` 以 SQLite immutable read-only mode 加载；构建和发布见
+  [`PAN_GENOME.md`](PAN_GENOME.md)
 - Genome Browser：Genomes 二级页面 `/genomes/browser`（旧 `/genome-browser`
   地址保留兼容跳转），数据从
   `/mnt/data/public_data/Genome_browser_DB` 只读加载
@@ -57,6 +60,10 @@
   Gene Catalog 的公开页面和 `/api/v1/genes/` API；以 immutable read-only connection 查询外部 SQLite
 - `build_gene_catalog_db.py`
   从经过审查的注释、序列、文献、相似性和功能预测来源构建版本化 Gene Catalog SQLite
+- `pan_genome.py`
+  Pan-genome Orthogroups 的公开只读 API router
+- `build_pan_genome_db.py`
+  将 OrthoFinder `Orthogroups.tsv` 规范化为带索引的版本化 SQLite
 - `genome_browser.py`
   Genome Browser 的公开 FastAPI router；只读加载 bgzip FASTA/GFF3 及索引文件
 - `import_genome_browser_assembly.py`
@@ -92,6 +99,7 @@
 - WGCNA PostgreSQL 数据库，默认通过 `WGCNA_DATABASE_URL` 配置
 - Bulk RNA-Seq SQLite 数据库，默认 `/srv/bulk_rnaseq/current/bulk_rnaseq.sqlite`
 - Gene Catalog SQLite 数据库，默认 `/srv/gene_catalog/current/gene_catalog.sqlite`
+- Pan-genome SQLite 数据库，默认 `/srv/pan_genome/current/pan_genome.sqlite`
 - Genome Browser 数据库，默认 `/mnt/data/public_data/Genome_browser_DB`
 - Daily Updates 数据库，默认 `/srv/daily_updates/data/daily_updates.sqlite`
 
@@ -120,6 +128,7 @@
 - `WGCNA_DATABASE_URL`
 - `BULK_RNASEQ_DB_PATH`
 - `GENE_CATALOG_DB_PATH`
+- `PAN_GENOME_DB_PATH`
 - `GENOME_BROWSER_DB_ROOT`
 - `GENOME_BROWSER_FEATURE_INDEX_PATH`
 - `GENOME_BROWSER_SAMTOOLS`
@@ -149,6 +158,8 @@
 - `WGCNA_DATABASE_URL` 指向 WGCNA PostgreSQL 数据库，例如 `postgresql:///potato_wgcna?host=/var/run/postgresql`
 - `BULK_RNASEQ_DB_PATH` 默认 `/srv/bulk_rnaseq/current/bulk_rnaseq.sqlite`；建议 `/srv/bulk_rnaseq` owner 为 `root`、group 为 `potato-interface`，目录 `0750`、SQLite 文件 `0640`
 - `GENE_CATALOG_DB_PATH` 默认 `/srv/gene_catalog/current/gene_catalog.sqlite`；建议 `/srv/gene_catalog` owner
+  为 `root`、group 为 `potato-interface`，目录 `0750`、SQLite 文件 `0640`
+- `PAN_GENOME_DB_PATH` 默认 `/srv/pan_genome/current/pan_genome.sqlite`；建议 `/srv/pan_genome` owner
   为 `root`、group 为 `potato-interface`，目录 `0750`、SQLite 文件 `0640`
 - `GENOME_BROWSER_DB_ROOT` 默认 `/mnt/data/public_data/Genome_browser_DB`；目录内 FASTA/GFF3 需要是 bgzip 压缩并带 `.fai/.gzi/.tbi` 索引
 - `GENOME_BROWSER_FEATURE_INDEX_PATH` 指向集中式多 assembly 特征索引；未设置时默认使用
