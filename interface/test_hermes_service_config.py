@@ -11,6 +11,7 @@ import yaml
 
 from interface.hermes_service import (
     DEFAULT_APPROVAL_MODE,
+    DEFAULT_ENVIRONMENT_HINT,
     REQUIRED_INACCESSIBLE_PATHS,
     build_config_data,
     build_systemd_unit,
@@ -148,6 +149,12 @@ def test_build_config_data_defaults_approvals_to_smart() -> None:
     data = build_config_data({"hermes": {}}, _target())
 
     assert data["approvals"]["mode"] == DEFAULT_APPROVAL_MODE
+
+
+def test_build_config_data_includes_default_environment_hint() -> None:
+    data = build_config_data({"hermes": {}}, _target())
+
+    assert data["agent"]["environment_hint"] == DEFAULT_ENVIRONMENT_HINT
 
 
 def test_build_config_data_applies_runtime_profile_after_user_overrides() -> None:
@@ -567,6 +574,7 @@ def test_install_user_runtime_files_writes_only_user_runtime_paths(
     config_body = (user.hermes_home / "config.yaml").read_text(encoding="utf-8")
     config_data = yaml.safe_load(config_body)
     assert config_data["model"]["default"] == "gpt-5.5"
+    assert config_data["agent"]["environment_hint"] == DEFAULT_ENVIRONMENT_HINT
     assert "OPENAI_API_KEY" not in env_body
     assert "sk-user" not in env_body
     assert config_data["model"]["base_url"] == "http://127.0.0.1:8765/v1"

@@ -54,6 +54,10 @@ DEFAULT_APPROVAL_MODE = "smart"
 DEFAULT_RUNTIME_READY_TIMEOUT = 45
 DEFAULT_GATEWAY_RESTART_DRAIN_TIMEOUT = 180
 DEFAULT_GATEWAY_STOP_GRACE_SECONDS = 30
+DEFAULT_ENVIRONMENT_HINT = (
+    "When official GitHub URLs are inaccessible or cloning is slow, consider "
+    "using a GitHub proxy in mainland China to accelerate access."
+)
 DEFAULT_RUNTIME_LOCK_DIR = Path("/run/potato-agent/runtime-start")
 DEFAULT_SOUL_TEMPLATE_PATH = REPO_ROOT / "soul_settings" / "SOUL.md"
 REQUIRED_INACCESSIBLE_PATHS = (
@@ -372,7 +376,10 @@ def build_config_data(config: dict[str, Any], user: HermesTarget) -> dict[str, A
             "api_key": local_model_proxy_token(user.username, user.model_proxy_token),
         }
     data["terminal"] = terminal_cfg
-    data["agent"] = {"reasoning_effort": DEFAULT_REASONING_EFFORT}
+    data["agent"] = {
+        "reasoning_effort": DEFAULT_REASONING_EFFORT,
+        "environment_hint": DEFAULT_ENVIRONMENT_HINT,
+    }
     data["approvals"] = {"mode": DEFAULT_APPROVAL_MODE}
 
     deep_merge(data, global_overrides)
