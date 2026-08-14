@@ -56,7 +56,12 @@ DEFAULT_GATEWAY_RESTART_DRAIN_TIMEOUT = 180
 DEFAULT_GATEWAY_STOP_GRACE_SECONDS = 30
 DEFAULT_ENVIRONMENT_HINT = (
     "When official GitHub URLs are inaccessible or cloning is slow, consider "
-    "using a GitHub proxy in mainland China to accelerate access."
+    "using a GitHub proxy in mainland China to accelerate access. "
+    "Before installing software for a bioinformatics task, check the system "
+    "environment (including PATH) and the shared environments under "
+    "`/opt/potato-bio/current`; run shared tools with "
+    "`potato-bio-run ENV COMMAND ...`, and consider installation only if neither "
+    "source provides what is needed."
 )
 DEFAULT_RUNTIME_LOCK_DIR = Path("/run/potato-agent/runtime-start")
 DEFAULT_SOUL_TEMPLATE_PATH = REPO_ROOT / "soul_settings" / "SOUL.md"

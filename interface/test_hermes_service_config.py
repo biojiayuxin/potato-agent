@@ -155,6 +155,9 @@ def test_build_config_data_includes_default_environment_hint() -> None:
     data = build_config_data({"hermes": {}}, _target())
 
     assert data["agent"]["environment_hint"] == DEFAULT_ENVIRONMENT_HINT
+    assert "system environment (including PATH)" in data["agent"]["environment_hint"]
+    assert "potato-bio-run ENV COMMAND" in data["agent"]["environment_hint"]
+    assert "only if neither source provides" in data["agent"]["environment_hint"]
 
 
 def test_build_config_data_applies_runtime_profile_after_user_overrides() -> None:

@@ -258,6 +258,9 @@ sudo -u potato-interface test -r /srv/potato_agent/interface/file_stream_worker.
 
 ## 前置条件
 
+马铃薯/生信 skills 的系统软件、共享 micromamba 环境、调度器、容器和下载工具不应在初次部署时无差别
+全部安装。先按目标 skill 或工作流确认实际需要，再遵循本节的共享依赖规则逐项安装和验收。
+
 以下命令默认以 root 执行，目标机器需要 x86_64 Linux 和 systemd。Lite 与 Interface 的构建、wheelhouse
 校验及生产 venv 统一要求 CPython 3.12；其它 Python 实现、Python minor 或 CPU 架构不能复用这里的 lock 和
 wheelhouse manifest。
@@ -293,6 +296,210 @@ binary: /opt/micromamba/bin/micromamba
 profile: /etc/profile.d/micromamba.sh
 MAMBA_ROOT_PREFIX: $HOME/.micromamba
 ```
+
+### 生物信息系统软件和共享环境
+
+README 不维护具体软件或环境清单；实际需求由要上线的 skill、工作流和数据资产决定。部署前先检查普通用户的
+干净 `PATH` 和 `/opt/potato-bio/current`，只有两处都不能提供所需能力时才安装。安装分析依赖不得顺带修改
+仓库 `skills/` 或覆盖用户 `~/.hermes/skills`；环境部署与 skill 发布是两个独立变更面。
+
+#### 安装边界和目录
+
+依赖按以下规则选择安装面：
+
+- 需要宿主集成、供多数用户直接调用且版本冲突风险低的工具，可通过系统包或 root 管理的
+  `/usr/local/bin` wrapper/symlink 提供。第三方 APT 仓库必须记录来源、发行版、签名指纹和实际包版本。
+- 带 Python、R、Java 或复杂二进制依赖的分析工作流，安装到版本化共享环境。不要写入
+  `/opt/interface-env`、Potato Hermes Lite release、系统默认 Python 或 Git checkout。
+- 依赖闭包明显冲突时拆分共享环境；不要为了强行合并而降级到失去维护的软件版本。
+- 难以稳定打包的闭包可以使用固定 digest/hash 的只读容器。共享服务器优先使用 non-setuid/user namespace
+  模式，并以真实普通用户验证镜像检查、挂载和命令执行。
+- 普通用户对共享安装只读，不获得 `/opt` 写权限，也不通过 `sudo` 运行分析工具。任务输出、缓存和自定义
+  数据库必须写入用户自己的 home、workdir 或获准的数据目录。
+
+共享环境统一使用以下布局：
+
+```text
+/opt/potato-bio/mamba-root
+/opt/potato-bio/releases/<environment>/<release-id>
+/opt/potato-bio/current/<environment> -> ../releases/<environment>/<release-id>
+/opt/potato-bio/manifests
+```
+
+`releases` 中的版本安装后不可原地升级；升级时创建新 release，验收后原子切换 `current` symlink。
+`/opt/potato-bio/mamba-root` 只供 root 构建共享环境，不能设置为普通用户的默认
+`MAMBA_ROOT_PREFIX`。目录、release、symlink 和清单均由 `root:root` 管理，普通用户不能修改。
+
+共享分析任务的默认并发预算为 12。提交到调度器时取调度器分配值与 12 的较小者，并把该值显式传给工具；
+还要审计工作流内部的线程参数、并行子进程和 parallel sort，不能只限制最外层命令：
+
+```bash
+TASK_THREADS="${SLURM_CPUS_PER_TASK:-12}"
+if (( TASK_THREADS > 12 )); then
+  TASK_THREADS=12
+fi
+```
+
+#### 构建和发布共享环境
+
+每次安装先固定 channel 顺序和直接依赖版本，并在最终 prefix 上完成当日 dry-run。以下是通用模板；
+`PINNED_SPECS` 由目标工作流的实际依赖填写，不把清单固化在 README：
+
+```bash
+set -euo pipefail
+
+: "${BIO_ENV_NAME:?set BIO_ENV_NAME to the reviewed environment name}"
+BIO_RELEASE_ID="$(date -u +%Y%m%dT%H%M%SZ)"
+BIO_PREFIX="/opt/potato-bio/releases/${BIO_ENV_NAME}/${BIO_RELEASE_ID}"
+BIO_MANIFEST_BASE="/opt/potato-bio/manifests/${BIO_ENV_NAME}-${BIO_RELEASE_ID}"
+MAMBA=/opt/micromamba/bin/micromamba
+PINNED_SPECS=(
+  # 每行填写一个经过审查的 "package=version"，不要使用无约束的包名。
+)
+
+test "$(id -u)" -eq 0
+[[ "$BIO_ENV_NAME" =~ ^[a-z0-9][a-z0-9._-]*$ ]]
+(( ${#PINNED_SPECS[@]} > 0 ))
+[[ ! -e "$BIO_PREFIX" && ! -L "$BIO_PREFIX" ]]
+install -d -o root -g root -m 0755 \
+  "$(dirname "$BIO_PREFIX")" /opt/potato-bio/current /opt/potato-bio/manifests
+
+MAMBA_ROOT_PREFIX=/opt/potato-bio/mamba-root \
+  "$MAMBA" create --dry-run -p "$BIO_PREFIX" -c conda-forge -c bioconda \
+  "${PINNED_SPECS[@]}" | tee "${BIO_MANIFEST_BASE}.dry-run.log"
+
+MAMBA_ROOT_PREFIX=/opt/potato-bio/mamba-root \
+  "$MAMBA" create -y -p "$BIO_PREFIX" -c conda-forge -c bioconda \
+  "${PINNED_SPECS[@]}" | tee "${BIO_MANIFEST_BASE}.install.log"
+
+MAMBA_ROOT_PREFIX=/opt/potato-bio/mamba-root \
+  "$MAMBA" list -p "$BIO_PREFIX" --explicit \
+  >"${BIO_MANIFEST_BASE}.explicit.txt"
+
+chown -R root:root "$BIO_PREFIX" "${BIO_MANIFEST_BASE}."*
+chmod -R go-w "$BIO_PREFIX"
+chmod a+r "${BIO_MANIFEST_BASE}."*
+```
+
+外部源码、二进制、JAR、模型或容器还必须保存来源版本、commit/digest 和 SHA-256。清单不得包含 API key、
+密码、token 或用户数据。先用 release 绝对路径完成 CLI/import、最小功能测试、权限检查和普通用户测试，
+全部通过后才发布稳定入口：
+
+```bash
+BIO_PREVIOUS_TARGET="$(readlink -f "/opt/potato-bio/current/$BIO_ENV_NAME" 2>/dev/null || true)"
+ln -sfn "$BIO_PREFIX" "/opt/potato-bio/current/.${BIO_ENV_NAME}.new"
+mv -Tf "/opt/potato-bio/current/.${BIO_ENV_NAME}.new" \
+  "/opt/potato-bio/current/$BIO_ENV_NAME"
+```
+
+必须在安装记录中保留 `BIO_PREVIOUS_TARGET`；失败的 release 不得发布，也不要覆盖已工作的 `current`。
+
+#### 安装 `potato-bio-run`
+
+专业分析环境统一用 `potato-bio-run ENV COMMAND [ARG ...]` 调用，无需 `conda activate`。环境是否可用由
+root 在 `/opt/potato-bio/current` 发布的 symlink 决定，启动器本身不维护环境名称清单。下面的安装使用
+临时文件做语法检查，再原子替换系统入口：
+
+```bash
+POTATO_BIO_RUN_TMP="$(mktemp)"
+trap 'rm -f -- "$POTATO_BIO_RUN_TMP"' EXIT
+
+cat >"$POTATO_BIO_RUN_TMP" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+
+if [[ $# -lt 2 ]]; then
+  echo "Usage: potato-bio-run ENV COMMAND [ARG ...]" >&2
+  exit 2
+fi
+
+env_name="$1"
+shift
+if [[ ! "$env_name" =~ ^[a-z0-9][a-z0-9._-]*$ ]]; then
+  echo "Invalid Potato bioinformatics environment: $env_name" >&2
+  exit 2
+fi
+
+current_root=/opt/potato-bio/current
+release_root=/opt/potato-bio/releases
+prefix="$current_root/$env_name"
+if [[ ! -L "$prefix" ]]; then
+  echo "Environment is not published: $prefix" >&2
+  exit 127
+fi
+
+if ! resolved_prefix="$(readlink -f -- "$prefix")"; then
+  echo "Environment target cannot be resolved: $prefix" >&2
+  exit 126
+fi
+case "$resolved_prefix" in
+  "$release_root"/*) ;;
+  *)
+    echo "Environment target is outside $release_root: $resolved_prefix" >&2
+    exit 126
+    ;;
+esac
+if [[ ! -d "$resolved_prefix/bin" ]]; then
+  echo "Environment has no bin directory: $resolved_prefix" >&2
+  exit 127
+fi
+
+export PATH="$resolved_prefix/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+export XDG_CACHE_HOME="${XDG_CACHE_HOME:-${TMPDIR:-/tmp}/potato-xdg-cache-${UID}}"
+export MPLCONFIGDIR="${MPLCONFIGDIR:-${TMPDIR:-/tmp}/potato-matplotlib-${UID}}"
+install -d -m 0700 "$XDG_CACHE_HOME" "$MPLCONFIGDIR"
+
+exec "$@"
+EOF
+
+bash -n "$POTATO_BIO_RUN_TMP"
+install -o root -g root -m 0755 \
+  "$POTATO_BIO_RUN_TMP" /usr/local/bin/potato-bio-run.new
+mv -Tf /usr/local/bin/potato-bio-run.new /usr/local/bin/potato-bio-run
+rm -f -- "$POTATO_BIO_RUN_TMP"
+trap - EXIT
+```
+
+只把无版本冲突、适合所有用户的稳定 CLI 暴露到 `/usr/local/bin`；不要暴露共享环境中的 `python`、`pip`、
+`R` 或 `Rscript`。同一命令在不同工作流中需要不同版本时，必须通过 `potato-bio-run` 选择环境。
+系统工具、调度器客户端和容器运行时可直接从干净 `PATH` 调用，不需要经过该启动器。
+
+#### 验收、审计和回退
+
+选择一个真实 mapped 普通用户做最终验收，不能用 root 或 `potato-interface` 替代。版本命令不能代替功能测试；
+至少执行一个小型、确定性的输入输出流程，并在需要调度器的场景提交一次受限资源任务：
+
+稳定入口发布后必须再通过 `potato-bio-run` 做最终验收；若失败，立即把 `current` 指回旧 target。
+
+```bash
+: "${AUDIT_USER:?set AUDIT_USER to a mapped Linux user}"
+: "${BIO_ENV_NAME:?set BIO_ENV_NAME to the environment under test}"
+: "${BIO_PREFIX:?set BIO_PREFIX to the immutable release under test}"
+: "${AUDIT_COMMAND:?set AUDIT_COMMAND to one command in that environment}"
+AUDIT_HOME="$(getent passwd "$AUDIT_USER" | cut -d: -f6)"
+
+sudo -u "$AUDIT_USER" env -i \
+  HOME="$AUDIT_HOME" \
+  PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
+  BIO_ENV_NAME="$BIO_ENV_NAME" AUDIT_COMMAND="$AUDIT_COMMAND" \
+  bash --noprofile --norc -c '
+    cd "$HOME"
+    potato-bio-run "$BIO_ENV_NAME" "$AUDIT_COMMAND" --version
+  '
+
+if sudo -u "$AUDIT_USER" find "$BIO_PREFIX" -xdev -writable -print -quit | grep -q .; then
+  echo "shared release is writable by $AUDIT_USER" >&2
+  exit 1
+fi
+```
+
+每次变更向 `/opt/potato-bio/manifests/INSTALL_LOG.md` 追加 UTC 时间、操作者、来源和固定版本、release 路径、
+前后 `current` target、普通用户、测试命令和结果、已知告警、证据文件及回退目标。系统包还要记录安装前后
+`dpkg-query`/repository 状态；容器要记录镜像 digest、SIF hash、运行模式和普通用户执行结果。
+
+回退时只把 `current` 原子指回记录的旧 release；没有旧 release 时只取消该稳定入口。旧 release、失败日志和
+manifest 在观察期结束且确认没有进程使用前不得删除。不要对 `/opt/potato-bio`、公共数据目录或用户 home
+执行递归删除、全局可写权限修改或未经影响评估的共享 micromamba cache 清理。
 
 ## 全新部署
 
