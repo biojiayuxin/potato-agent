@@ -102,7 +102,7 @@ macs2 --version
 python3 --version
 python3 -c "import yaml; print('PyYAML OK')"
 Rscript --version
-Rscript -e "suppressPackageStartupMessages({library(ChIPseeker); library(clusterProfiler); library(GenomicFeatures); library(txdbmaker)}); cat('R packages OK\n')"
+Rscript -e "suppressPackageStartupMessages({library(ChIPseeker); library(GenomicFeatures); library(txdbmaker)}); cat('R packages OK\n')"
 findMotifsGenome.pl 2>&1 | head -5
 ```
 
@@ -117,7 +117,6 @@ findMotifsGenome.pl 2>&1 | head -5
 | PyYAML | 6.0.3 |
 | R / Rscript | 4.5.3 |
 | ChIPseeker | 1.46.1 |
-| clusterProfiler | 4.18.4 |
 | GenomicFeatures | 1.62.0 |
 | txdbmaker | 1.6.2 |
 | HOMER | 5.1 |
@@ -130,7 +129,7 @@ findMotifsGenome.pl 2>&1 | head -5
 - MACS2
 - Python 3 + PyYAML
 - Rscript
-- R/Bioconductor 包：`ChIPseeker`、`clusterProfiler`、`GenomicFeatures`、`txdbmaker`
+- R/Bioconductor 包：`ChIPseeker`、`GenomicFeatures`、`txdbmaker`
 - HOMER：`findMotifsGenome.pl`
 
 ### 4.2 安装优先级
@@ -157,7 +156,7 @@ source /etc/profile.d/micromamba.sh
   -p /path/to/DAP-Seq.<job_id>/envs/dapseq \
   -c conda-forge -c bioconda \
   python=3.11.15 pip pyyaml=6.0.3 bwa=0.7.19 samtools=1.23.1 \
-  r-base=4.5.3 bioconductor-chipseeker=1.46.1 bioconductor-clusterprofiler=4.18.4 \
+  r-base=4.5.3 bioconductor-chipseeker=1.46.1 \
   bioconductor-genomicfeatures=1.62.0 bioconductor-txdbmaker=1.6.2 \
   homer=5.1
 
@@ -438,7 +437,7 @@ bash "$SLURM_SKILL_DIR/scripts/job-status.sh" <JOBID>
 
 ```bash
 micromamba install -p envs/dapseq -c conda-forge -c bioconda \
-  r-base bioconductor-chipseeker bioconductor-clusterprofiler bioconductor-genomicfeatures
+  r-base bioconductor-chipseeker bioconductor-genomicfeatures
 ```
 
 ### 缺少 HOMER

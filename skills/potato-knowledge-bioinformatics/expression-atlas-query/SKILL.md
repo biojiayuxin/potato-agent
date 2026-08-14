@@ -1,7 +1,7 @@
 ---
 name: expression-atlas-query
 description: 通过 Potato Agent Bulk RNA-Seq API 查询和绘制马铃薯 DMv8.2 基因表达，支持按材料-组织、组织、材料或原始 run 分组，读取 TPM、log2(TPM+1) 或行 z-score，并生成与 Bulk RNA-Seq 页面一致的可编辑矢量 PDF 热图。适用于查询、比较、导出或绘制一个或多个 DMv8.2 基因的 bulk RNA-Seq 表达。
-version: 2.1.0
+version: 2.1.1
 author: Potato Agent
 license: MIT
 metadata:
@@ -36,7 +36,7 @@ prerequisites:
 3. 查询结果必须说明数据集、grouping 和 scale。区分变换后的 `value` 与原始/分组平均 `mean_tpm`。
 4. 默认仅展示每个基因表达最高的 10 行；用户要求完整结果时使用 `--output-tsv`，不要在对话中打印数百行。
 5. API 不可用、返回 404 或字段异常时，报告实际错误；不要回退到旧的本地矩阵，也不要猜测表达量。
-6. 用户要求绘图时使用 `plot_expression_atlas.py` 生成 `.pdf`；不要改为 PNG/JPEG，也不要在 PDF 中嵌入栅格图。
+6. 用户要求绘图时使用 `plot_expression_atlas.py` 生成 `.pdf`；不要改为 PNG/JPEG，也不要在 PDF 中嵌入栅格图。绘图成功后，必须向用户返回生成的矢量 PDF 的完整绝对路径，不能只返回文件名或相对路径。
 
 ## 查询参数
 
@@ -147,6 +147,8 @@ python3 "$SKILL_DIR/scripts/plot_expression_atlas.py" \
 - 保留页面的标题、grouping/scale summary、标签、网格、缺失格和图例布局。
 
 输出必须是 `.pdf`。脚本以 PDF 矢量矩形、线条和文本构图，不生成 PNG/JPEG，也不在 PDF 中嵌入栅格图片。默认宽度为 1280 pt；需要调整画布时使用 `--width` 和 `--stage-height`，不要修改颜色和数值范围算法。
+
+绘图完成后，先确认 PDF 已生成，再将其解析为完整绝对路径并明确返回给用户，例如 `/tmp/DM8.2_chr06G22780.sample_tissue.log2_tpm.pdf`。不要只报告输出目录、文件名或相对路径。
 
 ## 输出解读
 

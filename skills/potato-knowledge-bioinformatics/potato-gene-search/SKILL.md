@@ -1,31 +1,31 @@
 ---
 name: potato-gene-search
-description: 查询 Potato Knowledge Hub 基因 API，用于马铃薯 DMv8 基因模糊检索与详情获取；支持 Gene ID、symbol、reported ID、转录本、domain、表达、UniProt 相似性、参考文献、基因组坐标和按需序列输出。details 默认不返回 cds/pep/genomic/promoter 完整序列，避免上下文膨胀。
-version: 1.1.0
+description: 查询 Potato Knowledge Hub 基因 API，用于马铃薯 DMv8.2 基因模糊检索与详情获取；支持 Gene ID、symbol、reported ID、转录本、domain、UniProt 相似性、参考文献、基因组坐标和序列。脚本返回本技能职责范围内的 API JSON，由 AI 判断和整理结果。
+version: 1.2.3
 author: Potato Agent
 license: MIT
 metadata:
   hermes:
     tags: [potato, DMv8, gene-search, Potato-Knowledge-Hub, bioinformatics]
-    related_skills: [potato-knowledge-search, extract-cds-pep-from-gff3, gffread-export-cds-pep]
+    related_skills: [potato-gene-function-prediction, potato-knowledge-search, gffread-export-cds-pep]
 prerequisites:
   commands: [python3]
 ---
 
 # Potato Gene Search
 
-使用 Potato Knowledge Hub 的基因 API 查询马铃薯 DMv8 基因。适用于根据基因符号、reported ID、历史注释 ID、局部 ID 或 DMv8 gene ID 检索候选基因，并进一步获取基因详情。
+使用 Potato Knowledge Hub 的基因 API 查询马铃薯 DMv8.2 基因。适用于根据基因符号、reported ID、历史注释 ID、局部 ID 或 DMv8.2 gene ID 检索候选基因，并进一步获取基因详情。
 
 ## 何时使用
 
 - 用户询问马铃薯 / potato / *Solanum tuberosum* 基因信息。
-- 用户给出基因符号，如 `PYL8`、`StCDF1`、`NAC`，希望找到对应 DMv8 基因。
+- 用户给出基因符号，如 `PYL8`、`StCDF1`、`NAC`，希望找到对应 DMv8.2 基因。
 - 用户给出 reported ID / 历史 ID，如 `LOC102580526`、`PGSC0003DMG...`、`Soltu.DM...`、`St_E4-63...`。
-- 用户给出明确 DMv8 gene ID，如 `DM8C06G10190`，希望查看坐标、domain、转录本、表达、UniProt 相似性、参考文献或序列。
+- 用户给出明确 DMv8.2 gene ID，如 `DM8.2_chr06G09000`，希望查看坐标、domain、转录本、UniProt 相似性、参考文献或序列。
 
 ## API 选择规则
 
-1. **输入是明确 DMv8 gene ID**（例如 `DM8C06G10190`）且用户要详情：直接调用 `details`。
+1. **输入是明确 DMv8.2 gene ID**（例如 `DM8.2_chr06G09000`）且用户要详情：直接调用 `details`。
 2. **输入是 symbol、reported ID、历史 ID、partial ID 或不确定关键词**：先调用 `search`。
 3. 用户要求“查详情”但只给 symbol / reported ID：先 `search`，再根据候选选择 `gene_id` 后调用 `details`。
 4. 候选选择优先级：
@@ -37,51 +37,27 @@ prerequisites:
 
 ## 推荐脚本调用
 
-加载技能后，优先使用运行环境返回的 `skill_dir`。不要写死部署账号下的技能安装路径；如果需要在 shell 中调用脚本，先把 `SKILL_DIR` 设为当前技能目录：
-
-```bash
-SKILL_DIR="${SKILL_DIR:?set SKILL_DIR to the potato-gene-search skill directory}"
-```
+Hermes 加载技能时会将 `${HERMES_SKILL_DIR}` 展开为当前技能的绝对目录。不要写死部署账号下的技能安装路径。
 
 ### 模糊检索 / symbol 检索
 
 ```bash
-python3 "$SKILL_DIR/scripts/query_potato_gene.py" search "PYL8"
+python3 "${HERMES_SKILL_DIR}/scripts/query_potato_gene.py" search "PYL8"
 ```
 
 省略子命令时默认按 `search` 处理：
 
 ```bash
-python3 "$SKILL_DIR/scripts/query_potato_gene.py" "PYL8"
+python3 "${HERMES_SKILL_DIR}/scripts/query_potato_gene.py" "PYL8"
 ```
 
-### 详情查询：默认不返回完整序列
+### 详情查询
 
 ```bash
-python3 "$SKILL_DIR/scripts/query_potato_gene.py" details DM8C06G10190
+python3 "${HERMES_SKILL_DIR}/scripts/query_potato_gene.py" details DM8.2_chr06G09000
 ```
 
-默认输出会移除以下完整序列字段，避免污染上下文：
-
-```text
-cds, pep, genomic, promoter
-```
-
-脚本会保留 `sequence_summary`，用于说明这些序列是否存在、FASTA header 和序列长度；同时给出 `sequence_fields_omitted`。
-
-### 只有用户明确要求时才输出完整序列
-
-用户明确要求 CDS、蛋白、基因组序列、启动子序列、FASTA 或完整 sequence 时，再使用：
-
-```bash
-python3 "$SKILL_DIR/scripts/query_potato_gene.py" details DM8C06G10190 --include-sequences
-```
-
-只输出部分序列字段时使用：
-
-```bash
-python3 "$SKILL_DIR/scripts/query_potato_gene.py" details DM8C06G10190 --include-sequences --sequence-fields cds,pep
-```
+脚本只负责发送请求并返回本技能职责范围内的 API JSON，不判断响应中的基因、文献或序列字段是否有效，也不添加或改写返回字段。AI 必须结合完整响应判断查询是否成功，并按用户需求整理结果。
 
 ## 输出规则
 
@@ -108,9 +84,8 @@ python3 "$SKILL_DIR/scripts/query_potato_gene.py" details DM8C06G10190 --include
 - `domain`
 - `coordinates`
 - `ls_uniprot` 简要数量或前几条
-- `ls_exp` 简要说明
-- `ref_info_parsed` 中的文献标题、DOI 或年份摘要
-- `sequence_summary`，只报告序列长度，不输出完整序列
+- `ref_info` 中的文献标题、DOI 或年份摘要；该字段可能是 JSON 字符串，由 AI 解析
+- `cds`、`pep`、`genomic`、`promoter` 是否存在及序列长度
 
 **强制规则：** 用户没有明确要求时，不要在回答中回显 `cds`、`pep`、`genomic`、`promoter` 的完整内容。
 
@@ -125,10 +100,10 @@ GET https://www.potato-ai.top/api/gene_search?q=<query>
 Gene details:
 
 ```text
-GET https://www.potato-ai.top/api/gene_details?id=<DMv8_gene_id>
+GET https://www.potato-ai.top/api/gene_details?id=<DMv8.2_gene_id>
 ```
 
-`ref_info` 由 API 返回为 JSON 字符串。脚本保留原始 `ref_info`，并在可解析时增加 `ref_info_parsed` 列表。
+`ref_info` 可能由 API 返回为 JSON 字符串。脚本不解析或改写它，由 AI 根据实际响应处理。
 
 ## 脚本参数
 
@@ -136,25 +111,17 @@ GET https://www.potato-ai.top/api/gene_details?id=<DMv8_gene_id>
 --base-url URL       默认 https://www.potato-ai.top，也可用 POTATO_GENE_BASE_URL 覆盖
 --timeout SECONDS    HTTP 超时时间，默认 60
 search QUERY         按关键词检索候选基因
-search --max-results N QUERY
-                    只保留前 N 条 search 结果
-
-details GENE_ID      查询详情，默认移除完整序列字段
-details --include-sequences GENE_ID
-                    保留完整 cds/pep/genomic/promoter 序列字段
-details --include-sequences --sequence-fields cds,pep GENE_ID
-                    只保留指定完整序列字段，其余序列字段仍省略
+details GENE_ID      查询 DMv8.2 基因详情
 ```
 
 ## 验证命令
 
 ```bash
-python3 "$SKILL_DIR/scripts/query_potato_gene.py" search "PYL8"
-python3 "$SKILL_DIR/scripts/query_potato_gene.py" details DM8C06G10190
-python3 "$SKILL_DIR/scripts/query_potato_gene.py" details DM8C06G10190 --include-sequences --sequence-fields cds,pep
+python3 "${HERMES_SKILL_DIR}/scripts/query_potato_gene.py" search "PYL8"
+python3 "${HERMES_SKILL_DIR}/scripts/query_potato_gene.py" details DM8.2_chr06G09000
 ```
 
-验证默认详情输出中不应包含顶层 `cds`、`pep`、`genomic`、`promoter` 字段；显式 `--include-sequences` 后才应返回对应字段。
+API 有时会把“找不到数据”的说明放在普通字段中而不是顶层 `error`，必须由 AI 阅读完整响应后判断，脚本不做语义推断。
 
 ## 本地数据库降级方案（API 502/不可用时）
 
@@ -183,7 +150,7 @@ for q in ['BEL5','POTH1','FDL1','SP6A','ABL1','AST1']:
 PY
 ```
 
-本地库表结构：`new_genes(gene_id, gene_symbol, ID_reported, refs, descriptions)`。该方式适合核对基因号与历史 ID；不要把它等同于完整 `details` API，因为 domain、表达、文献题名、序列等辅助表可能不在同一路径。
+本地库表结构：`new_genes(gene_id, gene_symbol, ID_reported, refs, descriptions)`。该方式适合核对基因号与历史 ID；不要把它等同于完整 `details` API，因为 domain、文献题名、序列等辅助表可能不在同一路径。
 
 若需要坐标，可用 DMv8.2 GFF3 中的代表转录本验证：
 
