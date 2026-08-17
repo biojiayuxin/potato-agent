@@ -158,6 +158,7 @@ def test_build_config_data_includes_default_environment_hint() -> None:
     assert "system environment (including PATH)" in data["agent"]["environment_hint"]
     assert "potato-bio-run ENV COMMAND" in data["agent"]["environment_hint"]
     assert "only if neither source provides" in data["agent"]["environment_hint"]
+    assert "always provide their full absolute paths" in data["agent"]["environment_hint"]
 
 
 def test_build_config_data_applies_runtime_profile_after_user_overrides() -> None:

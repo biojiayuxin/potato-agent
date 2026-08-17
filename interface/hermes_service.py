@@ -61,7 +61,8 @@ DEFAULT_ENVIRONMENT_HINT = (
     "environment (including PATH) and the shared environments under "
     "`/opt/potato-bio/current`; run shared tools with "
     "`potato-bio-run ENV COMMAND ...`, and consider installation only if neither "
-    "source provides what is needed."
+    "source provides what is needed. When returning paths to any result files "
+    "after completing a task, always provide their full absolute paths."
 )
 DEFAULT_RUNTIME_LOCK_DIR = Path("/run/potato-agent/runtime-start")
 DEFAULT_SOUL_TEMPLATE_PATH = REPO_ROOT / "soul_settings" / "SOUL.md"
