@@ -131,16 +131,7 @@ python3 "${SKILL_DIR}/scripts/run_ncbi_blast.py" \
   --blast-args -evalue 1e-10 -max_target_seqs 20 -num_threads 4
 ```
 
-若 BLAST+ 位于共享环境，在该环境中运行此脚本，例如：
-
-```bash
-potato-bio-run comparative-core python3 \
-  "${SKILL_DIR}/scripts/run_ncbi_blast.py" \
-  --program blastn \
-  --query "${QUERY_FASTA}" \
-  --database "${DB_PREFIX}" \
-  --output "${RESULT_FILE}"
-```
+运行前根据实际部署环境确认 Python 和所选 BLAST+ 可执行文件可用，并记录实际版本。本技能不假定或固定共享运行环境名。
 
 不指定 `--outfmt` 时保留 BLAST 默认 pairwise 格式。额外参数只放搜索参数，不重复传入脚本已经管理的 `-query`、`-db`、`-out` 和 `-outfmt`。
 

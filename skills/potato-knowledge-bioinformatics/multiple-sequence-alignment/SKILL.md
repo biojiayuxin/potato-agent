@@ -77,7 +77,7 @@ python3 "${SKILL_DIR}/scripts/run_msa.py" \
   --output-dir /path/to/msa-result
 ```
 
-`--aligner` 缺省为 `mafft`，`--threads` 缺省为 `1`。在 Potato 共享软件环境完成 MSA 软件发布后，通过包含这些软件的 `potato-bio-run` 环境执行同一脚本。不要假设当前 `comparative-core` 已包含 MSA 软件；先验证实际可执行文件和环境 manifest。
+`--aligner` 缺省为 `mafft`，`--threads` 缺省为 `1`。运行前根据实际部署环境确认 Python 和所选 aligner 可执行文件可用，并验证实际版本；本技能不假定或固定共享运行环境名。
 
 大型数据集预计运行较久时，使用 `slurm-for-long-running-tasks` 提交相同命令。不要把尚未结束的 Slurm 作业报告为已完成。
 
