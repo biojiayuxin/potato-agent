@@ -267,6 +267,97 @@ def test_gene_catalog_metadata_and_ranked_literal_search(monkeypatch, tmp_path) 
         client.close()
 
 
+def test_gene_search_merges_ranked_bidirectional_st_symbol_variants(
+    monkeypatch, tmp_path
+) -> None:
+    db_path = _write_catalog_db(tmp_path / "catalog.sqlite")
+    with sqlite3.connect(db_path) as conn:
+        conn.executemany(
+            "INSERT INTO genes VALUES (?, ?, ?, ?, ?, ?, ?)",
+            [
+                (4, "GeneBareExact", "genebareexact", "chr03", 1, 10, "+"),
+                (5, "GeneStExact", "genestexact", "chr03", 11, 20, "+"),
+                (6, "GeneBarePrefix", "genebareprefix", "chr03", 21, 30, "+"),
+                (7, "GeneStPrefix", "genestprefix", "chr03", 31, 40, "+"),
+                (8, "GeneBoth", "geneboth", "chr03", 41, 50, "+"),
+                (9, "GeneReported", "genereported", "chr03", 51, 60, "+"),
+            ],
+        )
+        conn.executemany(
+            """
+            INSERT INTO gene_identifiers(
+              gene_pk, identifier_type, identifier, identifier_norm,
+              qualifier_type, qualifier_value, display_order
+            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            [
+                (4, "gene_symbol", "SN2", "sn2", None, None, 0),
+                (5, "gene_symbol", "StSN2", "stsn2", None, None, 0),
+                (6, "gene_symbol", "SN2A", "sn2a", None, None, 0),
+                (7, "gene_symbol", "StSN2A", "stsn2a", None, None, 0),
+                (8, "gene_symbol", "DUO", "duo", None, None, 0),
+                (8, "gene_symbol", "StDUO", "stduo", None, None, 1),
+                (9, "reported_id", "StONLY", "stonly", None, None, 0),
+            ],
+        )
+        conn.commit()
+
+    client = _client_for_catalog(monkeypatch, db_path)
+    try:
+        prefixed = client.get(
+            "/api/v1/genes/search", params={"q": "StSN2", "limit": 10}
+        )
+        assert prefixed.status_code == 200, prefixed.text
+        assert [row["geneId"] for row in prefixed.json()["genes"]] == [
+            "GeneStExact",
+            "GeneStPrefix",
+            "GeneBareExact",
+            "GeneBarePrefix",
+        ]
+
+        bare = client.get(
+            "/api/v1/genes/search", params={"q": "SN2", "limit": 10}
+        )
+        assert bare.status_code == 200, bare.text
+        assert [row["geneId"] for row in bare.json()["genes"]] == [
+            "GeneBareExact",
+            "GeneBarePrefix",
+            "GeneStExact",
+            "GeneStPrefix",
+        ]
+
+        first_page = client.get(
+            "/api/v1/genes/search", params={"q": "StSN2", "limit": 2}
+        ).json()
+        second_page = client.get(
+            "/api/v1/genes/search",
+            params={"q": "StSN2", "limit": 2, "offset": 2},
+        ).json()
+        assert [row["geneId"] for row in first_page["genes"]] == [
+            "GeneStExact",
+            "GeneStPrefix",
+        ]
+        assert first_page["hasMore"] is True
+        assert [row["geneId"] for row in second_page["genes"]] == [
+            "GeneBareExact",
+            "GeneBarePrefix",
+        ]
+        assert second_page["hasMore"] is False
+
+        deduplicated = client.get(
+            "/api/v1/genes/search", params={"q": "DUO", "limit": 10}
+        ).json()
+        assert [row["geneId"] for row in deduplicated["genes"]] == ["GeneBoth"]
+        assert deduplicated["genes"][0]["matchedIdentifier"] == "DUO"
+
+        symbol_only = client.get(
+            "/api/v1/genes/search", params={"q": "ONLY", "limit": 10}
+        ).json()
+        assert symbol_only["genes"] == []
+    finally:
+        client.close()
+
+
 def test_gene_search_description_excerpt_has_a_stable_limit(monkeypatch, tmp_path) -> None:
     db_path = _write_catalog_db(tmp_path / "catalog.sqlite")
     long_description = " ".join(["potato"] * 100)

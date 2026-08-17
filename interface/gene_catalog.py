@@ -386,23 +386,58 @@ def _search_tier(
     ).fetchall()
 
 
-def _search_rows(
-    conn: sqlite3.Connection, normalized: str, limit: int, offset: int
-) -> tuple[list[sqlite3.Row], bool]:
-    target_count = offset + limit + 1
+def _st_symbol_variant(normalized: str) -> str | None:
+    if normalized == "st" or normalized.startswith("st "):
+        return None
+    if normalized.startswith("st"):
+        return normalized[2:] or None
+    return f"st{normalized}"
+
+
+def _identifier_search_tiers(
+    normalized: str,
+) -> tuple[tuple[str, tuple[Any, ...]], ...]:
     prefix_upper_bound = f"{normalized}\U0010ffff"
-    tiers = (
+    tiers: list[tuple[str, tuple[Any, ...]]] = [
         ("gi.identifier_norm = ?", (normalized,)),
         (
             "gi.identifier_norm >= ? AND gi.identifier_norm < ? "
             "AND gi.identifier_norm <> ?",
             (normalized, prefix_upper_bound, normalized),
         ),
-    )
+    ]
+
+    variant = _st_symbol_variant(normalized)
+    if variant is not None and variant != normalized:
+        variant_upper_bound = f"{variant}\U0010ffff"
+        tiers.extend(
+            [
+                (
+                    "gi.identifier_type = 'gene_symbol' "
+                    "AND gi.identifier_norm = ?",
+                    (variant,),
+                ),
+                (
+                    "gi.identifier_type = 'gene_symbol' "
+                    "AND gi.identifier_norm >= ? AND gi.identifier_norm < ? "
+                    "AND gi.identifier_norm <> ?",
+                    (variant, variant_upper_bound, variant),
+                ),
+            ]
+        )
+    return tuple(tiers)
+
+
+def _search_rows(
+    conn: sqlite3.Connection, normalized: str, limit: int, offset: int
+) -> tuple[list[sqlite3.Row], bool]:
+    target_count = offset + limit + 1
 
     selected: list[sqlite3.Row] = []
     seen_gene_pks: set[int] = set()
-    for match_rank, (condition_sql, condition_params) in enumerate(tiers):
+    for match_rank, (condition_sql, condition_params) in enumerate(
+        _identifier_search_tiers(normalized)
+    ):
         rows = _search_tier(
             conn,
             condition_sql=condition_sql,
