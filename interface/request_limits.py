@@ -44,9 +44,14 @@ class RequestBodyLimitMiddleware:
         app: ASGIApp,
         *,
         limit_for_scope: Callable[[dict[str, Any]], int],
+        error_body_for_scope: Callable[
+            [dict[str, Any], int, str], dict[str, Any] | None
+        ]
+        | None = None,
     ) -> None:
         self.app = app
         self.limit_for_scope = limit_for_scope
+        self.error_body_for_scope = error_body_for_scope
 
     async def __call__(
         self,
@@ -99,8 +104,13 @@ class RequestBodyLimitMiddleware:
         except _RequestBodyError as exc:
             if response_started:
                 raise
+            content = (
+                self.error_body_for_scope(scope, exc.status_code, exc.detail)
+                if self.error_body_for_scope is not None
+                else None
+            )
             body = json.dumps(
-                {"detail": exc.detail},
+                content if content is not None else {"detail": exc.detail},
                 ensure_ascii=True,
                 separators=(",", ":"),
             ).encode("ascii")

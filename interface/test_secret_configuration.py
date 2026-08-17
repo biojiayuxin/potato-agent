@@ -140,6 +140,38 @@ def test_production_rejects_secret_in_process_environment(monkeypatch) -> None:
         secret_config.load_session_secret()
 
 
+def test_production_tavily_secret_requires_private_file_or_systemd_credential(
+    monkeypatch,
+) -> None:
+    _clear_secret_environment(monkeypatch)
+    monkeypatch.setenv("INTERFACE_ENVIRONMENT", "production")
+    monkeypatch.setenv("TAVILY_API_KEY", "tvly-fixture-secret")
+
+    with pytest.raises(
+        secret_config.SecretConfigurationError,
+        match="TAVILY_API_KEY must not be stored directly",
+    ):
+        secret_config.load_secret(
+            "TAVILY_API_KEY", credential_name="tavily-api-key"
+        )
+
+
+def test_tavily_secret_loads_from_systemd_credential(tmp_path, monkeypatch) -> None:
+    _clear_secret_environment(monkeypatch)
+    credential_dir = tmp_path / "credentials"
+    credential_dir.mkdir()
+    secret_path = credential_dir / "tavily-api-key"
+    secret_path.write_text("tvly-fixture-secret\n", encoding="utf-8")
+    secret_path.chmod(0o440)
+    credential_dir.chmod(0o550)
+    monkeypatch.setenv("INTERFACE_ENVIRONMENT", "production")
+    monkeypatch.setenv("CREDENTIALS_DIRECTORY", str(credential_dir))
+
+    assert secret_config.load_secret(
+        "TAVILY_API_KEY", credential_name="tavily-api-key"
+    ) == "tvly-fixture-secret"
+
+
 def test_secret_loader_rejects_conflicting_sources(tmp_path, monkeypatch) -> None:
     _clear_secret_environment(monkeypatch)
     secret_path = tmp_path / "session-secret"

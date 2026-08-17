@@ -65,9 +65,22 @@ def test_ensure_token_usage_store_creates_tables_idempotently(tmp_path) -> None:
                 "pragma index_list(model_proxy_usage_requests)"
             ).fetchall()
         }
+        search_columns = {
+            row[1]
+            for row in conn.execute(
+                "pragma table_info(web_search_usage_requests)"
+            ).fetchall()
+        }
+        search_index_names = {
+            row[1]
+            for row in conn.execute(
+                "pragma index_list(web_search_usage_requests)"
+            ).fetchall()
+        }
 
     assert "model_proxy_usage_requests" in tables
     assert "model_proxy_user_quotas" in tables
+    assert "web_search_usage_requests" in tables
     assert "users" not in tables
     assert stat.S_IMODE(db_path.parent.stat().st_mode) == 0o700
     assert stat.S_IMODE(db_path.stat().st_mode) == 0o600
@@ -93,6 +106,20 @@ def test_ensure_token_usage_store_creates_tables_idempotently(tmp_path) -> None:
     assert "idx_model_proxy_usage_user_started" in index_names
     assert "idx_model_proxy_usage_started" in index_names
     assert "idx_model_proxy_usage_route_model_started" in index_names
+    assert {
+        "mapping_username",
+        "topic",
+        "status_code",
+        "started_at",
+        "completed_at",
+        "duration_ms",
+        "result_count",
+        "credits_used",
+        "error_code",
+        "provider_request_id",
+    }.issubset(search_columns)
+    assert "idx_web_search_usage_user_started" in search_index_names
+    assert "idx_web_search_usage_started" in search_index_names
 
 
 def test_usage_store_discards_arbitrary_raw_upstream_fields(tmp_path) -> None:

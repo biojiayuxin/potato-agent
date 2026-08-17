@@ -24,6 +24,7 @@ from interface.model_proxy_config import (
 from interface.secret_config import SecretConfigurationError, load_secret
 from interface import token_usage_store
 from interface.request_limits import RequestBodyLimitMiddleware
+from interface import web_search
 
 
 logger = logging.getLogger(__name__)
@@ -1025,8 +1026,37 @@ async def responses(request: Request) -> Response:
     return await _forward_model_request(request, "responses")
 
 
+@app.post("/v1/search")
+async def search(request: Request) -> Response:
+    try:
+        principal = _require_principal(request)
+    except HTTPException as exc:
+        if exc.status_code == 401:
+            return web_search.error_response(
+                web_search.SearchFailure(
+                    401, "unauthorized", "Web search authorization failed", False
+                )
+            )
+        return web_search.error_response(
+            web_search.SearchFailure(
+                503, "search_unavailable", "Web search is unavailable", False
+            )
+        )
+    if principal.is_daily_updates_service:
+        return web_search.error_response(
+            web_search.SearchFailure(
+                403,
+                "search_forbidden",
+                "This principal cannot use web search",
+                False,
+            )
+        )
+    return await web_search.execute_search(request, username=principal.name)
+
+
 def _model_proxy_request_body_limit(scope: dict[str, Any]) -> int:
-    del scope
+    if scope.get("path") == "/v1/search":
+        return web_search.SEARCH_REQUEST_LIMIT_BYTES
     raw = os.getenv("POTATO_MODEL_PROXY_MAX_REQUEST_BYTES", "").strip()
     try:
         configured = int(raw) if raw else DEFAULT_MODEL_PROXY_REQUEST_LIMIT_BYTES
@@ -1038,9 +1068,19 @@ def _model_proxy_request_body_limit(scope: dict[str, Any]) -> int:
     )
 
 
+def _model_proxy_request_limit_error(
+    scope: dict[str, Any], status_code: int, detail: str
+) -> dict[str, Any] | None:
+    del detail
+    if scope.get("path") == "/v1/search":
+        return web_search.request_limit_error(status_code)
+    return None
+
+
 app.add_middleware(
     RequestBodyLimitMiddleware,
     limit_for_scope=_model_proxy_request_body_limit,
+    error_body_for_scope=_model_proxy_request_limit_error,
 )
 
 
