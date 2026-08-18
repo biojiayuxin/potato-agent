@@ -1,6 +1,13 @@
 {
   "updates": [
     {
+      "version": "2026-08-18-001",
+      "title": "New skills",
+      "date": "August 18, 2026",
+      "summary": "Added several new skills, including scientific data visualization, general web search, BLAST, and multiple-sequence alignment.",
+      "items": []
+    },
+    {
       "version": "2026-08-03-001",
       "title": "Security fixes",
       "date": "August 3, 2026",
