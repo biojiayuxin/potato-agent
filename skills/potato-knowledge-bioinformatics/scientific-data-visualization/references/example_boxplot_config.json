@@ -1,0 +1,27 @@
+{
+  "pdf_title": "De-identified scientific boxplot example",
+  "panels": [
+    {
+      "sheet": "Continuous trait",
+      "title": "Continuous measurement",
+      "y_label": "Measurement per sample (a.u.)"
+    },
+    {
+      "sheet": "Count trait",
+      "title": "Count measurement",
+      "y_label": "Count per sample"
+    }
+  ],
+  "ncols": 2,
+  "colors": ["#9AA0A6", "#3B82C4"],
+  "show_points": true,
+  "jitter_seed": 20260807,
+  "figure_width": 8.0,
+  "figure_height": 4.25,
+  "left_margin": 0.105,
+  "right_margin": 0.985,
+  "bottom_margin": 0.16,
+  "top_margin": 0.86,
+  "wspace": 0.34,
+  "footer_y": 0.045
+}
