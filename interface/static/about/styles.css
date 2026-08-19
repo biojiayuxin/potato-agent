@@ -1,0 +1,38 @@
+.about-main {
+  justify-items: center;
+  gap: 14px;
+}
+
+.github-link {
+  max-width: 100%;
+  color: #14532d;
+  font-size: 16px;
+  font-weight: 700;
+  line-height: 1.4;
+  letter-spacing: 0;
+  overflow-wrap: anywhere;
+}
+
+.architecture-link {
+  width: 100%;
+  display: block;
+  line-height: 0;
+}
+
+.architecture-link img {
+  width: 100%;
+  height: auto;
+  display: block;
+}
+
+.github-link:focus-visible,
+.architecture-link:focus-visible {
+  outline: 3px solid rgba(37, 99, 235, 0.38);
+  outline-offset: 3px;
+}
+
+@media (max-width: 580px) {
+  .github-link {
+    font-size: 14px;
+  }
+}

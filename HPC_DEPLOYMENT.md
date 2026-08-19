@@ -140,7 +140,7 @@ Interface 完整闭包见
 
 1. `/srv/potato_agent` 只允许 `root` 和 `potato-interface` 组读取，普通 Hermes 用户不能读源码。
 2. `/var/lib/potato-agent/data` 由 `potato-interface` 独占，普通 Hermes 用户不能读
-   interface 用户数据库和归档数据库。
+   Interface 用户数据库、归档数据库或包含明文反馈正文和联系邮箱的 Feedback 数据库。
 3. `/srv/spatial_data` 由 `root:potato-interface` 只读维护，空间转录组页面可公开访问，但底层
    SQLite 和轮廓数据不暴露给普通 Linux 用户直接读取。
 4. `/srv/wgcna_data` 由 `root:potato-interface` 只读维护，WGCNA 页面可公开访问，但底层导出
@@ -574,6 +574,17 @@ find /srv/potato_agent -type f \
 
 最后一条命令应无输出。mapping、Interface 数据库和所有用户 `HERMES_HOME` 必须在 `/var/lib` 或用户 home
 等外部状态路径中，不能通过源码同步创建。
+
+About 和 Feedback 都属于 Interface 代码发布，不需要独立安装。整树同步必须同时包含后端、全部公开页面和共享
+静态资源；`feedback.db` 是运行时状态，不能从源码 checkout 同步：
+
+```bash
+test -f /srv/potato_agent/interface/feedback_store.py
+test -f /srv/potato_agent/interface/static/shared/feedback.css
+test -f /srv/potato_agent/interface/static/shared/feedback.js
+test -f /srv/potato_agent/interface/static/about/index.html
+test -f /srv/potato_agent/interface/static/about/potato-agent-architecture.png
+```
 
 同步后确认 Lite 源码自带的旧 `plan` 技能已被删除，避免覆盖托管的 `plan-mode` 技能：
 
@@ -1902,6 +1913,7 @@ Environment=INTERFACE_RUNTIME_IDLE_TIMEOUT_SECONDS=1800
 Environment=POTATO_AGENT_MAPPING_PATH=/var/lib/potato-agent/config/users_mapping.yaml
 Environment=INTERFACE_AUTH_DB=/var/lib/potato-agent/data/interface.db
 Environment=INTERFACE_ARCHIVE_DB=/var/lib/potato-agent/data/archive.db
+Environment=INTERFACE_FEEDBACK_DB=/var/lib/potato-agent/data/feedback.db
 Environment=INTERFACE_TUI_GATEWAY_PYTHON=/opt/potato-hermes-lite/current/venv/bin/python3
 Environment=SPATIAL_VIEWER_DATA_ROOT=/srv/spatial_data/current
 Environment=WGCNA_DATABASE_URL=postgresql:///potato_wgcna?host=/var/run/postgresql
@@ -1958,8 +1970,10 @@ ufw show listening
 正式域名和 HTTPS 入口就绪后，删除 `90-site-insecure-http.conf`，重新加载 systemd 并重启 Interface，即可
 恢复 packaged unit 的 loopback + Secure 默认 profile。
 
-注册流程通过 Resend HTTPS API 发送邮箱验证码。`INTERFACE_MAIL_FROM` 必须使用已验证域名下的地址；Resend
-credential 或发件地址无效时，发送接口会失败。不要把 credential 的内容复制到 drop-in。
+注册流程和公开 Feedback 都通过 Resend HTTPS API 发送邮件。`INTERFACE_MAIL_FROM` 必须使用已验证域名下的
+地址；Resend credential 或发件地址无效时，发送接口会失败。Feedback 收件人固定在
+`interface/mailer.py`，当前为 `jiayuxin@ynnu.edu.cn`；站点 drop-in 不再配置第二套收件人。不要把
+credential 的内容复制到 drop-in。
 
 会话归档调度仍每天 03:00 运行，但默认只处理超过 `99999` 天未活跃的会话，即默认
 不开启常规自动会话归档。该阈值由 `INTERFACE_ARCHIVE_RETENTION_DAYS` 调整；未经 owner 明确要求，
@@ -1973,6 +1987,10 @@ systemctl daemon-reload
 systemctl enable --now potato-interface.service
 systemctl status potato-interface.service
 ```
+
+Interface 首次启动会在 `INTERFACE_FEEDBACK_DB` 创建 `feedback.db`；升级旧版本时会在事务中补齐缺少的列，
+不需要手工运行 SQLite DDL。该数据库保存明文反馈正文和可选联系邮箱、投递状态、Resend ID 与时间戳，默认保留
+30 天；不保存客户端 IP。文件应为 `potato-interface:potato-interface 0600`，父目录保持 `0700`。
 
 #### Daily Updates（需单独部署）
 
@@ -2056,6 +2074,9 @@ Hermes service 默认保持 disabled，用户进入 workspace 时再按需启动
 - 每个 mapped 用户的 `HERMES_HOME` 和 workdir 都在源码树外；
 - mapping 至少包含一个用户，全部 mapped unit 已存在，`/usr/local/bin/hermes` 是 symlink；
 - 已完成独立、可恢复的数据备份，而不是只依赖 cutover 的状态指纹。
+
+`feedback.db` 会保存明文反馈正文和可选联系邮箱。它必须包含在 Interface 数据备份中，备份目录只能由 root
+读取，并按批准的备份保留策略清理；不能因长期遗留备份而绕过应用内 30 天清理。
 
 如果 mapping、任一 Interface DB 或其 WAL/SHM 仍在 `/srv/potato_agent`，或者新旧位置同时存在状态，这属于
 单独的旧状态迁移，不得与 Lite release 切换合并执行。本 README 不提供危险的文件复制捷径：迁移必须在
@@ -2778,6 +2799,10 @@ test -n "$INTERFACE_HEALTH_HOST"
 INTERFACE_HTTP_ORIGIN="http://$INTERFACE_HEALTH_HOST:3000"
 curl -fsS "$INTERFACE_HTTP_ORIGIN/health" | python3 -m json.tool >/dev/null
 curl -fsS "$INTERFACE_HTTP_ORIGIN/lite" >/dev/null
+curl -fsS "$INTERFACE_HTTP_ORIGIN/about" >/dev/null
+curl -fsS "$INTERFACE_HTTP_ORIGIN/static/shared/feedback.css" >/dev/null
+curl -fsS "$INTERFACE_HTTP_ORIGIN/static/shared/feedback.js" >/dev/null
+curl -fsS "$INTERFACE_HTTP_ORIGIN/static/about/potato-agent-architecture.png" >/dev/null
 curl -fsS "$INTERFACE_HTTP_ORIGIN/spatial" >/dev/null
 curl -fsS "$INTERFACE_HTTP_ORIGIN/api/spatial/datasets" | python3 -m json.tool >/dev/null
 curl -fsS "$INTERFACE_HTTP_ORIGIN/wgcna" >/dev/null
@@ -2793,6 +2818,36 @@ PUBLIC_ORIGIN=https://agent.example.com
 # 显式 HTTP profile 使用：http://<server-address>:3000
 curl -fsS "$PUBLIC_ORIGIN/health" >/dev/null
 ```
+
+用不会进入限流 claim 的空白正文验证 Feedback 路由和请求校验；预期返回 `400`，不会创建数据库记录或发送邮件：
+
+```bash
+FEEDBACK_VALIDATION_STATUS=$(curl -sS -o /dev/null -w '%{http_code}' \
+  -H 'Content-Type: application/json' \
+  --data '{"message":" ","contact_email":"","page_path":"/about"}' \
+  "$INTERFACE_HTTP_ORIGIN/api/feedback")
+test "$FEEDBACK_VALIDATION_STATUS" = 400
+```
+
+服务启动后检查私有权限和自动创建/迁移的 schema，不读取或打印反馈内容：
+
+```bash
+FEEDBACK_DB=/var/lib/potato-agent/data/feedback.db
+test "$(stat -c '%U:%G:%a' "$FEEDBACK_DB")" = potato-interface:potato-interface:600
+/opt/interface-env/bin/python - "$FEEDBACK_DB" <<'PY'
+import sqlite3
+import sys
+
+with sqlite3.connect(f"file:{sys.argv[1]}?mode=ro", uri=True) as conn:
+    columns = {str(row[1]) for row in conn.execute("pragma table_info(feedback_submissions)")}
+required = {"message", "contact_email"}
+if not required.issubset(columns):
+    raise SystemExit(f"feedback schema missing columns: {sorted(required - columns)}")
+PY
+```
+
+真实邮件 smoke test 会产生外部邮件并占用全站每小时 20 次额度，只在 owner 批准后从浏览器提交一条可识别反馈。
+随后仅核对数据库状态/Resend ID、Resend 投递事件和固定收件箱，不把正文或联系邮箱写入命令、日志或验收报告。
 
 检查空间转录组、WGCNA、Bulk RNA-Seq 和 Gene Catalog 数据对 interface 服务可读：
 
@@ -2819,6 +2874,7 @@ sudo -u "$ORDINARY_USER" test ! -r /var/lib/potato-agent/config/users_mapping.ya
 sudo -u "$ORDINARY_USER" test ! -r /var/lib/potato-agent/config/model_proxy.yaml
 sudo -u "$ORDINARY_USER" test ! -r /var/lib/potato-agent/data/interface.db
 sudo -u "$ORDINARY_USER" test ! -r /var/lib/potato-agent/data/archive.db
+sudo -u "$ORDINARY_USER" test ! -r /var/lib/potato-agent/data/feedback.db
 sudo -u "$ORDINARY_USER" test ! -r /var/lib/potato-agent/model-proxy/usage.db
 sudo -u "$ORDINARY_USER" test ! -r /etc/potato-agent/credentials/interface-session-secret
 sudo -u "$ORDINARY_USER" test ! -r /etc/potato-agent/credentials/resend-api-key
@@ -2830,6 +2886,7 @@ sudo -u "$ORDINARY_USER" test ! -r /srv/gene_catalog/current/gene_catalog.sqlite
 sudo -u "$ORDINARY_USER" test ! -r /srv/pan_genome/current/pan_genome.sqlite
 sudo -u potato-interface test ! -r /var/lib/potato-agent/config/model_proxy.yaml
 sudo -u potato-model-proxy test ! -r /var/lib/potato-agent/data/interface.db
+sudo -u potato-model-proxy test ! -r /var/lib/potato-agent/data/feedback.db
 ```
 
 从两个普通 Web 账号分别创建一条可识别的测试会话，再确认双方的会话列表、resume、归档状态和 title 修改接口
@@ -2926,6 +2983,7 @@ unit 中应包含：
 - `/var/lib/potato-agent/config/model_proxy.yaml`
 - `/var/lib/potato-agent/data/interface.db`
 - `/var/lib/potato-agent/data/archive.db`
+- `/var/lib/potato-agent/data/feedback.db`
 - `/var/lib/potato-agent/model-proxy/usage.db`
 - 上述 SQLite 对应的 `-wal`、`-shm` 和 `-journal` sidecar
 - `/etc/potato-agent/credentials/interface-session-secret`

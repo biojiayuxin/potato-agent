@@ -14,6 +14,8 @@ from interface.secret_config import SecretConfigurationError, load_secret
 LOGGER = logging.getLogger("potato_interface.mailer")
 RESEND_API_BASE_URL = "https://api.resend.com"
 USER_AGENT = "potato-agent-interface/1.0"
+FEEDBACK_RECIPIENT = "jiayuxin@ynnu.edu.cn"
+FEEDBACK_EMAIL_SUBJECT = "Potato Agent website feedback"
 
 
 @dataclass(frozen=True)
@@ -168,6 +170,40 @@ def _password_rotation_notice_html(
     )
 
 
+def _feedback_text(
+    *, message: str, contact_email: str, page_path: str, submitted_at: str
+) -> str:
+    contact = contact_email or "Not provided"
+    return (
+        "Potato Agent website feedback\n\n"
+        f"Submitted at (UTC): {submitted_at}\n"
+        f"Source page: {page_path}\n"
+        f"Unverified contact email: {contact}\n\n"
+        "Feedback:\n"
+        f"{message}"
+    )
+
+
+def _feedback_html(
+    *, message: str, contact_email: str, page_path: str, submitted_at: str
+) -> str:
+    escaped_message = html.escape(message)
+    escaped_contact = html.escape(contact_email or "Not provided")
+    escaped_page_path = html.escape(page_path)
+    escaped_submitted_at = html.escape(submitted_at)
+    return (
+        '<div style="font-family:Arial,sans-serif;line-height:1.5;color:#14213d">'
+        "<h2>Potato Agent website feedback</h2>"
+        f"<p><strong>Submitted at (UTC):</strong> {escaped_submitted_at}<br>"
+        f"<strong>Source page:</strong> {escaped_page_path}<br>"
+        f"<strong>Unverified contact email:</strong> {escaped_contact}</p>"
+        '<p><strong>Feedback:</strong></p><pre style="white-space:pre-wrap;'
+        'overflow-wrap:anywhere;font:inherit">'
+        f"{escaped_message}</pre>"
+        "</div>"
+    )
+
+
 async def send_resend_email(
     *,
     email: str,
@@ -311,5 +347,34 @@ async def send_password_rotation_notice_email(
             site_url=site_url.strip(),
         ),
         idempotency_key=idempotency_key,
+        settings=settings,
+    )
+
+
+async def send_feedback_email(
+    *,
+    message: str,
+    contact_email: str,
+    page_path: str,
+    submitted_at: str,
+    submission_id: str,
+    settings: ResendSettings | None = None,
+) -> ResendEmailResult:
+    return await send_resend_email(
+        email=FEEDBACK_RECIPIENT,
+        subject=FEEDBACK_EMAIL_SUBJECT,
+        text=_feedback_text(
+            message=message,
+            contact_email=contact_email,
+            page_path=page_path,
+            submitted_at=submitted_at,
+        ),
+        html=_feedback_html(
+            message=message,
+            contact_email=contact_email,
+            page_path=page_path,
+            submitted_at=submitted_at,
+        ),
+        idempotency_key=submission_id,
         settings=settings,
     )

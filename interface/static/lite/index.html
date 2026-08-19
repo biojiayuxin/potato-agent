@@ -6,6 +6,7 @@
     <title>Potato Agent</title>
     <link rel="icon" type="image/png" href="./static/favicon.png" />
     <link rel="stylesheet" href="./static/lite/styles.css?v=20260803-daily-research-meta-type" />
+    <link rel="stylesheet" href="/static/shared/feedback.css?v=20260819-feedback" />
   </head>
   <body>
     <div id="app" class="app-shell">
@@ -30,6 +31,7 @@
             <a class="portal-nav-item" href="/genomes" data-mobile-supported="true">Genomes</a>
             <button class="portal-nav-item" type="button" aria-disabled="true" tabindex="-1">Variants</button>
             <button class="portal-nav-item" type="button" aria-disabled="true" tabindex="-1">Germplasm</button>
+            <a class="portal-nav-item" href="/about" data-mobile-supported="true">About</a>
           </nav>
         </header>
         <div class="login-stage">
@@ -551,6 +553,7 @@
     </template>
 
     <script src="./static/lite/vendor/marked.umd.js"></script>
+    <script src="/static/shared/feedback.js?v=20260819-feedback" defer></script>
     <script type="module" src="./static/lite/app.js?v=20260803-daily-research-meta"></script>
   </body>
 </html>

@@ -41,7 +41,7 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.responses import Response as FastAPIResponse
 from fastapi.responses import StreamingResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 
 from interface.auth_db import (
     EMAIL_VERIFICATION_PURPOSE_PASSWORD_RESET,
@@ -120,11 +120,18 @@ from interface.file_upload_worker import (
     build_file_upload_worker_command,
     run_upload_command,
 )
+from interface.feedback_store import (
+    claim_feedback_submission,
+    cleanup_feedback_submissions,
+    ensure_feedback_store,
+    finish_feedback_submission,
+)
 from interface.hermes_profile import DEFAULT_HERMES_LITE_PYTHON
 from interface.mapping import DEFAULT_MAPPING_PATH, HermesTarget, MappingStore
 from interface.mailer import (
     MailerConfigurationError,
     MailerDeliveryError,
+    send_feedback_email,
     send_password_reset_email,
     send_signup_verification_email,
 )
@@ -199,6 +206,7 @@ ROOT_DIR = Path(__file__).resolve().parent
 REPO_ROOT = ROOT_DIR.parent
 STATIC_DIR = ROOT_DIR / "static"
 LITE_DIR = STATIC_DIR / "lite"
+ABOUT_DIR = STATIC_DIR / "about"
 SPATIAL_STATIC_DIR = STATIC_DIR / "spatial"
 FAVICON_PATH = STATIC_DIR / "favicon.png"
 SESSION_COOKIE_NAME = "potato_interface_token"
@@ -334,6 +342,7 @@ TEXT_PREVIEW_FILENAMES = {
 }
 INTERFACE_SESSION_SOURCES = ("tui",)
 ACTIVITY_REFRESH_EXCLUDED_PATHS = {
+    "/api/feedback",
     "/api/auth/session",
     "/api/auth/signin",
     "/api/auth/signout",
@@ -402,6 +411,14 @@ class EmailVerificationRequest(BaseModel):
     email: str
 
 
+class FeedbackRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    message: str
+    contact_email: str = ""
+    page_path: str
+
+
 class SessionDisplaySyncRequest(BaseModel):
     messages: list[dict[str, Any]]
     draft_title: str = ""
@@ -468,6 +485,60 @@ def _validate_signup_email(email: str) -> str:
     ):
         raise HTTPException(status_code=400, detail="Invalid email address.")
     return normalized_email
+
+
+def _validate_feedback_contact_email(contact_email: str) -> str:
+    normalized_email = contact_email.strip()
+    if not normalized_email:
+        return ""
+    if (
+        len(normalized_email) > 254
+        or normalized_email.count("@") != 1
+        or any(char.isspace() or ord(char) < 32 for char in normalized_email)
+    ):
+        raise HTTPException(status_code=400, detail="Invalid contact email address.")
+    local_part, domain = normalized_email.rsplit("@", 1)
+    if (
+        not local_part
+        or len(local_part) > 64
+        or local_part.startswith(".")
+        or local_part.endswith(".")
+        or ".." in local_part
+        or re.fullmatch(r"[A-Za-z0-9.!#$%&'*+/=?^_`{|}~-]+", local_part)
+        is None
+    ):
+        raise HTTPException(status_code=400, detail="Invalid contact email address.")
+    domain_labels = domain.split(".")
+    if not domain or any(
+        re.fullmatch(r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?", label)
+        is None
+        for label in domain_labels
+    ):
+        raise HTTPException(status_code=400, detail="Invalid contact email address.")
+    return normalized_email
+
+
+def _validate_feedback_payload(payload: FeedbackRequest) -> tuple[str, str, str]:
+    message = payload.message.strip()
+    if not message:
+        raise HTTPException(status_code=400, detail="Feedback message is required.")
+    if len(message) > 5_000:
+        raise HTTPException(
+            status_code=400,
+            detail="Feedback message must be 5,000 characters or fewer.",
+        )
+
+    contact_email = _validate_feedback_contact_email(payload.contact_email)
+    page_path = payload.page_path.strip()
+    if (
+        not page_path
+        or len(page_path) > 512
+        or not page_path.startswith("/")
+        or page_path.startswith("//")
+        or any(ord(char) < 32 for char in page_path)
+    ):
+        raise HTTPException(status_code=400, detail="Invalid source page path.")
+    return message, contact_email, page_path
 
 
 def _validate_password_complexity(password: str) -> None:
@@ -2969,6 +3040,8 @@ def _should_refresh_activity_for_request(request: Request) -> bool:
 
 def _interface_request_body_limit(scope: dict[str, Any]) -> int:
     path = str(scope.get("path") or "")
+    if path == "/api/feedback":
+        return 32 * 1024
     if path == "/api/files/upload":
         return HARD_MAX_UPLOAD_BYTES + 1024 * 1024
     if re.fullmatch(r"/api/sessions/[^/]+/display", path):
@@ -3016,6 +3089,8 @@ async def on_startup() -> None:
         cleanup_expired_archived_sessions,
         retention_days=ARCHIVE_STORAGE_RETENTION_DAYS,
     )
+    ensure_feedback_store()
+    app.state.feedback_cleanup = cleanup_feedback_submissions()
     ensure_runtime_state_store()
     app.state.tui_gateway_bridges = TuiGatewayBridgeRegistry()
     app.state.session_run_manager = SessionRunManager(
@@ -3063,6 +3138,94 @@ async def favicon() -> FileResponse:
     if not FAVICON_PATH.is_file():
         raise HTTPException(status_code=404, detail="Favicon not found")
     return FileResponse(FAVICON_PATH)
+
+
+@app.get("/about", include_in_schema=False)
+async def serve_about() -> FileResponse:
+    file_path = ABOUT_DIR / "index.html"
+    if not file_path.is_file():
+        raise HTTPException(status_code=404, detail="About page not found")
+    return FileResponse(file_path)
+
+
+@app.post("/api/feedback")
+async def submit_feedback(payload: FeedbackRequest) -> dict[str, bool]:
+    message, contact_email, page_path = _validate_feedback_payload(payload)
+    submitted_at_seconds = _now_seconds()
+    try:
+        claim = await asyncio.to_thread(
+            claim_feedback_submission,
+            message=message,
+            contact_email=contact_email,
+            now=submitted_at_seconds,
+        )
+    except (OSError, sqlite3.Error):
+        LOGGER.exception("Feedback metadata claim failed")
+        raise HTTPException(
+            status_code=503,
+            detail="Feedback is temporarily unavailable. Please try again later.",
+        ) from None
+
+    if not claim.accepted or claim.submission_id is None:
+        raise HTTPException(
+            status_code=429,
+            detail="Too many feedback submissions. Please try again later.",
+            headers={"Retry-After": str(max(1, claim.retry_after))},
+        )
+
+    submission_id = claim.submission_id
+    submitted_at = (
+        datetime.fromtimestamp(submitted_at_seconds, tz=UTC)
+        .isoformat()
+        .replace("+00:00", "Z")
+    )
+    try:
+        result = await send_feedback_email(
+            message=message,
+            contact_email=contact_email,
+            page_path=page_path,
+            submitted_at=submitted_at,
+            submission_id=submission_id,
+        )
+    except (MailerConfigurationError, MailerDeliveryError) as exc:
+        try:
+            await asyncio.to_thread(
+                finish_feedback_submission,
+                submission_id,
+                status="failed",
+                now=submitted_at_seconds,
+            )
+        except (LookupError, OSError, sqlite3.Error, ValueError):
+            LOGGER.exception(
+                "Feedback failure metadata update failed: submission_id=%s",
+                submission_id,
+            )
+        LOGGER.warning(
+            "Feedback delivery failed: submission_id=%s error_type=%s",
+            submission_id,
+            exc.error_type
+            if isinstance(exc, MailerDeliveryError) and exc.error_type
+            else type(exc).__name__,
+        )
+        raise HTTPException(
+            status_code=503,
+            detail="Feedback is temporarily unavailable. Please try again later.",
+        ) from None
+
+    try:
+        await asyncio.to_thread(
+            finish_feedback_submission,
+            submission_id,
+            status="sent",
+            resend_email_id=result.email_id,
+            now=submitted_at_seconds,
+        )
+    except (LookupError, OSError, sqlite3.Error, ValueError):
+        LOGGER.exception(
+            "Feedback success metadata update failed: submission_id=%s",
+            submission_id,
+        )
+    return {"ok": True}
 
 
 @app.get("/api/auth/session")

@@ -41,6 +41,8 @@
   页面展示态 transcript 持久化
 - `archive_store.py`
   归档会话和归档运行记录
+- `feedback_store.py`
+  公开反馈提交的全站限流、内容存储和邮件投递元数据；不保存客户端 IP
 - `mapping.py`
   加载 `users_mapping.yaml` 并解析每用户 Hermes 目标
 - `hermes_service.py`
@@ -76,6 +78,8 @@
   CPython 3.12/Linux x86_64 生产依赖的全量 hash lock 和精确 wheel inventory
 - `static/lite/`
   Lite 前端页面、样式、脚本、图标
+- `static/about/`、`static/shared/`
+  公开 About 页面、架构图，以及所有公开页面共用的 Feedback 前端资源
 - `static/spatial/`
   空间转录组查看器前端页面、样式、脚本、图标
 - `static/wgcna/`
@@ -93,6 +97,7 @@
 - `/var/lib/potato-agent/config/model_proxy.yaml`
 - `/var/lib/potato-agent/data/interface.db`
 - `/var/lib/potato-agent/data/archive.db`
+- `/var/lib/potato-agent/data/feedback.db`
 - `/var/lib/potato-agent/model-proxy/usage.db`
 - 每用户 `~/.hermes/state.db`
 - 空间转录组数据目录，默认 `/srv/spatial_data/current`
@@ -111,12 +116,15 @@
 - `POTATO_MODEL_PROXY_USAGE_DB`
 - `INTERFACE_AUTH_DB`
 - `INTERFACE_ARCHIVE_DB`
+- `INTERFACE_FEEDBACK_DB`
 - `INTERFACE_ENVIRONMENT`
 - `INTERFACE_ALLOW_INSECURE_HTTP`
 - `INTERFACE_BIND_HOST`
 - `INTERFACE_SESSION_SECRET_FILE`
 - `INTERFACE_SESSION_COOKIE_SECURE`
 - `INTERFACE_RESEND_API_KEY_FILE`
+- `INTERFACE_MAIL_FROM`
+- `INTERFACE_MAIL_REPLY_TO`
 - `INTERFACE_SESSION_TTL_SECONDS`
 - `INTERFACE_MAX_UPLOAD_BYTES`
 - `INTERFACE_FILE_BROWSER_MODE`
@@ -165,6 +173,20 @@
 - `GENOME_BROWSER_FEATURE_INDEX_PATH` 指向集中式多 assembly 特征索引；未设置时默认使用
   `$GENOME_BROWSER_DB_ROOT/feature_index.sqlite`
 - `GENOME_BROWSER_SAMTOOLS` 可指定坐标序列 API 使用的 `samtools` 可执行文件，默认从 `PATH` 解析 `samtools`
+
+## 公开 Feedback
+
+- 所有公开页面加载 `/static/shared/feedback.css` 和 `/static/shared/feedback.js`，通过无需登录的
+  `POST /api/feedback` 投递反馈；Lite 登录工作区实际显示时会隐藏入口，并关闭尚未成功提交的反馈弹窗
+- 请求正文上限为 32 KiB；反馈正文必填且最多 5,000 字符，联系邮箱可选且最多 254 字符，来源仅接受站内绝对路径
+- 邮件沿用 Resend 配置，收件人在 `interface/mailer.py` 中固定为 `jiayuxin@ynnu.edu.cn`；发件人使用
+  `INTERFACE_MAIL_FROM`，Reply-To 只使用服务端 `INTERFACE_MAIL_REPLY_TO`，客户端不能指定收件人、
+  发件人、主题或 Reply-To
+- 全站采用滚动一小时最多 20 次的原子 SQLite claim；邮件发送失败也占用额度，超限返回 `429` 和
+  `Retry-After`。该 API 不认证用户、不刷新运行时活跃时间，也不启动 Hermes 运行时
+- `feedback.db` 以明文保存反馈正文、可选联系邮箱、提交 ID、`pending/sent/failed` 状态、Resend ID
+  和时间戳，保留 30 天；不保存客户端 IP。数据库及其目录使用私有权限，日志仍不得包含反馈正文、
+  联系邮箱或 Resend 响应正文
 
 ## 当前边界
 
