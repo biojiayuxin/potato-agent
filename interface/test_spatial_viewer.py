@@ -221,68 +221,32 @@ def _load_spatial_skill_script():
     return module
 
 
-def _mock_agent_expression_payload(dataset: str, gene: str) -> dict[str, object]:
+def _mock_interface_dotplot_payload(gene: str) -> dict[str, object]:
     return {
-        "dataset": dataset,
         "gene": gene,
-        "samples": ["S1"],
-        "range": {"vmin": 0.0, "vmax": 3.5},
         "clusterColumn": "seurat_clusters",
-        "tissueColumn": "celltype",
-        "clusterExpression": [
+        "clusters": [
             {
-                "scope": "dataset",
-                "sample": None,
-                "groupId": "0",
-                "groupLabel": "Cluster 0",
+                "id": "0",
+                "label": "0",
+                "name": "Toy cluster cells",
+                "order": 0,
                 "cellCount": 2,
                 "expressingCount": 1,
                 "pctExpr": 50.0,
                 "avgExpr": 1.75,
-                "avgExprExpressing": 3.5,
-                "sumExpr": 3.5,
-                "maxExpr": 3.5,
+                "avgExprScaled": 1.0,
             },
             {
-                "scope": "sample",
-                "sample": "S1",
-                "groupId": "0",
-                "groupLabel": "Cluster 0",
-                "cellCount": 2,
-                "expressingCount": 1,
-                "pctExpr": 50.0,
-                "avgExpr": 1.75,
-                "avgExprExpressing": 3.5,
-                "sumExpr": 3.5,
-                "maxExpr": 3.5,
-            },
-        ],
-        "tissueExpression": [
-            {
-                "scope": "dataset",
-                "sample": None,
-                "groupId": "Leaf",
-                "groupLabel": "Leaf",
-                "cellCount": 2,
-                "expressingCount": 2,
-                "pctExpr": 100.0,
-                "avgExpr": 2.25,
-                "avgExprExpressing": 2.25,
-                "sumExpr": 4.5,
-                "maxExpr": 3.5,
-            },
-            {
-                "scope": "sample",
-                "sample": "S1",
-                "groupId": "Pith",
-                "groupLabel": "Pith",
+                "id": "1",
+                "label": "1",
+                "name": "Outer cells",
+                "order": 1,
                 "cellCount": 1,
                 "expressingCount": 0,
                 "pctExpr": 0.0,
                 "avgExpr": 0.0,
-                "avgExprExpressing": 0.0,
-                "sumExpr": 0.0,
-                "maxExpr": 0.0,
+                "avgExprScaled": -1.0,
             },
         ],
     }
@@ -445,83 +409,247 @@ def test_spatial_agent_expression_aggregates_sparse_values(monkeypatch, tmp_path
     assert tissue_dataset_leaf["sumExpr"] == 6.5
 
 
-def test_spatial_skill_dotplot_writes_cluster_tsv_and_pdf(monkeypatch, tmp_path) -> None:
+def test_spatial_skill_plot_reproduces_interface_outputs(monkeypatch, tmp_path, capsys) -> None:
     module = _load_spatial_skill_script()
-    calls = []
+    calls: list[str] = []
 
-    def fake_request(base_url: str, dataset: str, gene: str, timeout: int) -> dict[str, object]:
-        calls.append((base_url, dataset, gene, timeout))
-        return _mock_agent_expression_payload(dataset, gene)
+    def fake_request_json_url(url: str, timeout: int) -> dict[str, object]:
+        assert timeout == module.TIMEOUT_SECONDS
+        calls.append(url)
+        path = module.urllib.parse.urlsplit(url).path
+        if path == "/api/spatial/datasets":
+            return {
+                "defaultDataset": "toy",
+                "datasets": [
+                    {
+                        "id": "toy",
+                        "label": "Toy Dataset",
+                        "dataPath": "/api/spatial/data/toy",
+                        "defaultSample": "S1",
+                        "defaultGene": "GeneA",
+                        "samples": [{"id": "S1", "label": "S1", "columns": 1}],
+                    }
+                ],
+            }
+        if path == "/api/spatial/gene":
+            return {
+                "dataset": "toy",
+                "gene": "GeneA",
+                "range": {"vmin": 0.0, "vmax": 3.5},
+                "samples": {
+                    "S1": {
+                        "vmin": 0.0,
+                        "vmax": 3.5,
+                        "nonzero": 2,
+                        "values": [[1, 3.5], [3, 1.0]],
+                    }
+                },
+            }
+        if path == "/api/spatial/dotplot":
+            return _mock_interface_dotplot_payload("GeneA")
+        if path == "/api/spatial/replicates":
+            return {
+                "samples": {
+                    "S1": {
+                        "replicates": [
+                            {
+                                "id": "s1_rep1",
+                                "label": "S1 REP1",
+                                "assignedCellCount": 3,
+                                "bbox": [0, 0, 9, 9],
+                                "cellIds": [1, 2, 3],
+                                "tileKeys": ["0,0"],
+                            }
+                        ]
+                    }
+                }
+            }
+        if path == "/api/spatial/data/toy/contours/S1/manifest.json":
+            return {
+                "sample": "S1",
+                "width": 10,
+                "height": 10,
+                "tileSize": 10,
+                "tiles": [{"x": 0, "y": 0, "url": "/data/contours/S1/tile_0_0.json"}],
+            }
+        if path == "/api/spatial/data/_root/data/contours/S1/tile_0_0.json":
+            return {
+                "cells": [
+                    {
+                        "id": 1,
+                        "bbox": [0, 0, 2, 2],
+                        "contours": [[[0, 0], [2, 0], [2, 2], [0, 2]]],
+                    },
+                    {
+                        "id": 2,
+                        "bbox": [3, 0, 5, 2],
+                        "contours": [[[0, 0], [2, 0], [2, 2], [0, 2]]],
+                    },
+                    {
+                        "id": 3,
+                        "bbox": [6, 0, 8, 2],
+                        "contours": [[[0, 0], [2, 0], [2, 2], [0, 2]]],
+                    },
+                ]
+            }
+        raise AssertionError(f"unexpected URL: {url}")
 
-    monkeypatch.setattr(module, "request_expression", fake_request)
+    def fake_render_spatial(output_path, dataset, sample, gene, layout, cells, width):
+        cells = list(cells)
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        output_path.write_bytes(b"%PDF-1.4\n")
+        return {
+            "path": str(output_path.resolve()),
+            "format": output_path.suffix.lstrip("."),
+            "sample": sample["id"],
+            "drawn_cells": len(cells),
+            "expressing_cells": len(gene["samples"][sample["id"]]["values"]),
+            "width": width,
+            "height": 600,
+        }
+
+    def fake_render_dotplot(output_path, payload, width):
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        output_path.write_bytes(b"%PDF-1.4\n")
+        return {
+            "path": str(output_path.resolve()),
+            "format": output_path.suffix.lstrip("."),
+            "clusters": len(payload["clusters"]),
+            "width": width,
+            "height": 340,
+        }
+
+    monkeypatch.setattr(module, "request_json_url", fake_request_json_url)
+    monkeypatch.setattr(module, "render_spatial_image", fake_render_spatial)
+    monkeypatch.setattr(module, "render_dotplot_image", fake_render_dotplot)
     outdir = tmp_path / "plots"
     code = module.main(
         [
-            "dotplot",
+            "plot",
             "GeneA",
             "--dataset",
             "toy",
-            "--group",
-            "cluster",
+            "--sample",
+            "S1",
             "--outdir",
             str(outdir),
+            "--width",
+            "800",
         ]
     )
     assert code == 0
 
-    tsv_path = outdir / "GeneA_cluster_dotplot.tsv"
-    pdf_path = outdir / "GeneA_cluster_dotplot.pdf"
+    spatial_path = outdir / "GeneA_toy_S1_spatial_expression.pdf"
+    dotplot_path = outdir / "GeneA_toy_cluster_dotplot.pdf"
+    tsv_path = outdir / "GeneA_toy_cluster_dotplot.tsv"
+    raw_path = outdir / "GeneA_toy_cluster_dotplot.json"
+    provenance_path = outdir / "GeneA_toy_interface_data.json"
+    assert spatial_path.read_bytes().startswith(b"%PDF-1.4")
+    assert dotplot_path.read_bytes().startswith(b"%PDF-1.4")
     assert tsv_path.is_file()
-    assert pdf_path.read_bytes().startswith(b"%PDF-1.4")
+    assert raw_path.is_file()
+    assert provenance_path.is_file()
     lines = tsv_path.read_text(encoding="utf-8").splitlines()
-    assert lines[0] == "\t".join(module.TSV_FIELDS)
+    assert lines[0] == "\t".join(module.DOTPLOT_TSV_FIELDS)
     assert lines[1].split("\t") == [
         "toy",
         "GeneA",
-        "cluster",
-        "dataset",
-        "",
+        "seurat_clusters",
         "0",
-        "Cluster 0",
+        "0",
+        "Toy cluster cells",
+        "0",
         "2",
         "1",
         "50.0",
         "1.75",
-        "3.5",
-        "3.5",
-        "3.5",
+        "1.0",
     ]
-    assert calls == [(module.DEFAULT_BASE_URL, "toy", "GeneA", module.TIMEOUT_SECONDS)]
+    result = json.loads(capsys.readouterr().out)
+    assert result["source"] == module.PRODUCTION_BASE_URL
+    assert result["spatial"][0]["path"] == str(spatial_path.resolve())
+    assert result["spatial"][0]["format"] == "pdf"
+    assert result["spatial"][0]["drawn_cells"] == 3
+    assert result["dotplot"]["path"] == str(dotplot_path.resolve())
+    assert result["dotplot"]["format"] == "pdf"
+    assert all(url.startswith(module.PRODUCTION_BASE_URL) for url in calls)
 
 
-def test_spatial_skill_dotplot_supports_tissue_group(monkeypatch, tmp_path) -> None:
+def test_spatial_skill_scales_colors_and_dot_sizes_like_interface() -> None:
     module = _load_spatial_skill_script()
-
-    def fake_request(base_url: str, dataset: str, gene: str, timeout: int) -> dict[str, object]:
-        return _mock_agent_expression_payload(dataset, gene)
-
-    monkeypatch.setattr(module, "request_expression", fake_request)
-    outdir = tmp_path / "plots"
-    code = module.main(
-        [
-            "dotplot",
-            "GeneA",
-            "--dataset",
-            "toy",
-            "--group",
-            "tissue",
-            "--outdir",
-            str(outdir),
-        ]
+    assert module.color_for_value(0.0, {"vmin": 0.0, "vmax": 10.0}) == module.REDS[0]
+    assert module.color_for_value(10.0, {"vmin": 0.0, "vmax": 10.0}) == module.REDS[-1]
+    assert module.dot_radius(2.0, 2.0, 50.0) == 3.0
+    assert module.dot_radius(50.0, 2.0, 50.0) == 15.0
+    assert module.dot_radius(5.0, 5.0, 5.0) == 9.0
+    default_args = module.build_parser().parse_args(
+        ["dotplot", "GeneA", "--dataset", "toy"]
     )
-    assert code == 0
+    png_args = module.build_parser().parse_args(
+        ["dotplot", "GeneA", "--dataset", "toy", "--format", "png"]
+    )
+    assert default_args.output_format == "pdf"
+    assert png_args.output_format == "png"
 
-    tsv_path = outdir / "GeneA_tissue_dotplot.tsv"
-    pdf_path = outdir / "GeneA_tissue_dotplot.pdf"
-    assert tsv_path.is_file()
-    assert pdf_path.read_bytes().startswith(b"%PDF-1.4")
-    tsv_text = tsv_path.read_text(encoding="utf-8")
-    assert "\ttissue\tsample\tS1\tPith\tPith\t1\t0\t0.0\t0.0" in tsv_text
+
+def test_spatial_skill_pdf_outputs_are_native_vector(tmp_path) -> None:
+    module = _load_spatial_skill_script()
+    manifest = {
+        "sample": "S1",
+        "width": 10,
+        "height": 10,
+        "tileSize": 10,
+        "tiles": [],
+    }
+    replicates = {
+        "replicates": [
+            {
+                "id": "s1_rep1",
+                "label": "S1 REP1",
+                "assignedCellCount": 1,
+                "bbox": [0, 0, 9, 9],
+                "cellIds": [1],
+                "tileKeys": [],
+            }
+        ]
+    }
+    layout = module.prepare_spatial_layout(manifest, replicates, 1)
+    gene_payload = {
+        "gene": "GeneA",
+        "range": {"vmin": 0.0, "vmax": 3.5},
+        "samples": {"S1": {"values": [[1, 3.5]]}},
+    }
+    cells = [
+        {
+            "id": 1,
+            "bbox": [0, 0, 2, 2],
+            "contours": [[[0, 0], [2, 0], [2, 2], [0, 2]]],
+        }
+    ]
+    spatial_path = tmp_path / "spatial.pdf"
+    dotplot_path = tmp_path / "dotplot.pdf"
+
+    spatial_result = module.render_spatial_image(
+        spatial_path,
+        {"id": "toy", "label": "Toy Dataset"},
+        {"id": "S1", "label": "S1"},
+        gene_payload,
+        layout,
+        cells,
+        800,
+    )
+    dotplot_result = module.render_dotplot_image(
+        dotplot_path, _mock_interface_dotplot_payload("GeneA"), 800
+    )
+
+    assert spatial_result["vector"] is True
+    assert dotplot_result["vector"] is True
+    for path in (spatial_path, dotplot_path):
+        content = path.read_bytes()
+        assert content.startswith(b"%PDF-1.4")
+        assert b"/Filter /FlateDecode" in content
+        assert b"/BaseFont /Helvetica" in content
+        assert b"/Subtype /Image" not in content
 
 
 def test_spatial_data_route_rejects_traversal_and_sqlite(monkeypatch, tmp_path) -> None:
