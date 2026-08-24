@@ -324,11 +324,7 @@ select:focus {
 .heatmap-stage {
   position: relative;
   min-height: 620px;
-  background:
-    linear-gradient(rgba(20, 33, 61, 0.04) 1px, transparent 1px),
-    linear-gradient(90deg, rgba(20, 33, 61, 0.04) 1px, transparent 1px),
-    rgba(255, 255, 255, 0.68);
-  background-size: 36px 36px;
+  background: transparent;
 }
 
 .viewer-panel.is-compact .heatmap-stage {

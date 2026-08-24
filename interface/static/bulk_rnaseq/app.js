@@ -18,6 +18,7 @@ const state = {
   cells: [],
   selectedCell: null,
   loading: false,
+  vectorExport: null,
 };
 
 const dom = {
@@ -36,7 +37,7 @@ const dom = {
   legendMin: document.getElementById('legend-min'),
   legendMax: document.getElementById('legend-max'),
   legendBar: document.getElementById('legend-bar'),
-  downloadPng: document.getElementById('download-png'),
+  downloadPdf: document.getElementById('download-pdf'),
   downloadTsv: document.getElementById('download-tsv'),
 };
 
@@ -149,6 +150,43 @@ const displayRange = (payload) => {
   return { min: Math.min(0, minValue), max: Math.max(1, maxValue) };
 };
 
+const graphPresentation = (payload) => {
+  const legendStops = payload?.transform === 'row_zscore'
+    ? ['#0000ff', '#f8fafc', '#ff0000']
+    : ['#f8fafc', '#ff0000'];
+  if (!payload) {
+    return {
+      title: 'No query loaded',
+      summary: 'Enter one or more gene IDs.',
+      legendMin: '0',
+      legendMax: 'max',
+      legendStops,
+      legendColors: legendStops,
+    };
+  }
+
+  const geneCount = payload.genes.length;
+  const range = displayRange(payload);
+  const colorStops = payload.transform === 'row_zscore'
+    ? divergingStops
+    : sequentialStops;
+  return {
+    title: geneCount === 1 ? payload.genes[0]?.geneId || '' : `${geneCount} genes`,
+    summary: [
+      SCOPE_LABELS[payload.scope],
+      TRANSFORM_LABELS[payload.transform],
+      `${payload.columns.length} columns`,
+    ].join(' | '),
+    legendMin: formatNumber(range.min, 2),
+    legendMax: formatNumber(range.max, 2),
+    legendStops,
+    legendColors: Array.from(
+      { length: 96 },
+      (_, index) => colorFromStops(index / 95, colorStops),
+    ),
+  };
+};
+
 const valueColor = (value, range, transform) => {
   if (transform === 'row_zscore') {
     const t = (value - range.min) / Math.max(0.000001, range.max - range.min);
@@ -165,18 +203,10 @@ const setLoading = (loading) => {
 };
 
 const updateLegend = (payload) => {
-  if (!payload) {
-    dom.legendMin.textContent = '0';
-    dom.legendMax.textContent = 'max';
-    dom.legendBar.style.background = 'linear-gradient(90deg, #f8fafc, #ff0000)';
-    return;
-  }
-  const range = displayRange(payload);
-  dom.legendMin.textContent = formatNumber(range.min, 2);
-  dom.legendMax.textContent = formatNumber(range.max, 2);
-  dom.legendBar.style.background = payload.transform === 'row_zscore'
-    ? 'linear-gradient(90deg, #0000ff, #f8fafc, #ff0000)'
-    : 'linear-gradient(90deg, #f8fafc, #ff0000)';
+  const presentation = graphPresentation(payload);
+  dom.legendMin.textContent = presentation.legendMin;
+  dom.legendMax.textContent = presentation.legendMax;
+  dom.legendBar.style.background = `linear-gradient(90deg, ${presentation.legendStops.join(', ')})`;
 };
 
 const resizeCanvas = () => {
@@ -199,6 +229,28 @@ const resizeCanvas = () => {
 const drawNoData = () => {
   const { ctx, width, height } = resizeCanvas();
   ctx.clearRect(0, 0, width, height);
+  drawHeatmapBackground(ctx, width, height);
+};
+
+const drawHeatmapBackground = (ctx, width, height) => {
+  ctx.save();
+  ctx.fillStyle = 'rgba(255, 255, 255, 0.68)';
+  ctx.fillRect(0, 0, width, height);
+  ctx.strokeStyle = 'rgba(20, 33, 61, 0.04)';
+  ctx.lineWidth = 1;
+  for (let x = 0.5; x < width; x += 36) {
+    ctx.beginPath();
+    ctx.moveTo(x, 0);
+    ctx.lineTo(x, height);
+    ctx.stroke();
+  }
+  for (let y = 0.5; y < height; y += 36) {
+    ctx.beginPath();
+    ctx.moveTo(0, y);
+    ctx.lineTo(width, y);
+    ctx.stroke();
+  }
+  ctx.restore();
 };
 
 const maxTextWidth = (ctx, labels, cap) => Math.min(
@@ -489,6 +541,7 @@ const drawMatrixHeatmap = (ctx, payload, width, height) => {
 
 const renderHeatmap = () => {
   state.cells = [];
+  state.vectorExport = null;
   const compactPanel = Boolean(
     state.payload
     && state.payload.genes.length === 1
@@ -500,15 +553,36 @@ const renderHeatmap = () => {
   updateLegend(state.payload);
 
   if (!state.payload) {
+    drawHeatmapBackground(ctx, width, height);
     dom.heatmapEmpty.hidden = false;
     return;
   }
   dom.heatmapEmpty.hidden = true;
+  const presentation = graphPresentation(state.payload);
+  const exportHeight = window.BulkRnaSeqPdf.viewerExportHeight(height);
+  const vectorExport = window.BulkRnaSeqPdf.createVectorContext(width, exportHeight);
+  vectorExport.context.fillStyle = '#ffffff';
+  vectorExport.context.fillRect(0, 0, width, exportHeight);
+  vectorExport.context.save();
+  vectorExport.context.translate(0, window.BulkRnaSeqPdf.VIEWER_TOOLBAR_HEIGHT);
+  const mirroredContext = window.BulkRnaSeqPdf.createMirroredContext(
+    ctx,
+    vectorExport.context,
+  );
+  drawHeatmapBackground(mirroredContext, width, height);
   if (state.payload.scope === 'sample_tissue' && state.payload.genes.length === 1) {
-    drawSingleGenePivot(ctx, state.payload, width, height);
+    drawSingleGenePivot(mirroredContext, state.payload, width, height);
   } else {
-    drawMatrixHeatmap(ctx, state.payload, width, height);
+    drawMatrixHeatmap(mirroredContext, state.payload, width, height);
   }
+  vectorExport.context.restore();
+  window.BulkRnaSeqPdf.drawViewerChrome(
+    vectorExport.context,
+    width,
+    height,
+    presentation,
+  );
+  state.vectorExport = vectorExport;
 };
 
 const cellAt = (x, y) => state.cells.find((cell) => (
@@ -566,21 +640,9 @@ const hideTooltip = () => {
 };
 
 const updateTitle = (payload) => {
-  if (!payload) {
-    dom.graphTitle.textContent = 'No query loaded';
-    dom.graphSummary.textContent = 'Enter one or more gene IDs.';
-    return;
-  }
-  const geneCount = payload.genes.length;
-  const firstGene = payload.genes[0]?.geneId || '';
-  dom.graphTitle.textContent = geneCount === 1
-    ? firstGene
-    : `${geneCount} genes`;
-  dom.graphSummary.textContent = [
-    SCOPE_LABELS[payload.scope],
-    TRANSFORM_LABELS[payload.transform],
-    `${payload.columns.length} columns`,
-  ].join(' | ');
+  const presentation = graphPresentation(payload);
+  dom.graphTitle.textContent = presentation.title;
+  dom.graphSummary.textContent = presentation.summary;
 };
 
 const setError = (message) => {
@@ -650,11 +712,9 @@ const downloadBlob = (blob, filename) => {
   URL.revokeObjectURL(url);
 };
 
-const downloadPng = () => {
-  if (!state.payload) return;
-  dom.heatmap.toBlob((blob) => {
-    if (blob) downloadBlob(blob, 'bulk_rnaseq_heatmap.png');
-  }, 'image/png');
+const downloadPdf = () => {
+  if (!state.vectorExport) return;
+  downloadBlob(state.vectorExport.toBlob(), 'bulk_rnaseq_heatmap.pdf');
 };
 
 const tsvValue = (value) => {
@@ -709,7 +769,7 @@ dom.queryForm.addEventListener('submit', (event) => {
   runQuery();
 });
 
-dom.downloadPng.addEventListener('click', downloadPng);
+dom.downloadPdf.addEventListener('click', downloadPdf);
 dom.downloadTsv.addEventListener('click', downloadTsv);
 
 dom.heatmap.addEventListener('pointermove', (event) => {

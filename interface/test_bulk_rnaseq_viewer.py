@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import math
+import shutil
+import subprocess
 import sys
 from pathlib import Path
 
@@ -59,13 +61,112 @@ def test_bulk_rnaseq_entry_and_static_paths_are_prefixed() -> None:
     )
     assert 'href="/static/bulk_rnaseq/styles.css' in bulk_index
     assert 'src="/static/bulk_rnaseq/app.js' in bulk_index
+    assert 'src="/static/bulk_rnaseq/pdf_export.js' in bulk_index
     assert 'href="/bulk-rnaseq" aria-current="page"' in bulk_index
+    assert 'id="download-pdf"' in bulk_index
+    assert 'id="download-png"' not in bulk_index
     assert 'id="selection-detail"' not in bulk_index
 
     bulk_css = (REPO_ROOT / "interface/static/bulk_rnaseq/styles.css").read_text(
         encoding="utf-8"
     )
     assert "background: url('../background.png')" in bulk_css
+
+
+def test_bulk_rnaseq_pdf_export_is_vector_only() -> None:
+    node = shutil.which("node")
+    if node is None:
+        return
+    exporter = REPO_ROOT / "interface/static/bulk_rnaseq/pdf_export.js"
+    script = r"""
+const assert = require('node:assert/strict');
+const {
+  createVectorContext,
+  drawViewerChrome,
+  viewerExportHeight,
+} = require(process.argv[1]);
+const stageHeight = 180;
+const pdf = createVectorContext(640, viewerExportHeight(stageHeight));
+const ctx = pdf.context;
+ctx.fillStyle = '#ff0000';
+ctx.fillRect(20, 30, 80, 40);
+ctx.strokeStyle = 'rgba(100, 116, 139, 0.28)';
+ctx.strokeRect(20, 30, 80, 40);
+ctx.font = '750 11px Inter, sans-serif';
+ctx.fillText('GeneA', 20, 90);
+drawViewerChrome(ctx, 640, stageHeight, {
+  title: 'DM8.2_chr01G00010',
+  summary: 'Material by tissue | Row z-score | 3 columns',
+  legendMin: '-1.5',
+  legendMax: '1.5',
+  legendColors: ['#0000ff', '#f8fafc', '#ff0000'],
+});
+const bytes = pdf.toUint8Array();
+const source = new TextDecoder('ascii').decode(bytes);
+assert.match(source, /^%PDF-1\.4/);
+assert.match(source, / re f/);
+assert.match(source, /\(GeneA\) Tj/);
+assert.match(source, /\(DM8\.2_chr01G00010\) Tj/);
+assert.match(source, /\(Material by tissue \| Row z-score \| 3 columns\) Tj/);
+assert.match(source, /\(-1\.5\) Tj/);
+assert.match(source, /\(1\.5\) Tj/);
+assert.match(source, /\/ExtGState/);
+assert.match(source, /\/ca 0\.28 \/CA 0\.28/);
+assert.doesNotMatch(source, /\/Subtype\s*\/Image/);
+const xrefOffset = Number(source.match(/startxref\n(\d+)\n%%EOF/)[1]);
+assert.equal(source.slice(xrefOffset, xrefOffset + 4), 'xref');
+"""
+    subprocess.run(
+        [node, "-e", script, str(exporter)],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+
+def test_bulk_rnaseq_pdf_records_the_canvas_render() -> None:
+    node = shutil.which("node")
+    if node is None:
+        return
+    exporter = REPO_ROOT / "interface/static/bulk_rnaseq/pdf_export.js"
+    script = r"""
+const assert = require('node:assert/strict');
+const { createMirroredContext, createVectorContext } = require(process.argv[1]);
+const canvasCalls = [];
+const canvas = {
+  fillStyle: '#000000',
+  strokeStyle: '#000000',
+  lineWidth: 1,
+  font: '10px sans-serif',
+  textAlign: 'start',
+  textBaseline: 'alphabetic',
+  fillRect(...args) { canvasCalls.push(['fillRect', ...args]); },
+  fillText(...args) { canvasCalls.push(['fillText', ...args]); },
+  measureText() { return { width: 42 }; },
+};
+const pdf = createVectorContext(320, 180);
+const ctx = createMirroredContext(canvas, pdf.context);
+ctx.fillStyle = '#ff0000';
+ctx.font = '700 11px Inter, sans-serif';
+ctx.fillRect(20, 30, 80, 40);
+ctx.fillText('GeneA', 20, 90);
+assert.deepEqual(canvasCalls, [
+  ['fillRect', 20, 30, 80, 40],
+  ['fillText', 'GeneA', 20, 90],
+]);
+const source = new TextDecoder('ascii').decode(pdf.toUint8Array());
+assert.match(source, / re f/);
+assert.match(source, /\(GeneA\) Tj/);
+assert.match(source, /\/F2 11 Tf/);
+assert.match(source, / Tz/);
+assert.doesNotMatch(source, /\/Subtype\s*\/Image/);
+"""
+    subprocess.run(
+        [node, "-e", script, str(exporter)],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
 
 
 def test_bulk_rnaseq_page_route_serves_static_page() -> None:

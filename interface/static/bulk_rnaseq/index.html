@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Bulk RNA-Seq | Potato Research</title>
     <link rel="icon" type="image/png" href="/static/favicon.png" />
-    <link rel="stylesheet" href="/static/bulk_rnaseq/styles.css?v=20260708-primary-zscore" />
+    <link rel="stylesheet" href="/static/bulk_rnaseq/styles.css?v=20260824-complete-export" />
     <link rel="stylesheet" href="/static/shared/feedback.css?v=20260819-feedback" />
   </head>
   <body>
@@ -80,7 +80,7 @@
               <div id="graph-summary" class="graph-summary">Enter one or more gene IDs.</div>
             </div>
             <div class="export-actions">
-              <button id="download-png" type="button" class="icon-button" title="Download PNG" aria-label="Download PNG">PNG</button>
+              <button id="download-pdf" type="button" class="icon-button" title="Download vector PDF" aria-label="Download vector PDF">PDF</button>
               <button id="download-tsv" type="button" class="icon-button export-data-button" title="Download TSV" aria-label="Download TSV">Export data</button>
             </div>
           </div>
@@ -99,6 +99,7 @@
     </div>
 
     <script src="/static/shared/feedback.js?v=20260819-feedback" defer></script>
-    <script src="/static/bulk_rnaseq/app.js?v=20260708-primary-zscore"></script>
+    <script src="/static/bulk_rnaseq/pdf_export.js?v=20260824-complete-export"></script>
+    <script src="/static/bulk_rnaseq/app.js?v=20260824-complete-export"></script>
   </body>
 </html>
