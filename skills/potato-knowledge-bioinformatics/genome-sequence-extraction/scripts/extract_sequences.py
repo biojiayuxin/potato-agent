@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
-"""Deterministic sequence extraction from indexed genomes and GFF3/GTF.
+"""Download configured genome/GFF3 files or extract deterministic sequences.
 
-The AI selects explicit command-line parameters; this script performs resource
-resolution, annotation parsing, coordinate calculations, indexed extraction,
-strand handling, splicing, translation, and auditable reporting.
+The caller selects explicit command-line parameters; this script performs safe
+configured-file transfer, resource resolution, annotation parsing, coordinate
+calculations, indexed extraction, strand handling, splicing, translation, and
+auditable reporting.
 
 Coordinates accepted from users are 1-based closed intervals.
 """
@@ -26,14 +27,14 @@ import tempfile
 from collections import defaultdict
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from types import SimpleNamespace
 from typing import Callable, Dict, Iterable, Iterator, List, Optional, Sequence, Set, Tuple
 from urllib.error import HTTPError, URLError
-from urllib.parse import urlencode, unquote
+from urllib.parse import quote, urlencode, unquote
 from urllib.request import Request, urlopen
 
-VERSION = "4.2.0"
+VERSION = "4.3.0"
 DEFAULT_POTATO_ROOT = Path("/mnt/data/public_data/Genome_browser_DB")
 DEFAULT_OTHER_ROOT = Path("/mnt/data/public_data/Other_species_genomes")
 DEFAULT_API_BASE_URL = "https://potato-agent.ynnu.edu.cn"
@@ -68,6 +69,7 @@ FEATURE_INDEX_REQUIRED_COLUMNS = {
 MAX_API_RESPONSE_BYTES = 2_500_000
 MAX_API_SEQUENCE_BP = 1_000_000
 MAX_API_SEGMENTS = 256
+DOWNLOAD_CHUNK_BYTES = 1024 * 1024
 RC_TABLE = str.maketrans(
     "ACGTRYKMSWBDHVNacgtrykmswbdhvn",
     "TGCAYRMKSWVHDBNtgcayrmkswvhdbn",
@@ -143,12 +145,18 @@ class RecordPlan:
 
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(
-        description="Deterministic sequence extraction using Genome_browser_DB, Other_species_genomes, or explicit files."
+        description=(
+            "Download configured genome/GFF3 files or extract deterministic "
+            "sequences using Genome_browser_DB, Other_species_genomes, or explicit files."
+        )
     )
     p.add_argument("--version", action="version", version=f"%(prog)s {VERSION}")
     p.add_argument(
         "--mode", required=True,
-        choices=["list-resources", "region", "gene", "promoter", "gene-window", "cds", "transcript", "protein"],
+        choices=[
+            "list-resources", "download", "region", "gene", "promoter",
+            "gene-window", "cds", "transcript", "protein",
+        ],
     )
 
     resource = p.add_argument_group("resource selection")
@@ -194,10 +202,19 @@ def parse_args() -> argparse.Namespace:
     relative.add_argument("--downstream", type=int, default=0, help="Gene-window downstream bp [default: 0]")
 
     output = p.add_argument_group("output and validation")
-    output.add_argument("--output", help="Output FASTA (required except list-resources)")
-    output.add_argument("--report", help="Output audit TSV (required except list-resources)")
+    output.add_argument("--output", help="Output FASTA (required for extraction modes)")
+    output.add_argument("--report", help="Output audit TSV (required for extraction modes)")
     output.add_argument("--missing", help="Failed query IDs; defaults to OUTPUT.missing.txt")
     output.add_argument("--metadata", help="Run metadata JSON; defaults to OUTPUT.meta.json")
+    output.add_argument(
+        "--output-dir",
+        help="Destination directory for download mode",
+    )
+    output.add_argument(
+        "--overwrite",
+        action="store_true",
+        help="Replace existing download files; never enabled by default",
+    )
     output.add_argument("--clip", action="store_true", help="Clip out-of-bound genomic windows; never silently clip by default")
     output.add_argument("--wrap", type=int, default=60)
     output.add_argument("--samtools", default="samtools")
@@ -219,7 +236,25 @@ def parse_args() -> argparse.Namespace:
             "--feature-index cannot be combined with --genome, --annotation, "
             "or --resource-dir"
         )
+    if args.mode != "download" and (args.output_dir or args.overwrite):
+        p.error("--output-dir and --overwrite are only valid for download mode")
     if args.mode == "list-resources":
+        return args
+    if args.mode == "download":
+        if not args.output_dir:
+            p.error("--output-dir is required for download mode")
+        if args.output or args.report or args.missing or args.metadata:
+            p.error(
+                "Download mode uses --output-dir; extraction output/report arguments "
+                "are not accepted"
+            )
+        if not args.assembly and not args.resource_dir and not (
+            args.genome and args.annotation
+        ):
+            p.error(
+                "Download mode requires --assembly, --resource-dir, or both "
+                "--genome and --annotation"
+            )
         return args
     if not args.output or not args.report:
         p.error("--output and --report are required for extraction modes")
@@ -503,6 +538,9 @@ def local_potato_assembly_available(
         return False
     if args.mode == "list-resources":
         return True
+    if args.mode == "download":
+        annotation = _manifest_file_path(root, entry.get("annotation", ""))
+        return annotation is not None
     if not _samtools_available(getattr(args, "samtools", "samtools")):
         return False
     if not _reference_indexes_available(reference):
@@ -890,6 +928,228 @@ def list_api_resources(args: argparse.Namespace) -> int:
     return 0
 
 
+def api_data_path(configured_path: object) -> str:
+    value = str(configured_path or "").strip()
+    posix_path = PurePosixPath(value)
+    raw_parts = value.split("/")
+    if (
+        not value
+        or "\\" in value
+        or posix_path.is_absolute()
+        or any(part in {"", ".", ".."} for part in raw_parts)
+    ):
+        raise ExtractionError(f"Assembly contains an invalid configured file path: {value!r}")
+    encoded = "/".join(quote(part, safe="") for part in posix_path.parts)
+    return f"/api/genome-browser/data/{encoded}"
+
+
+def configured_download_name(configured_path: object) -> str:
+    value = str(configured_path or "").strip()
+    name = PurePosixPath(value).name
+    if not value or "\\" in value or not name or name in {".", ".."}:
+        raise ExtractionError(f"Assembly contains an invalid configured filename: {value!r}")
+    return name
+
+
+def _write_binary_stream(handle, destination: Path, expected_bytes: Optional[int]) -> Dict[str, object]:
+    digest = hashlib.sha256()
+    total = 0
+    with destination.open("xb") as output:
+        while True:
+            block = handle.read(DOWNLOAD_CHUNK_BYTES)
+            if not block:
+                break
+            if not isinstance(block, bytes):
+                raise ExtractionError("Download returned non-binary data")
+            output.write(block)
+            digest.update(block)
+            total += len(block)
+        output.flush()
+        os.fsync(output.fileno())
+    if total == 0:
+        raise ExtractionError("Configured database file is empty")
+    if expected_bytes is not None and total != expected_bytes:
+        raise ExtractionError(
+            f"Downloaded file size mismatch: received {total} bytes, expected {expected_bytes}"
+        )
+    return {"bytes": total, "sha256": digest.hexdigest()}
+
+
+def _response_content_length(response) -> Optional[int]:
+    headers = getattr(response, "headers", None)
+    value = headers.get("Content-Length") if headers is not None else None
+    if value in {None, ""}:
+        return None
+    try:
+        length = int(value)
+    except (TypeError, ValueError) as exc:
+        raise ExtractionError("Download returned an invalid Content-Length") from exc
+    if length < 0:
+        raise ExtractionError("Download returned an invalid Content-Length")
+    return length
+
+
+def download_api_file(
+    args: argparse.Namespace,
+    configured_path: str,
+    destination: Path,
+) -> Dict[str, object]:
+    endpoint = api_data_path(configured_path)
+    url = api_url(args, endpoint)
+    request = Request(
+        url,
+        headers={
+            "Accept": "application/octet-stream",
+            "User-Agent": f"potato-genome-sequence-extraction/{VERSION}",
+        },
+        method="GET",
+    )
+    try:
+        with urlopen(request, timeout=args.api_timeout) as response:
+            result = _write_binary_stream(
+                response,
+                destination,
+                _response_content_length(response),
+            )
+    except HTTPError as exc:
+        detail = f"HTTP {exc.code}"
+        try:
+            parsed = json.loads(exc.read(64_000).decode("utf-8"))
+            detail = format_api_error_detail(exc.code, parsed)
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+            pass
+        raise ExtractionError(f"Genome Browser file download failed: {detail}") from exc
+    except ExtractionError:
+        raise
+    except (URLError, TimeoutError, OSError) as exc:
+        raise ExtractionError(f"Genome Browser file download failed: {exc}") from exc
+    result["url"] = url
+    return result
+
+
+def copy_local_file(source: Path, destination: Path) -> Dict[str, object]:
+    try:
+        expected_bytes = source.stat().st_size
+        with source.open("rb") as handle:
+            return _write_binary_stream(handle, destination, expected_bytes)
+    except ExtractionError:
+        raise
+    except OSError as exc:
+        raise ExtractionError(f"Failed to copy configured database file: {exc}") from exc
+
+
+def publish_configured_downloads(
+    args: argparse.Namespace,
+    *,
+    resource_id: str,
+    source_label: str,
+    configured_files: Sequence[Tuple[str, str]],
+    transfer: Callable[[str, Path], Dict[str, object]],
+) -> Dict[str, object]:
+    output_dir = Path(args.output_dir).expanduser().resolve()
+    try:
+        output_dir.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        raise ExtractionError(f"Cannot create download directory {output_dir}: {exc}") from exc
+    if not output_dir.is_dir():
+        raise ExtractionError(f"Download destination is not a directory: {output_dir}")
+
+    prepared: List[Tuple[str, str, str, Path]] = []
+    seen_names: Set[str] = set()
+    for kind, configured_path in configured_files:
+        name = configured_download_name(configured_path)
+        if name in seen_names:
+            raise ExtractionError(f"Configured download filenames collide: {name}")
+        seen_names.add(name)
+        target = output_dir / name
+        if target.is_symlink():
+            raise ExtractionError(f"Refusing to replace symbolic link: {target}")
+        if target.exists():
+            if not target.is_file():
+                raise ExtractionError(f"Download target is not a regular file: {target}")
+            if not args.overwrite:
+                raise ExtractionError(
+                    f"Download target already exists: {target}; use --overwrite to replace it"
+                )
+        prepared.append((kind, configured_path, name, target))
+
+    records: List[Dict[str, object]] = []
+    with tempfile.TemporaryDirectory(prefix=".genome-download-", dir=output_dir) as temporary:
+        staging_dir = Path(temporary)
+        staged: List[Tuple[Path, Path]] = []
+        for kind, configured_path, name, target in prepared:
+            staging = staging_dir / name
+            result = transfer(configured_path, staging)
+            records.append(
+                {
+                    "kind": kind,
+                    "configuredPath": configured_path,
+                    "filename": name,
+                    "path": str(target),
+                    **result,
+                }
+            )
+            staged.append((staging, target))
+        for staging, target in staged:
+            os.replace(staging, target)
+
+    return {
+        "assembly": resource_id,
+        "source": source_label,
+        "outputDir": str(output_dir),
+        "files": records,
+    }
+
+
+def download_api_assembly(
+    args: argparse.Namespace,
+    assembly: Dict[str, object],
+) -> Dict[str, object]:
+    assembly_id = str(assembly.get("id") or "").strip()
+    if not assembly_id:
+        raise ExtractionError("Genome Browser API assembly does not have an id")
+    configured_files = [
+        ("genome", str(assembly.get("reference") or "")),
+        ("annotation", str(assembly.get("annotation") or "")),
+    ]
+    for _kind, configured_path in configured_files:
+        api_data_path(configured_path)
+    return publish_configured_downloads(
+        args,
+        resource_id=assembly_id,
+        source_label="Genome_browser_API",
+        configured_files=configured_files,
+        transfer=lambda configured_path, destination: download_api_file(
+            args, configured_path, destination
+        ),
+    )
+
+
+def download_local_resources(
+    args: argparse.Namespace,
+    resources: Dict[str, str],
+) -> Dict[str, object]:
+    configured_files = [
+        ("genome", resources["genome"]),
+        ("annotation", resources["annotation"]),
+    ]
+    output_dir = Path(args.output_dir).expanduser().resolve()
+    for _kind, source_value in configured_files:
+        source = Path(source_value).resolve()
+        target = output_dir / source.name
+        if source == target:
+            raise ExtractionError(f"Source and download target are the same file: {source}")
+    return publish_configured_downloads(
+        args,
+        resource_id=resources.get("resource_id", ""),
+        source_label=resources.get("source", "local"),
+        configured_files=configured_files,
+        transfer=lambda configured_path, destination: copy_local_file(
+            Path(configured_path), destination
+        ),
+    )
+
+
 def open_text(path: Path):
     with path.open("rb") as fh:
         magic = fh.read(2)
@@ -1152,6 +1412,15 @@ def resolve_resources(args: argparse.Namespace) -> Dict[str, str]:
     genome_path = Path(resolved["genome"])
     if not genome_path.is_file() or genome_path.stat().st_size == 0:
         raise ExtractionError(f"Genome FASTA missing or empty: {genome_path}")
+    if args.mode == "download":
+        if not resolved["annotation"]:
+            raise ExtractionError(
+                "No annotation resolved; set --assembly, --resource-dir, or --annotation"
+            )
+        annotation_path = Path(resolved["annotation"])
+        if not annotation_path.is_file() or annotation_path.stat().st_size == 0:
+            raise ExtractionError(f"Annotation missing or empty: {annotation_path}")
+        return resolved
     if args.mode != "region":
         indexed = False
         if resolved["feature_index"] and resolved["resource_id"]:
@@ -1985,6 +2254,18 @@ def main() -> int:
         source = effective_source(args)
         if args.mode == "list-resources":
             return list_api_resources(args) if source == "api" else list_resources(args)
+        if args.mode == "download":
+            if source == "api":
+                summary = download_api_assembly(args, resolve_api_assembly(args))
+            else:
+                summary = download_local_resources(args, resolve_resources(args))
+            json.dump(summary, sys.stdout, ensure_ascii=False, indent=2)
+            sys.stdout.write("\n")
+            eprint(
+                f"mode=download assembly={summary['assembly']} "
+                f"files={len(summary['files'])} output_dir={summary['outputDir']}"
+            )
+            return 0
         queries = [] if args.mode == "region" else read_query_ids(args.ids, args.inline_ids)
         if source == "api":
             assembly = resolve_api_assembly(args)

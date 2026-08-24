@@ -41,6 +41,28 @@ ASSEMBLY = {
 }
 
 
+class BinaryResponse:
+    def __init__(self, body: bytes, *, content_length: int | None = None) -> None:
+        self.body = body
+        self.offset = 0
+        self.headers = {
+            "Content-Length": str(len(body) if content_length is None else content_length)
+        }
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc_value, traceback) -> None:
+        return None
+
+    def read(self, size: int = -1) -> bytes:
+        if size < 0:
+            size = len(self.body) - self.offset
+        block = self.body[self.offset : self.offset + size]
+        self.offset += len(block)
+        return block
+
+
 def write_test_fai(genome: Path, *, length: int = 100) -> None:
     Path(str(genome) + ".fai").write_text(
         f"chr1\t{length}\t6\t{length}\t{length + 1}\n",
@@ -286,6 +308,39 @@ def test_promoter_defaults_to_representative_and_other_modes_default_to_error(tm
     assert cds.isoform == "error"
 
 
+def test_download_mode_requires_its_dedicated_output_arguments(tmp_path) -> None:
+    args = parse_args(
+        "--mode",
+        "download",
+        "--source",
+        "api",
+        "--assembly",
+        "DMv8.2",
+        "--output-dir",
+        str(tmp_path / "downloads"),
+    )
+
+    assert args.output_dir == str(tmp_path / "downloads")
+    assert args.output is None
+    assert args.report is None
+
+    with pytest.raises(SystemExit):
+        parse_args(
+            "--mode",
+            "download",
+            "--source",
+            "api",
+            "--assembly",
+            "DMv8.2",
+        )
+    with pytest.raises(SystemExit):
+        parse_args(
+            "--mode",
+            "list-resources",
+            "--overwrite",
+        )
+
+
 def test_mocked_api_main_extracts_cds_and_audits_backend(tmp_path) -> None:
     output = tmp_path / "gene1.cds.fa"
     report = tmp_path / "gene1.cds.tsv"
@@ -440,6 +495,241 @@ def test_list_resources_can_use_api() -> None:
     lines = stdout.getvalue().splitlines()
     assert lines[0].startswith("source\tresource_id")
     assert lines[1].startswith("Genome_browser_API\tmonoploid/DMv8.2")
+
+
+def test_api_download_streams_complete_configured_genome_and_annotation(
+    tmp_path, capsys
+) -> None:
+    output_dir = tmp_path / "downloads"
+    genome_bytes = b">chr1\nACGTACGT\n"
+    annotation_bytes = b"##gff-version 3\nchr1\ttest\tgene\t1\t8\t.\t+\t.\tID=gene1\n"
+    calls: list[tuple[str, float]] = []
+
+    def fake_urlopen(request, timeout):
+        calls.append((request.full_url, timeout))
+        if request.full_url.endswith("/genome.fa.bgz"):
+            return BinaryResponse(genome_bytes)
+        if request.full_url.endswith("/genes.gff3.bgz"):
+            return BinaryResponse(annotation_bytes)
+        raise AssertionError(request.full_url)
+
+    with (
+        mock.patch.object(
+            EXTRACT,
+            "api_request_json",
+            return_value={"assemblies": [ASSEMBLY]},
+        ),
+        mock.patch.object(EXTRACT, "urlopen", side_effect=fake_urlopen),
+    ):
+        code = run_main(
+            [
+                "--mode",
+                "download",
+                "--source",
+                "api",
+                "--api-base-url",
+                "https://example.test",
+                "--assembly",
+                "DMv8.2",
+                "--output-dir",
+                str(output_dir),
+            ]
+        )
+
+    assert code == 0
+    summary = json.loads(capsys.readouterr().out)
+    assert summary["assembly"] == ASSEMBLY["id"]
+    assert summary["source"] == "Genome_browser_API"
+    assert [item["kind"] for item in summary["files"]] == ["genome", "annotation"]
+    assert [item["bytes"] for item in summary["files"]] == [
+        len(genome_bytes),
+        len(annotation_bytes),
+    ]
+    assert (output_dir / "genome.fa.bgz").read_bytes() == genome_bytes
+    assert (output_dir / "genes.gff3.bgz").read_bytes() == annotation_bytes
+    assert [url for url, _timeout in calls] == [
+        "https://example.test/api/genome-browser/data/monoploid/DMv8.2/reference/genome.fa.bgz",
+        "https://example.test/api/genome-browser/data/monoploid/DMv8.2/annotation/genes.gff3.bgz",
+    ]
+
+
+def test_download_auto_uses_complete_local_configured_files_without_indexes(
+    tmp_path, capsys
+) -> None:
+    potato_root = tmp_path / "potato"
+    reference = potato_root / "configured" / "reference" / "genome.fa.bgz"
+    annotation = potato_root / "configured" / "annotation" / "genes.gff3.bgz"
+    reference.parent.mkdir(parents=True)
+    annotation.parent.mkdir(parents=True)
+    reference.write_bytes(b"configured-genome")
+    annotation.write_bytes(b"configured-annotation")
+    (potato_root / "assemblies.tsv").write_text(
+        "id\tsample\tdisplay_name\treference\tannotation\n"
+        "monoploid/DMv8.2\tDMv8.2\tDMv8.2\t"
+        "configured/reference/genome.fa.bgz\t"
+        "configured/annotation/genes.gff3.bgz\n",
+        encoding="utf-8",
+    )
+    output_dir = tmp_path / "downloads"
+
+    code = run_main(
+        [
+            "--mode",
+            "download",
+            "--source",
+            "auto",
+            "--assembly",
+            "DMv8.2",
+            "--potato-root",
+            str(potato_root),
+            "--other-root",
+            str(tmp_path / "other"),
+            "--output-dir",
+            str(output_dir),
+        ]
+    )
+
+    assert code == 0
+    summary = json.loads(capsys.readouterr().out)
+    assert summary["source"] == "Genome_browser_DB"
+    assert (output_dir / reference.name).read_bytes() == b"configured-genome"
+    assert (output_dir / annotation.name).read_bytes() == b"configured-annotation"
+
+
+def test_download_refuses_existing_targets_before_transfer(tmp_path, capsys) -> None:
+    output_dir = tmp_path / "downloads"
+    output_dir.mkdir()
+    existing = output_dir / "genome.fa.bgz"
+    existing.write_bytes(b"keep-existing")
+
+    with (
+        mock.patch.object(
+            EXTRACT,
+            "api_request_json",
+            return_value={"assemblies": [ASSEMBLY]},
+        ),
+        mock.patch.object(EXTRACT, "urlopen") as request,
+    ):
+        code = run_main(
+            [
+                "--mode",
+                "download",
+                "--source",
+                "api",
+                "--assembly",
+                "DMv8.2",
+                "--output-dir",
+                str(output_dir),
+            ]
+        )
+
+    assert code == 1
+    request.assert_not_called()
+    assert existing.read_bytes() == b"keep-existing"
+    assert not (output_dir / "genes.gff3.bgz").exists()
+    assert "--overwrite" in capsys.readouterr().err
+
+
+def test_download_refuses_symbolic_link_target_even_with_overwrite(tmp_path) -> None:
+    output_dir = tmp_path / "downloads"
+    output_dir.mkdir()
+    outside = tmp_path / "outside.bgz"
+    outside.write_bytes(b"outside-must-remain")
+    (output_dir / "genome.fa.bgz").symlink_to(outside)
+
+    with (
+        mock.patch.object(
+            EXTRACT,
+            "api_request_json",
+            return_value={"assemblies": [ASSEMBLY]},
+        ),
+        mock.patch.object(EXTRACT, "urlopen") as request,
+    ):
+        code = run_main(
+            [
+                "--mode",
+                "download",
+                "--source",
+                "api",
+                "--assembly",
+                "DMv8.2",
+                "--output-dir",
+                str(output_dir),
+                "--overwrite",
+            ]
+        )
+
+    assert code == 1
+    request.assert_not_called()
+    assert outside.read_bytes() == b"outside-must-remain"
+
+
+def test_download_failure_does_not_publish_partial_files(tmp_path) -> None:
+    output_dir = tmp_path / "downloads"
+
+    def fake_urlopen(request, timeout):
+        if request.full_url.endswith("/genome.fa.bgz"):
+            return BinaryResponse(b"complete-genome")
+        return BinaryResponse(b"short", content_length=99)
+
+    with (
+        mock.patch.object(
+            EXTRACT,
+            "api_request_json",
+            return_value={"assemblies": [ASSEMBLY]},
+        ),
+        mock.patch.object(EXTRACT, "urlopen", side_effect=fake_urlopen),
+    ):
+        code = run_main(
+            [
+                "--mode",
+                "download",
+                "--source",
+                "api",
+                "--assembly",
+                "DMv8.2",
+                "--output-dir",
+                str(output_dir),
+            ]
+        )
+
+    assert code == 1
+    assert not (output_dir / "genome.fa.bgz").exists()
+    assert not (output_dir / "genes.gff3.bgz").exists()
+    assert list(output_dir.iterdir()) == []
+
+
+@pytest.mark.parametrize(
+    "configured_path",
+    [
+        "../genome.fa.bgz",
+        "/absolute/genome.fa.bgz",
+        "nested\\genome.fa.bgz",
+        "nested//genome.fa.bgz",
+        "./genome.fa.bgz",
+    ],
+)
+def test_api_download_rejects_unsafe_configured_paths(configured_path) -> None:
+    with pytest.raises(EXTRACT.ExtractionError, match="invalid configured file path"):
+        EXTRACT.api_data_path(configured_path)
+
+
+def test_api_download_percent_encodes_each_configured_path_segment() -> None:
+    assert EXTRACT.api_data_path("monoploid/A B/reference/A+B.fa.bgz") == (
+        "/api/genome-browser/data/monoploid/A%20B/reference/A%2BB.fa.bgz"
+    )
+
+
+def test_skill_uses_hermes_metadata_and_runtime_paths() -> None:
+    skill_root = SCRIPT_PATH.parents[1]
+    content = (skill_root / "SKILL.md").read_text(encoding="utf-8")
+
+    assert content.startswith("---\n")
+    assert "metadata:\n  hermes:" in content
+    assert "${HERMES_SKILL_DIR}" in content
+    assert "Codex" not in content
+    assert "python3 scripts/" not in content
+    assert not (skill_root / "agents" / "openai.yaml").exists()
 
 
 def test_default_api_origin_is_fixed_to_public_https() -> None:
