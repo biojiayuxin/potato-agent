@@ -413,8 +413,37 @@ canvas {
   padding: 0;
 }
 
-.toolbar #resetView {
+.toolbar #resetView,
+.toolbar #exportPdf {
   width: 62px;
+}
+
+.toolbar #exportPdf {
+  position: relative;
+}
+
+.toolbar #exportPdf.is-loading {
+  color: transparent;
+}
+
+.toolbar #exportPdf.is-loading::after {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  width: 15px;
+  height: 15px;
+  margin: -8px 0 0 -8px;
+  border: 2px solid rgba(23, 50, 77, 0.22);
+  border-top-color: #17324d;
+  border-radius: 50%;
+  content: "";
+  animation: export-pdf-spin 700ms linear infinite;
+}
+
+@keyframes export-pdf-spin {
+  to {
+    transform: rotate(360deg);
+  }
 }
 
 .toolbar span {

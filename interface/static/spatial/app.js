@@ -45,6 +45,7 @@ const state = {
   dotplot: { payload: null, error: "", loading: false },
   dotplotDrawPending: false,
   dotplotPoints: [],
+  exportingPdf: false,
 };
 
 const els = {
@@ -63,6 +64,7 @@ const els = {
   legendMax: document.getElementById("legendMax"),
   legendMin: document.getElementById("legendMin"),
   scaleText: document.getElementById("scaleText"),
+  exportPdf: document.getElementById("exportPdf"),
 };
 
 function datasetDisplayLabel(dataset) {
@@ -290,6 +292,7 @@ function prepareSpatial(manifest, replicatePayload) {
     loadedTiles: new Map(),
     loadingTiles: new Set(),
     failedTiles: new Set(),
+    tilePromises: new Map(),
     pathCache: new Map(),
   };
 }
@@ -527,26 +530,35 @@ function visibleTileKeys(spatial, bounds) {
   return Array.from(keys);
 }
 
-async function loadTile(spatial, key) {
+function loadTile(spatial, key, options = {}) {
   const tile = spatial.tileMap.get(key);
-  if (!tile || spatial.loadedTiles.has(key) || spatial.loadingTiles.has(key) || spatial.failedTiles.has(key)) {
-    return;
-  }
+  if (!tile || spatial.loadedTiles.has(key)) return Promise.resolve(spatial.loadedTiles.get(key));
+  if (spatial.tilePromises.has(key)) return spatial.tilePromises.get(key);
+  if (spatial.failedTiles.has(key) && !options.retry) return Promise.resolve(null);
 
+  spatial.failedTiles.delete(key);
   spatial.loadingTiles.add(key);
-  try {
-    const response = await fetch(tile.url);
-    if (!response.ok) throw new Error(`Failed to load contour tile ${tile.url}`);
-    const payload = await response.json();
-    spatial.loadedTiles.set(key, payload);
-  } catch (error) {
-    spatial.failedTiles.add(key);
-    console.error(error);
-    setStatus(error.message);
-  } finally {
-    spatial.loadingTiles.delete(key);
-    requestDraw();
-  }
+  const promise = (async () => {
+    try {
+      const response = await fetch(tile.url);
+      if (!response.ok) throw new Error(`Failed to load contour tile ${tile.url}`);
+      const payload = await response.json();
+      spatial.loadedTiles.set(key, payload);
+      return payload;
+    } catch (error) {
+      spatial.failedTiles.add(key);
+      console.error(error);
+      setStatus(error.message);
+      if (options.strict) throw error;
+      return null;
+    } finally {
+      spatial.loadingTiles.delete(key);
+      spatial.tilePromises.delete(key);
+      requestDraw();
+    }
+  })();
+  spatial.tilePromises.set(key, promise);
+  return promise;
 }
 
 function ensureTiles(spatial, keys) {
@@ -994,6 +1006,248 @@ function handleDotplotPointerMove(event) {
   }
 }
 
+function updatePdfExportButton() {
+  if (!els.exportPdf) return;
+  const ready = Boolean(
+    window.SpatialExpressionPdf
+    && currentSpatial()
+    && (state.displayMode !== "gene" || state.currentGene)
+  );
+  els.exportPdf.disabled = state.exportingPdf || !ready;
+}
+
+function setPdfExportBusy(busy, title = "Download vector PDF") {
+  state.exportingPdf = busy;
+  els.exportPdf.classList.toggle("is-loading", busy);
+  els.exportPdf.setAttribute("aria-busy", String(busy));
+  els.exportPdf.title = title;
+  els.exportPdf.setAttribute("aria-label", title);
+  updatePdfExportButton();
+}
+
+async function* contourCellsForExport(spatial) {
+  const keys = Array.from(spatial.tileMap.keys());
+  const retainedKeys = new Set(spatial.loadedTiles.keys());
+  const pending = new Map();
+  const preloadCount = 3;
+
+  async function loadExportTile(key) {
+    let lastError = null;
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      try {
+        const payload = await loadTile(spatial, key, { retry: true, strict: true });
+        if (payload) return payload;
+        lastError = new Error(`Contour tile ${key} is unavailable`);
+      } catch (error) {
+        lastError = error;
+      }
+      await new Promise((resolve) => window.setTimeout(resolve, 150 * (attempt + 1)));
+    }
+    throw lastError;
+  }
+
+  function preload(index) {
+    const key = keys[index];
+    if (key === undefined || pending.has(key)) return;
+    const promise = loadExportTile(key).then(
+      (payload) => ({ payload, error: null }),
+      (error) => ({ payload: null, error }),
+    );
+    pending.set(key, promise);
+  }
+
+  for (let index = 0; index < keys.length; index += 1) {
+    for (let offset = 0; offset < preloadCount; offset += 1) preload(index + offset);
+    const key = keys[index];
+    const result = await pending.get(key);
+    pending.delete(key);
+    if (result.error) throw result.error;
+    if (!result.payload) throw new Error(`Contour tile ${key} is unavailable`);
+    try {
+      for (const cell of result.payload.cells || []) yield cell;
+    } finally {
+      if (!retainedKeys.has(key)) spatial.loadedTiles.delete(key);
+    }
+    els.exportPdf.title = `Rendering contours ${index + 1}/${keys.length}`;
+  }
+}
+
+function categoryColorForExport(snapshot, kind, id) {
+  const configured = snapshot.categoryColors[kind].get(String(id));
+  return configured || fallbackCategoryColor(id);
+}
+
+function cellColorForExport(snapshot, cell) {
+  if (snapshot.displayMode === "cluster") {
+    const clusterId = snapshot.clusterMap.get(cell.id);
+    if (clusterId === undefined) return CATEGORY_MUTED;
+    const color = categoryColorForExport(snapshot, "clusters", clusterId);
+    return maybeMutedCategoryColor(color, clusterId, snapshot.selectedCluster);
+  }
+  if (snapshot.displayMode === "tissue") {
+    const tissueId = snapshot.tissueMap.get(cell.id);
+    if (tissueId === undefined) return CATEGORY_MUTED;
+    const color = categoryColorForExport(snapshot, "tissues", tissueId);
+    return maybeMutedCategoryColor(color, tissueId, snapshot.selectedTissue);
+  }
+  return colorForValue(snapshot.expression.map.get(cell.id) || 0, snapshot.expressionRange);
+}
+
+function clusterLegendLabel(snapshot, cluster) {
+  const id = String(cluster.label || cluster.id || "");
+  const name = snapshot.clusterNames.get(String(cluster.id)) || "";
+  return name ? `${id} - ${name}` : `Cluster ${id}`;
+}
+
+function exportLegend(snapshot) {
+  if (snapshot.displayMode === "gene") {
+    return {
+      type: "gradient",
+      label: "Expression",
+      min: snapshot.expressionRange.vmin,
+      max: snapshot.expressionRange.vmax,
+      colors: REDS,
+    };
+  }
+
+  if (snapshot.displayMode === "cluster") {
+    const clusters = snapshot.clusters.filter((cluster) => (
+      !snapshot.selectedCluster || String(cluster.id) === snapshot.selectedCluster
+    ));
+    const items = clusters.map((cluster) => ({
+      label: clusterLegendLabel(snapshot, cluster),
+      color: categoryColorForExport(snapshot, "clusters", cluster.id),
+    }));
+    if (snapshot.selectedCluster) items.push({ label: "Other cells", color: CATEGORY_MUTED });
+    return { type: "categories", items };
+  }
+
+  const tissues = snapshot.tissues.filter((tissue) => (
+    !snapshot.selectedTissue || String(tissue.id) === snapshot.selectedTissue
+  ));
+  const items = tissues.map((tissue) => ({
+    label: tissue.label || tissue.id,
+    color: categoryColorForExport(snapshot, "tissues", tissue.id),
+  }));
+  if (snapshot.selectedTissue) items.push({ label: "Other cells", color: CATEGORY_MUTED });
+  return { type: "categories", items };
+}
+
+function exportPresentation(snapshot) {
+  const context = `${snapshot.datasetLabel} | ${snapshot.sampleLabel}`;
+  if (snapshot.displayMode === "gene") {
+    return {
+      title: `${snapshot.currentGene} spatial expression`,
+      subtitle: context,
+    };
+  }
+  if (snapshot.displayMode === "cluster") {
+    const cluster = snapshot.clusters.find((item) => String(item.id) === snapshot.selectedCluster);
+    const selection = cluster ? clusterLegendLabel(snapshot, cluster) : "All clusters";
+    return {
+      title: "Seurat cluster spatial map",
+      subtitle: `${context} | ${selection}`,
+    };
+  }
+  const tissue = snapshot.tissues.find((item) => String(item.id) === snapshot.selectedTissue);
+  return {
+    title: "Tissue spatial map",
+    subtitle: `${context} | ${tissue ? tissue.label || tissue.id : "All tissues"}`,
+  };
+}
+
+function safeFilenameComponent(value) {
+  return String(value || "spatial_expression")
+    .trim()
+    .replace(/[^A-Za-z0-9._-]+/g, "_")
+    .replace(/^[._]+|[._]+$/g, "") || "spatial_expression";
+}
+
+function exportFilename(snapshot, includeDotplot) {
+  const parts = [snapshot.datasetId, snapshot.sampleId];
+  if (snapshot.displayMode === "gene") {
+    parts.unshift(snapshot.currentGene);
+    parts.push(includeDotplot ? "spatial_and_dotplot" : "spatial_expression");
+  } else if (snapshot.displayMode === "cluster") {
+    parts.push("clusters", snapshot.selectedCluster || "all");
+  } else {
+    parts.push("tissues", snapshot.selectedTissue || "all");
+  }
+  return `${parts.map(safeFilenameComponent).join("_")}.pdf`;
+}
+
+function downloadBlob(blob, filename) {
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = filename;
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+
+async function exportCurrentPdf() {
+  if (state.exportingPdf) return;
+  const spatial = currentSpatial();
+  const dataset = state.currentDataset;
+  const sample = dataset?.samples?.find((item) => item.id === state.currentSample);
+  if (!spatial || !dataset || !sample || !window.SpatialExpressionPdf) return;
+
+  const snapshot = {
+    spatial,
+    datasetId: dataset.id,
+    datasetLabel: datasetDisplayLabel(dataset),
+    sampleId: state.currentSample,
+    sampleLabel: sampleDisplayLabel(sample),
+    displayMode: state.displayMode,
+    currentGene: state.currentGene,
+    selectedCluster: state.selectedCluster,
+    selectedTissue: state.selectedTissue,
+    expressionRange: { ...state.expressionRange },
+    expression: { ...currentExpression(), map: new Map(currentExpression().map) },
+    clusterMap: new Map(currentClusterMap()),
+    tissueMap: new Map(currentTissueMap()),
+    clusters: state.clusterMeta.clusters.map((cluster) => ({ ...cluster })),
+    clusterNames: new Map(state.clusterMeta.names),
+    tissues: state.tissueMeta.tissues.map((tissue) => ({ ...tissue })),
+    categoryColors: {
+      clusters: new Map(state.categoryColors.clusters),
+      tissues: new Map(state.categoryColors.tissues),
+    },
+    dotplot: state.displayMode === "gene" && state.dotplot.payload
+      ? structuredClone(state.dotplot.payload)
+      : null,
+  };
+  const presentation = exportPresentation(snapshot);
+
+  setPdfExportBusy(true, "Preparing vector PDF");
+  try {
+    await new Promise((resolve) => window.requestAnimationFrame(resolve));
+    const result = await window.SpatialExpressionPdf.render({
+      title: presentation.title,
+      spatial: {
+        title: presentation.title,
+        subtitle: presentation.subtitle,
+        layoutWidth: spatial.layoutWidth,
+        layoutHeight: spatial.layoutHeight,
+        panels: spatial.panels,
+        cellToPanel: spatial.cellToPanel,
+        cells: contourCellsForExport(spatial),
+        colorForCell: (cell) => cellColorForExport(snapshot, cell),
+        legend: exportLegend(snapshot),
+      },
+      dotplot: snapshot.dotplot,
+    });
+    downloadBlob(result.blob, exportFilename(snapshot, result.pageCount > 1));
+    setPdfExportBusy(false, `Downloaded ${result.pageCount}-page vector PDF`);
+  } catch (error) {
+    console.error(error);
+    setPdfExportBusy(false, "Download vector PDF");
+    window.alert(`PDF export failed: ${error.message || error}`);
+  }
+}
+
 async function loadSpatial() {
   if (typeof Path2D === "undefined") {
     throw new Error("This browser does not support Path2D, so cell contours cannot be rendered");
@@ -1224,6 +1478,7 @@ function setDataset(datasetId, options = {}) {
   state.dotplot = { payload: null, error: "", loading: false };
   state.currentSample = dataset.defaultSample || ((dataset.samples || [])[0] || {}).id || "";
   els.datasetSelect.value = dataset.id;
+  updatePdfExportButton();
 
   if (options.resetGene !== false && dataset.defaultGene) {
     els.input.value = dataset.defaultGene;
@@ -1311,6 +1566,7 @@ async function queryGene(gene) {
     state.dotplot = { payload: null, error: "Waiting for a valid gene", loading: false };
     requestDotplotDraw();
     setStatus(payload.error || "Query failed");
+    updatePdfExportButton();
     return;
   }
 
@@ -1344,6 +1600,7 @@ function updateStats() {
   els.legendMax.textContent = vmax ? formatNumber(vmax) : "max";
   els.legendMin.textContent = Number.isFinite(vmin) ? formatNumber(vmin) : "0";
   updateScaleText();
+  updatePdfExportButton();
 }
 
 function updateModeControls() {
@@ -1442,6 +1699,7 @@ document.getElementById("resetView").addEventListener("click", () => {
   fitView();
   requestDraw();
 });
+els.exportPdf.addEventListener("click", exportCurrentPdf);
 
 canvas.addEventListener("wheel", (event) => {
   event.preventDefault();

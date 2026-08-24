@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>Spatial Expression | Potato Research</title>
     <link rel="icon" type="image/png" href="/static/favicon.png">
-    <link rel="stylesheet" href="/static/spatial/style.css?v=20260708-fixed-viewport">
+    <link rel="stylesheet" href="/static/spatial/style.css?v=20260824-vector-pdf-buttons">
     <link rel="stylesheet" href="/static/shared/feedback.css?v=20260819-feedback">
   </head>
   <body>
@@ -91,6 +91,7 @@
                 <button type="button" id="zoomIn" class="icon-button" title="Zoom in" aria-label="Zoom in">+</button>
                 <button type="button" id="zoomOut" class="icon-button" title="Zoom out" aria-label="Zoom out">-</button>
                 <button type="button" id="resetView" class="ghost" title="Reset view">Reset</button>
+                <button type="button" id="exportPdf" class="icon-button export-pdf" title="Download vector PDF" aria-label="Download vector PDF" disabled>PDF</button>
                 <span id="scaleText">100%</span>
               </div>
               <div class="legend">
@@ -112,6 +113,7 @@
     </div>
 
     <script src="/static/shared/feedback.js?v=20260819-feedback" defer></script>
-    <script src="/static/spatial/app.js?v=20260708-fixed-viewport"></script>
+    <script src="/static/spatial/pdf_export.js?v=20260824-vector-pdf-export"></script>
+    <script src="/static/spatial/app.js?v=20260824-vector-pdf-export"></script>
   </body>
 </html>
