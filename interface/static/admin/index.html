@@ -1,0 +1,130 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light">
+  <title>Potato Agent 管理</title>
+  <link rel="icon" href="/favicon.ico">
+  <link rel="stylesheet" href="/static/admin/styles.css">
+</head>
+<body>
+  <main id="login-view" class="login-view">
+    <section class="login-panel" aria-labelledby="login-title">
+      <div class="brand-lockup">
+        <img src="/favicon.ico" alt="" width="36" height="36">
+        <div>
+          <p class="product-name">Potato Agent</p>
+          <h1 id="login-title">管理员登录</h1>
+        </div>
+      </div>
+      <form id="login-form" novalidate>
+        <label for="login">账号</label>
+        <input id="login" name="login" type="text" autocomplete="username" maxlength="320" required>
+        <label for="password">密码</label>
+        <input id="password" name="password" type="password" autocomplete="current-password" maxlength="1024" required>
+        <p id="login-error" class="form-error" role="alert" hidden></p>
+        <button id="login-submit" class="primary-button" type="submit">登录</button>
+      </form>
+    </section>
+  </main>
+
+  <div id="dashboard-view" class="dashboard" hidden>
+    <header class="topbar">
+      <div class="topbar-inner">
+        <div class="brand-lockup compact">
+          <img src="/favicon.ico" alt="" width="30" height="30">
+          <div>
+            <p class="product-name">Potato Agent</p>
+            <h1>监控面板</h1>
+          </div>
+        </div>
+        <div class="account-actions">
+          <span id="admin-name" class="admin-name"></span>
+          <button id="signout" class="quiet-button" type="button">退出</button>
+        </div>
+      </div>
+    </header>
+
+    <section class="system-band" aria-labelledby="system-heading">
+      <div class="content system-content">
+        <div class="section-heading-row">
+          <h2 id="system-heading">实时状态</h2>
+        </div>
+        <div id="system-grid" class="system-grid">
+          <div class="metric"><span>CPU</span><strong id="cpu-value">--</strong></div>
+          <div class="metric"><span>内存已用</span><strong id="memory-used">--</strong></div>
+          <div class="metric"><span>内存可用</span><strong id="memory-available">--</strong></div>
+          <div id="swap-metric" class="metric" hidden><span>Swap</span><strong id="swap-value">--</strong></div>
+          <div class="metric load-metric"><span>负载 1 / 5 / 15</span><strong id="load-value">--</strong></div>
+        </div>
+        <p id="sample-time" class="sample-time"></p>
+      </div>
+    </section>
+
+    <section class="content overview-section" aria-labelledby="overview-heading">
+      <div class="section-heading-row overview-heading">
+        <h2 id="overview-heading">用户概览</h2>
+      </div>
+
+      <div class="summary-grid">
+        <article class="summary-item">
+          <span>用户数</span>
+          <strong id="total-users">--</strong>
+        </article>
+        <article class="summary-item">
+          <span>Token 总量</span>
+          <strong id="total-tokens">--</strong>
+        </article>
+      </div>
+
+      <div class="controls" aria-label="用户筛选">
+        <div id="window-control" class="segments" role="group" aria-label="统计窗口">
+          <button type="button" data-window="24h" class="active" aria-pressed="true">24 小时</button>
+          <button type="button" data-window="7d" aria-pressed="false">7 天</button>
+          <button type="button" data-window="30d" aria-pressed="false">30 天</button>
+        </div>
+        <label class="select-field">
+          <span>用户类型</span>
+          <select id="type-filter">
+            <option value="all">全部</option>
+            <option value="formal">正式用户</option>
+            <option value="temporary">临时用户</option>
+            <option value="retired">已清理临时用户</option>
+          </select>
+        </label>
+        <label class="search-field">
+          <span>搜索</span>
+          <input id="user-search" type="search" maxlength="100" placeholder="账号、邮箱或映射名">
+        </label>
+      </div>
+
+      <div id="table-state" class="table-state" role="status">正在加载用户数据</div>
+      <div id="table-wrap" class="table-wrap" hidden>
+        <table>
+          <thead>
+            <tr>
+              <th aria-sort="none"><button class="sort-heading" type="button" data-sort="user" title="点击按用户升序排列">用户</button></th>
+              <th aria-sort="none"><button class="sort-heading" type="button" data-sort="created_at" title="点击按注册时间升序排列">注册时间</button></th>
+              <th aria-sort="none"><button class="sort-heading" type="button" data-sort="input_tokens" title="点击按输入 Token 升序排列">输入 Token</button></th>
+              <th aria-sort="none"><button class="sort-heading" type="button" data-sort="output_tokens" title="点击按输出 Token 升序排列">输出 Token</button></th>
+              <th aria-sort="none"><button class="sort-heading" type="button" data-sort="cache_read_tokens" title="点击按缓存读升序排列">缓存读</button></th>
+              <th aria-sort="none"><button class="sort-heading" type="button" data-sort="total_tokens" title="点击按 Token 合计升序排列">Token 合计</button></th>
+              <th aria-sort="none"><button class="sort-heading" type="button" data-sort="request_count" title="点击按请求数升序排列">请求</button></th>
+              <th aria-sort="none"><button class="sort-heading" type="button" data-sort="storage_bytes" title="点击按目录空间升序排列">目录空间</button></th>
+            </tr>
+          </thead>
+          <tbody id="users-body"></tbody>
+        </table>
+      </div>
+      <nav id="pagination" class="pagination" aria-label="用户分页" hidden>
+        <button id="previous-page" class="icon-button" type="button" title="上一页" aria-label="上一页">‹</button>
+        <span id="page-label"></span>
+        <button id="next-page" class="icon-button" type="button" title="下一页" aria-label="下一页">›</button>
+      </nav>
+    </section>
+  </div>
+
+  <script src="/static/admin/app.js" defer></script>
+</body>
+</html>

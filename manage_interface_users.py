@@ -16,6 +16,8 @@ from interface.auth_db import (
     InterfaceUser,
     get_user_with_password_by_login,
     list_users,
+    RoleManagementError,
+    set_user_role,
     update_user_password,
     verify_password,
 )
@@ -326,6 +328,28 @@ def command_reset_password(args: argparse.Namespace) -> int:
     return 0
 
 
+def command_set_role(args: argparse.Namespace) -> int:
+    db_path = _require_existing_db(args.auth_db)
+    user, _ = _load_user_with_hash(args.login, db_path=db_path)
+    try:
+        updated = set_user_role(
+            user.username,
+            args.role,
+            db_path=db_path,
+        )
+    except RoleManagementError as exc:
+        raise ManagementError(str(exc)) from exc
+    if updated.role == user.role:
+        print(f"Role for {updated.username} is already {updated.role}.")
+        return 0
+    print(f"Role updated for {updated.username}: {user.role} -> {updated.role}.")
+    print(
+        f"Auth session version: {user.auth_session_version} -> {updated.auth_session_version}"
+    )
+    print("Existing browser sessions for this user are revoked.")
+    return 0
+
+
 def _iter_audit_targets(
     login: str | None, *, db_path: Path
 ) -> Iterable[tuple[InterfaceUser, str]]:
@@ -397,6 +421,13 @@ def build_parser() -> argparse.ArgumentParser:
     reset_parser.add_argument("login", help="Username or email.")
     _add_password_source_args(reset_parser, include_generate=True)
     reset_parser.set_defaults(func=command_reset_password)
+
+    role_parser = subparsers.add_parser(
+        "set-role", help="Set a formal user's administrator role."
+    )
+    role_parser.add_argument("login", help="Username or email.")
+    role_parser.add_argument("role", choices=("admin", "user"))
+    role_parser.set_defaults(func=command_set_role)
 
     audit_parser = subparsers.add_parser(
         "audit-passwords",

@@ -1,0 +1,12 @@
+[Unit]
+Description=Daily Potato Agent user storage snapshot
+
+[Timer]
+OnCalendar=*-*-* 04:00:00 Asia/Shanghai
+AccuracySec=1min
+RandomizedDelaySec=0
+Persistent=true
+Unit=potato-storage-snapshot.service
+
+[Install]
+WantedBy=timers.target

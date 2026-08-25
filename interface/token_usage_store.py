@@ -342,6 +342,106 @@ def get_usage_by_user(
     ]
 
 
+def get_admin_usage_aggregate(
+    *,
+    start_at: float,
+    end_at: float,
+    db_path: Path | str | None = None,
+) -> list[dict[str, Any]]:
+    ensure_token_usage_store(db_path)
+    with _connect_usage_db(_resolve_db_path(db_path)) as conn:
+        rows = conn.execute(
+            """
+            select
+                mapping_username,
+                count(*) as request_count,
+                coalesce(sum(case when usage_status = 'present' then 1 else 0 end), 0)
+                    as usage_request_count,
+                coalesce(sum(case when usage_status = 'missing' then 1 else 0 end), 0)
+                    as missing_usage_request_count,
+                coalesce(sum(input_tokens), 0) as input_tokens,
+                coalesce(sum(output_tokens), 0) as output_tokens,
+                coalesce(sum(cache_read_tokens), 0) as cache_read_tokens,
+                coalesce(sum(cache_write_tokens), 0) as cache_write_tokens
+            from model_proxy_usage_requests
+            where started_at >= ? and started_at < ?
+              and status_code >= 200 and status_code < 300
+            group by mapping_username
+            order by mapping_username
+            """,
+            (float(start_at), float(end_at)),
+        ).fetchall()
+    result: list[dict[str, Any]] = []
+    for row in rows:
+        usage = {
+            "mapping_username": str(row["mapping_username"]),
+            "request_count": int(row["request_count"] or 0),
+            "usage_request_count": int(row["usage_request_count"] or 0),
+            "missing_usage_request_count": int(
+                row["missing_usage_request_count"] or 0
+            ),
+            "input_tokens": int(row["input_tokens"] or 0),
+            "output_tokens": int(row["output_tokens"] or 0),
+            "cache_read_tokens": int(row["cache_read_tokens"] or 0),
+            "cache_write_tokens": int(row["cache_write_tokens"] or 0),
+        }
+        usage["total_tokens"] = sum(
+            usage[field]
+            for field in (
+                "input_tokens",
+                "output_tokens",
+                "cache_read_tokens",
+                "cache_write_tokens",
+            )
+        )
+        result.append(usage)
+    return result
+
+
+def get_principal_catalog_page(
+    *,
+    page: int,
+    page_size: int,
+    db_path: Path | str | None = None,
+) -> dict[str, Any]:
+    ensure_token_usage_store(db_path)
+    normalized_page = max(1, int(page))
+    normalized_page_size = min(200, max(1, int(page_size)))
+    offset = (normalized_page - 1) * normalized_page_size
+    with _connect_usage_db(_resolve_db_path(db_path)) as conn:
+        total = int(
+            conn.execute(
+                "select count(distinct mapping_username) from model_proxy_usage_requests"
+            ).fetchone()[0]
+            or 0
+        )
+        rows = conn.execute(
+            """
+            select mapping_username, min(started_at) as first_used_at,
+                   max(started_at) as last_used_at, count(*) as request_count
+            from model_proxy_usage_requests
+            group by mapping_username
+            order by mapping_username
+            limit ? offset ?
+            """,
+            (normalized_page_size, offset),
+        ).fetchall()
+    return {
+        "page": normalized_page,
+        "page_size": normalized_page_size,
+        "total": total,
+        "items": [
+            {
+                "mapping_username": str(row["mapping_username"]),
+                "first_used_at": float(row["first_used_at"]),
+                "last_used_at": float(row["last_used_at"]),
+                "request_count": int(row["request_count"] or 0),
+            }
+            for row in rows
+        ],
+    }
+
+
 def _row_to_quota(row: sqlite3.Row | None) -> dict[str, Any] | None:
     if row is None:
         return None

@@ -840,6 +840,14 @@ def test_idle_check_cleans_temporary_user(monkeypatch) -> None:
     )
     monkeypatch.setattr(
         app_mod,
+        "retire_temporary_user_identity",
+        lambda checked_user_id: auth_db.retire_temporary_user_identity(
+            checked_user_id,
+            db_path=db_path,
+        ),
+    )
+    monkeypatch.setattr(
+        app_mod,
         "delete_temporary_user_record",
         lambda checked_user_id: auth_db.delete_temporary_user_record(
             checked_user_id,

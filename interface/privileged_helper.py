@@ -39,6 +39,7 @@ from interface.hermes_service import (
     stop_and_remove_service,
     stop_service,
 )
+from interface.home_usage import measure_home_allocated_bytes
 from interface.mapping import (
     DEFAULT_MAPPING_PATH,
     HermesTarget,
@@ -331,6 +332,7 @@ def build_parser() -> argparse.ArgumentParser:
         "get-active-model",
         "tui-gateway-command",
         "tui-gateway",
+        "home-usage",
     ):
         p = sub.add_parser(name)
         p.add_argument("--username", required=True)
@@ -430,6 +432,10 @@ def main() -> int:
         if args.command == "has-background-jobs":
             target = _load_target(args.username)
             return _emit({"ok": True, "active": has_active_background_processes(target)})
+
+        if args.command == "home-usage":
+            allocated_bytes = measure_home_allocated_bytes(_load_target(args.username))
+            return _emit({"ok": True, "allocated_bytes": allocated_bytes})
 
         if args.command == "deprovision-user":
             target = _load_target(args.username)
@@ -595,6 +601,17 @@ def main() -> int:
         if getattr(args, "command", "") in {"file-stream-v2", "file-upload"}:
             print(str(exc), file=sys.stderr)
             return 1
+        if getattr(args, "command", "") == "home-usage":
+            error_code = (
+                "timeout" if isinstance(exc, subprocess.TimeoutExpired) else "unavailable"
+            )
+            return _emit(
+                {
+                    "ok": False,
+                    "error": "home usage unavailable",
+                    "error_code": error_code,
+                }
+            )
         return _emit({"ok": False, "error": str(exc), "type": type(exc).__name__})
 
 

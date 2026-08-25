@@ -159,3 +159,20 @@ def test_plaintext_password_argument_is_rejected() -> None:
         )
 
     assert exc_info.value.code == 2
+
+
+def test_set_role_cli_promotes_user_and_revokes_sessions(tmp_path, capsys) -> None:
+    db_path = tmp_path / "interface.db"
+    user = _create_user(db_path)
+
+    result = manage_interface_users.main(
+        ["--auth-db", str(db_path), "set-role", "alice", "admin"]
+    )
+
+    captured = capsys.readouterr()
+    assert result == 0
+    assert "user -> admin" in captured.out
+    updated = auth_db.get_user_by_id(user.id, db_path=db_path)
+    assert updated is not None
+    assert updated.role == "admin"
+    assert updated.auth_session_version == user.auth_session_version + 1

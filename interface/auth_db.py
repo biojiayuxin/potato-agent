@@ -59,6 +59,52 @@ CREATE TABLE IF NOT EXISTS temporary_users (
 CREATE INDEX IF NOT EXISTS idx_temporary_users_cleanup
 ON temporary_users(cleanup_status, last_cleanup_attempt_at);
 
+CREATE TABLE IF NOT EXISTS user_usage_identities (
+    mapping_username TEXT PRIMARY KEY,
+    user_id TEXT UNIQUE,
+    account_type TEXT NOT NULL CHECK (
+        account_type IN ('formal', 'temporary', 'unknown', 'service')
+    ),
+    created_at INTEGER NOT NULL,
+    retired_at INTEGER,
+    source TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_user_usage_identities_user
+ON user_usage_identities(user_id);
+
+CREATE INDEX IF NOT EXISTS idx_user_usage_identities_type_retired
+ON user_usage_identities(account_type, retired_at);
+
+CREATE TABLE IF NOT EXISTS user_storage_snapshots (
+    user_id TEXT NOT NULL,
+    snapshot_day TEXT NOT NULL,
+    sampled_at INTEGER NOT NULL,
+    allocated_bytes INTEGER,
+    status TEXT NOT NULL CHECK (status IN ('ok', 'error')),
+    error_code TEXT NOT NULL DEFAULT '',
+    PRIMARY KEY(user_id, snapshot_day)
+);
+
+CREATE INDEX IF NOT EXISTS idx_user_storage_snapshots_latest
+ON user_storage_snapshots(user_id, sampled_at DESC);
+
+CREATE TABLE IF NOT EXISTS admin_signin_limits (
+    key_hash TEXT PRIMARY KEY,
+    scope TEXT NOT NULL CHECK (scope IN ('login_ip', 'ip')),
+    window_started_at INTEGER NOT NULL,
+    attempt_count INTEGER NOT NULL,
+    last_attempt_at INTEGER NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_admin_signin_limits_last_attempt
+ON admin_signin_limits(last_attempt_at);
+
+CREATE TABLE IF NOT EXISTS admin_migrations (
+    migration_key TEXT PRIMARY KEY,
+    completed_at INTEGER NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS signup_jobs (
     job_id TEXT PRIMARY KEY,
     username TEXT NOT NULL,
@@ -152,6 +198,18 @@ class MappingUsernameConflictError(RuntimeError):
     pass
 
 
+class PrincipalReuseError(RuntimeError):
+    pass
+
+
+class RoleManagementError(RuntimeError):
+    pass
+
+
+class LastAdministratorError(RoleManagementError):
+    pass
+
+
 def _row_to_user(row: sqlite3.Row | None) -> InterfaceUser | None:
     if row is None:
         return None
@@ -215,6 +273,101 @@ def _ensure_unique_mapping_username_index(conn: sqlite3.Connection) -> None:
     )
 
 
+def _claim_usage_identity(
+    conn: sqlite3.Connection,
+    *,
+    mapping_username: str,
+    user_id: str | None,
+    account_type: str,
+    created_at: int,
+    source: str,
+) -> None:
+    normalized_mapping_username = mapping_username.strip()
+    if not normalized_mapping_username:
+        raise ValueError("mapping_username is required")
+    existing = conn.execute(
+        "select user_id, account_type, retired_at from user_usage_identities "
+        "where mapping_username = ? limit 1",
+        (normalized_mapping_username,),
+    ).fetchone()
+    if existing is None:
+        try:
+            conn.execute(
+                "insert into user_usage_identities "
+                "(mapping_username, user_id, account_type, created_at, retired_at, source) "
+                "values (?, ?, ?, ?, null, ?)",
+                (
+                    normalized_mapping_username,
+                    user_id,
+                    account_type,
+                    int(created_at),
+                    source.strip() or "unknown",
+                ),
+            )
+        except sqlite3.IntegrityError as exc:
+            raise PrincipalReuseError(
+                f"Usage principal is already assigned: {normalized_mapping_username}"
+            ) from exc
+        return
+
+    existing_user_id = str(existing[0] or "") or None
+    if (
+        existing_user_id != user_id
+        or existing[2] is not None
+        or str(existing[1]) != account_type
+    ):
+        raise PrincipalReuseError(
+            f"Usage principal cannot be reused: {normalized_mapping_username}"
+        )
+
+
+def _backfill_current_usage_identities(conn: sqlite3.Connection) -> None:
+    rows = conn.execute(
+        """
+        select u.id, u.mapping_username, u.created_at,
+               case when t.user_id is null then 'formal' else 'temporary' end as account_type
+        from users u
+        left join temporary_users t on t.user_id = u.id
+        order by u.created_at, u.id
+        """
+    ).fetchall()
+    for row in rows:
+        _claim_usage_identity(
+            conn,
+            mapping_username=str(row[1]),
+            user_id=str(row[0]),
+            account_type=str(row[3]),
+            created_at=int(row[2] or 0),
+            source="current_user_backfill_v1",
+        )
+
+
+def _assert_admin_deletion_allowed(
+    conn: sqlite3.Connection, user_ids: list[str]
+) -> None:
+    if not user_ids:
+        return
+    placeholders = ",".join("?" for _ in user_ids)
+    target_admins = int(
+        conn.execute(
+            f"select count(*) from users where active = 1 and role = 'admin' "
+            f"and id in ({placeholders})",
+            tuple(user_ids),
+        ).fetchone()[0]
+        or 0
+    )
+    if target_admins <= 0:
+        return
+    active_admins = int(
+        conn.execute(
+            "select count(*) from users where active = 1 and role = 'admin'"
+        ).fetchone()[0]
+        or 0
+    )
+    if active_admins - target_admins <= 0:
+        raise LastAdministratorError("Refusing to delete the last administrator")
+
+
 def _database_identity(db_path: Path) -> tuple[int, int] | None:
     try:
         stat_result = db_path.stat()
@@ -253,6 +406,7 @@ def ensure_auth_db(db_path: Path = DEFAULT_AUTH_DB_PATH) -> Path:
             _add_column_if_missing(conn, "signup_jobs", "email_verification_id", "TEXT")
             _add_column_if_missing(conn, "signup_jobs", "email_verified_at", "INTEGER")
             _ensure_unique_mapping_username_index(conn)
+            _backfill_current_usage_identities(conn)
             for index_name, column_name in (
                 ("idx_signup_jobs_username", "username"),
                 ("idx_signup_jobs_email", "email"),
@@ -601,6 +755,14 @@ def create_temporary_user(
                 TEMPORARY_USER_STATUS_ACTIVE,
             ),
         )
+        _claim_usage_identity(
+            conn,
+            mapping_username=normalized_mapping_username,
+            user_id=user_id,
+            account_type="temporary",
+            created_at=now,
+            source="temporary_user",
+        )
         conn.commit()
 
     user = get_user_by_id(user_id, resolved_db_path)
@@ -680,6 +842,37 @@ def delete_temporary_user_record(
         return cursor.rowcount > 0
 
 
+def retire_temporary_user_identity(
+    user_id: str,
+    *,
+    now: int | None = None,
+    db_path: Path | None = None,
+) -> bool:
+    resolved_db_path = db_path or DEFAULT_AUTH_DB_PATH
+    normalized_user_id = user_id.strip()
+    timestamp = int(time.time()) if now is None else int(now)
+    with connect_auth_db(resolved_db_path) as conn:
+        conn.execute("begin immediate")
+        temporary = conn.execute(
+            "select mapping_username from temporary_users where user_id = ? limit 1",
+            (normalized_user_id,),
+        ).fetchone()
+        if temporary is None:
+            conn.rollback()
+            return False
+        cursor = conn.execute(
+            "update user_usage_identities set retired_at = coalesce(retired_at, ?) "
+            "where user_id = ? and account_type = 'temporary'",
+            (timestamp, normalized_user_id),
+        )
+        conn.execute(
+            "delete from user_storage_snapshots where user_id = ?",
+            (normalized_user_id,),
+        )
+        conn.commit()
+    return cursor.rowcount > 0
+
+
 def upsert_user(
     *,
     username: str,
@@ -695,12 +888,17 @@ def upsert_user(
     display_name = (name or username).strip() or username
     password_hash = hash_password(password)
     now = int(time.time())
+    normalized_mapping_username = mapping_username.strip()
+    normalized_role = role.strip().lower()
+    if normalized_role not in {"admin", "user"}:
+        raise ValueError("role must be 'admin' or 'user'")
 
     query_existing = (
         "select id from users where lower(email) = lower(?) or username = ? limit 1"
     )
 
     with connect_auth_db(db_path) as conn:
+        conn.execute("begin immediate")
         existing = conn.execute(
             query_existing, (normalized_email, normalized_username)
         ).fetchone()
@@ -715,8 +913,8 @@ def upsert_user(
                     normalized_email,
                     password_hash,
                     display_name,
-                    role,
-                    mapping_username,
+                    normalized_role,
+                    normalized_mapping_username,
                     now,
                     now,
                 ),
@@ -724,19 +922,26 @@ def upsert_user(
         else:
             user_id = str(existing["id"])
             conn.execute(
-                "update users set username = ?, email = ?, password_hash = ?, name = ?, role = ?, mapping_username = ?, active = 1, updated_at = ? "
+                "update users set username = ?, email = ?, password_hash = ?, name = ?, mapping_username = ?, active = 1, updated_at = ? "
                 "where id = ?",
                 (
                     normalized_username,
                     normalized_email,
                     password_hash,
                     display_name,
-                    role,
-                    mapping_username,
+                    normalized_mapping_username,
                     now,
                     user_id,
                 ),
             )
+        _claim_usage_identity(
+            conn,
+            mapping_username=normalized_mapping_username,
+            user_id=user_id,
+            account_type="formal",
+            created_at=now,
+            source="managed_user",
+        )
         conn.commit()
 
     user = get_user_by_id(user_id, db_path)
@@ -763,6 +968,61 @@ def update_user_password(
         if cursor.rowcount <= 0:
             return None
     return get_user_by_id(normalized_user_id, db_path)
+
+
+def set_user_role(
+    login: str,
+    role: str,
+    *,
+    db_path: Path = DEFAULT_AUTH_DB_PATH,
+) -> InterfaceUser:
+    normalized_login = login.strip()
+    normalized_role = role.strip().lower()
+    if normalized_role not in {"admin", "user"}:
+        raise RoleManagementError("Role must be 'admin' or 'user'")
+    now = int(time.time())
+    with connect_auth_db(db_path) as conn:
+        conn.execute("begin immediate")
+        row = conn.execute(
+            "select id, role from users where lower(email) = lower(?) or username = ? limit 1",
+            (normalized_login, normalized_login),
+        ).fetchone()
+        if row is None:
+            raise RoleManagementError(f"User not found: {normalized_login}")
+        user_id = str(row["id"])
+        current_role = str(row["role"])
+        if normalized_role == "admin":
+            temporary = conn.execute(
+                "select 1 from temporary_users where user_id = ? limit 1",
+                (user_id,),
+            ).fetchone()
+            if temporary is not None:
+                raise RoleManagementError("Temporary users cannot be administrators")
+        if current_role == normalized_role:
+            conn.commit()
+        else:
+            if current_role == "admin" and normalized_role == "user":
+                active_admins = int(
+                    conn.execute(
+                        "select count(*) from users where active = 1 and role = 'admin'"
+                    ).fetchone()[0]
+                    or 0
+                )
+                if active_admins <= 1:
+                    raise LastAdministratorError(
+                        "Refusing to demote the last administrator"
+                    )
+            conn.execute(
+                "update users set role = ?, "
+                "auth_session_version = coalesce(auth_session_version, 0) + 1, "
+                "updated_at = ? where id = ?",
+                (normalized_role, now, user_id),
+            )
+            conn.commit()
+    user = get_user_by_id(user_id, db_path)
+    if user is None:
+        raise RoleManagementError("User disappeared during role update")
+    return user
 
 
 def _consume_email_verification_in_conn(
@@ -1037,17 +1297,17 @@ def activate_signup_user(
     mapping_username: str,
     db_path: Path = DEFAULT_AUTH_DB_PATH,
 ) -> InterfaceUser:
+    now = int(time.time())
+    user_id = str(uuid.uuid4())
+    normalized_mapping_username = mapping_username.strip()
     with connect_auth_db(db_path) as conn:
+        conn.execute("begin immediate")
         row = conn.execute(
             "select username, email, password_hash, display_name from signup_jobs where job_id = ? limit 1",
             (job_id,),
         ).fetchone()
         if row is None:
             raise RuntimeError("Signup job not found")
-
-    now = int(time.time())
-    user_id = str(uuid.uuid4())
-    with connect_auth_db(db_path) as conn:
         conn.execute(
             "insert into users (id, username, email, password_hash, name, role, mapping_username, active, created_at, updated_at) values (?, ?, ?, ?, ?, 'user', ?, 1, ?, ?)",
             (
@@ -1056,10 +1316,18 @@ def activate_signup_user(
                 str(row["email"]),
                 str(row["password_hash"]),
                 str(row["display_name"]),
-                mapping_username,
+                normalized_mapping_username,
                 now,
                 now,
             ),
+        )
+        _claim_usage_identity(
+            conn,
+            mapping_username=normalized_mapping_username,
+            user_id=user_id,
+            account_type="formal",
+            created_at=now,
+            source="signup",
         )
         conn.commit()
 
@@ -1084,6 +1352,29 @@ def delete_user_by_mapping_username(
 ) -> bool:
     normalized_mapping_username = mapping_username.strip()
     with connect_auth_db(db_path) as conn:
+        conn.execute("begin immediate")
+        users = conn.execute(
+            "select id from users where mapping_username = ? or username = ?",
+            (normalized_mapping_username, normalized_mapping_username),
+        ).fetchall()
+        user_ids = [str(row["id"]) for row in users]
+        _assert_admin_deletion_allowed(conn, user_ids)
+        now = int(time.time())
+        for target_user_id in user_ids:
+            conn.execute(
+                "update user_usage_identities set retired_at = coalesce(retired_at, ?) "
+                "where user_id = ?",
+                (now, target_user_id),
+            )
+            temporary = conn.execute(
+                "select 1 from temporary_users where user_id = ? limit 1",
+                (target_user_id,),
+            ).fetchone()
+            if temporary is not None:
+                conn.execute(
+                    "delete from user_storage_snapshots where user_id = ?",
+                    (target_user_id,),
+                )
         conn.execute(
             """
             delete from temporary_users
@@ -1111,6 +1402,27 @@ def delete_user_by_id(user_id: str, db_path: Path | None = None) -> bool:
     resolved_db_path = db_path or DEFAULT_AUTH_DB_PATH
     normalized_user_id = user_id.strip()
     with connect_auth_db(resolved_db_path) as conn:
+        conn.execute("begin immediate")
+        row = conn.execute(
+            "select id from users where id = ? limit 1", (normalized_user_id,)
+        ).fetchone()
+        _assert_admin_deletion_allowed(
+            conn, [normalized_user_id] if row is not None else []
+        )
+        temporary = conn.execute(
+            "select 1 from temporary_users where user_id = ? limit 1",
+            (normalized_user_id,),
+        ).fetchone()
+        conn.execute(
+            "update user_usage_identities set retired_at = coalesce(retired_at, ?) "
+            "where user_id = ?",
+            (int(time.time()), normalized_user_id),
+        )
+        if temporary is not None:
+            conn.execute(
+                "delete from user_storage_snapshots where user_id = ?",
+                (normalized_user_id,),
+            )
         conn.execute(
             "delete from temporary_users where user_id = ?",
             (normalized_user_id,),

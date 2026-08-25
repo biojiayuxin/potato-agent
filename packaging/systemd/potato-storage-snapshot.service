@@ -1,0 +1,24 @@
+[Unit]
+Description=Potato Agent user storage snapshot
+After=local-fs.target
+ConditionPathExists=/var/lib/potato-agent/data/interface.db
+
+[Service]
+Type=oneshot
+User=potato-interface
+Group=potato-interface
+WorkingDirectory=/srv/potato_agent
+Environment=INTERFACE_ENVIRONMENT=production
+Environment=INTERFACE_AUTH_DB=/var/lib/potato-agent/data/interface.db
+Environment=INTERFACE_PRIVILEGED_HELPER=/usr/local/libexec/potato-agent-privileged-helper
+ExecStart=/opt/interface-env/bin/python -m interface.storage_snapshot_job run
+TimeoutStartSec=4h
+PrivateTmp=true
+ProtectProc=invisible
+ProcSubset=pid
+ProtectSystem=strict
+ReadWritePaths=/var/lib/potato-agent/data
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target

@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import json
 import hmac
+import ipaddress
 import logging
+import math
 import os
 import time
 from dataclasses import dataclass
@@ -43,6 +45,10 @@ DAILY_UPDATES_SERVICE_PRINCIPAL = "daily-updates-service"
 DAILY_UPDATES_SERVICE_TOKEN_ENVIRONMENT = "POTATO_DAILY_UPDATES_MODEL_PROXY_TOKEN"
 DAILY_UPDATES_SERVICE_TOKEN_CREDENTIAL = "daily-updates-model-proxy-token"
 DAILY_UPDATES_SERVICE_TOKEN_MIN_BYTES = 32
+ADMIN_USAGE_TOKEN_ENVIRONMENT = "POTATO_ADMIN_USAGE_TOKEN"
+ADMIN_USAGE_TOKEN_CREDENTIAL = "admin-usage-token"
+ADMIN_USAGE_TOKEN_MIN_BYTES = 32
+MAX_ADMIN_USAGE_WINDOW_SECONDS = 31 * 24 * 3600
 HOP_BY_HOP_HEADERS = {
     "connection",
     "content-length",
@@ -196,6 +202,61 @@ def _load_daily_updates_service_token() -> str | None:
         logger.error("Model proxy service credential does not meet length requirements")
         raise HTTPException(status_code=503, detail="Model proxy is unavailable")
     return token
+
+
+def _load_admin_usage_token() -> str:
+    try:
+        token = load_secret(
+            ADMIN_USAGE_TOKEN_ENVIRONMENT,
+            credential_name=ADMIN_USAGE_TOKEN_CREDENTIAL,
+        )
+    except SecretConfigurationError as exc:
+        logger.error("Unable to load model proxy admin usage credential")
+        raise HTTPException(status_code=503, detail="Model proxy is unavailable") from exc
+    if token is None or len(token.encode("utf-8")) < ADMIN_USAGE_TOKEN_MIN_BYTES:
+        logger.error("Model proxy admin usage credential is unavailable or too short")
+        raise HTTPException(status_code=503, detail="Model proxy is unavailable")
+    return token
+
+
+def _require_admin_usage_access(request: Request) -> None:
+    peer_host = str(request.client.host if request.client else "")
+    try:
+        peer_address = ipaddress.ip_address(peer_host)
+    except ValueError:
+        raise HTTPException(status_code=403, detail="Internal endpoint") from None
+    if not peer_address.is_loopback:
+        raise HTTPException(status_code=403, detail="Internal endpoint")
+    supplied_token = _extract_bearer_token(request)
+    admin_token = _load_admin_usage_token()
+    try:
+        targets = MappingStore(_mapping_path()).load_targets()
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail="Model proxy is unavailable") from exc
+    conflicting_tokens: list[str] = []
+    for target in targets:
+        try:
+            conflicting_tokens.append(
+                local_model_proxy_token(target.username, target.model_proxy_token)
+            )
+        except ModelProxyConfigError:
+            continue
+    service_token = _load_daily_updates_service_token()
+    if service_token is not None:
+        conflicting_tokens.append(service_token)
+    if any(hmac.compare_digest(admin_token, token) for token in conflicting_tokens):
+        logger.error("Model proxy admin usage credential conflicts with another credential")
+        raise HTTPException(status_code=503, detail="Model proxy is unavailable")
+    if not hmac.compare_digest(supplied_token, admin_token):
+        raise HTTPException(status_code=401, detail="Invalid bearer token")
+
+
+def _validate_admin_usage_window(start_at: float, end_at: float) -> None:
+    if not math.isfinite(start_at) or not math.isfinite(end_at):
+        raise HTTPException(status_code=400, detail="Invalid time window")
+    duration = end_at - start_at
+    if duration <= 0 or duration > MAX_ADMIN_USAGE_WINDOW_SECONDS:
+        raise HTTPException(status_code=400, detail="Invalid time window")
 
 
 def _require_principal(request: Request) -> ProxyPrincipal:
@@ -979,6 +1040,46 @@ app = FastAPI(title="Potato Model Proxy")
 @app.get("/healthz")
 async def healthz() -> dict[str, Any]:
     return {"ok": True}
+
+
+@app.get("/internal/admin/usage/aggregate")
+async def admin_usage_aggregate(
+    request: Request,
+    start_at: float,
+    end_at: float,
+) -> JSONResponse:
+    _require_admin_usage_access(request)
+    _validate_admin_usage_window(start_at, end_at)
+    items = token_usage_store.get_admin_usage_aggregate(
+        start_at=start_at,
+        end_at=end_at,
+    )
+    return JSONResponse(
+        content={
+            "start_at": start_at,
+            "end_at": end_at,
+            "coverage": "fully consumed successful proxy responses",
+            "items": items,
+        },
+        headers={"Cache-Control": "no-store"},
+    )
+
+
+@app.get("/internal/admin/usage/principals")
+async def admin_usage_principals(
+    request: Request,
+    page: int = 1,
+    page_size: int = 100,
+) -> JSONResponse:
+    _require_admin_usage_access(request)
+    result = token_usage_store.get_principal_catalog_page(
+        page=page,
+        page_size=page_size,
+    )
+    return JSONResponse(
+        content=result,
+        headers={"Cache-Control": "no-store"},
+    )
 
 
 @app.get("/v1/models")

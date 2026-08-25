@@ -22,6 +22,11 @@ from interface.hermes_service import (
     stop_and_remove_service,
     stop_service,
 )
+from interface.home_usage import (
+    HOME_USAGE_TIMEOUT_SECONDS,
+    HomeUsageError,
+    measure_home_allocated_bytes,
+)
 from interface.mapping import (
     DEFAULT_MAPPING_PATH,
     HermesTarget,
@@ -154,6 +159,8 @@ class PrivilegedClient:
                     timeout_seconds=timeout_seconds,
                     input_text=input_text,
                 )
+        except OSError as exc:
+            raise PrivilegedClientError("privileged helper is unavailable") from exc
         except subprocess.TimeoutExpired as exc:
             raise PrivilegedClientError(
                 f"privileged helper timed out after {float(timeout_seconds or 0):.0f} seconds"
@@ -169,8 +176,12 @@ class PrivilegedClient:
             detail = result.stderr.strip() or raw_payload
             raise PrivilegedClientError(force_redact_text(detail)) from exc
         if not isinstance(payload, dict) or not payload.get("ok"):
+            error_code = str(payload.get("error_code") or "").strip()
+            detail = str(payload.get("error") or "privileged helper failed")
+            if error_code:
+                detail = f"{detail} ({error_code})"
             raise PrivilegedClientError(
-                force_redact_text(payload.get("error") or "privileged helper failed")
+                force_redact_text(detail)
             )
         return payload
 
@@ -260,6 +271,27 @@ class PrivilegedClient:
 
         payload = self._call_helper(["has-background-jobs", "--username", username])
         return bool(payload.get("active"))
+
+    def home_usage(self, username: str) -> int:
+        try:
+            target = MappingStore(DEFAULT_MAPPING_PATH).get_target_by_username(username)
+        except RuntimeError as exc:
+            raise PrivilegedClientError("Unknown mapping user") from exc
+        if target is None:
+            raise PrivilegedClientError("Unknown mapping user")
+        if self._can_call_directly():
+            try:
+                return measure_home_allocated_bytes(target)
+            except (HomeUsageError, OSError, subprocess.TimeoutExpired) as exc:
+                raise PrivilegedClientError("home usage unavailable") from exc
+        payload = self._call_helper(
+            ["home-usage", "--username", username],
+            timeout_seconds=HOME_USAGE_TIMEOUT_SECONDS + 10.0,
+        )
+        value = payload.get("allocated_bytes")
+        if not isinstance(value, int) or value < 0:
+            raise PrivilegedClientError("home usage unavailable")
+        return value
 
     def stop_idle_runtime(
         self,

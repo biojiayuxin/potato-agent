@@ -69,6 +69,7 @@ from interface.auth_db import (
     mark_temporary_user_cleanup_attempt,
     record_email_verification_sent,
     reset_user_password_with_email_verification,
+    retire_temporary_user_identity,
     set_signup_job_status,
     TEMPORARY_USER_STATUS_ACTIVE,
     TEMPORARY_USER_STATUS_FAILED,
@@ -199,6 +200,12 @@ from interface.genome_browser import router as genome_browser_router
 from interface.pan_genome import router as pan_genome_router
 from interface.spatial_viewer import router as spatial_viewer_router
 from interface.wgcna_viewer import router as wgcna_viewer_router
+from interface.admin_api import router as admin_router
+from interface.admin_usage_client import (
+    AdminUsageUnavailable,
+    reconcile_principals_once,
+)
+from interface.system_resources import SystemResourceSampler
 
 
 LOGGER = logging.getLogger("potato_interface")
@@ -2281,9 +2288,18 @@ async def _delete_temporary_user_local_state(
     user_id: str,
     mapping_username: str,
 ) -> None:
+    await asyncio.to_thread(delete_user_by_mapping_username, mapping_username)
     await asyncio.to_thread(delete_display_user_data, user_id)
     await asyncio.to_thread(delete_runtime_state, user_id)
-    await asyncio.to_thread(delete_user_by_mapping_username, mapping_username)
+
+
+async def _reconcile_admin_principals_once() -> None:
+    try:
+        await reconcile_principals_once()
+    except AdminUsageUnavailable:
+        LOGGER.warning("Admin usage principal reconciliation is deferred")
+    except Exception:
+        LOGGER.exception("Admin usage principal reconciliation failed")
 
 
 async def _close_temporary_user_bridge(user_id: str) -> bool:
@@ -2378,6 +2394,12 @@ async def _cleanup_temporary_user_candidate(
             user_id,
             reason="temporary_user_expired",
         )
+        retired = await asyncio.to_thread(
+            retire_temporary_user_identity,
+            user_id,
+        )
+        if not retired:
+            raise RuntimeError("Temporary usage identity is unavailable")
         await asyncio.to_thread(
             privileged_client.deprovision_user,
             mapping_username,
@@ -2994,6 +3016,7 @@ app.include_router(genome_browser_router)
 app.include_router(pan_genome_router)
 app.include_router(spatial_viewer_router)
 app.include_router(wgcna_viewer_router)
+app.include_router(admin_router)
 
 
 def _should_refresh_activity_for_request(request: Request) -> bool:
@@ -3075,6 +3098,18 @@ async def refresh_authenticated_activity(request: Request, call_next):
     return await call_next(request)
 
 
+@app.middleware("http")
+async def protect_admin_responses(request: Request, call_next):
+    response = await call_next(request)
+    if str(request.scope.get("path") or "").startswith("/admin"):
+        response.headers["Cache-Control"] = "no-store"
+        response.headers["Pragma"] = "no-cache"
+        response.headers["X-Content-Type-Options"] = "nosniff"
+        response.headers["X-Frame-Options"] = "DENY"
+        response.headers["Referrer-Policy"] = "same-origin"
+    return response
+
+
 @app.on_event("startup")
 async def on_startup() -> None:
     ensure_auth_db()
@@ -3101,6 +3136,13 @@ async def on_startup() -> None:
     app.state.runtime_idle_scheduler_task = asyncio.create_task(
         _runtime_idle_scheduler_loop()
     )
+    app.state.system_resource_sampler = SystemResourceSampler()
+    app.state.system_resource_sampler_task = asyncio.create_task(
+        app.state.system_resource_sampler.run()
+    )
+    app.state.admin_principal_reconciliation_task = asyncio.create_task(
+        _reconcile_admin_principals_once()
+    )
 
 
 @app.on_event("shutdown")
@@ -3116,6 +3158,26 @@ async def on_shutdown() -> None:
     )
     if runtime_idle_scheduler_task is not None:
         runtime_idle_scheduler_task.cancel()
+    system_resource_sampler_task = getattr(
+        app.state, "system_resource_sampler_task", None
+    )
+    if system_resource_sampler_task is not None:
+        system_resource_sampler_task.cancel()
+    reconciliation_task = getattr(
+        app.state, "admin_principal_reconciliation_task", None
+    )
+    if reconciliation_task is not None:
+        reconciliation_task.cancel()
+    pending_tasks = [
+        task
+        for task in (
+            system_resource_sampler_task,
+            reconciliation_task,
+        )
+        if task is not None
+    ]
+    if pending_tasks:
+        await asyncio.gather(*pending_tasks, return_exceptions=True)
     session_run_manager: SessionRunManager | None = getattr(
         app.state, "session_run_manager", None
     )

@@ -13,6 +13,7 @@ Environment=INTERFACE_ENVIRONMENT=production
 Environment=POTATO_AGENT_MAPPING_PATH=/var/lib/potato-agent/config/users_mapping.yaml
 Environment=POTATO_MODEL_PROXY_CONFIG_PATH=/var/lib/potato-agent/config/model_proxy.yaml
 Environment=POTATO_MODEL_PROXY_USAGE_DB=/var/lib/potato-agent/model-proxy/usage.db
+LoadCredential=admin-usage-token:/etc/potato-agent/credentials/admin-usage-token
 ExecStart=/opt/interface-env/bin/python -m uvicorn interface.model_proxy:app --host 127.0.0.1 --port 8765
 Restart=always
 RestartSec=3
