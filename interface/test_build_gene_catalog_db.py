@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 
-from interface.build_gene_catalog_db import BuildConfig, build_database
+from interface.build_gene_catalog_db import BuildConfig, build_database, load_genes_json
 
 
 def _write_text(path: Path, value: str) -> Path:
@@ -82,41 +82,13 @@ def _build_fixture(tmp_path: Path) -> BuildConfig:
     trans_a2 = f"{gene_a}.2"
     trans_b1 = f"{gene_b}.1"
 
-    genes_db = source / "genes.db"
-    genes_db.parent.mkdir(parents=True)
-    with sqlite3.connect(genes_db) as conn:
-        conn.execute(
-            """
-            create table new_genes(
-              gene_id text primary key,
-              gene_symbol text,
-              ID_reported text,
-              refs text,
-              descriptions text
-            )
-            """
-        )
-        conn.executemany(
-            "insert into new_genes values (?,?,?,?,?)",
-            [
-                (
-                    gene_a,
-                    "PAL, PAL",
-                    "OLD1(blast identity:100%), OLD1(blast identity:100.00%)",
-                    "P1, P2",
-                    None,
-                ),
-                (gene_b, "PAL", "OLD2", None, None),
-            ],
-        )
-
     genes_json = _write_text(
         source / "genes.json",
         json.dumps(
             [
                 {
                     "gene_id": gene_a,
-                    "gene_symbols": ["PAL", "PAL"],
+                    "gene_symbols": ["PAL", "PAL", "SP6A(Incorrect)"],
                     "reported_ids": [
                         "OLD1(blast identity:100%)",
                         "OLD1(blast identity:100.00%)",
@@ -212,7 +184,6 @@ def _build_fixture(tmp_path: Path) -> BuildConfig:
         source / "retry_1.json", json.dumps(_run_report([]))
     )
     return BuildConfig(
-        genes_db=genes_db,
         genes_json=genes_json,
         paper_metadata=paper_metadata,
         transcript_map=transcript_map,
@@ -248,6 +219,8 @@ def test_build_database_imports_normalized_catalog_and_atg_promoters(tmp_path) -
     assert result["paper_stats"]["duplicate_gene_doi_refs"] == 1
     assert result["similarity_stats"]["duplicate_rows_removed"] == 1
     assert result["sequence_stats"]["promoter_truncated"] == 2
+    assert "genes_json" in result["sources"]
+    assert "legacy_genes_db" not in result["sources"]
 
     with sqlite3.connect(config.output_db) as conn:
         conn.row_factory = sqlite3.Row
@@ -263,6 +236,17 @@ def test_build_database_imports_normalized_catalog_and_atg_promoters(tmp_path) -
         assert len(reported) == 1
         assert reported[0]["qualifier_type"] == "blast_identity_pct"
         assert reported[0]["qualifier_value"] == 100.0
+        symbols = conn.execute(
+            """
+            select gi.identifier
+            from gene_identifiers gi
+            join genes g on g.gene_pk=gi.gene_pk
+            where g.gene_id=? and gi.identifier_type='gene_symbol'
+            order by gi.display_order
+            """,
+            ("DM8.2_chr01G00010",),
+        ).fetchall()
+        assert [row["identifier"] for row in symbols] == ["PAL", "SP6A(Incorrect)"]
 
         promoter_rows = conn.execute(
             """
@@ -311,3 +295,46 @@ def test_failed_build_preserves_existing_database(tmp_path) -> None:
 
     assert config.output_db.read_bytes() == original
     assert not list(config.output_db.parent.glob(f".{config.output_db.name}.*.tmp"))
+
+
+@pytest.mark.parametrize(
+    ("payload", "message"),
+    [
+        ({"gene_id": "G1"}, "must contain a list"),
+        (
+            [
+                {
+                    "gene_id": "G1",
+                    "gene_symbols": "PAL",
+                    "reported_ids": [],
+                    "paperIDs": [],
+                }
+            ],
+            "field 'gene_symbols' must be a list",
+        ),
+        (
+            [
+                {
+                    "gene_id": "G1",
+                    "gene_symbols": [],
+                    "reported_ids": [],
+                    "paperIDs": [],
+                },
+                {
+                    "gene_id": "G1",
+                    "gene_symbols": [],
+                    "reported_ids": [],
+                    "paperIDs": [],
+                },
+            ],
+            "duplicate gene ID",
+        ),
+    ],
+)
+def test_load_genes_json_rejects_invalid_sources(
+    tmp_path: Path, payload: object, message: str
+) -> None:
+    path = _write_text(tmp_path / "genes.json", json.dumps(payload))
+
+    with pytest.raises(ValueError, match=message):
+        load_genes_json(path)

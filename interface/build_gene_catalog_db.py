@@ -19,9 +19,6 @@ from urllib.parse import unquote
 
 DEFAULT_KNOWLEDGE_HUB_ROOT = Path("/home/jiayuxin/tmp/potato-knowledge-hub")
 DEFAULT_DATA_ROOT = DEFAULT_KNOWLEDGE_HUB_ROOT / "data"
-DEFAULT_GENES_DB = (
-    DEFAULT_KNOWLEDGE_HUB_ROOT / "scripts" / "search_genes" / "genes.db"
-)
 DEFAULT_GENES_JSON = DEFAULT_DATA_ROOT / "genes_db" / "genes_db.260531.json"
 DEFAULT_PAPER_METADATA = (
     DEFAULT_DATA_ROOT
@@ -89,7 +86,6 @@ CODON_TABLE = {
 
 @dataclass(frozen=True)
 class BuildConfig:
-    genes_db: Path = DEFAULT_GENES_DB
     genes_json: Path = DEFAULT_GENES_JSON
     paper_metadata: Path = DEFAULT_PAPER_METADATA
     transcript_map: Path = DEFAULT_TRANSCRIPT_MAP
@@ -112,7 +108,7 @@ class BuildConfig:
 
 
 @dataclass(frozen=True)
-class LegacyGene:
+class GeneRecord:
     gene_id: str
     symbols: tuple[str, ...]
     reported_ids: tuple[str, ...]
@@ -165,12 +161,6 @@ def normalize_doi(value: str) -> str:
     return DOI_PREFIX_RE.sub("", normalize_identifier(value)).rstrip(".")
 
 
-def _split_legacy_list(value: str | None) -> tuple[str, ...]:
-    if not value:
-        return ()
-    return tuple(item.strip() for item in str(value).split(", ") if item.strip())
-
-
 def _deduplicate(values: Iterable[str], *, key=normalize_identifier) -> tuple[list[str], int]:
     result: list[str] = []
     seen: set[Any] = set()
@@ -212,8 +202,7 @@ def _require_file(path: Path, label: str) -> Path:
 
 def _source_paths(config: BuildConfig) -> dict[str, Path]:
     return {
-        "legacy_genes_db": _require_file(config.genes_db, "legacy genes database"),
-        "legacy_genes_json": _require_file(config.genes_json, "legacy genes JSON"),
+        "genes_json": _require_file(config.genes_json, "genes JSON"),
         "paper_metadata": _require_file(config.paper_metadata, "paper metadata"),
         "transcript_map": _require_file(config.transcript_map, "transcript mapping"),
         "dmv82_gff": _require_file(config.gff, "DMv8.2 GFF"),
@@ -239,79 +228,53 @@ def _source_paths(config: BuildConfig) -> dict[str, Path]:
     }
 
 
-def load_legacy_genes(path: Path) -> list[LegacyGene]:
-    conn = sqlite3.connect(f"file:{path}?mode=ro&immutable=1", uri=True)
-    conn.row_factory = sqlite3.Row
-    try:
-        table = conn.execute(
-            "select sql from sqlite_master where type='table' and name='new_genes'"
-        ).fetchone()
-        if table is None:
-            raise ValueError("legacy genes database does not contain new_genes")
-        rows = conn.execute(
-            """
-            select gene_id, gene_symbol, ID_reported, refs, descriptions
-            from new_genes
-            order by gene_id
-            """
-        ).fetchall()
-    finally:
-        conn.close()
+def _load_gene_list(row: dict[str, Any], field: str, index: int) -> tuple[str, ...]:
+    values = row.get(field)
+    if not isinstance(values, list):
+        raise ValueError(f"genes JSON item {index} field {field!r} must be a list")
 
-    genes: list[LegacyGene] = []
-    seen: set[str] = set()
-    for row in rows:
-        gene_id = str(row["gene_id"] or "").strip()
-        if not gene_id or gene_id in seen:
-            raise ValueError(f"invalid or duplicate legacy gene ID: {gene_id!r}")
-        if row["descriptions"] not in (None, ""):
+    result: list[str] = []
+    for value_index, value in enumerate(values, start=1):
+        if not isinstance(value, str) or not value.strip() or value != value.strip():
             raise ValueError(
-                f"legacy descriptions must remain empty; found data for {gene_id}"
+                f"genes JSON item {index} field {field!r} has invalid value "
+                f"at position {value_index}"
             )
-        seen.add(gene_id)
-        genes.append(
-            LegacyGene(
-                gene_id=gene_id,
-                symbols=_split_legacy_list(row["gene_symbol"]),
-                reported_ids=_split_legacy_list(row["ID_reported"]),
-                paper_ids=_split_legacy_list(row["refs"]),
-            )
-        )
-    return genes
+        result.append(value)
+    return tuple(result)
 
 
-def validate_legacy_json(path: Path, genes: list[LegacyGene]) -> None:
+def load_genes_json(path: Path) -> list[GeneRecord]:
     with path.open("r", encoding="utf-8") as handle:
         payload = json.load(handle)
     if not isinstance(payload, list):
-        raise ValueError("legacy genes JSON must contain a list")
-    expected = {
-        gene.gene_id: {
-            "gene_symbols": list(gene.symbols),
-            "reported_ids": list(gene.reported_ids),
-            "paperIDs": list(gene.paper_ids),
-        }
-        for gene in genes
-    }
-    if len(payload) != len(expected):
-        raise ValueError(
-            f"legacy genes JSON count differs from genes.db: {len(payload)} != {len(expected)}"
-        )
+        raise ValueError("genes JSON must contain a list")
+
+    genes: list[GeneRecord] = []
     seen: set[str] = set()
     for index, row in enumerate(payload, start=1):
         if not isinstance(row, dict):
-            raise ValueError(f"legacy genes JSON item {index} is not an object")
-        gene_id = str(row.get("gene_id") or "")
-        if gene_id in seen or gene_id not in expected:
-            raise ValueError(f"unexpected or duplicate gene in legacy JSON: {gene_id!r}")
+            raise ValueError(f"genes JSON item {index} is not an object")
+        raw_gene_id = row.get("gene_id")
+        if (
+            not isinstance(raw_gene_id, str)
+            or not raw_gene_id.strip()
+            or raw_gene_id != raw_gene_id.strip()
+        ):
+            raise ValueError(f"genes JSON item {index} has an invalid gene ID")
+        gene_id = raw_gene_id
+        if gene_id in seen:
+            raise ValueError(f"duplicate gene ID in genes JSON: {gene_id!r}")
         seen.add(gene_id)
-        actual = {
-            "gene_symbols": row.get("gene_symbols") or [],
-            "reported_ids": row.get("reported_ids") or [],
-            "paperIDs": row.get("paperIDs") or [],
-        }
-        if actual != expected[gene_id]:
-            raise ValueError(f"genes.db and legacy JSON differ for {gene_id}")
+        genes.append(
+            GeneRecord(
+                gene_id=gene_id,
+                symbols=_load_gene_list(row, "gene_symbols", index),
+                reported_ids=_load_gene_list(row, "reported_ids", index),
+                paper_ids=_load_gene_list(row, "paperIDs", index),
+            )
+        )
+    return genes
 
 
 def load_transcript_definitions(
@@ -845,7 +808,7 @@ def update_source_count(
 
 def insert_genes_and_identifiers(
     conn: sqlite3.Connection,
-    genes: list[LegacyGene],
+    genes: list[GeneRecord],
     features: dict[str, Feature],
 ) -> tuple[dict[str, int], dict[str, int]]:
     gene_pk_by_id = {gene.gene_id: index for index, gene in enumerate(genes, start=1)}
@@ -1004,7 +967,7 @@ def insert_transcripts(
 def import_papers(
     conn: sqlite3.Connection,
     path: Path,
-    genes: list[LegacyGene],
+    genes: list[GeneRecord],
     gene_pk_by_id: dict[str, int],
 ) -> dict[str, int]:
     paper_by_doi: dict[str, tuple[int, str, str]] = {}
@@ -1608,14 +1571,12 @@ def build_database(config: BuildConfig) -> dict[str, Any]:
         create_schema(conn)
         source_records = register_sources(conn, source_paths)
 
-        genes = load_legacy_genes(source_paths["legacy_genes_db"])
+        genes = load_genes_json(source_paths["genes_json"])
         if config.expected_gene_count is not None and len(genes) != config.expected_gene_count:
             raise ValueError(
                 f"expected {config.expected_gene_count} genes, found {len(genes)}"
             )
-        validate_legacy_json(source_paths["legacy_genes_json"], genes)
-        update_source_count(conn, source_records, "legacy_genes_db", len(genes))
-        update_source_count(conn, source_records, "legacy_genes_json", len(genes))
+        update_source_count(conn, source_records, "genes_json", len(genes))
         gene_ids = {gene.gene_id for gene in genes}
 
         definitions, representative_by_gene = load_transcript_definitions(
@@ -1794,7 +1755,6 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Build the versioned Potato Gene Catalog SQLite database."
     )
-    parser.add_argument("--genes-db", type=Path, default=DEFAULT_GENES_DB)
     parser.add_argument("--genes-json", type=Path, default=DEFAULT_GENES_JSON)
     parser.add_argument("--paper-metadata", type=Path, default=DEFAULT_PAPER_METADATA)
     parser.add_argument("--transcript-map", type=Path, default=DEFAULT_TRANSCRIPT_MAP)
@@ -1830,7 +1790,6 @@ def parse_args() -> argparse.Namespace:
 def main() -> None:
     args = parse_args()
     config = BuildConfig(
-        genes_db=args.genes_db,
         genes_json=args.genes_json,
         paper_metadata=args.paper_metadata,
         transcript_map=args.transcript_map,

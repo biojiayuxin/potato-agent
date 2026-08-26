@@ -1574,8 +1574,9 @@ Gene Catalog 代码随仓库部署，公开页面是 `/genes`，详情 deep link
 `/srv/gene_catalog/current/gene_catalog.sqlite`；数据库不是源码，也不能放进 Git checkout 或
 `/srv/potato_agent`。
 
-在受控构建目录中从经过审查的源数据生成完整数据库。builder 内置的个人开发路径不是生产配置；生产构建必须
-显式传入全部来源及 release 标识：
+在受控构建目录中从经过审查的源数据生成完整数据库。基因标识和文献关联以 `--genes-json` 为唯一数据源，
+不再读取由该 JSON 派生的 legacy `genes.db`。builder 内置的个人开发路径不是生产配置；生产构建必须显式传入
+全部来源及 release 标识：
 
 ```bash
 GENE_BUILD_ROOT=/var/tmp/potato-gene-catalog-$(date -u +%Y%m%dT%H%M%SZ)
@@ -1584,7 +1585,6 @@ test ! -e "$GENE_BUILD_ROOT"
 install -d -o root -g root -m 0700 "$GENE_BUILD_ROOT"
 
 python3.12 /srv/potato_agent/interface/build_gene_catalog_db.py \
-  --genes-db /path/to/reviewed/genes.db \
   --genes-json /path/to/reviewed/genes.json \
   --paper-metadata /path/to/reviewed/paper_metadata.txt \
   --transcript-map /path/to/reviewed/gene_to_transcript.txt \
