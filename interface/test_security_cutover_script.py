@@ -323,14 +323,14 @@ def test_cutover_rejects_runtime_paths_that_overlap_the_deploy_tree() -> None:
     assert "overlaps(resolved, repo_resolved)" in mapping_validation
 
 
-def test_readme_staging_excludes_generated_artifacts_and_uses_dynamic_count() -> None:
-    readme = (REPO_ROOT / "README.md").read_text(encoding="utf-8")
-    assert '-m 0700 "$BUILD_ROOT"' in readme
-    cutover_start = readme.index("CODE_SOURCE=$BUILD_ROOT/code-source")
-    cutover_end = readme.index(
+def test_deployment_guide_staging_excludes_artifacts_and_uses_dynamic_count() -> None:
+    deployment_guide = (REPO_ROOT / "HPC_DEPLOYMENT.md").read_text(encoding="utf-8")
+    assert '-m 0700 "$BUILD_ROOT"' in deployment_guide
+    cutover_start = deployment_guide.index("CODE_SOURCE=$BUILD_ROOT/code-source")
+    cutover_end = deployment_guide.index(
         "readlink -f /opt/potato-hermes-lite/current", cutover_start
     )
-    cutover = readme[cutover_start:cutover_end]
+    cutover = deployment_guide[cutover_start:cutover_end]
 
     for exclusion in (
         "--exclude '*.egg-info/'",
@@ -346,5 +346,5 @@ def test_readme_staging_excludes_generated_artifacts_and_uses_dynamic_count() ->
     assert '"$CODE_SOURCE" "$RELEASE_ID" "$EXPECTED_USER_COUNT"' in cutover
     assert 'chmod -R a+rX,go-w "$CODE_SOURCE"' in cutover
     assert 'find "$CODE_SOURCE" -type f ! -perm -0040' in cutover
-    assert re.search(r"EXPECTED_USER_COUNT\s*=\s*[0-9]+", readme) is None
-    assert re.search(r"--expect-count\s+[\"']?[0-9]+", readme) is None
+    assert re.search(r"EXPECTED_USER_COUNT\s*=\s*[0-9]+", deployment_guide) is None
+    assert re.search(r"--expect-count\s+[\"']?[0-9]+", deployment_guide) is None

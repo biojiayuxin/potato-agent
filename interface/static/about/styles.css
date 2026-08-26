@@ -1,21 +1,85 @@
 .about-main {
-  justify-items: center;
-  gap: 14px;
+  max-width: 1040px;
 }
 
-.github-link {
-  max-width: 100%;
-  color: #14532d;
+.about-readme {
+  min-width: 0;
+  padding: 32px 40px 44px;
+  border: 1px solid #d0d7de;
+  border-radius: 8px;
+  color: #1f2328;
+  background: #ffffff;
+  box-shadow: 0 12px 32px rgba(8, 15, 30, 0.1);
   font-size: 16px;
-  font-weight: 700;
-  line-height: 1.4;
+  line-height: 1.6;
+}
+
+.about-readme h2,
+.about-readme h3 {
+  color: #1f2328;
+  line-height: 1.25;
   letter-spacing: 0;
+}
+
+.about-readme h2 {
+  margin: 0;
+  padding-bottom: 10px;
+  border-bottom: 1px solid #d8dee4;
+  font-size: 30px;
+  font-weight: 650;
+}
+
+.about-readme h3 {
+  margin: 0 0 16px;
+  padding-bottom: 8px;
+  border-bottom: 1px solid #d8dee4;
+  font-size: 24px;
+  font-weight: 650;
+}
+
+.about-readme p {
+  margin: 16px 0 0;
+}
+
+.readme-section {
+  margin-top: 32px;
+}
+
+.resource-link-row {
+  display: flex;
+  align-items: center;
+  min-height: 44px;
+  padding: 10px 12px;
+  border: 1px solid #d0d7de;
+  border-radius: 6px;
+  background: #f6f8fa;
+}
+
+.resource-link {
+  color: #0969da;
+  font-weight: 600;
+  text-decoration: none;
+  min-width: 0;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+  font-size: 14px;
+  line-height: 1.5;
   overflow-wrap: anywhere;
+}
+
+.resource-link:hover {
+  text-decoration: underline;
+}
+
+.architecture-figure {
+  margin: 18px 0 0;
 }
 
 .architecture-link {
   width: 100%;
   display: block;
+  overflow: hidden;
+  border-radius: 6px;
+  background: #ffffff;
   line-height: 0;
 }
 
@@ -25,14 +89,33 @@
   display: block;
 }
 
-.github-link:focus-visible,
+.resource-link:focus-visible,
 .architecture-link:focus-visible {
-  outline: 3px solid rgba(37, 99, 235, 0.38);
+  outline: 3px solid rgba(9, 105, 218, 0.28);
   outline-offset: 3px;
 }
 
-@media (max-width: 580px) {
-  .github-link {
-    font-size: 14px;
+@media (max-width: 700px) {
+  .about-readme {
+    padding: 26px 20px 32px;
+  }
+
+  .about-readme h2 {
+    font-size: 26px;
+  }
+
+  .about-readme h3 {
+    font-size: 21px;
+  }
+}
+
+@media (max-width: 430px) {
+  .about-readme {
+    padding-right: 16px;
+    padding-left: 16px;
+  }
+
+  .resource-link {
+    font-size: 13px;
   }
 }

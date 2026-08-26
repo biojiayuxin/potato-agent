@@ -6,7 +6,7 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SYSTEMD_ROOT = REPO_ROOT / "packaging" / "systemd"
 RUNBOOK_PATH = REPO_ROOT / "interface" / "DAILY_UPDATES.md"
-ROOT_README_PATH = REPO_ROOT / "README.md"
+HPC_DEPLOYMENT_PATH = REPO_ROOT / "HPC_DEPLOYMENT.md"
 
 
 def test_daily_updates_service_uses_dedicated_identity_and_credentials() -> None:
@@ -91,11 +91,11 @@ def test_daily_updates_runbook_preserves_operational_boundaries() -> None:
     assert "Do not run the legacy three-database migration afterward" in runbook
 
 
-def test_root_readme_marks_daily_updates_as_a_separate_deployment() -> None:
-    readme = ROOT_README_PATH.read_text(encoding="utf-8")
+def test_hpc_deployment_marks_daily_updates_as_a_separate_deployment() -> None:
+    deployment_guide = HPC_DEPLOYMENT_PATH.read_text(encoding="utf-8")
 
-    assert "#### Daily Updates（需单独部署）" in readme
-    assert "只复制数据库只能让前端读取已有内容" in readme
-    assert "/srv/daily_updates/data/daily_updates.sqlite" in readme
-    assert "potato-daily-updates:potato-daily-updates 0640" in readme
-    assert "同步统一数据库时跳过旧 Knowledge" in readme
+    assert "#### Daily Updates（需单独部署）" in deployment_guide
+    assert "只复制数据库只能让前端读取已有内容" in deployment_guide
+    assert "/srv/daily_updates/data/daily_updates.sqlite" in deployment_guide
+    assert "potato-daily-updates:potato-daily-updates 0640" in deployment_guide
+    assert "同步统一数据库时跳过旧 Knowledge" in deployment_guide

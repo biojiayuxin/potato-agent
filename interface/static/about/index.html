@@ -6,7 +6,7 @@
     <title>About | Potato Agent</title>
     <link rel="icon" type="image/png" href="/static/favicon.png" />
     <link rel="stylesheet" href="/static/genes/styles.css?v=20260727-gene-detail-width" />
-    <link rel="stylesheet" href="/static/about/styles.css?v=20260819-shared-portal" />
+    <link rel="stylesheet" href="/static/about/styles.css?v=20260826-readme-3" />
     <link rel="stylesheet" href="/static/shared/feedback.css?v=20260819-feedback" />
   </head>
   <body>
@@ -31,10 +31,47 @@
       </header>
 
       <main class="genes-main about-main">
-        <a class="github-link" href="https://github.com/biojiayuxin/potato-agent" target="_blank" rel="noopener noreferrer">https://github.com/biojiayuxin/potato-agent</a>
-        <a class="architecture-link" href="/static/about/potato-agent-architecture.png" target="_blank" rel="noopener noreferrer" aria-label="Open the Potato Agent architecture diagram at full size">
-          <img src="/static/about/potato-agent-architecture.png" width="2405" height="2739" alt="Potato Agent architecture diagram" />
-        </a>
+        <article class="about-readme" aria-labelledby="about-title">
+          <header class="readme-header">
+            <h2 id="about-title">About Potato Agent</h2>
+          </header>
+
+          <section class="readme-section" aria-labelledby="source-code-title">
+            <h3 id="source-code-title">Source Code</h3>
+            <p>
+              The source code for this website is available in the Potato Agent
+              repository on GitHub.
+            </p>
+            <p class="resource-link-row">
+              <a class="resource-link" href="https://github.com/biojiayuxin/potato-agent" target="_blank" rel="noopener noreferrer">
+                https://github.com/biojiayuxin/potato-agent
+              </a>
+            </p>
+          </section>
+
+          <section class="readme-section" aria-labelledby="open-apis-title">
+            <h3 id="open-apis-title">Open APIs</h3>
+            <p>
+              The API interfaces for genomic data, bulk RNA-Seq, spatial
+              transcriptomics, WGCNA networks, and genome-wide gene function
+              prediction have been packaged as reusable Agent Skills.
+            </p>
+            <p class="resource-link-row">
+              <a class="resource-link" href="https://github.com/biojiayuxin/potato-agent/tree/lite/skills" target="_blank" rel="noopener noreferrer">
+                https://github.com/biojiayuxin/potato-agent/tree/lite/skills
+              </a>
+            </p>
+          </section>
+
+          <section class="readme-section architecture-section" aria-labelledby="architecture-title">
+            <h3 id="architecture-title">Architecture, Skills, and Databases</h3>
+            <figure class="architecture-figure">
+              <a class="architecture-link" href="/static/about/potato-agent-architecture.png" target="_blank" rel="noopener noreferrer" aria-label="Open the Potato Agent architecture diagram at full size">
+                <img src="/static/about/potato-agent-architecture.png" width="2405" height="2739" alt="Potato Agent architecture diagram" />
+              </a>
+            </figure>
+          </section>
+        </article>
       </main>
     </div>
     <script src="/static/shared/feedback.js?v=20260819-feedback" defer></script>

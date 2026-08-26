@@ -21,6 +21,7 @@ from interface.privileged_client import PrivilegedClientError
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SYSTEMD_ROOT = REPO_ROOT / "packaging" / "systemd"
+HPC_DEPLOYMENT_PATH = REPO_ROOT / "HPC_DEPLOYMENT.md"
 
 
 def _target(home: Path) -> HermesTarget:
@@ -196,3 +197,16 @@ def test_storage_timer_and_admin_usage_credentials_are_hardened_templates() -> N
     assert credential in proxy_unit
     assert "POTATO_ADMIN_USAGE_TOKEN=" not in interface_unit
     assert "POTATO_ADMIN_USAGE_TOKEN=" not in proxy_unit
+
+
+def test_hpc_deployment_covers_admin_observability_activation() -> None:
+    deployment_guide = HPC_DEPLOYMENT_PATH.read_text(encoding="utf-8")
+
+    assert "### 16. 启用管理员监控页面" in deployment_guide
+    assert "/etc/potato-agent/credentials/admin-usage-token" in deployment_guide
+    assert "root:root:400" in deployment_guide
+    assert "potato-storage-snapshot.service" in deployment_guide
+    assert "potato-storage-snapshot.timer" in deployment_guide
+    assert "set-role LOGIN admin" in deployment_guide
+    assert "https://agent.example.com/admin" in deployment_guide
+    assert "potato_admin_token" in deployment_guide

@@ -1813,6 +1813,33 @@ test "$(stat -c '%U:%G:%a' /var/lib/potato-agent/config/model_proxy.yaml)" = \
   'root:potato-model-proxy:640'
 ```
 
+打包的 model proxy 和 Interface unit 通过同一个 systemd credential 验证管理员用量查询。该凭据是两个
+unit 的必需启动条件，因此全新部署必须在首次启动 model proxy 前创建。它必须独立生成，不得与
+任一用户 proxy token 或 Daily Updates token 复用，也不得写入 unit `Environment=`。已有文件属于长期
+生产凭据；升级时只校验，不要重新生成或覆盖。
+
+```bash
+install -d -o root -g root -m 0700 /etc/potato-agent/credentials
+ADMIN_USAGE_CREDENTIAL=/etc/potato-agent/credentials/admin-usage-token
+test ! -e "$ADMIN_USAGE_CREDENTIAL"
+python3 - "$ADMIN_USAGE_CREDENTIAL" <<'PY'
+import os
+import secrets
+import sys
+
+path = sys.argv[1]
+fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o400)
+try:
+    os.write(fd, secrets.token_urlsafe(48).encode("ascii"))
+finally:
+    os.close(fd)
+PY
+chown root:root "$ADMIN_USAGE_CREDENTIAL"
+chmod 0400 "$ADMIN_USAGE_CREDENTIAL"
+test "$(stat -c '%U:%G:%a' "$ADMIN_USAGE_CREDENTIAL")" = 'root:root:400'
+test "$(stat -c '%s' "$ADMIN_USAGE_CREDENTIAL")" -ge 32
+```
+
 安装并启动本地 proxy service：
 
 ```bash
@@ -1869,8 +1896,9 @@ PUBLIC_ORIGIN=https://agent.example.com
 curl -fsS "$PUBLIC_ORIGIN/health" >/dev/null
 ```
 
-创建 root-only credential。session secret 应长期保持稳定；全新部署只生成一次。Resend key 使用无回显输入，
-不会进入 unit、argv 或导出的环境变量：
+继续创建 Interface 使用的 root-only credential。第 12 节的 `admin-usage-token` 此时必须已存在且通过
+owner/mode/长度校验，不要在这里重新生成。session secret 应长期保持稳定；全新部署只生成一次。
+Resend key 使用无回显输入，不会进入 unit、argv 或导出的环境变量：
 
 ```bash
 install -d -o root -g root -m 0700 /etc/potato-agent/credentials
@@ -1897,6 +1925,8 @@ printf '\n'
 unset RESEND_KEY
 chown root:root "$SESSION_CREDENTIAL" "$RESEND_CREDENTIAL"
 chmod 0600 "$SESSION_CREDENTIAL" "$RESEND_CREDENTIAL"
+test "$(stat -c '%U:%G:%a' /etc/potato-agent/credentials/admin-usage-token)" = \
+  'root:root:400'
 ```
 
 安装经过审计的 unit；非敏感的站点配置放在单独 drop-in：
@@ -2064,6 +2094,82 @@ http://<server-address>:3000/lite  # 仅限显式 HTTP profile
 systemd unit。安装 runtime 文件时会在用户 home 下创建 `public_data` 软链接，指向
 `/mnt/data/public_data`；共享数据目录的读写权限由该目录自身权限控制，开通流程不会修改它。
 Hermes service 默认保持 disabled，用户进入 workspace 时再按需启动。
+
+### 16. 启用管理员监控页面
+
+`/admin` 是只读运维页面，使用正式 Interface 账号的用户名或邮箱和原密码登录；临时账号和
+`role=user` 的正式账号都不能访问。用量统计只包含 model proxy 已完整消费的成功响应，不是计费
+记录；CPU、内存和负载在进程内采样，只有用户 home 占用量每日写入 Interface auth DB。
+
+安装 credential/unit、修改 sudoers、晋升首个管理员、重启两个主服务以及启用 timer 都是独立的
+生产变更，必须获得 owner 批准。对旧部署升级时，应先按第 12 节创建并校验
+`admin-usage-token`，然后才能运行会安装新 model proxy/Interface unit 的 cutover；cutover 不会安装或
+启用 storage snapshot timer。
+
+首次启用前，使用 SQLite backup API 分别备份
+`/var/lib/potato-agent/data/interface.db` 和
+`/var/lib/potato-agent/model-proxy/usage.db`，并对两个备份执行 `PRAGMA integrity_check`。备份目录必须是
+root-only，不能在读取原数据库的同时用 `cp` 复制 WAL 模式下的单个主文件。同时确认 auth DB 父目录为
+`potato-interface:potato-interface 0700`、数据库及 sidecar 为 `0600`，model proxy 状态目录为
+`potato-model-proxy:potato-model-proxy 0700`、`usage.db` 为 `0600`。
+
+先验证并安装每日存储快照 unit，暂不启用 timer：
+
+```bash
+systemd-analyze verify \
+  /srv/potato_agent/packaging/systemd/potato-storage-snapshot.service \
+  /srv/potato_agent/packaging/systemd/potato-storage-snapshot.timer
+install -D -o root -g root -m 0644 \
+  /srv/potato_agent/packaging/systemd/potato-storage-snapshot.service \
+  /etc/systemd/system/potato-storage-snapshot.service
+install -D -o root -g root -m 0644 \
+  /srv/potato_agent/packaging/systemd/potato-storage-snapshot.timer \
+  /etc/systemd/system/potato-storage-snapshot.timer
+systemctl daemon-reload
+```
+
+从已创建的正式账号中选择管理员。`LOGIN` 替换为实际用户名或邮箱；命令会拒绝临时账号，并在
+角色变更时撤销该账号的旧浏览器会话：
+
+```bash
+/opt/interface-env/bin/python /srv/potato_agent/manage_interface_users.py \
+  set-role LOGIN admin
+/opt/interface-env/bin/python /srv/potato_agent/manage_interface_users.py \
+  show LOGIN
+```
+
+按 model proxy、Interface 的顺序重启并验收健康端点。未带管理员 credential 的内部用量请求必须被拒绝：
+
+```bash
+systemctl restart potato-model-proxy.service
+curl -fsS http://127.0.0.1:8765/healthz | python3 -m json.tool >/dev/null
+test "$(curl -sS -o /dev/null -w '%{http_code}' \
+  'http://127.0.0.1:8765/internal/admin/usage/aggregate?start_at=0&end_at=1')" = 401
+systemctl restart potato-interface.service
+curl -fsS http://127.0.0.1:3000/health | python3 -m json.tool >/dev/null
+```
+
+先手动成功运行一次快照。用 `journalctl` 人工确认日志只包含 candidates/saved/errors 等聚合计数，不包含
+用户名或 home 路径，然后再启用每天 `04:00 Asia/Shanghai` 执行且支持宕机补跑的 timer：
+
+```bash
+systemctl start potato-storage-snapshot.service
+systemctl --no-pager --full status potato-storage-snapshot.service
+journalctl -u potato-storage-snapshot.service -n 20 --no-pager
+systemctl enable --now potato-storage-snapshot.timer
+systemctl list-timers potato-storage-snapshot.timer --no-pager
+```
+
+使用新的无痕浏览器 profile 访问 `https://agent.example.com/admin`，分别验证管理员、普通正式用户和临时
+用户。HTTPS profile 的 `potato_admin_token` 必须为 `Secure=true`、`HttpOnly=true`、`SameSite=Strict`、
+`Path=/admin`；经 owner 批准的显式 HTTP profile 只将 `Secure` 改为 `false`。不要复制、截图或输出 Cookie
+值。当反向代理不在 loopback 上时，只把实际代理网段写入站点 drop-in 的
+`INTERFACE_ADMIN_TRUSTED_PROXIES`；不得使用无限制的公网网段，否则登录限流的客户端 IP 边界会失效。
+
+停用管理员监控时，先执行 `systemctl disable --now potato-storage-snapshot.timer`，再恢复上一版代码和 unit，按
+model proxy、Interface 顺序重启。新增的 auth DB 表可以保留，旧版会忽略；只在完整性或迁移验收
+失败时恢复数据库备份。只要任一已安装 unit 仍引用 `admin-usage-token`，就不得删除该 credential。
+补充的安全边界和故障模式见 [`interface/ADMIN_OBSERVABILITY.md`](interface/ADMIN_OBSERVABILITY.md)。
 
 ## 升级已有部署
 
@@ -2987,6 +3093,7 @@ unit 中应包含：
 - `/var/lib/potato-agent/model-proxy/usage.db`
 - 上述 SQLite 对应的 `-wal`、`-shm` 和 `-journal` sidecar
 - `/etc/potato-agent/credentials/interface-session-secret`
+- `/etc/potato-agent/credentials/admin-usage-token`
 - `/etc/potato-agent/credentials/resend-api-key`
 - `/etc/potato-agent/credentials/daily-updates-model-proxy-token`
 - `/etc/potato-agent/credentials/daily-updates-pubmed-api-key`（可选）

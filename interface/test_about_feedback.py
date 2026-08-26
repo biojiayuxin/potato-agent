@@ -82,7 +82,33 @@ def test_about_and_shared_feedback_assets_are_public(tmp_path, monkeypatch) -> N
         assert '/static/genes/styles.css' in about_html
         assert '<div class="genes-app">' in about_html
         assert '<main class="genes-main about-main">' in about_html
+        assert '<article class="about-readme"' in about_html
+        assert "About Potato Agent" in about_html
+        assert "Source Code" in about_html
+        assert "Open APIs" in about_html
+        assert "Architecture, Skills, and Databases" in about_html
+        assert "README.md" not in about_html
+        assert "Potato Agent connects an AI agent" not in about_html
+        assert 'class="api-list"' not in about_html
+        assert "Browse the skills and installation resources" not in about_html
+        assert "The diagram below provides an overview" not in about_html
+        assert "Potato Agent architecture, integrated Agent Skills" not in about_html
+        assert "View full-size image" not in about_html
+        assert "<figcaption>" not in about_html
         assert "https://github.com/biojiayuxin/potato-agent" in about_html
+        assert (
+            "https://github.com/biojiayuxin/potato-agent/tree/lite/skills"
+            in about_html
+        )
+        normalized_about_html = " ".join(about_html.split()).lower()
+        for api_domain in (
+            "genomic data",
+            "bulk rna-seq",
+            "spatial transcriptomics",
+            "wgcna networks",
+            "genome-wide gene function prediction",
+        ):
+            assert api_domain in normalized_about_html
         assert 'target="_blank"' in about_html
         assert 'src="/static/about/potato-agent-architecture.png"' in about_html
         assert 'width="2405" height="2739"' in about_html
