@@ -48,6 +48,7 @@ from interface.auth_db import (
     EMAIL_VERIFICATION_PURPOSE_SIGNUP,
     EmailVerificationError,
     activate_signup_user,
+    cleanup_expired_agreement_acceptances,
     cleanup_terminal_signup_jobs,
     create_temporary_user,
     create_pending_email_verification,
@@ -63,11 +64,13 @@ from interface.auth_db import (
     get_user_by_id,
     get_user_with_password_by_id,
     get_user_with_password_by_login,
+    has_agreement_acceptance,
     is_temporary_user,
     list_users,
     mark_email_verification_failed,
     mark_temporary_user_cleanup_attempt,
     record_email_verification_sent,
+    record_agreement_acceptance,
     reset_user_password_with_email_verification,
     retire_temporary_user_identity,
     set_signup_job_status,
@@ -128,6 +131,12 @@ from interface.feedback_store import (
     finish_feedback_submission,
 )
 from interface.hermes_profile import DEFAULT_HERMES_LITE_PYTHON
+from interface.legal import (
+    CURRENT_AGREEMENT_PATH,
+    CURRENT_AGREEMENT_VERSION,
+    agreement_document_path,
+    current_agreement_metadata,
+)
 from interface.mapping import DEFAULT_MAPPING_PATH, HermesTarget, MappingStore
 from interface.mailer import (
     MailerConfigurationError,
@@ -220,8 +229,10 @@ SESSION_COOKIE_NAME = "potato_interface_token"
 REQUEST_AUTH_RESOLUTION_STATE_KEY = "potato_auth_resolution"
 SESSION_SECRET = load_session_secret()
 SESSION_COOKIE_SECURE = load_session_cookie_secure()
-SESSION_TTL_SECONDS = int(
-    os.getenv("INTERFACE_SESSION_TTL_SECONDS", str(7 * 24 * 3600))
+MAX_SESSION_TTL_SECONDS = 7 * 24 * 3600
+SESSION_TTL_SECONDS = min(
+    int(os.getenv("INTERFACE_SESSION_TTL_SECONDS", str(MAX_SESSION_TTL_SECONDS))),
+    MAX_SESSION_TTL_SECONDS,
 )
 MAX_UPLOAD_SIZE_BYTES = min(
     int(os.getenv("INTERFACE_MAX_UPLOAD_BYTES", str(HARD_MAX_UPLOAD_BYTES))),
@@ -391,6 +402,8 @@ class CurrentUser:
 class SigninRequest(BaseModel):
     email: str
     password: str
+    agreement_version: str = ""
+    agreement_accepted: bool = False
 
 
 class SignupRequest(BaseModel):
@@ -400,6 +413,13 @@ class SignupRequest(BaseModel):
     display_name: str = ""
     email_verification_id: str = ""
     email_verification_code: str = ""
+    agreement_version: str = ""
+    agreement_accepted: bool = False
+
+
+class TemporaryAuthRequest(BaseModel):
+    agreement_version: str = ""
+    agreement_accepted: bool = False
 
 
 class PasswordChangeRequest(BaseModel):
@@ -620,6 +640,23 @@ def _validate_signup_payload(
     return username, email, password, display_name, verification_id, verification_code
 
 
+def _validate_current_agreement_acceptance(
+    agreement_version: str,
+    agreement_accepted: bool,
+) -> dict[str, Any]:
+    metadata = current_agreement_metadata()
+    if not agreement_accepted or agreement_version.strip() != metadata["version"]:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "code": "agreement_required",
+                "message": "You must accept the current research preview terms before continuing.",
+                "agreement": metadata,
+            },
+        )
+    return metadata
+
+
 def _reset_mapping_store_cache() -> None:
     mapping_store._mtime_ns = None
     mapping_store._targets = []
@@ -698,8 +735,13 @@ def _process_signup_job_sync(job: dict[str, Any]) -> None:
 
 
 async def _signup_worker_loop() -> None:
+    last_agreement_cleanup_at = 0
     while True:
         await asyncio.to_thread(cleanup_terminal_signup_jobs)
+        now = _now_seconds()
+        if now - last_agreement_cleanup_at >= 24 * 60 * 60:
+            await asyncio.to_thread(cleanup_expired_agreement_acceptances)
+            last_agreement_cleanup_at = now
         job = await asyncio.to_thread(get_next_pending_signup_job)
         if job is None:
             await asyncio.sleep(2)
@@ -3114,6 +3156,7 @@ async def protect_admin_responses(request: Request, call_next):
 async def on_startup() -> None:
     ensure_auth_db()
     cleanup_terminal_signup_jobs()
+    cleanup_expired_agreement_acceptances()
     ensure_display_store()
     app.state.turn_submission_receipt_cleanup = cleanup_turn_submission_receipts()
     app.state.stale_live_sessions_failed = mark_active_live_session_states_failed(
@@ -3457,8 +3500,31 @@ async def serve_lite_index() -> FileResponse:
     return FileResponse(file_path)
 
 
+@app.get("/api/legal/agreement")
+async def get_current_legal_agreement() -> dict[str, Any]:
+    return current_agreement_metadata()
+
+
+@app.get("/user-agreement", include_in_schema=False)
+@app.get("/user-agreement/{version}", include_in_schema=False)
+async def serve_user_agreement(version: str | None = None) -> FileResponse:
+    file_path = (
+        agreement_document_path(version)
+        if version is not None
+        else CURRENT_AGREEMENT_PATH
+    )
+    if file_path is None or not file_path.is_file():
+        raise HTTPException(status_code=404, detail="Agreement version not found")
+    headers = (
+        {"Cache-Control": "public, max-age=31536000, immutable"}
+        if version
+        else {"Cache-Control": "no-cache"}
+    )
+    return FileResponse(file_path, headers=headers)
+
+
 @app.post("/api/auth/signin")
-async def signin(payload: SigninRequest, response: Response) -> dict[str, Any]:
+async def signin(payload: SigninRequest, response: Response) -> Any:
     login = payload.email.strip()
     if not login or not payload.password:
         raise HTTPException(
@@ -3474,6 +3540,34 @@ async def signin(payload: SigninRequest, response: Response) -> dict[str, Any]:
         verify_password, payload.password, password_hash
     ):
         raise HTTPException(status_code=401, detail="Invalid credentials")
+
+    agreement = current_agreement_metadata()
+    agreement_is_current = await asyncio.to_thread(
+        has_agreement_acceptance,
+        record.id,
+        str(agreement["version"]),
+        document_sha256=str(agreement["sha256"]),
+    )
+    if not agreement_is_current:
+        if (
+            not payload.agreement_accepted
+            or payload.agreement_version.strip() != agreement["version"]
+        ):
+            return JSONResponse(
+                status_code=428,
+                content={
+                    "error": "agreement_required",
+                    "message": "Accept the current research preview terms to sign in.",
+                    "agreement": agreement,
+                },
+            )
+        await asyncio.to_thread(
+            record_agreement_acceptance,
+            user_id=record.id,
+            agreement_version=str(agreement["version"]),
+            document_sha256=str(agreement["sha256"]),
+            source="signin",
+        )
 
     target = mapping_store.resolve_target(
         mapping_username=record.mapping_username,
@@ -3500,7 +3594,14 @@ async def signin(payload: SigninRequest, response: Response) -> dict[str, Any]:
 
 
 @app.post("/api/auth/temporary")
-async def create_temporary_auth_session(response: Response) -> dict[str, Any]:
+async def create_temporary_auth_session(
+    response: Response,
+    payload: TemporaryAuthRequest | None = None,
+) -> dict[str, Any]:
+    agreement = _validate_current_agreement_acceptance(
+        payload.agreement_version if payload is not None else "",
+        payload.agreement_accepted if payload is not None else False,
+    )
     last_integrity_error: sqlite3.IntegrityError | None = None
     for _ in range(3):
         username, email, display_name = await asyncio.to_thread(
@@ -3526,6 +3627,8 @@ async def create_temporary_auth_session(response: Response) -> dict[str, Any]:
                 password=password,
                 mapping_username=username,
                 name=display_name,
+                agreement_version=str(agreement["version"]),
+                agreement_document_sha256=str(agreement["sha256"]),
             )
             user = CurrentUser(
                 id=record.id,
@@ -3840,6 +3943,10 @@ async def signup(payload: SignupRequest) -> dict[str, Any]:
         verification_id,
         verification_code,
     ) = await asyncio.to_thread(_validate_signup_payload, payload)
+    agreement = _validate_current_agreement_acceptance(
+        payload.agreement_version,
+        payload.agreement_accepted,
+    )
     try:
         job_id = await asyncio.to_thread(
             create_signup_job_with_email_verification,
@@ -3851,6 +3958,8 @@ async def signup(payload: SignupRequest) -> dict[str, Any]:
             email_verification_code_hash=_hash_email_verification_code(
                 email, verification_code
             ),
+            agreement_version=str(agreement["version"]),
+            agreement_document_sha256=str(agreement["sha256"]),
         )
     except EmailVerificationError as exc:
         status_code = 429 if exc.reason == "too_many_attempts" else 400

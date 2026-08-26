@@ -34,8 +34,8 @@ def test_daily_updates_layout_keeps_login_first_on_small_screens() -> None:
     assert ".daily-updates-panel" in mobile
     assert "order: 2;" in mobile
     assert ".high-resolution-view .login-stage" in styles
-    assert "styles.css?v=20260803-daily-research-meta-type" in index
-    assert "app.js?v=20260803-daily-research-meta" in index
+    assert "styles.css?v=20260825-research-preview-terms" in index
+    assert "app.js?v=20260825-research-preview-terms" in index
 
 
 def test_daily_updates_hides_redundant_pubmed_metadata_and_uses_larger_type() -> None:

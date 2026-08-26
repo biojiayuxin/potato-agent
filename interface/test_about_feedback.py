@@ -85,7 +85,7 @@ def test_about_and_shared_feedback_assets_are_public(tmp_path, monkeypatch) -> N
         assert "https://github.com/biojiayuxin/potato-agent" in about_html
         assert 'target="_blank"' in about_html
         assert 'src="/static/about/potato-agent-architecture.png"' in about_html
-        assert 'width="2430" height="2533"' in about_html
+        assert 'width="2405" height="2739"' in about_html
         assert 'alt="Potato Agent architecture diagram"' in about_html
     finally:
         client.close()

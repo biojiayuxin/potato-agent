@@ -115,6 +115,10 @@ CREATE TABLE IF NOT EXISTS signup_jobs (
     error_message TEXT NOT NULL DEFAULT '',
     email_verification_id TEXT,
     email_verified_at INTEGER,
+    agreement_version TEXT NOT NULL DEFAULT '',
+    agreement_document_sha256 TEXT NOT NULL DEFAULT '',
+    agreement_accepted_at INTEGER,
+    agreement_source TEXT NOT NULL DEFAULT '',
     created_at INTEGER NOT NULL,
     updated_at INTEGER NOT NULL
 );
@@ -149,11 +153,27 @@ ON email_verifications(email, purpose, status, last_sent_at);
 
 CREATE INDEX IF NOT EXISTS idx_email_verifications_client_ip_sent
 ON email_verifications(client_ip_hash, last_sent_at);
+
+CREATE TABLE IF NOT EXISTS agreement_acceptances (
+    user_id TEXT NOT NULL,
+    agreement_version TEXT NOT NULL,
+    document_sha256 TEXT NOT NULL,
+    accepted_at INTEGER NOT NULL,
+    source TEXT NOT NULL CHECK (source IN ('signup', 'signin', 'temporary')),
+    user_deleted_at INTEGER,
+    retain_until INTEGER,
+    PRIMARY KEY(user_id, agreement_version)
+);
+
+CREATE INDEX IF NOT EXISTS idx_agreement_acceptances_retention
+ON agreement_acceptances(user_deleted_at, retain_until);
 """
 
 ACTIVE_SIGNUP_JOB_STATUSES = ("pending", "provisioning")
 TERMINAL_SIGNUP_JOB_STATUSES = ("completed", "failed")
 DEFAULT_SIGNUP_JOB_RETENTION_SECONDS = 3600
+DEFAULT_AGREEMENT_AUDIT_RETENTION_SECONDS = 3 * 365 * 24 * 60 * 60
+AGREEMENT_ACCEPTANCE_SOURCES = frozenset({"signup", "signin", "temporary"})
 EMAIL_VERIFICATION_PURPOSE_SIGNUP = "signup"
 EMAIL_VERIFICATION_PURPOSE_PASSWORD_RESET = "password_reset"
 EMAIL_VERIFICATION_STATUS_PENDING = "pending"
@@ -405,6 +425,27 @@ def ensure_auth_db(db_path: Path = DEFAULT_AUTH_DB_PATH) -> Path:
             )
             _add_column_if_missing(conn, "signup_jobs", "email_verification_id", "TEXT")
             _add_column_if_missing(conn, "signup_jobs", "email_verified_at", "INTEGER")
+            _add_column_if_missing(
+                conn,
+                "signup_jobs",
+                "agreement_version",
+                "TEXT NOT NULL DEFAULT ''",
+            )
+            _add_column_if_missing(
+                conn,
+                "signup_jobs",
+                "agreement_document_sha256",
+                "TEXT NOT NULL DEFAULT ''",
+            )
+            _add_column_if_missing(
+                conn, "signup_jobs", "agreement_accepted_at", "INTEGER"
+            )
+            _add_column_if_missing(
+                conn,
+                "signup_jobs",
+                "agreement_source",
+                "TEXT NOT NULL DEFAULT ''",
+            )
             _ensure_unique_mapping_username_index(conn)
             _backfill_current_usage_identities(conn)
             for index_name, column_name in (
@@ -624,6 +665,142 @@ def cleanup_terminal_signup_jobs(
         return cursor.rowcount
 
 
+def _record_agreement_acceptance_in_conn(
+    conn: sqlite3.Connection,
+    *,
+    user_id: str,
+    agreement_version: str,
+    document_sha256: str,
+    accepted_at: int,
+    source: str,
+) -> bool:
+    normalized_user_id = user_id.strip()
+    normalized_version = agreement_version.strip()
+    normalized_sha256 = document_sha256.strip().lower()
+    normalized_source = source.strip().lower()
+    if not normalized_user_id or not normalized_version or len(normalized_sha256) != 64:
+        raise ValueError("Complete agreement acceptance evidence is required")
+    if normalized_source not in AGREEMENT_ACCEPTANCE_SOURCES:
+        raise ValueError("Invalid agreement acceptance source")
+    cursor = conn.execute(
+        "insert or ignore into agreement_acceptances "
+        "(user_id, agreement_version, document_sha256, accepted_at, source, user_deleted_at, retain_until) "
+        "values (?, ?, ?, ?, ?, null, null)",
+        (
+            normalized_user_id,
+            normalized_version,
+            normalized_sha256,
+            int(accepted_at),
+            normalized_source,
+        ),
+    )
+    if cursor.rowcount > 0:
+        return True
+    existing = conn.execute(
+        "select document_sha256 from agreement_acceptances "
+        "where user_id = ? and agreement_version = ? limit 1",
+        (normalized_user_id, normalized_version),
+    ).fetchone()
+    if existing is None or str(existing[0]).lower() != normalized_sha256:
+        raise ValueError("Agreement version and document digest do not match")
+    return False
+
+
+def record_agreement_acceptance(
+    *,
+    user_id: str,
+    agreement_version: str,
+    document_sha256: str,
+    source: str,
+    now: int | None = None,
+    db_path: Path = DEFAULT_AUTH_DB_PATH,
+) -> bool:
+    timestamp = int(time.time()) if now is None else int(now)
+    with connect_auth_db(db_path) as conn:
+        inserted = _record_agreement_acceptance_in_conn(
+            conn,
+            user_id=user_id,
+            agreement_version=agreement_version,
+            document_sha256=document_sha256,
+            accepted_at=timestamp,
+            source=source,
+        )
+        conn.commit()
+    return inserted
+
+
+def has_agreement_acceptance(
+    user_id: str,
+    agreement_version: str,
+    *,
+    document_sha256: str | None = None,
+    db_path: Path = DEFAULT_AUTH_DB_PATH,
+) -> bool:
+    normalized_user_id = user_id.strip()
+    normalized_version = agreement_version.strip()
+    params: list[Any] = [normalized_user_id, normalized_version]
+    query = (
+        "select 1 from agreement_acceptances "
+        "where user_id = ? and agreement_version = ?"
+    )
+    if document_sha256 is not None:
+        query += " and document_sha256 = ?"
+        params.append(document_sha256.strip().lower())
+    query += " limit 1"
+    with connect_auth_db(db_path) as conn:
+        row = conn.execute(query, tuple(params)).fetchone()
+    return row is not None
+
+
+def get_agreement_acceptance(
+    user_id: str,
+    agreement_version: str,
+    *,
+    db_path: Path = DEFAULT_AUTH_DB_PATH,
+) -> dict[str, Any] | None:
+    with connect_auth_db(db_path) as conn:
+        row = conn.execute(
+            "select user_id, agreement_version, document_sha256, accepted_at, source, user_deleted_at, retain_until "
+            "from agreement_acceptances where user_id = ? and agreement_version = ? limit 1",
+            (user_id.strip(), agreement_version.strip()),
+        ).fetchone()
+    return dict(row) if row is not None else None
+
+
+def _mark_agreement_acceptances_deleted_in_conn(
+    conn: sqlite3.Connection,
+    user_ids: list[str],
+    *,
+    deleted_at: int,
+    retention_seconds: int = DEFAULT_AGREEMENT_AUDIT_RETENTION_SECONDS,
+) -> None:
+    if not user_ids:
+        return
+    placeholders = ",".join("?" for _ in user_ids)
+    retain_until = int(deleted_at) + max(int(retention_seconds), 0)
+    conn.execute(
+        f"update agreement_acceptances set user_deleted_at = coalesce(user_deleted_at, ?), "
+        f"retain_until = coalesce(retain_until, ?) where user_id in ({placeholders})",
+        (int(deleted_at), retain_until, *user_ids),
+    )
+
+
+def cleanup_expired_agreement_acceptances(
+    *,
+    now: int | None = None,
+    db_path: Path = DEFAULT_AUTH_DB_PATH,
+) -> int:
+    timestamp = int(time.time()) if now is None else int(now)
+    with connect_auth_db(db_path) as conn:
+        cursor = conn.execute(
+            "delete from agreement_acceptances "
+            "where user_deleted_at is not null and retain_until is not null and retain_until <= ?",
+            (timestamp,),
+        )
+        conn.commit()
+    return cursor.rowcount
+
+
 def hash_password(password: str) -> str:
     return bcrypt.hashpw(password.encode("utf-8"), bcrypt.gensalt()).decode("utf-8")
 
@@ -718,6 +895,8 @@ def create_temporary_user(
     password: str,
     mapping_username: str,
     name: str | None = None,
+    agreement_version: str = "",
+    agreement_document_sha256: str = "",
     db_path: Path | None = None,
 ) -> InterfaceUser:
     resolved_db_path = db_path or DEFAULT_AUTH_DB_PATH
@@ -763,6 +942,15 @@ def create_temporary_user(
             created_at=now,
             source="temporary_user",
         )
+        if agreement_version or agreement_document_sha256:
+            _record_agreement_acceptance_in_conn(
+                conn,
+                user_id=user_id,
+                agreement_version=agreement_version,
+                document_sha256=agreement_document_sha256,
+                accepted_at=now,
+                source="temporary",
+            )
         conn.commit()
 
     user = get_user_by_id(user_id, resolved_db_path)
@@ -1178,6 +1366,9 @@ def create_signup_job(
     display_name: str,
     email_verification_id: str | None = None,
     email_verified_at: int | None = None,
+    agreement_version: str = "",
+    agreement_document_sha256: str = "",
+    agreement_accepted_at: int | None = None,
     db_path: Path = DEFAULT_AUTH_DB_PATH,
 ) -> str:
     normalized_username = username.strip()
@@ -1189,8 +1380,8 @@ def create_signup_job(
     with connect_auth_db(db_path) as conn:
         conn.execute(
             "insert into signup_jobs "
-            "(job_id, username, email, password_hash, display_name, status, error_message, email_verification_id, email_verified_at, created_at, updated_at) "
-            "values (?, ?, ?, ?, ?, 'pending', '', ?, ?, ?, ?)",
+            "(job_id, username, email, password_hash, display_name, status, error_message, email_verification_id, email_verified_at, agreement_version, agreement_document_sha256, agreement_accepted_at, agreement_source, created_at, updated_at) "
+            "values (?, ?, ?, ?, ?, 'pending', '', ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 job_id,
                 normalized_username,
@@ -1199,6 +1390,14 @@ def create_signup_job(
                 display_name.strip() or normalized_username,
                 email_verification_id,
                 email_verified_at,
+                agreement_version.strip(),
+                agreement_document_sha256.strip().lower(),
+                (
+                    int(agreement_accepted_at)
+                    if agreement_accepted_at is not None
+                    else (now if agreement_version and agreement_document_sha256 else None)
+                ),
+                "signup" if agreement_version and agreement_document_sha256 else "",
                 now,
                 now,
             ),
@@ -1217,6 +1416,8 @@ def create_signup_job_with_email_verification(
     email_verification_code_hash: str,
     purpose: str = EMAIL_VERIFICATION_PURPOSE_SIGNUP,
     max_attempts: int = DEFAULT_EMAIL_VERIFICATION_MAX_ATTEMPTS,
+    agreement_version: str = "",
+    agreement_document_sha256: str = "",
     now: int | None = None,
     db_path: Path = DEFAULT_AUTH_DB_PATH,
 ) -> str:
@@ -1240,8 +1441,8 @@ def create_signup_job_with_email_verification(
         password_hash = hash_password(password)
         conn.execute(
             "insert into signup_jobs "
-            "(job_id, username, email, password_hash, display_name, status, error_message, email_verification_id, email_verified_at, created_at, updated_at) "
-            "values (?, ?, ?, ?, ?, 'pending', '', ?, ?, ?, ?)",
+            "(job_id, username, email, password_hash, display_name, status, error_message, email_verification_id, email_verified_at, agreement_version, agreement_document_sha256, agreement_accepted_at, agreement_source, created_at, updated_at) "
+            "values (?, ?, ?, ?, ?, 'pending', '', ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 job_id,
                 normalized_username,
@@ -1250,6 +1451,10 @@ def create_signup_job_with_email_verification(
                 display_name.strip() or normalized_username,
                 email_verification_id.strip(),
                 timestamp,
+                agreement_version.strip(),
+                agreement_document_sha256.strip().lower(),
+                timestamp if agreement_version and agreement_document_sha256 else None,
+                "signup" if agreement_version and agreement_document_sha256 else "",
                 timestamp,
                 timestamp,
             ),
@@ -1270,7 +1475,7 @@ def get_signup_job(job_id: str, db_path: Path = DEFAULT_AUTH_DB_PATH) -> dict | 
 def get_next_pending_signup_job(db_path: Path = DEFAULT_AUTH_DB_PATH) -> dict | None:
     with connect_auth_db(db_path) as conn:
         row = conn.execute(
-            "select job_id, username, email, password_hash, display_name, status, error_message, email_verification_id, email_verified_at, created_at, updated_at from signup_jobs where status = 'pending' order by created_at asc limit 1"
+            "select job_id, username, email, password_hash, display_name, status, error_message, email_verification_id, email_verified_at, agreement_version, agreement_document_sha256, agreement_accepted_at, agreement_source, created_at, updated_at from signup_jobs where status = 'pending' order by created_at asc limit 1"
         ).fetchone()
     return dict(row) if row is not None else None
 
@@ -1303,7 +1508,7 @@ def activate_signup_user(
     with connect_auth_db(db_path) as conn:
         conn.execute("begin immediate")
         row = conn.execute(
-            "select username, email, password_hash, display_name from signup_jobs where job_id = ? limit 1",
+            "select username, email, password_hash, display_name, agreement_version, agreement_document_sha256, agreement_accepted_at, agreement_source from signup_jobs where job_id = ? limit 1",
             (job_id,),
         ).fetchone()
         if row is None:
@@ -1329,6 +1534,15 @@ def activate_signup_user(
             created_at=now,
             source="signup",
         )
+        if str(row["agreement_version"] or ""):
+            _record_agreement_acceptance_in_conn(
+                conn,
+                user_id=user_id,
+                agreement_version=str(row["agreement_version"]),
+                document_sha256=str(row["agreement_document_sha256"]),
+                accepted_at=int(row["agreement_accepted_at"] or now),
+                source=str(row["agreement_source"] or "signup"),
+            )
         conn.commit()
 
     user = get_user_by_id(user_id, db_path)
@@ -1360,6 +1574,9 @@ def delete_user_by_mapping_username(
         user_ids = [str(row["id"]) for row in users]
         _assert_admin_deletion_allowed(conn, user_ids)
         now = int(time.time())
+        _mark_agreement_acceptances_deleted_in_conn(
+            conn, user_ids, deleted_at=now
+        )
         for target_user_id in user_ids:
             conn.execute(
                 "update user_usage_identities set retired_at = coalesce(retired_at, ?) "
@@ -1413,10 +1630,16 @@ def delete_user_by_id(user_id: str, db_path: Path | None = None) -> bool:
             "select 1 from temporary_users where user_id = ? limit 1",
             (normalized_user_id,),
         ).fetchone()
+        deleted_at = int(time.time())
+        _mark_agreement_acceptances_deleted_in_conn(
+            conn,
+            [normalized_user_id] if row is not None else [],
+            deleted_at=deleted_at,
+        )
         conn.execute(
             "update user_usage_identities set retired_at = coalesce(retired_at, ?) "
             "where user_id = ?",
-            (int(time.time()), normalized_user_id),
+            (deleted_at, normalized_user_id),
         )
         if temporary is not None:
             conn.execute(

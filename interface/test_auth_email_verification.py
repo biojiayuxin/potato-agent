@@ -333,6 +333,8 @@ def test_signup_email_verification_api_sends_and_signup_consumes_code(
                 "display_name": "Alice",
                 "email_verification_id": payload["verification_id"],
                 "email_verification_code": sent["code"],
+                "agreement_version": app_mod.CURRENT_AGREEMENT_VERSION,
+                "agreement_accepted": True,
             },
         )
         assert signup_response.status_code == 200, signup_response.text

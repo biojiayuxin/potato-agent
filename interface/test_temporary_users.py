@@ -577,7 +577,13 @@ def _load_app(tmp_path, monkeypatch):
 def test_temporary_auth_session_creates_user_and_cookie(tmp_path, monkeypatch) -> None:
     client, app_mod, auth_db_mod, db_path = _load_app(tmp_path, monkeypatch)
 
-    response = client.post("/api/auth/temporary")
+    response = client.post(
+        "/api/auth/temporary",
+        json={
+            "agreement_version": app_mod.CURRENT_AGREEMENT_VERSION,
+            "agreement_accepted": True,
+        },
+    )
 
     assert response.status_code == 200, response.text
     payload = response.json()
@@ -589,6 +595,13 @@ def test_temporary_auth_session_creates_user_and_cookie(tmp_path, monkeypatch) -
     assert len(users) == 1
     assert users[0].username == payload["username"]
     assert auth_db_mod.is_temporary_user(users[0].id, db_path=db_path)
+    acceptance = auth_db_mod.get_agreement_acceptance(
+        users[0].id,
+        app_mod.CURRENT_AGREEMENT_VERSION,
+        db_path=db_path,
+    )
+    assert acceptance is not None
+    assert acceptance["source"] == "temporary"
 
     session_response = client.get("/api/auth/session")
     assert session_response.status_code == 200, session_response.text
@@ -599,7 +612,13 @@ def test_temporary_auth_session_creates_user_and_cookie(tmp_path, monkeypatch) -
 
 def test_expired_temporary_session_waits_for_scheduler_revocation(tmp_path, monkeypatch) -> None:
     client, app_mod, auth_db_mod, db_path = _load_app(tmp_path, monkeypatch)
-    response = client.post("/api/auth/temporary")
+    response = client.post(
+        "/api/auth/temporary",
+        json={
+            "agreement_version": app_mod.CURRENT_AGREEMENT_VERSION,
+            "agreement_accepted": True,
+        },
+    )
     assert response.status_code == 200, response.text
     user = auth_db_mod.list_users(db_path=db_path)[0]
     old_activity_at = 1000
@@ -693,8 +712,14 @@ def test_file_tree_refresh_does_not_extend_activity(tmp_path, monkeypatch) -> No
 
 
 def test_temporary_user_cannot_change_password(tmp_path, monkeypatch) -> None:
-    client, _, _, _ = _load_app(tmp_path, monkeypatch)
-    response = client.post("/api/auth/temporary")
+    client, app_mod, _, _ = _load_app(tmp_path, monkeypatch)
+    response = client.post(
+        "/api/auth/temporary",
+        json={
+            "agreement_version": app_mod.CURRENT_AGREEMENT_VERSION,
+            "agreement_accepted": True,
+        },
+    )
     assert response.status_code == 200, response.text
 
     password_response = client.post(

@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Potato Agent</title>
     <link rel="icon" type="image/png" href="./static/favicon.png" />
-    <link rel="stylesheet" href="./static/lite/styles.css?v=20260803-daily-research-meta-type" />
+    <link rel="stylesheet" href="./static/lite/styles.css?v=20260826-concise-consent" />
     <link rel="stylesheet" href="/static/shared/feedback.css?v=20260819-feedback" />
   </head>
   <body>
@@ -73,6 +73,7 @@
                 <button id="show-temporary-button" type="button" class="primary login-home-button">Quick Start</button>
                 <button id="show-login-button" type="button" class="primary login-home-button">Sign in</button>
                 <button id="show-register-button" type="button" class="ghost login-home-button">Register</button>
+                <a class="auth-legal-link agreement-link" href="/user-agreement" target="_blank" rel="noopener noreferrer">Research Preview Terms &amp; Privacy</a>
               </div>
 
               <div id="auth-panel-header" class="login-card-header" hidden>
@@ -90,10 +91,17 @@
                   <span>Password</span>
                   <input id="password" name="password" type="password" autocomplete="current-password" required />
                 </label>
+                <div id="signin-agreement-panel" class="agreement-panel" hidden>
+                  <label class="agreement-checkbox-row">
+                    <input id="signin-agreement-checkbox" type="checkbox" />
+                    <span>I have read and agree to the <a class="agreement-link" href="/user-agreement" target="_blank" rel="noopener noreferrer">Research Preview Terms and Privacy Notice</a>.</span>
+                  </label>
+                </div>
                 <div class="login-inline-action">
                   <button id="forgot-password-button" type="button" class="login-link-button">Forgot password?</button>
                 </div>
                 <button type="submit" class="primary login-submit">Sign in</button>
+                <a class="auth-legal-link agreement-link" href="/user-agreement" target="_blank" rel="noopener noreferrer">Research Preview Terms &amp; Privacy</a>
                 <div id="login-error" class="error" hidden></div>
               </form>
 
@@ -162,6 +170,12 @@
                   <span>Confirm password</span>
                   <input id="register-password-confirm" name="register-password-confirm" type="password" autocomplete="new-password" />
                 </label>
+                <div class="agreement-panel">
+                  <label class="agreement-checkbox-row">
+                    <input id="register-agreement-checkbox" type="checkbox" />
+                    <span>I have read and agree to the <a class="agreement-link" href="/user-agreement" target="_blank" rel="noopener noreferrer">Research Preview Terms and Privacy Notice</a>.</span>
+                  </label>
+                </div>
                 <button type="submit" class="primary login-submit">Create account</button>
                 <div id="register-error" class="error" hidden></div>
               </form>
@@ -227,9 +241,13 @@
           <p id="temporary-confirm-description">
             After 30 minutes of inactivity, chat history and workspace data are deleted.
           </p>
+          <label class="agreement-checkbox-row temporary-agreement-checkbox-row">
+            <input id="temporary-agreement-checkbox" type="checkbox" />
+            <span>I have read and agree to the <a class="agreement-link" href="/user-agreement" target="_blank" rel="noopener noreferrer">Research Preview Terms and Privacy Notice</a>.</span>
+          </label>
           <div class="temporary-confirm-actions">
             <button id="temporary-confirm-cancel" type="button" class="ghost">Cancel</button>
-            <button id="temporary-confirm-start" type="button" class="primary">Confirm</button>
+            <button id="temporary-confirm-start" type="button" class="primary" disabled>Confirm</button>
           </div>
         </section>
       </div>
@@ -307,6 +325,15 @@
                 </svg>
               </button>
               <div id="sidebar-settings-menu" class="sidebar-settings-menu" role="menu" hidden>
+                <a class="sidebar-settings-menu-item agreement-link" href="/user-agreement" target="_blank" rel="noopener noreferrer" role="menuitem">
+                  <svg class="sidebar-settings-menu-icon" viewBox="0 0 24 24" aria-hidden="true">
+                    <path d="M6 2h9l3 3v17H6z"></path>
+                    <path d="M14 2v4h4"></path>
+                    <path d="M9 11h6"></path>
+                    <path d="M9 15h6"></path>
+                  </svg>
+                  <span>Terms &amp; privacy</span>
+                </a>
                 <button id="sidebar-change-password-button" class="sidebar-settings-menu-item" type="button" role="menuitem">
                   <svg class="sidebar-settings-menu-icon" viewBox="0 0 24 24" aria-hidden="true">
                     <circle cx="7.5" cy="15.5" r="5.5"></circle>
@@ -554,6 +581,6 @@
 
     <script src="./static/lite/vendor/marked.umd.js"></script>
     <script src="/static/shared/feedback.js?v=20260819-feedback" defer></script>
-    <script type="module" src="./static/lite/app.js?v=20260803-daily-research-meta"></script>
+    <script type="module" src="./static/lite/app.js?v=20260825-research-preview-terms"></script>
   </body>
 </html>

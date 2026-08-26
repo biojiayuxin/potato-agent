@@ -1,0 +1,267 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Potato Agent Research Preview Terms, Privacy Notice, and Risk Acknowledgment</title>
+    <link rel="icon" type="image/png" href="/static/favicon.png" />
+    <style>
+      :root {
+        color-scheme: light;
+        --ink: #172033;
+        --muted: #586174;
+        --line: #d7dde8;
+        --paper: #ffffff;
+        --page: #f2f5f8;
+        --accent: #165d4a;
+        --warning: #fff4d6;
+        --warning-line: #dba935;
+      }
+      * { box-sizing: border-box; }
+      html { background: var(--page); }
+      body {
+        margin: 0;
+        color: var(--ink);
+        font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+        font-size: 16px;
+        line-height: 1.7;
+        letter-spacing: 0;
+      }
+      header {
+        border-bottom: 1px solid var(--line);
+        background: var(--paper);
+      }
+      .header-inner,
+      main,
+      footer {
+        width: min(860px, calc(100% - 36px));
+        margin: 0 auto;
+      }
+      .header-inner { padding: 28px 0 24px; }
+      .brand {
+        color: var(--accent);
+        font-size: 14px;
+        font-weight: 750;
+      }
+      h1 {
+        max-width: 760px;
+        margin: 8px 0 10px;
+        font-size: 34px;
+        line-height: 1.2;
+        letter-spacing: 0;
+      }
+      .meta { margin: 0; color: var(--muted); }
+      main { padding: 34px 0 48px; }
+      section { margin-top: 32px; }
+      h2 {
+        margin: 0 0 10px;
+        font-size: 22px;
+        line-height: 1.35;
+        letter-spacing: 0;
+      }
+      h3 {
+        margin: 22px 0 6px;
+        font-size: 17px;
+        line-height: 1.45;
+        letter-spacing: 0;
+      }
+      p { margin: 8px 0; }
+      ul, ol { padding-left: 24px; }
+      li + li { margin-top: 7px; }
+      a { color: #155fc2; overflow-wrap: anywhere; }
+      .risk-summary {
+        margin: 0;
+        padding: 20px 22px;
+        border: 1px solid var(--warning-line);
+        border-left-width: 5px;
+        border-radius: 6px;
+        background: var(--warning);
+      }
+      .risk-summary h2 { font-size: 20px; }
+      table {
+        width: 100%;
+        border-collapse: collapse;
+        margin-top: 14px;
+        font-size: 14px;
+      }
+      th, td {
+        padding: 11px 12px;
+        border: 1px solid var(--line);
+        text-align: left;
+        vertical-align: top;
+      }
+      th { background: #eef2f5; }
+      .caps { font-weight: 750; }
+      footer {
+        padding: 22px 0 36px;
+        border-top: 1px solid var(--line);
+        color: var(--muted);
+        font-size: 14px;
+      }
+      @media (max-width: 620px) {
+        h1 { font-size: 28px; }
+        .header-inner, main, footer { width: min(100% - 28px, 860px); }
+        table, thead, tbody, tr, th, td { display: block; }
+        thead { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); }
+        tr { margin-top: 12px; border: 1px solid var(--line); }
+        td { border: 0; border-bottom: 1px solid var(--line); }
+        td:last-child { border-bottom: 0; }
+        td::before { content: attr(data-label); display: block; margin-bottom: 3px; font-weight: 750; }
+      }
+    </style>
+  </head>
+  <body>
+    <header>
+      <div class="header-inner">
+        <div class="brand">Potato Agent Project</div>
+        <h1>Potato Agent Research Preview Terms, Privacy Notice, and Risk Acknowledgment</h1>
+        <p class="meta">Version 2026-08-25 &middot; Effective 2026-08-25</p>
+      </div>
+    </header>
+    <main>
+      <aside class="risk-summary" aria-labelledby="risk-summary-title">
+        <h2 id="risk-summary-title">Important research preview risks</h2>
+        <ul>
+          <li>External model providers may process, retain, or use your content to train or improve models or products under their policies in effect at the time.</li>
+          <li>Agent actions can execute commands and modify, overwrite, or delete files and data in your workspace.</li>
+          <li>Outputs can be incorrect, incomplete, fabricated, insecure, non-reproducible, or unsuitable for research or other decisions.</li>
+          <li>The Service may be unavailable or discontinued, and storage, backup, recovery, or preservation of data is not guaranteed.</li>
+          <li>Do not submit sensitive personal information, credentials, confidential material, unpublished secrets, controlled data, or any content you are not authorized to process.</li>
+        </ul>
+      </aside>
+
+      <section>
+        <h2>1. Service identity, research purpose, and eligibility</h2>
+        <p>Potato Agent is maintained by the <strong>Potato Agent Project</strong> as an independent, free, non-commercial, experimental public-interest research preview (the <strong>Service</strong>). The Project has a research association with Yunnan Normal University, but the Project is not represented here as a separate legal person.</p>
+        <p>Yunnan Normal University does not automatically become a party to these Terms, a guarantor, or a provider responsible for the Service merely because a university domain, email address, research affiliation, hosting resource, or other infrastructure is used. Nothing in these Terms states that the university has approved, sponsored, warranted, or assumed responsibility for the Service.</p>
+        <p>You may use the Service only if you are an individual research user who is at least 18 years old and legally capable of accepting these Terms. The Service is not offered for consumer, clinical, production, commercial, or mission-critical use. By creating an account, signing in after a Terms update, or using Quick Start, you confirm that you meet these requirements and accept these Terms.</p>
+      </section>
+
+      <section>
+        <h2>2. Experimental agent behavior and your decisions</h2>
+        <p>The Service can call external models, browse websites, create or edit content, execute commands, and interact with files. Tool confirmations and technical safeguards reduce some risks but cannot eliminate them. Agent behavior may differ between runs and can have unintended consequences.</p>
+        <p>You independently decide whether to submit data, authorize or execute a command, rely on an output, or use a generated artifact. You are responsible for maintaining independent backups; checking methods, facts, calculations, citations, licenses, security, and reproducibility; and obtaining all required ethical, institutional, regulatory, or third-party approvals. You must not rely on the Service as the sole basis for medical, legal, safety-critical, personnel, financial, regulatory, publication, intellectual-property, or other high-impact decisions.</p>
+      </section>
+
+      <section>
+        <h2>3. Acceptable use</h2>
+        <p>You must comply with applicable law, research ethics, institutional requirements, and third-party rights. You must not use or attempt to use the Service to:</p>
+        <ul>
+          <li>access systems, accounts, data, or networks without authorization; bypass permissions, safeguards, quotas, or approval controls; probe vulnerabilities without written authorization; or interfere with service operation;</li>
+          <li>develop, deploy, or distribute malware; steal or expose credentials; conduct phishing, fraud, harassment, surveillance, or other harmful activity;</li>
+          <li>mine cryptocurrency, resell access, automate abusive workloads, monopolize shared compute, evade resource limits, or use the Service for unauthorized commercial processing;</li>
+          <li>infringe intellectual-property, privacy, publicity, confidentiality, database, or other rights, or submit unlawful or tortious content;</li>
+          <li>conduct high-risk biological dual-use work, including work intended or reasonably likely to enable pathogen enhancement, harmful synthesis, evasion of safeguards, or other serious biological harm; or</li>
+          <li>upload personal information, human-subject data, confidential information, controlled data, trade secrets, credentials, or other material unless you have a valid legal basis and authorization and the Service is an appropriate processing environment.</li>
+        </ul>
+      </section>
+
+      <section>
+        <h2>4. Your content and limited license</h2>
+        <p>As between you and the Project, you retain the rights you hold in prompts, files, feedback, and other content you submit, and you remain responsible for that content. You grant the Project, its maintainers, and necessary service providers a limited, non-exclusive license to host, copy, transmit, transform, and inspect content only as needed to provide and secure the Service, investigate abuse, respond to your support request, troubleshoot a fault, comply with law, or perform the third-party processing described below.</p>
+        <p>The Project does not use account chats or workspace files for general model or Service performance improvement. This does not control how an external provider uses content under its own terms or policy. Do not submit content unless you can authorize the processing and any transfers described here.</p>
+      </section>
+
+      <section>
+        <h2>5. Privacy notice and external processing</h2>
+        <p>The Project maintainers determine the limited processing needed to operate this research preview. Depending on how you use the Service, processed data may include account identifiers and credentials, agreement evidence, prompts, chat messages, uploaded and generated files, tool requests and results, model usage metadata, support correspondence, and security or operational events. Processing purposes are account administration, service delivery, security, abuse prevention, troubleshooting, support, resource accounting, legal compliance, and the limited research-preview operation described in these Terms.</p>
+        <p>Your affirmative acceptance supplies consent where consent is the applicable basis. Some processing may also be necessary to provide the Service you request or to meet mandatory legal duties. Model and other providers may operate outside mainland China, so your content and related metadata may be transferred across borders and handled under the provider's then-current terms, privacy notice, retention settings, account configuration, and applicable law.</p>
+        <table aria-label="External providers and data practices">
+          <thead>
+            <tr><th>Provider</th><th>Role and possible data</th><th>Policy</th></tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td data-label="Provider">OpenAI</td>
+              <td data-label="Role and possible data">Model inference; prompts, attachments, tool context, and outputs may be processed, retained, or used for model or product improvement as its policy and account settings permit.</td>
+              <td data-label="Policy"><a href="https://openai.com/policies/business-data/" rel="noopener noreferrer">Business data privacy, security, and compliance</a></td>
+            </tr>
+            <tr>
+              <td data-label="Provider">Google</td>
+              <td data-label="Role and possible data">Gemini model inference; content may be reviewed, retained, or used to improve products or models as the applicable paid or unpaid service terms provide.</td>
+              <td data-label="Policy"><a href="https://ai.google.dev/gemini-api/terms" rel="noopener noreferrer">Gemini API Additional Terms</a></td>
+            </tr>
+            <tr>
+              <td data-label="Provider">DeepSeek</td>
+              <td data-label="Role and possible data">Model inference; inputs, outputs, device or service data may be processed, retained, or used for service or model improvement under its current policy.</td>
+              <td data-label="Policy"><a href="https://cdn.deepseek.com/policies/en-US/deepseek-privacy-policy.html" rel="noopener noreferrer">DeepSeek Privacy Policy</a></td>
+            </tr>
+            <tr>
+              <td data-label="Provider">Moonshot AI</td>
+              <td data-label="Role and possible data">Model inference; inputs, outputs, and service metadata may be processed or retained under its current terms and privacy rules.</td>
+              <td data-label="Policy"><a href="https://platform.kimi.com/docs/agreement/userprivacy" rel="noopener noreferrer">Moonshot AI Privacy Policy</a></td>
+            </tr>
+            <tr>
+              <td data-label="Provider">Resend</td>
+              <td data-label="Role and possible data">Transactional email delivery, including an email address and message delivery metadata.</td>
+              <td data-label="Policy"><a href="https://resend.com/legal/privacy-policy" rel="noopener noreferrer">Resend Privacy Policy</a></td>
+            </tr>
+            <tr>
+              <td data-label="Provider">Tavily</td>
+              <td data-label="Role and possible data">Web search queries and returned search metadata.</td>
+              <td data-label="Policy"><a href="https://tavily.com/privacy" rel="noopener noreferrer">Tavily Privacy Policy</a></td>
+            </tr>
+            <tr>
+              <td data-label="Provider">Websites you direct the agent to access</td>
+              <td data-label="Role and possible data">Those sites receive requests and may observe query content, network metadata, cookies, or other data according to their own practices.</td>
+              <td data-label="Policy">The terms and privacy notice of each accessed website.</td>
+            </tr>
+          </tbody>
+        </table>
+        <p>Provider availability and routing may change. Adding a model provider or materially changing a data use requires a new Terms version and renewed acceptance.</p>
+      </section>
+
+      <section>
+        <h2>6. Human access, retention, and deletion</h2>
+        <p>Project personnel may access content only to the extent reasonably necessary for a security investigation, abuse response, user-requested support, or fault diagnosis. Access is not promised to be impossible, and no system is completely secure.</p>
+        <p>For a formal account, chats and workspace data are stored under the current service mechanism until you delete them, the account is cleaned up, or the Service is ended. Quick Start chats, its temporary identity, and workspace data are scheduled for cleanup after 30 minutes of inactivity. Deletion may not be instantaneous and may not remove copies already processed or retained by external providers under their policies.</p>
+        <p>The Service records minimal acceptance evidence: user UUID, Terms version, document SHA-256, server acceptance time, and acceptance source. It does not add your IP address, User-Agent, email address, or chat content to that evidence. After account deletion, this evidence is retained for up to three years for dispute handling and then scheduled for deletion.</p>
+        <p>The Project does not promise that data can be restored after user action, software or hardware failure, attack, provider failure, account cleanup, or project termination. You may request access, correction, deletion, or an explanation of personal-information handling by contacting the Project Contact. A request may require proportionate identity verification and may be limited where retention or refusal is required by law.</p>
+      </section>
+
+      <section>
+        <h2>7. Availability, changes, and termination</h2>
+        <p>The Project may suspend, restrict, rate-limit, modify, or permanently discontinue any part of the Service at any time because of resources, maintenance, security, suspected abuse, legal requirements, provider changes, or a decision by those responsible for the Project. The Project will try to give advance notice when reasonably practicable, but this creates no obligation to continue operating the Service or to preserve data.</p>
+        <p>The Project may block or remove an account or workload that violates these Terms or creates legal, security, safety, operational, or resource risk. You may stop using the Service at any time.</p>
+      </section>
+
+      <section>
+        <h2>8. Disclaimers</h2>
+        <p class="caps">TO THE MAXIMUM EXTENT PERMITTED BY LAW, THE SERVICE AND ALL OUTPUTS ARE PROVIDED "AS IS," "AS AVAILABLE," AND "WITH ALL FAULTS." THE PROJECT, PROJECT CONTACT, MAINTAINERS, CONTRIBUTORS, ASSOCIATED RESEARCH TEAMS, AND HOSTING OR AFFILIATED INSTITUTIONS MAKE NO EXPRESS OR IMPLIED WARRANTY, INCLUDING ANY WARRANTY OF ACCURACY, COMPLETENESS, SECURITY, NON-INFRINGEMENT, CONTINUITY, AVAILABILITY, MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE, RESEARCH REPRODUCIBILITY, PUBLICATION SUCCESS, REGULATORY ACCEPTANCE, OR INTELLECTUAL-PROPERTY SAFETY.</p>
+        <p>No statement, output, demonstration, support response, affiliation, or availability history creates a warranty not expressly stated in these Terms.</p>
+      </section>
+
+      <section>
+        <h2>9. Limitation of liability</h2>
+        <p>To the maximum extent permitted by law, the Project, Project Contact, maintainers, contributors, associated research teams, and hosting or affiliated institutions will not be liable for any loss, claim, damage, cost, or liability arising from or related to the Service. This exclusion particularly includes loss or corruption of data; loss of research time, opportunity, publication, funding, profit, goodwill, or reputation; intellectual-property exposure; and any indirect, incidental, special, exemplary, consequential, or reliance loss.</p>
+        <p>If a complete exclusion is held invalid, the aggregate liability for ordinary direct, actual, and provable loss will not exceed RMB 100. This cap is cumulative across all claims and applies only to the extent permitted by law.</p>
+        <p>Nothing in these Terms excludes or limits liability that cannot lawfully be excluded or limited, including responsibility imposed for intentional misconduct, gross negligence, or mandatory personal-information, data-security, cybersecurity, consumer, tort, or other statutory duties. The Service's free and public-interest character does not remove those duties.</p>
+      </section>
+
+      <section>
+        <h2>10. Your responsibility for third-party claims</h2>
+        <p>To the extent permitted by law, you are responsible for losses, costs, and third-party claims caused by your unlawful use, your submission of data or material you had no right to process, your infringement of third-party rights, or your intentional violation of these Terms. This clause does not require you to compensate a party for that party's own unlawful conduct or responsibility that cannot legally be shifted to you.</p>
+      </section>
+
+      <section>
+        <h2>11. Governing law and disputes</h2>
+        <p>These Terms are governed by the laws of the People's Republic of China, without regard to conflict-of-law rules. A dispute that cannot be resolved informally will be submitted to a people's court with competent jurisdiction in Kunming, China, except where mandatory law requires another forum.</p>
+      </section>
+
+      <section>
+        <h2>12. Version changes and continued use</h2>
+        <p>The Project may publish a new version when material terms, data uses, retention practices, or model providers change. Formal-account users will be asked to accept the current version at the next sign-in. Existing authenticated sessions are not interrupted solely by this version and can continue until sign-out or the normal session expiry, which is no longer than seven days. Quick Start always requires current acceptance before a temporary identity or workspace is created.</p>
+        <p>If a provision is unenforceable, it will be applied to the greatest extent allowed and the remaining provisions will continue. A failure to enforce a provision is not a waiver. The versioned document at the URL recorded with your acceptance is the text that governs that acceptance.</p>
+      </section>
+
+      <section>
+        <h2>13. Project Contact</h2>
+        <p>Questions, privacy requests, and legal notices may be sent to <a href="mailto:jiayuxin@ynnu.edu.cn">jiayuxin@ynnu.edu.cn</a> (<strong>Project Contact</strong>).</p>
+        <p>The Project Contact is identified to provide a communication channel. The contact does not, merely by being named or responding, personally warrant the Service or voluntarily assume contractual liability that applicable law permits these Terms to exclude. Regulators or courts may nevertheless assign responsibility based on the actual operation and control of the Service, regardless of this description.</p>
+      </section>
+    </main>
+    <footer>
+      Potato Agent Project &middot; Version 2026-08-25 &middot; Project Contact: jiayuxin@ynnu.edu.cn
+    </footer>
+  </body>
+</html>

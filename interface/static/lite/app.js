@@ -42,6 +42,9 @@ const state = {
   passwordResetTimer: null,
   passwordResetSending: false,
   passwordResetSubmitting: false,
+  agreement: null,
+  agreementPromise: null,
+  signinAgreementRequired: false,
   pendingApproval: null,
   approvalSubmitting: false,
   temporaryConfirmResolve: null,
@@ -117,6 +120,8 @@ const dom = {
   authPanelHeader: document.getElementById('auth-panel-header'),
   loginForm: document.getElementById('login-form'),
   loginError: document.getElementById('login-error'),
+  signinAgreementPanel: document.getElementById('signin-agreement-panel'),
+  signinAgreementCheckbox: document.getElementById('signin-agreement-checkbox'),
   authCard: document.getElementById('auth-card'),
   authCardLabel: document.getElementById('auth-card-label'),
   authCardTitle: document.getElementById('auth-card-title'),
@@ -140,6 +145,7 @@ const dom = {
   registerEmailCode: document.getElementById('register-email-code'),
   sendEmailCodeButton: document.getElementById('send-email-code-button'),
   registerCodeStatus: document.getElementById('register-code-status'),
+  registerAgreementCheckbox: document.getElementById('register-agreement-checkbox'),
   showRegisterButton: document.getElementById('show-register-button'),
   showLoginButton: document.getElementById('show-login-button'),
   showTemporaryButton: document.getElementById('show-temporary-button'),
@@ -148,6 +154,7 @@ const dom = {
   temporaryConfirmClose: document.getElementById('temporary-confirm-close'),
   temporaryConfirmCancel: document.getElementById('temporary-confirm-cancel'),
   temporaryConfirmStart: document.getElementById('temporary-confirm-start'),
+  temporaryAgreementCheckbox: document.getElementById('temporary-agreement-checkbox'),
   authBackButton: document.getElementById('auth-back-button'),
   switchRegisterButton: document.getElementById('switch-register-button'),
   registerBackButton: document.getElementById('register-back-button'),
@@ -2646,11 +2653,12 @@ const handlePortalNavClick = (event) => {
 
 const isTemporaryConfirmModalOpen = () => Boolean(dom.temporaryConfirmModal && !dom.temporaryConfirmModal.hidden);
 
-const getTemporaryConfirmFocusTargets = () => ([
-  dom.temporaryConfirmClose,
-  dom.temporaryConfirmCancel,
-  dom.temporaryConfirmStart,
-].filter((element) => element && !element.disabled && !element.hidden));
+const getTemporaryConfirmFocusTargets = () => {
+  if (!dom.temporaryConfirmModal) return [];
+  return Array.from(
+    dom.temporaryConfirmModal.querySelectorAll('a[href], button, input'),
+  ).filter((element) => !element.disabled && !element.hidden);
+};
 
 const resolveTemporaryConfirmModal = (confirmed) => {
   const resolve = state.temporaryConfirmResolve;
@@ -2671,23 +2679,34 @@ const resolveTemporaryConfirmModal = (confirmed) => {
   }
 };
 
-const confirmTemporaryWorkspace = () => {
+const confirmTemporaryWorkspace = async () => {
   if (!dom.temporaryConfirmModal || !dom.temporaryConfirmStart) {
     showError(dom.loginError, TEMPORARY_USER_NOTICE);
-    return Promise.resolve(false);
+    return false;
+  }
+
+  try {
+    await ensureAgreementMetadata();
+  } catch (error) {
+    showError(dom.loginError, String(error.message || 'Research preview terms are unavailable.'));
+    return false;
   }
 
   if (state.temporaryConfirmResolve) {
     dom.temporaryConfirmStart.focus({ preventScroll: true });
-    return Promise.resolve(false);
+    return false;
   }
 
+  if (dom.temporaryAgreementCheckbox) {
+    dom.temporaryAgreementCheckbox.checked = false;
+  }
+  dom.temporaryConfirmStart.disabled = true;
   return new Promise((resolve) => {
     state.temporaryConfirmResolve = resolve;
     const activeElement = document.activeElement;
     state.temporaryConfirmPreviousFocus = activeElement instanceof HTMLElement ? activeElement : null;
     dom.temporaryConfirmModal.hidden = false;
-    window.requestAnimationFrame(() => dom.temporaryConfirmStart.focus({ preventScroll: true }));
+    window.requestAnimationFrame(() => dom.temporaryAgreementCheckbox?.focus({ preventScroll: true }));
   });
 };
 
@@ -3643,6 +3662,7 @@ const setAuthViewMode = (mode) => {
   }
 
   if (showHome) {
+    resetSigninAgreementPrompt();
     showError(dom.loginError, '');
     showError(dom.registerError, '');
     showError(dom.passwordResetError, '');
@@ -3964,6 +3984,46 @@ const api = async (path, options = {}) => {
   }
 
   return response;
+};
+
+const applyAgreementMetadata = (agreement) => {
+  if (!agreement?.version || !agreement?.url || !agreement?.sha256) return null;
+  state.agreement = agreement;
+  for (const link of document.querySelectorAll('.agreement-link')) {
+    link.setAttribute('href', agreement.url);
+  }
+  return agreement;
+};
+
+const ensureAgreementMetadata = async () => {
+  if (state.agreement) return state.agreement;
+  if (!state.agreementPromise) {
+    state.agreementPromise = (async () => {
+      const response = await api('/api/legal/agreement', { method: 'GET' });
+      const agreement = applyAgreementMetadata(await response.json());
+      if (!agreement) {
+        throw new Error('Research preview terms are unavailable.');
+      }
+      return agreement;
+    })().finally(() => {
+      state.agreementPromise = null;
+    });
+  }
+  return state.agreementPromise;
+};
+
+const resetSigninAgreementPrompt = () => {
+  state.signinAgreementRequired = false;
+  if (dom.signinAgreementPanel) dom.signinAgreementPanel.hidden = true;
+  if (dom.signinAgreementCheckbox) dom.signinAgreementCheckbox.checked = false;
+};
+
+const requireSigninAgreement = (agreement) => {
+  applyAgreementMetadata(agreement);
+  state.signinAgreementRequired = true;
+  if (dom.signinAgreementPanel) dom.signinAgreementPanel.hidden = false;
+  if (dom.signinAgreementCheckbox) dom.signinAgreementCheckbox.checked = false;
+  window.requestAnimationFrame(() => dom.signinAgreementCheckbox?.focus({ preventScroll: true }));
 };
 
 const sanitizeRenderedHtml = (html) => {
@@ -7926,15 +7986,37 @@ dom.loginForm.addEventListener('submit', async (event) => {
   const email = document.getElementById('email').value.trim();
   const password = document.getElementById('password').value;
 
+  if (state.signinAgreementRequired && !dom.signinAgreementCheckbox?.checked) {
+    showError(dom.loginError, 'Accept the current research preview terms to sign in.');
+    dom.signinAgreementCheckbox?.focus();
+    return;
+  }
+
   try {
     setLoginPending(true);
+    const agreement = state.signinAgreementRequired
+      ? await ensureAgreementMetadata()
+      : null;
     const response = await api('/api/auth/signin', {
       method: 'POST',
-      body: JSON.stringify({ email, password }),
+      body: JSON.stringify({
+        email,
+        password,
+        agreement_version: agreement?.version || '',
+        agreement_accepted: Boolean(
+          state.signinAgreementRequired && dom.signinAgreementCheckbox?.checked
+        ),
+      }),
     });
     const user = await response.json();
+    resetSigninAgreementPrompt();
     await startWorkspaceRuntime(user, { allowRetry: true, source: 'signin' });
   } catch (error) {
+    if (error.status === 428 && error.payload?.error === 'agreement_required') {
+      requireSigninAgreement(error.payload?.agreement);
+      showError(dom.loginError, error.payload?.message || 'Accept the current research preview terms to sign in.');
+      return;
+    }
     const message = String(error.message || 'Sign-in failed');
     showError(
       dom.loginError,
@@ -7978,9 +8060,15 @@ dom.registerForm.addEventListener('submit', async (event) => {
     showError(dom.registerError, 'Passwords do not match.');
     return;
   }
+  if (!dom.registerAgreementCheckbox?.checked) {
+    showError(dom.registerError, 'Accept the current research preview terms to create an account.');
+    dom.registerAgreementCheckbox?.focus();
+    return;
+  }
 
   try {
     setSignupPending(true);
+    const agreement = await ensureAgreementMetadata();
     const response = await api('/api/auth/signup', {
       method: 'POST',
       body: JSON.stringify({
@@ -7990,6 +8078,8 @@ dom.registerForm.addEventListener('submit', async (event) => {
         password,
         email_verification_id: state.emailVerificationId,
         email_verification_code: emailVerificationCode,
+        agreement_version: agreement.version,
+        agreement_accepted: true,
       }),
     });
     const json = await response.json();
@@ -8053,7 +8143,14 @@ dom.showTemporaryButton?.addEventListener('click', async () => {
 
   try {
     setTemporaryLoginPending(true);
-    const response = await api('/api/auth/temporary', { method: 'POST' });
+    const agreement = await ensureAgreementMetadata();
+    const response = await api('/api/auth/temporary', {
+      method: 'POST',
+      body: JSON.stringify({
+        agreement_version: agreement.version,
+        agreement_accepted: true,
+      }),
+    });
     const user = await response.json();
     await startWorkspaceRuntime(user, { allowRetry: true, source: 'temporary' });
   } catch (error) {
@@ -8077,7 +8174,14 @@ dom.temporaryConfirmCancel?.addEventListener('click', () => {
 });
 
 dom.temporaryConfirmStart?.addEventListener('click', () => {
+  if (!dom.temporaryAgreementCheckbox?.checked) return;
   resolveTemporaryConfirmModal(true);
+});
+
+dom.temporaryAgreementCheckbox?.addEventListener('change', () => {
+  if (dom.temporaryConfirmStart) {
+    dom.temporaryConfirmStart.disabled = !dom.temporaryAgreementCheckbox.checked;
+  }
 });
 
 dom.forgotPasswordButton?.addEventListener('click', () => {
@@ -8440,4 +8544,5 @@ autoResizePromptInput();
 renderMobilePanelState();
 renderEmailVerificationState();
 renderPasswordResetState();
+ensureAgreementMetadata().catch(() => {});
 bootstrapSession();
