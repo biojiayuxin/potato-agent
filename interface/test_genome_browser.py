@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import gzip
 import json
+import re
 import sqlite3
 import sys
 import threading
@@ -206,17 +207,39 @@ def test_genome_browser_entry_and_static_paths_are_prefixed() -> None:
     assert "`/genomes/browser?${params.toString()}`" in genes_app
 
 
-def test_portal_navigation_uses_genomes_as_the_primary_page() -> None:
+def test_portal_navigation_uses_consistent_module_order() -> None:
     portal_indexes = [
+        "interface/static/lite/index.html",
         "interface/static/lite/high-resolution-required.html",
         "interface/static/genes/index.html",
         "interface/static/spatial/index.html",
         "interface/static/wgcna/index.html",
         "interface/static/bulk_rnaseq/index.html",
+        "interface/static/genomes/index.html",
+        "interface/static/genome_browser/index.html",
+        "interface/static/about/index.html",
+    ]
+    expected_labels = [
+        "Potato Agent",
+        "Genomes",
+        "Gene Expression",
+        "WGCNA Network",
+        "Spatial Expression",
+        "Genes",
+        "Variants",
+        "Germplasm",
+        "About",
     ]
     for relative_path in portal_indexes:
         content = (REPO_ROOT / relative_path).read_text(encoding="utf-8")
-        assert 'href="/genomes">Genomes</a>' in content
+        nav = content.split('<nav class="portal-nav" aria-label="Portal modules">', 1)[1]
+        nav = nav.split("</nav>", 1)[0]
+        labels = re.findall(
+            r'class="portal-nav-item(?: active)?"[^>]*>([^<]+)</(?:a|button)>',
+            nav,
+        )
+        assert labels == expected_labels, relative_path
+        assert 'href="/bulk-rnaseq"' in nav
         assert '<a class="portal-nav-item" href="/genome-browser">' not in content
 
 

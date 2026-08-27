@@ -54,7 +54,7 @@ def _build_bulk_fixture(root: Path) -> Path:
 
 def test_bulk_rnaseq_entry_and_static_paths_are_prefixed() -> None:
     lite_index = (REPO_ROOT / "interface/static/lite/index.html").read_text(encoding="utf-8")
-    assert '<a class="portal-nav-item" href="/bulk-rnaseq">Bulk RNA-Seq</a>' in lite_index
+    assert '<a class="portal-nav-item" href="/bulk-rnaseq">Gene Expression</a>' in lite_index
 
     bulk_index = (REPO_ROOT / "interface/static/bulk_rnaseq/index.html").read_text(
         encoding="utf-8"
@@ -63,6 +63,8 @@ def test_bulk_rnaseq_entry_and_static_paths_are_prefixed() -> None:
     assert 'src="/static/bulk_rnaseq/app.js' in bulk_index
     assert 'src="/static/bulk_rnaseq/pdf_export.js' in bulk_index
     assert 'href="/bulk-rnaseq" aria-current="page"' in bulk_index
+    assert "Gene Expression Across Materials and Tissues" in bulk_index
+    assert "Bulk RNA-Seq" not in bulk_index
     assert 'id="download-pdf"' in bulk_index
     assert 'id="download-png"' not in bulk_index
     assert 'id="selection-detail"' not in bulk_index
