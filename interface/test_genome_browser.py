@@ -239,7 +239,10 @@ def test_portal_navigation_uses_consistent_module_order() -> None:
             nav,
         )
         assert labels == expected_labels, relative_path
-        assert 'href="/bulk-rnaseq"' in nav
+        if relative_path == "interface/static/lite/high-resolution-required.html":
+            assert 'href="./high-resolution-required.html">Gene Expression</a>' in nav
+        else:
+            assert 'href="/bulk-rnaseq"' in nav
         assert '<a class="portal-nav-item" href="/genome-browser">' not in content
 
 

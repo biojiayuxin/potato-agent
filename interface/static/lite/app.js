@@ -25,6 +25,17 @@ const state = {
   composerMode: 'chat',
   isSending: false,
   chatExporting: false,
+  chatSharing: false,
+  shareResult: null,
+  shareDialogPreviousFocus: null,
+  pendingShareToken: '',
+  shareImportStatus: 'idle',
+  shareImportMessage: '',
+  shareImportInFlight: false,
+  shareImportAbortController: null,
+  shareImportRetryTimer: null,
+  shareImportRequestGeneration: 0,
+  shareToastTimer: null,
   chatErrorTimer: null,
   authPollTimer: null,
   signupJobId: null,
@@ -117,6 +128,7 @@ const dom = {
   portalNav: document.querySelector('.portal-nav'),
   portalNavToggle: document.getElementById('portal-nav-toggle'),
   authHomeView: document.getElementById('auth-home-view'),
+  shareLoginBanner: document.getElementById('share-login-banner'),
   authPanelHeader: document.getElementById('auth-panel-header'),
   loginForm: document.getElementById('login-form'),
   loginError: document.getElementById('login-error'),
@@ -186,6 +198,7 @@ const dom = {
   mobileChatsButton: document.getElementById('mobile-chats-button'),
   mobileFilesButton: document.getElementById('mobile-files-button'),
   exportChatButton: document.getElementById('export-chat-button'),
+  shareChatButton: document.getElementById('share-chat-button'),
   mobilePanelBackdrop: document.getElementById('mobile-panel-backdrop'),
   modelName: document.getElementById('model-name'),
   modelSelect: document.getElementById('model-select'),
@@ -248,6 +261,29 @@ const dom = {
   passwordError: document.getElementById('password-error'),
   passwordCancelButton: document.getElementById('password-cancel-button'),
   passwordSaveButton: document.getElementById('password-save-button'),
+  shareRulesModal: document.getElementById('share-rules-modal'),
+  shareRulesBackdrop: document.getElementById('share-rules-backdrop'),
+  shareRulesClose: document.getElementById('share-rules-close'),
+  shareRulesCancel: document.getElementById('share-rules-cancel'),
+  shareRulesCreate: document.getElementById('share-rules-create'),
+  shareRulesError: document.getElementById('share-rules-error'),
+  shareResultModal: document.getElementById('share-result-modal'),
+  shareResultBackdrop: document.getElementById('share-result-backdrop'),
+  shareResultClose: document.getElementById('share-result-close'),
+  shareResultUrl: document.getElementById('share-result-url'),
+  shareResultCopy: document.getElementById('share-result-copy'),
+  shareResultMeta: document.getElementById('share-result-meta'),
+  shareResultError: document.getElementById('share-result-error'),
+  shareImportModal: document.getElementById('share-import-modal'),
+  shareImportSpinner: document.getElementById('share-import-spinner'),
+  shareImportTitle: document.getElementById('share-import-title'),
+  shareImportDescription: document.getElementById('share-import-description'),
+  shareImportError: document.getElementById('share-import-error'),
+  shareImportActions: document.getElementById('share-import-actions'),
+  shareImportRetry: document.getElementById('share-import-retry'),
+  shareImportDiscard: document.getElementById('share-import-discard'),
+  shareImportClose: document.getElementById('share-import-close'),
+  shareToast: document.getElementById('share-toast'),
 };
 
 let loginInFlight = false;
@@ -308,6 +344,7 @@ const FILES_WIDTH_KEY = 'lite_files_width';
 const THEME_MODE_KEY = 'lite_theme_mode';
 const UPDATE_NOTES_PATH = './static/lite/update-notes.json';
 const UPDATE_NOTES_SEEN_KEY = 'lite_update_notes_seen_version';
+const PENDING_SHARE_TOKEN_KEY = 'lite_pending_chat_share_token';
 const UPDATE_NOTES_VISIBLE_LIMIT = 5;
 const CHAT_TAB_ID = 'chat';
 const MAX_TOTAL_ATTACHMENT_SIZE_BYTES = 200 * 1024 * 1024;
@@ -351,6 +388,12 @@ const EMAIL_VERIFICATION_COUNTDOWN_INTERVAL_MS = 1000;
 const MOBILE_PANEL_MEDIA_QUERY = '(max-width: 1180px)';
 const PORTAL_SMALL_SCREEN_MEDIA_QUERY = '(max-width: 800px)';
 const HIGH_RESOLUTION_NOTICE_PATH = '/static/lite/high-resolution-required.html';
+const SHARE_IMPORT_DEFAULT_RETRY_MS = 1500;
+const SHARE_IMPORT_MAX_RETRY_MS = 60 * 60 * 1000;
+const SHARE_IMPORT_REQUEST_TIMEOUT_MS = 30 * 1000;
+const SHARE_COPY_FEEDBACK_MS = 1200;
+const SHARE_TOKEN_PATTERN = /^[A-Za-z0-9_-]{16,512}$/;
+const SHARE_REQUEST_HEADERS = { 'X-Potato-Request': '1' };
 const mobilePanelMediaQuery = typeof window.matchMedia === 'function'
   ? window.matchMedia(MOBILE_PANEL_MEDIA_QUERY)
   : { matches: false };
@@ -1133,6 +1176,24 @@ const hasExportableActiveMessages = () => state.messages.some((message) => {
   return role === 'user' && Array.isArray(message?.files) && message.files.length > 0;
 });
 
+const hasShareableActiveMessages = () => state.messages.some((message) => {
+  const role = String(message?.role || '').trim();
+  return (role === 'user' || role === 'assistant') && Boolean(String(message?.content ?? '').trim());
+});
+
+const isChatSharingFeatureEnabled = (user = state.user) => {
+  const nestedFlag = user?.features?.chat_sharing;
+  if (typeof nestedFlag === 'boolean') return nestedFlag;
+  const directFlag = user?.chat_sharing_enabled ?? user?.chat_sharing;
+  return typeof directFlag === 'boolean' ? directFlag : false;
+};
+
+const canCreateChatShares = () => Boolean(
+  state.user
+  && !state.user.is_temporary
+  && isChatSharingFeatureEnabled(state.user)
+);
+
 const getChatExportDisabledReason = () => {
   const sessionId = getActivePersistentSessionId();
   if (state.chatExporting) return 'Exporting chat...';
@@ -1151,6 +1212,29 @@ const refreshExportButtonState = () => {
   dom.exportChatButton.disabled = Boolean(reason);
   dom.exportChatButton.title = reason || 'Export chat';
   dom.exportChatButton.setAttribute('aria-disabled', reason ? 'true' : 'false');
+};
+
+const getChatShareDisabledReason = () => {
+  if (!canCreateChatShares()) return 'Chat sharing is unavailable for this account.';
+  const sessionId = getActivePersistentSessionId();
+  if (state.chatSharing) return 'Creating share link...';
+  if (!sessionId || state.activeSession?.isDraft) return 'Open a saved chat to share.';
+  if (state.sessionHistoryLoading) return 'Wait for chat history to finish loading.';
+  if (isSessionBusy(sessionId) || sessionNeedsApproval(sessionId)) {
+    return 'Wait for the current response to finish before sharing.';
+  }
+  if (!hasShareableActiveMessages()) return 'No visible questions or answers to share.';
+  return '';
+};
+
+const refreshShareButtonState = () => {
+  if (!dom.shareChatButton) return;
+  const visible = canCreateChatShares();
+  const reason = getChatShareDisabledReason();
+  dom.shareChatButton.hidden = !visible;
+  dom.shareChatButton.disabled = !visible || Boolean(reason);
+  dom.shareChatButton.title = reason || 'Share chat';
+  dom.shareChatButton.setAttribute('aria-disabled', (!visible || reason) ? 'true' : 'false');
 };
 
 const buildSessionExportUrl = (sessionId) => (
@@ -2397,6 +2481,7 @@ const refreshComposerBusyState = () => {
     dom.modelSelect.disabled = isActiveSessionBlockingModelSwitch() || state.models.length <= 1;
   }
   refreshExportButtonState();
+  refreshShareButtonState();
 };
 
 const setComposerMode = (mode) => {
@@ -2525,7 +2610,7 @@ const activatePersistedSession = (session, { clearMessages = true } = {}) => {
   }
 };
 
-const showDraftChat = () => {
+const showDraftChat = ({ focusPrompt = true } = {}) => {
   resetSessionRenameState();
   saveActiveSessionScrollPosition();
   activeTuiSessionId = '';
@@ -2540,7 +2625,7 @@ const showDraftChat = () => {
   state.activeWorkspaceTab = CHAT_TAB_ID;
   state.shouldAutoScrollMessages = true;
   renderWorkspace();
-  dom.promptInput?.focus();
+  if (focusPrompt) dom.promptInput?.focus();
 };
 
 const setLiveSessionMessages = (sessionId, messages) => {
@@ -3720,6 +3805,7 @@ const setAuthViewMode = (mode) => {
   if (showRegister) {
     showError(dom.registerError, '');
   }
+  renderShareLoginBanner();
 };
 
 const resetWorkspaceState = () => {
@@ -3752,6 +3838,17 @@ const resetWorkspaceState = () => {
   state.models = [];
   state.selectedModel = null;
   state.chatExporting = false;
+  state.chatSharing = false;
+  state.shareResult = null;
+  state.shareDialogPreviousFocus = null;
+  state.shareImportStatus = 'idle';
+  state.shareImportMessage = '';
+  cancelShareImportRequest();
+  clearShareImportRetryTimer();
+  if (dom.shareRulesModal) dom.shareRulesModal.hidden = true;
+  if (dom.shareResultModal) dom.shareResultModal.hidden = true;
+  if (dom.shareImportModal) dom.shareImportModal.hidden = true;
+  setChatSharing(false);
   state.rootPath = '';
   state.workspaceRoot = '';
   state.currentPath = '';
@@ -3980,6 +4077,7 @@ const api = async (path, options = {}) => {
     const requestError = new Error(detail);
     requestError.status = response.status;
     requestError.payload = payload;
+    requestError.retryAfter = response.headers.get('Retry-After');
     throw requestError;
   }
 
@@ -5018,6 +5116,573 @@ const copyTextToClipboard = async (text) => {
   textarea.remove();
 };
 
+const normalizeShareToken = (value) => {
+  const token = String(value || '').trim();
+  return SHARE_TOKEN_PATTERN.test(token) ? token : '';
+};
+
+const getStoredPendingShareToken = () => {
+  try {
+    return normalizeShareToken(sessionStorage.getItem(PENDING_SHARE_TOKEN_KEY));
+  } catch {
+    return '';
+  }
+};
+
+const persistPendingShareToken = (token, { replaceIntent = false } = {}) => {
+  const normalizedToken = normalizeShareToken(token);
+  if (
+    replaceIntent
+    && normalizedToken !== state.pendingShareToken
+  ) {
+    clearShareImportRetryTimer();
+    cancelShareImportRequest();
+  }
+  state.pendingShareToken = normalizedToken;
+  try {
+    if (normalizedToken) {
+      sessionStorage.setItem(PENDING_SHARE_TOKEN_KEY, normalizedToken);
+    } else {
+      sessionStorage.removeItem(PENDING_SHARE_TOKEN_KEY);
+    }
+  } catch {
+    // The in-memory intent still works when tab storage is unavailable.
+  }
+  renderShareLoginBanner();
+  return normalizedToken;
+};
+
+const removeShareFragmentFromAddressBar = () => {
+  try {
+    const cleanPath = `${window.location.pathname}${window.location.search}` || '/';
+    window.history.replaceState(window.history.state, '', cleanPath);
+  } catch {
+    // A fragment is never sent to the server; keep going if History API access fails.
+  }
+};
+
+const capturePendingShareIntent = () => {
+  const hash = String(window.location.hash || '');
+  if (!hash.startsWith('#share=')) {
+    if (!state.pendingShareToken) {
+      state.pendingShareToken = getStoredPendingShareToken();
+    }
+    renderShareLoginBanner();
+    return state.pendingShareToken;
+  }
+
+  let rawToken = '';
+  try {
+    rawToken = decodeURIComponent(hash.slice('#share='.length));
+  } catch {
+    rawToken = '';
+  }
+  removeShareFragmentFromAddressBar();
+  const token = persistPendingShareToken(rawToken, { replaceIntent: true });
+  if (!token && state.user) {
+    setShareImportState(
+      'terminal',
+      'The share link is invalid or incomplete.'
+    );
+  }
+  return token;
+};
+
+const clearPendingShareIntent = () => {
+  persistPendingShareToken('');
+};
+
+const renderShareLoginBanner = () => {
+  if (!dom.shareLoginBanner) return;
+  const authMode = String(dom.authCard?.dataset.authMode || 'home');
+  const authChoiceVisible = ['home', 'signin', 'register', 'password-reset'].includes(authMode);
+  dom.shareLoginBanner.hidden = !(state.pendingShareToken && !state.user && authChoiceVisible);
+};
+
+const showShareToast = (message) => {
+  if (!dom.shareToast) return;
+  if (state.shareToastTimer) {
+    window.clearTimeout(state.shareToastTimer);
+    state.shareToastTimer = null;
+  }
+  const text = String(message || '').trim();
+  dom.shareToast.textContent = text;
+  dom.shareToast.hidden = !text;
+  if (!text) return;
+  state.shareToastTimer = window.setTimeout(() => {
+    if (dom.shareToast?.textContent === text) {
+      dom.shareToast.hidden = true;
+      dom.shareToast.textContent = '';
+    }
+    state.shareToastTimer = null;
+  }, 5000);
+};
+
+const rememberShareDialogFocus = () => {
+  if (state.shareDialogPreviousFocus) return;
+  const activeElement = document.activeElement;
+  state.shareDialogPreviousFocus = activeElement instanceof HTMLElement ? activeElement : null;
+};
+
+const restoreShareDialogFocus = () => {
+  const previousFocus = state.shareDialogPreviousFocus;
+  state.shareDialogPreviousFocus = null;
+  if (previousFocus && document.contains(previousFocus)) {
+    window.requestAnimationFrame(() => previousFocus.focus({ preventScroll: true }));
+  }
+};
+
+const getOpenShareModal = () => [
+  dom.shareRulesModal,
+  dom.shareResultModal,
+  dom.shareImportModal,
+].find((modal) => modal && !modal.hidden) || null;
+
+const getShareModalFocusTargets = (modal) => {
+  if (!modal) return [];
+  return Array.from(modal.querySelectorAll('button, input, [tabindex]'))
+    .filter((element) => !element.disabled && !element.hidden && element.tabIndex >= 0);
+};
+
+const getChatShareCreateErrorMessage = (error) => {
+  const status = Number(error?.status || 0);
+  if (status === 403) return 'Chat sharing is only available to signed-in accounts.';
+  if (status === 404) return 'This chat is no longer available.';
+  if (status === 409) return 'Wait for the current response to finish, then try again.';
+  if (status === 413) return 'This chat is too large to share.';
+  return String(error?.message || 'Failed to create the share link.');
+};
+
+const openShareRulesDialog = () => {
+  const disabledReason = getChatShareDisabledReason();
+  if (disabledReason) {
+    showChatError(disabledReason);
+    return;
+  }
+  closeShareResultDialog({ restoreFocus: false });
+  showError(dom.shareRulesError, '');
+  rememberShareDialogFocus();
+  dom.shareRulesModal.hidden = false;
+  window.requestAnimationFrame(() => dom.shareRulesClose?.focus({ preventScroll: true }));
+};
+
+const closeShareRulesDialog = ({ restoreFocus = true, force = false } = {}) => {
+  if (state.chatSharing && !force) return;
+  if (dom.shareRulesModal) dom.shareRulesModal.hidden = true;
+  showError(dom.shareRulesError, '');
+  if (restoreFocus) restoreShareDialogFocus();
+};
+
+const formatShareExpiration = (value) => {
+  if (value === null || value === undefined || value === '') return '';
+  const numeric = Number(value);
+  const date = Number.isFinite(numeric)
+    ? new Date(numeric > 10_000_000_000 ? numeric : numeric * 1000)
+    : new Date(String(value));
+  if (Number.isNaN(date.getTime())) return '';
+  return new Intl.DateTimeFormat('en-US', {
+    dateStyle: 'medium',
+    timeStyle: 'short',
+  }).format(date);
+};
+
+const renderShareResultDialog = () => {
+  const result = state.shareResult || {};
+  if (dom.shareResultUrl) dom.shareResultUrl.value = String(result.url || '');
+  if (dom.shareResultMeta) {
+    const details = [];
+    const expiration = formatShareExpiration(result.expiresAt);
+    if (expiration) details.push(`Expires ${expiration}`);
+    if (result.maxRecipients) details.push(`Up to ${result.maxRecipients} accounts`);
+    dom.shareResultMeta.textContent = details.join(' | ');
+    dom.shareResultMeta.hidden = details.length === 0;
+  }
+  showError(dom.shareResultError, '');
+};
+
+const openShareResultDialog = () => {
+  rememberShareDialogFocus();
+  renderShareResultDialog();
+  dom.shareResultModal.hidden = false;
+  window.requestAnimationFrame(() => {
+    dom.shareResultUrl?.focus({ preventScroll: true });
+    dom.shareResultUrl?.select();
+  });
+};
+
+const closeShareResultDialog = ({ restoreFocus = true } = {}) => {
+  if (dom.shareResultModal) dom.shareResultModal.hidden = true;
+  showError(dom.shareResultError, '');
+  if (restoreFocus) restoreShareDialogFocus();
+};
+
+const setChatSharing = (sharing) => {
+  state.chatSharing = Boolean(sharing);
+  dom.shareRulesModal?.querySelector('[role="dialog"]')?.setAttribute(
+    'aria-busy',
+    state.chatSharing ? 'true' : 'false'
+  );
+  if (dom.shareRulesCreate) {
+    dom.shareRulesCreate.disabled = state.chatSharing;
+    dom.shareRulesCreate.textContent = state.chatSharing ? 'Creating link...' : 'Create link';
+  }
+  if (dom.shareRulesCancel) dom.shareRulesCancel.disabled = state.chatSharing;
+  if (dom.shareRulesClose) dom.shareRulesClose.disabled = state.chatSharing;
+  refreshShareButtonState();
+};
+
+const createActiveChatShare = async () => {
+  const disabledReason = getChatShareDisabledReason();
+  if (disabledReason) {
+    showError(dom.shareRulesError, disabledReason);
+    return;
+  }
+
+  const sessionId = getActivePersistentSessionId();
+  let createdResult = null;
+  showError(dom.shareRulesError, '');
+  try {
+    setChatSharing(true);
+    const response = await api(`/api/sessions/${encodeURIComponent(sessionId)}/shares`, {
+      method: 'POST',
+      headers: SHARE_REQUEST_HEADERS,
+      body: JSON.stringify({}),
+    });
+    const json = await response.json();
+    const token = normalizeShareToken(json?.token);
+    if (!token) throw new Error('The server returned an invalid share link.');
+    createdResult = {
+      token,
+      url: `${window.location.origin}/#share=${encodeURIComponent(token)}`,
+      expiresAt: json?.expires_at ?? '',
+      maxRecipients: Number(json?.max_recipients || 0),
+    };
+    state.shareResult = createdResult;
+  } catch (error) {
+    showError(dom.shareRulesError, getChatShareCreateErrorMessage(error));
+  } finally {
+    setChatSharing(false);
+  }
+
+  if (!createdResult) return;
+  closeShareRulesDialog({ restoreFocus: false, force: true });
+  openShareResultDialog();
+};
+
+const copyCreatedShareLink = async () => {
+  const url = String(state.shareResult?.url || '').trim();
+  if (!url || !dom.shareResultCopy) return;
+  const label = dom.shareResultCopy.querySelector('span');
+  dom.shareResultCopy.disabled = true;
+  showError(dom.shareResultError, '');
+  try {
+    await copyTextToClipboard(url);
+    if (label) label.textContent = 'Copied';
+    showShareToast('Share link copied.');
+  } catch {
+    showError(dom.shareResultError, 'Copy failed. Select the link and copy it manually.');
+    dom.shareResultUrl?.focus({ preventScroll: true });
+    dom.shareResultUrl?.select();
+  } finally {
+    window.setTimeout(() => {
+      if (label) label.textContent = 'Copy link';
+      if (dom.shareResultCopy) dom.shareResultCopy.disabled = false;
+    }, SHARE_COPY_FEEDBACK_MS);
+  }
+};
+
+const clearShareImportRetryTimer = () => {
+  if (!state.shareImportRetryTimer) return;
+  window.clearTimeout(state.shareImportRetryTimer);
+  state.shareImportRetryTimer = null;
+};
+
+const cancelShareImportRequest = () => {
+  const controller = state.shareImportAbortController;
+  state.shareImportAbortController = null;
+  state.shareImportInFlight = false;
+  state.shareImportRequestGeneration += 1;
+  if (controller && !controller.signal.aborted) {
+    controller.abort();
+  }
+};
+
+const renderShareImportDialog = () => {
+  if (!dom.shareImportModal) return;
+  const status = state.shareImportStatus;
+  const visible = ['importing', 'waiting', 'retry', 'terminal'].includes(status);
+  dom.shareImportModal.hidden = !visible;
+  if (!visible) return;
+
+  const importing = status === 'importing';
+  const waiting = status === 'waiting';
+  const retry = status === 'retry';
+  const terminal = status === 'terminal';
+  dom.shareImportModal.querySelector('[role="dialog"]')?.setAttribute(
+    'aria-busy',
+    importing ? 'true' : 'false'
+  );
+  dom.shareImportSpinner.hidden = !(importing || waiting);
+  dom.shareImportTitle.textContent = terminal
+    ? 'This share link is unavailable'
+    : retry
+      ? 'Shared chat could not be imported'
+      : waiting
+        ? 'Shared chat is still being prepared'
+        : 'Importing shared chat';
+  dom.shareImportDescription.textContent = state.shareImportMessage || (
+    terminal
+      ? 'The link is invalid, expired, at its account limit, or its original chat is no longer available.'
+      : retry
+        ? 'Check the connection and try again, or discard this link.'
+        : waiting
+          ? 'Potato Agent will retry automatically.'
+          : 'Creating a private copy in this workspace.'
+  );
+  showError(dom.shareImportError, '');
+  dom.shareImportActions.hidden = importing;
+  dom.shareImportActions.classList.toggle('single-action', waiting || terminal);
+  dom.shareImportRetry.hidden = !(retry);
+  dom.shareImportDiscard.hidden = terminal;
+  dom.shareImportClose.hidden = !terminal;
+  if (visible) {
+    rememberShareDialogFocus();
+  }
+};
+
+const setShareImportState = (status, message = '') => {
+  const wasVisible = ['importing', 'waiting', 'retry', 'terminal'].includes(state.shareImportStatus);
+  state.shareImportStatus = status;
+  state.shareImportMessage = String(message || '');
+  renderShareImportDialog();
+  const isVisible = ['importing', 'waiting', 'retry', 'terminal'].includes(status);
+  if (!wasVisible && isVisible) {
+    window.requestAnimationFrame(() => {
+      dom.shareImportModal?.querySelector('[role="dialog"]')?.focus({ preventScroll: true });
+    });
+  }
+};
+
+const closeShareImportDialog = ({ restoreFocus = true } = {}) => {
+  setShareImportState('idle');
+  if (restoreFocus) {
+    restoreShareDialogFocus();
+  } else {
+    state.shareDialogPreviousFocus = null;
+  }
+};
+
+const discardPendingShareImport = () => {
+  clearShareImportRetryTimer();
+  cancelShareImportRequest();
+  clearPendingShareIntent();
+  closeShareImportDialog();
+  if (state.user && !state.activeSession) {
+    if (state.sessions.length > 0) {
+      openSession(state.sessions[0].id).catch((error) => showChatError(String(error?.message || error)));
+    } else {
+      showDraftChat();
+    }
+  }
+};
+
+const parseShareRetryAfterMs = (headerValue) => {
+  const seconds = Number(String(headerValue || '').trim());
+  if (!Number.isFinite(seconds) || seconds <= 0) return SHARE_IMPORT_DEFAULT_RETRY_MS;
+  return Math.min(Math.max(seconds * 1000, 500), SHARE_IMPORT_MAX_RETRY_MS);
+};
+
+const schedulePendingShareImport = (delayMs, message = '') => {
+  clearShareImportRetryTimer();
+  setShareImportState(
+    'waiting',
+    message || 'The shared chat is still being prepared. Potato Agent will retry automatically.'
+  );
+  state.shareImportRetryTimer = window.setTimeout(() => {
+    state.shareImportRetryTimer = null;
+    if (!state.user || !state.pendingShareToken) {
+      closeShareImportDialog({ restoreFocus: false });
+      renderShareLoginBanner();
+      return;
+    }
+    importPendingSharedChat().catch(() => {});
+  }, delayMs);
+};
+
+const requestPendingShareImport = async () => {
+  const token = normalizeShareToken(state.pendingShareToken);
+  if (!token || !state.user || state.shareImportInFlight) return null;
+
+  closeShareRulesDialog({ restoreFocus: false, force: true });
+  closeShareResultDialog({ restoreFocus: false });
+  clearShareImportRetryTimer();
+  const requestGeneration = ++state.shareImportRequestGeneration;
+  const abortController = new AbortController();
+  let requestTimedOut = false;
+  state.shareImportInFlight = true;
+  state.shareImportAbortController = abortController;
+  const requestTimeout = window.setTimeout(() => {
+    requestTimedOut = true;
+    abortController.abort();
+  }, SHARE_IMPORT_REQUEST_TIMEOUT_MS);
+  setShareImportState('importing', 'Creating a private copy in this workspace.');
+
+  try {
+    const response = await api('/api/chat-shares/import', {
+      method: 'POST',
+      headers: SHARE_REQUEST_HEADERS,
+      body: JSON.stringify({ token }),
+      signal: abortController.signal,
+    });
+    if (requestGeneration !== state.shareImportRequestGeneration) return null;
+    if (response.status === 202) {
+      schedulePendingShareImport(parseShareRetryAfterMs(response.headers.get('Retry-After')));
+      return null;
+    }
+
+    const json = await response.json();
+    const session = normalizeSessionSnapshot(
+      json?.session ? { ...json.session, persistentSessionId: json.session.id } : null
+    );
+    if (!session?.id) throw new Error('The imported chat response was incomplete.');
+    const messages = Array.isArray(json?.messages)
+      ? json.messages.map(normalizeMessageForDisplay)
+      : [];
+    if (state.pendingShareToken !== token) return null;
+    return {
+      created: Boolean(json?.created),
+      session,
+      messages,
+      shareToken: token,
+      shareImportGeneration: requestGeneration,
+    };
+  } catch (error) {
+    if (requestGeneration !== state.shareImportRequestGeneration) return null;
+    const status = Number(error?.status || 0);
+    if (requestTimedOut || error?.name === 'AbortError') {
+      setShareImportState(
+        'retry',
+        'The shared chat import timed out. Try again, or discard this link.'
+      );
+      return null;
+    }
+    if (status === 404 || status === 410) {
+      clearPendingShareIntent();
+      setShareImportState(
+        'terminal',
+        'The link is invalid, expired, at its account limit, or its original chat is no longer available.'
+      );
+      return null;
+    }
+    if (status === 429) {
+      schedulePendingShareImport(
+        parseShareRetryAfterMs(error?.retryAfter),
+        'The import limit was reached. Potato Agent will retry when the server allows it.'
+      );
+      return null;
+    }
+    setShareImportState(
+      'retry',
+      'The shared chat could not be imported. Check the connection and try again, or discard this link.'
+    );
+    return null;
+  } finally {
+    window.clearTimeout(requestTimeout);
+    if (state.shareImportAbortController === abortController) {
+      state.shareImportAbortController = null;
+    }
+    if (requestGeneration === state.shareImportRequestGeneration) {
+      state.shareImportInFlight = false;
+    }
+  }
+};
+
+const upsertImportedShareSession = (result) => {
+  const session = normalizeSessionSnapshot(result?.session);
+  if (!session?.id) return null;
+  state.sessions = sortSessionsByActivity([
+    session,
+    ...state.sessions.filter((chat) => chat.id !== session.id),
+  ]);
+  setLiveSessionMessages(session.id, Array.isArray(result.messages) ? result.messages : []);
+  return session;
+};
+
+const applyImportedShareResult = async (result, { refresh = true } = {}) => {
+  if (!result?.session?.id) return false;
+  const operationIsCurrent = () => (
+    result.shareImportGeneration === state.shareImportRequestGeneration
+    && result.shareToken === state.pendingShareToken
+  );
+  if (!operationIsCurrent()) return false;
+  const importedSession = upsertImportedShareSession(result);
+  if (!importedSession) return false;
+
+  if (refresh) {
+    try {
+      await refreshSessions();
+    } catch (error) {
+      showChatError(String(error?.message || 'Failed to refresh chats after import.'));
+    }
+    if (!operationIsCurrent()) return false;
+    upsertImportedShareSession(result);
+  }
+
+  if (!operationIsCurrent()) return false;
+  await openSession(importedSession.id, { shouldApply: operationIsCurrent });
+  if (!operationIsCurrent()) return false;
+  clearPendingShareIntent();
+  closeShareImportDialog({ restoreFocus: false });
+  showShareToast(result.created ? 'Shared chat imported.' : 'Shared chat was already imported.');
+  return true;
+};
+
+const importPendingSharedChat = async ({ duringInitialization = false } = {}) => {
+  const result = await requestPendingShareImport();
+  if (!result || duringInitialization) return result;
+  await applyImportedShareResult(result);
+  return result;
+};
+
+const handleShareModalKeydown = (event) => {
+  const modal = getOpenShareModal();
+  if (!modal) return false;
+
+  if (event.key === 'Escape') {
+    if (modal === dom.shareRulesModal && !state.chatSharing) {
+      event.preventDefault();
+      closeShareRulesDialog();
+      return true;
+    }
+    if (modal === dom.shareResultModal) {
+      event.preventDefault();
+      closeShareResultDialog();
+      return true;
+    }
+    if (modal === dom.shareImportModal && state.shareImportStatus === 'terminal') {
+      event.preventDefault();
+      closeShareImportDialog();
+      return true;
+    }
+    return false;
+  }
+
+  if (event.key !== 'Tab') return false;
+  const focusTargets = getShareModalFocusTargets(modal);
+  if (focusTargets.length === 0) {
+    event.preventDefault();
+    modal.querySelector('[role="dialog"]')?.focus({ preventScroll: true });
+    return true;
+  }
+  const currentIndex = focusTargets.indexOf(document.activeElement);
+  const nextIndex = event.shiftKey
+    ? (currentIndex <= 0 ? focusTargets.length - 1 : currentIndex - 1)
+    : (currentIndex === focusTargets.length - 1 ? 0 : currentIndex + 1);
+  event.preventDefault();
+  focusTargets[nextIndex].focus({ preventScroll: true });
+  return true;
+};
+
 const getRenderableMessages = () => state.messages.filter((message) => message.role !== 'tool');
 
 const renderMessages = () => {
@@ -5421,6 +6086,7 @@ const renderWorkspaceHeader = () => {
   if (dom.sidebarChangePasswordButton) dom.sidebarChangePasswordButton.hidden = !canChangePassword;
   renderUpdateNotesUnreadState();
   dom.chatTitle.textContent = getActiveWorkspaceTitle();
+  refreshShareButtonState();
   if (!dom.modelSelect) return;
   const selectedId = String(state.selectedModel?.id || '').trim();
   dom.modelSelect.innerHTML = '';
@@ -6822,7 +7488,11 @@ const loadMoreSessions = async () => {
   }
 };
 
-const openSession = async (sessionId) => {
+const openSession = async (sessionId, { shouldApply = null } = {}) => {
+  const operationCanApply = () => (
+    typeof shouldApply !== 'function' || shouldApply()
+  );
+  if (!operationCanApply()) return;
   resetSessionRenameState();
   saveActiveSessionScrollPosition();
   if (!sessionId) {
@@ -6878,6 +7548,13 @@ const openSession = async (sessionId) => {
   try {
     const response = await api(`/api/sessions/${encodeURIComponent(sessionId)}`, { method: 'GET' });
     const json = await response.json();
+    if (!operationCanApply()) {
+      if (state.activeSessionId === sessionId) {
+        state.sessionHistoryLoading = false;
+        renderWorkspace();
+      }
+      return;
+    }
     const serverMessages = Array.isArray(json?.messages)
       ? json.messages.map(normalizeMessageForDisplay)
       : [];
@@ -6905,6 +7582,13 @@ const openSession = async (sessionId) => {
       startLiveSessionPolling(sessionId);
     }
   } catch (error) {
+    if (!operationCanApply()) {
+      if (state.activeSessionId === sessionId) {
+        state.sessionHistoryLoading = false;
+        renderWorkspace();
+      }
+      return;
+    }
     state.sessionHistoryLoading = false;
     renderWorkspace();
     throw error;
@@ -7867,6 +8551,7 @@ const showWorkspace = () => {
   dom.loginView.style.display = 'none';
   dom.workspaceView.hidden = false;
   dom.workspaceView.style.display = 'grid';
+  renderShareLoginBanner();
   renderMobilePanelState();
 };
 
@@ -7878,6 +8563,7 @@ const showLogin = () => {
   dom.loginView.hidden = false;
   dom.loginView.style.display = 'grid';
   setAuthViewMode('home');
+  renderShareLoginBanner();
   startDailyUpdates();
 };
 
@@ -7889,17 +8575,39 @@ const initializeWorkspaceData = async () => {
   });
 
   const sessionsPromise = (async () => {
+    let importedShareResult = null;
+    if (state.pendingShareToken) {
+      importedShareResult = await importPendingSharedChat({ duringInitialization: true });
+    }
+
+    let sessionsLoaded = false;
     try {
       await refreshSessions();
-      if (state.sessions.length > 0) {
-        await openSession(state.sessions[0].id);
-      } else {
-        state.sessionHistoryLoading = false;
-        showDraftChat();
-      }
+      sessionsLoaded = true;
     } catch (error) {
       state.sessionHistoryLoading = false;
       firstError = firstError || error;
+    }
+
+    if (importedShareResult) {
+      try {
+        await applyImportedShareResult(importedShareResult, { refresh: false });
+      } catch (error) {
+        firstError = firstError || error;
+      }
+      return;
+    }
+    if (!sessionsLoaded) return;
+    if (state.pendingShareToken) {
+      state.sessionHistoryLoading = false;
+      renderWorkspace();
+      return;
+    }
+    if (state.sessions.length > 0) {
+      await openSession(state.sessions[0].id);
+    } else {
+      state.sessionHistoryLoading = false;
+      showDraftChat({ focusPrompt: state.shareImportStatus !== 'terminal' });
     }
   })();
 
@@ -8275,6 +8983,7 @@ document.addEventListener('click', () => {
 });
 
 document.addEventListener('keydown', (event) => {
+  if (handleShareModalKeydown(event)) return;
   if (event.key === 'Escape') {
     if (handleTemporaryConfirmKeydown(event)) return;
     closeMobilePanel();
@@ -8364,6 +9073,32 @@ dom.mobileFilesButton?.addEventListener('click', () => {
 dom.exportChatButton?.addEventListener('click', () => {
   exportActiveChat().catch((error) => showChatError(String(error.message || 'Failed to export chat')));
 });
+
+dom.shareChatButton?.addEventListener('click', openShareRulesDialog);
+
+dom.shareRulesBackdrop?.addEventListener('click', () => closeShareRulesDialog());
+dom.shareRulesClose?.addEventListener('click', () => closeShareRulesDialog());
+dom.shareRulesCancel?.addEventListener('click', () => closeShareRulesDialog());
+dom.shareRulesCreate?.addEventListener('click', () => {
+  createActiveChatShare().catch((error) => {
+    showError(dom.shareRulesError, getChatShareCreateErrorMessage(error));
+    setChatSharing(false);
+  });
+});
+
+dom.shareResultBackdrop?.addEventListener('click', () => closeShareResultDialog());
+dom.shareResultClose?.addEventListener('click', () => closeShareResultDialog());
+dom.shareResultCopy?.addEventListener('click', () => {
+  copyCreatedShareLink().catch(() => {});
+});
+dom.shareResultUrl?.addEventListener('focus', () => dom.shareResultUrl.select());
+dom.shareResultUrl?.addEventListener('click', () => dom.shareResultUrl.select());
+
+dom.shareImportRetry?.addEventListener('click', () => {
+  importPendingSharedChat().catch(() => {});
+});
+dom.shareImportDiscard?.addEventListener('click', discardPendingShareImport);
+dom.shareImportClose?.addEventListener('click', () => closeShareImportDialog());
 
 dom.mobilePanelBackdrop?.addEventListener('click', () => {
   closeMobilePanel();
@@ -8537,6 +9272,16 @@ if (typeof portalSmallScreenMediaQuery.addEventListener === 'function') {
   portalSmallScreenMediaQuery.addListener(handlePortalSmallScreenMediaChange);
 }
 
+window.addEventListener('hashchange', () => {
+  const token = capturePendingShareIntent();
+  if (!token) return;
+  if (state.user) {
+    importPendingSharedChat().catch(() => {});
+    return;
+  }
+  renderShareLoginBanner();
+});
+
 initResizablePanels();
 initThemeControls();
 initUpdateNotes();
@@ -8544,5 +9289,6 @@ autoResizePromptInput();
 renderMobilePanelState();
 renderEmailVerificationState();
 renderPasswordResetState();
+capturePendingShareIntent();
 ensureAgreementMetadata().catch(() => {});
 bootstrapSession();

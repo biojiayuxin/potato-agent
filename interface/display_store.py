@@ -753,6 +753,29 @@ def save_display_messages(
         conn.commit()
 
 
+def create_display_messages_if_absent(
+    user_id: str,
+    session_id: str,
+    messages: list[dict[str, Any]],
+    *,
+    draft_title: str = "",
+    db_path: Path = DEFAULT_AUTH_DB_PATH,
+) -> bool:
+    ensure_display_store(db_path)
+    now = int(time.time())
+    payload = json.dumps(messages, ensure_ascii=False, separators=(",", ":"))
+
+    with connect_auth_db(db_path) as conn:
+        cursor = conn.execute(
+            "insert or ignore into session_display_transcripts "
+            "(user_id, session_id, messages_json, draft_title, created_at, updated_at) "
+            "values (?, ?, ?, ?, ?, ?)",
+            (user_id, session_id, payload, str(draft_title or ""), now, now),
+        )
+        conn.commit()
+    return cursor.rowcount == 1
+
+
 def set_display_draft_title(
     user_id: str,
     session_id: str,

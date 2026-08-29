@@ -561,6 +561,52 @@ button {
   gap: 14px;
 }
 
+.share-login-banner {
+  width: 100%;
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  margin: 20px 0 0;
+  padding: 13px 0;
+  border-top: 1px solid rgba(22, 101, 52, 0.18);
+  border-bottom: 1px solid rgba(22, 101, 52, 0.18);
+  color: #17324d;
+  text-align: left;
+}
+
+.share-login-banner[hidden] {
+  display: none !important;
+}
+
+.share-login-banner-icon {
+  width: 22px;
+  height: 22px;
+  flex: 0 0 22px;
+  fill: none;
+  stroke: #166534;
+  stroke-width: 1.8;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.share-login-banner > div {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.share-login-banner strong {
+  font-size: 14px;
+  line-height: 1.35;
+}
+
+.share-login-banner span {
+  color: rgba(18, 32, 59, 0.7);
+  font-size: 13px;
+  line-height: 1.45;
+}
+
 .login-brand-wordmark {
   font-size: 36px;
   line-height: 1.06;
@@ -1496,11 +1542,32 @@ button.stretch {
   gap: 12px;
 }
 
-.chat-export-button {
+.chat-action-buttons {
   position: absolute;
   top: 12px;
   left: 18px;
   z-index: 5;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  opacity: 0;
+  pointer-events: none;
+  transform: translateY(-4px);
+  transition: opacity 120ms ease, transform 120ms ease;
+}
+
+.workspace-view .chat-tab-panel > .messages {
+  padding-top: 64px;
+}
+
+.chat-tab-panel:hover .chat-action-buttons,
+.chat-action-buttons:focus-within {
+  opacity: 1;
+  pointer-events: auto;
+  transform: translateY(0);
+}
+
+.chat-action-button {
   min-height: 36px;
   display: inline-flex;
   align-items: center;
@@ -1508,37 +1575,20 @@ button.stretch {
   gap: 6px;
   flex: 0 0 auto;
   white-space: nowrap;
-  opacity: 0;
-  pointer-events: none;
-  transform: translateY(-4px);
   box-shadow: 0 10px 22px rgba(15, 23, 42, 0.12);
-  transition: opacity 120ms ease, transform 120ms ease;
 }
 
-.chat-tab-panel:hover .chat-export-button,
-.chat-export-button:focus,
-.chat-export-button:focus-visible {
-  opacity: 1;
-  pointer-events: auto;
-  transform: translateY(0);
-}
-
-.chat-export-button:disabled {
+.chat-action-button:disabled {
   cursor: not-allowed;
-}
-
-.chat-tab-panel:hover .chat-export-button:disabled,
-.chat-export-button:disabled:focus,
-.chat-export-button:disabled:focus-visible {
   opacity: 0.55;
 }
 
-.chat-export-button:disabled:hover {
+.chat-action-button:disabled:hover {
   border-color: var(--border);
   background: var(--panel);
 }
 
-.chat-export-icon {
+.chat-action-icon {
   width: 15px;
   height: 15px;
   display: block;
@@ -1551,14 +1601,10 @@ button.stretch {
 }
 
 @media (hover: none) {
-  .chat-export-button {
+  .chat-action-buttons {
     opacity: 1;
     pointer-events: auto;
     transform: translateY(0);
-  }
-
-  .chat-export-button:disabled {
-    opacity: 0.55;
   }
 }
 
@@ -3511,6 +3557,242 @@ button.stretch {
   gap: 12px;
 }
 
+.share-modal {
+  position: fixed;
+  inset: 0;
+  z-index: 80;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+}
+
+.share-modal[hidden] {
+  display: none !important;
+}
+
+.share-modal-backdrop {
+  position: absolute;
+  inset: 0;
+  background: rgba(15, 23, 42, 0.5);
+  backdrop-filter: blur(5px);
+}
+
+.share-dialog {
+  position: relative;
+  width: min(620px, 100%);
+  max-height: min(88vh, 760px);
+  max-height: min(88dvh, 760px);
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  overflow: auto;
+  padding: 24px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: #ffffff;
+  box-shadow: 0 24px 64px rgba(15, 23, 42, 0.24);
+  color: var(--text);
+  outline: none;
+}
+
+.share-import-dialog {
+  width: min(470px, 100%);
+}
+
+.share-dialog-close {
+  position: absolute;
+  top: 14px;
+  right: 14px;
+  width: 34px;
+  height: 34px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--muted);
+}
+
+.share-dialog-close:hover:not(:disabled) {
+  background: #f1f5f9;
+  color: var(--text);
+}
+
+.share-dialog-close:disabled {
+  cursor: wait;
+  opacity: 0.45;
+}
+
+.share-dialog-close svg,
+.share-copy-icon {
+  width: 18px;
+  height: 18px;
+  display: block;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.8;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  pointer-events: none;
+}
+
+.share-dialog-kicker {
+  padding-right: 42px;
+  color: #166534;
+  font-size: 12px;
+  line-height: 1.35;
+  font-weight: 750;
+  text-transform: uppercase;
+  letter-spacing: 0;
+}
+
+.share-dialog h2 {
+  margin: 0;
+  padding-right: 42px;
+  color: var(--text);
+  font-size: 22px;
+  line-height: 1.25;
+  letter-spacing: 0;
+}
+
+.share-dialog-copy,
+.share-result-meta {
+  margin: 0;
+  color: var(--muted);
+  font-size: 14px;
+  line-height: 1.55;
+}
+
+.share-rules-list {
+  display: grid;
+  gap: 9px;
+  margin: 0;
+  padding: 0 0 0 20px;
+  color: #334155;
+  font-size: 14px;
+  line-height: 1.48;
+}
+
+.share-rules-list li::marker {
+  color: #16a34a;
+}
+
+.share-dialog-actions {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+  margin-top: 4px;
+}
+
+.share-dialog-actions.single-action {
+  grid-template-columns: 1fr;
+}
+
+.share-dialog-actions button {
+  min-height: 42px;
+}
+
+.share-dialog-actions button:disabled {
+  cursor: wait;
+  opacity: 0.55;
+}
+
+.share-url-row {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 10px;
+}
+
+.share-url-input {
+  min-width: 0;
+  height: 44px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: #f8fafc;
+  color: #1e293b;
+  padding: 0 12px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+  font-size: 12px;
+  outline: none;
+}
+
+.share-url-input:focus {
+  border-color: rgba(37, 99, 235, 0.48);
+  box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.1);
+}
+
+.share-copy-button {
+  min-height: 44px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  white-space: nowrap;
+}
+
+.share-import-spinner {
+  width: 42px;
+  height: 24px;
+  display: flex;
+  align-items: center;
+  gap: 5px;
+}
+
+.share-import-spinner[hidden] {
+  display: none !important;
+}
+
+.share-import-spinner span {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: #2563eb;
+  animation: share-import-pulse 900ms ease-in-out infinite;
+}
+
+.share-import-spinner span:nth-child(2) {
+  animation-delay: 120ms;
+}
+
+.share-import-spinner span:nth-child(3) {
+  animation-delay: 240ms;
+}
+
+@keyframes share-import-pulse {
+  0%, 100% { opacity: 0.35; transform: translateY(0); }
+  50% { opacity: 1; transform: translateY(-3px); }
+}
+
+.share-toast {
+  position: fixed;
+  right: 22px;
+  bottom: 22px;
+  z-index: 90;
+  max-width: min(360px, calc(100vw - 32px));
+  padding: 11px 14px;
+  border: 1px solid rgba(22, 101, 52, 0.22);
+  border-radius: 8px;
+  background: #f0fdf4;
+  box-shadow: 0 12px 34px rgba(15, 23, 42, 0.16);
+  color: #166534;
+  font-size: 14px;
+  line-height: 1.4;
+  font-weight: 700;
+}
+
+.share-toast[hidden] {
+  display: none !important;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .share-import-spinner span {
+    animation: none;
+  }
+}
+
 .workspace-view .topbar-password-button {
   display: none !important;
 }
@@ -4440,9 +4722,12 @@ button.stretch {
     align-items: stretch;
   }
 
-  .workspace-view .chat-export-button {
+  .workspace-view .chat-action-buttons {
     top: 10px;
     left: 12px;
+  }
+
+  .workspace-view .chat-action-button {
     min-height: 36px;
     padding: 0 10px;
   }
@@ -4702,4 +4987,54 @@ button.stretch {
   stroke-linejoin: round;
   color: var(--muted);
   pointer-events: none;
+}
+
+@media (max-width: 800px) {
+  .share-login-banner {
+    margin-top: 16px;
+  }
+
+  .share-modal {
+    align-items: end;
+    padding: 12px;
+  }
+
+  .share-dialog {
+    width: 100%;
+    max-height: calc(100dvh - 24px);
+    padding: 20px 18px;
+  }
+
+  .share-url-row,
+  .share-dialog-actions {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .share-url-input,
+  .share-copy-button {
+    width: 100%;
+  }
+
+  .workspace-view .topbar-actions {
+    display: flex;
+    gap: 8px;
+  }
+
+  .workspace-view .model-select-wrap {
+    width: 100%;
+    flex: 1 1 auto;
+  }
+
+  .workspace-view .model-select {
+    width: 100%;
+    max-width: none;
+  }
+
+  .share-toast {
+    right: 16px;
+    bottom: 16px;
+    left: 16px;
+    max-width: none;
+    text-align: center;
+  }
 }

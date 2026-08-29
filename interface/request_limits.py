@@ -48,10 +48,15 @@ class RequestBodyLimitMiddleware:
             [dict[str, Any], int, str], dict[str, Any] | None
         ]
         | None = None,
+        error_headers_for_scope: Callable[
+            [dict[str, Any], int], list[tuple[bytes, bytes]]
+        ]
+        | None = None,
     ) -> None:
         self.app = app
         self.limit_for_scope = limit_for_scope
         self.error_body_for_scope = error_body_for_scope
+        self.error_headers_for_scope = error_headers_for_scope
 
     async def __call__(
         self,
@@ -114,6 +119,11 @@ class RequestBodyLimitMiddleware:
                 ensure_ascii=True,
                 separators=(",", ":"),
             ).encode("ascii")
+            extra_headers = (
+                self.error_headers_for_scope(scope, exc.status_code)
+                if self.error_headers_for_scope is not None
+                else []
+            )
             await send(
                 {
                     "type": "http.response.start",
@@ -121,6 +131,7 @@ class RequestBodyLimitMiddleware:
                     "headers": [
                         (b"content-type", b"application/json"),
                         (b"content-length", str(len(body)).encode("ascii")),
+                        *extra_headers,
                     ],
                 }
             )

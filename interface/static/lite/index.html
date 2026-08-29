@@ -3,9 +3,10 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="referrer" content="no-referrer" />
     <title>Potato Agent</title>
     <link rel="icon" type="image/png" href="./static/favicon.png" />
-    <link rel="stylesheet" href="./static/lite/styles.css?v=20260826-concise-consent" />
+    <link rel="stylesheet" href="./static/lite/styles.css?v=20260828-chat-actions" />
     <link rel="stylesheet" href="/static/shared/feedback.css?v=20260819-feedback" />
   </head>
   <body>
@@ -67,6 +68,20 @@
                 </div>
                 <div class="login-brand-wordmark">Potato Agent</div>
                 <p class="login-brand-subtitle">—— AI for Potato Research ——</p>
+              </div>
+
+              <div id="share-login-banner" class="share-login-banner" role="status" hidden>
+                <svg class="share-login-banner-icon" viewBox="0 0 24 24" aria-hidden="true">
+                  <circle cx="18" cy="5" r="3"></circle>
+                  <circle cx="6" cy="12" r="3"></circle>
+                  <circle cx="18" cy="19" r="3"></circle>
+                  <path d="m8.6 10.7 6.8-4.4"></path>
+                  <path d="m8.6 13.3 6.8 4.4"></path>
+                </svg>
+                <div>
+                  <strong>Shared chat ready to import</strong>
+                  <span>Sign in or use Quick Start to add a private copy to this workspace.</span>
+                </div>
               </div>
 
               <div id="auth-home-view" class="auth-home-view">
@@ -404,14 +419,26 @@
               <div id="workspace-tabs" class="workspace-tabs" role="tablist" aria-label="Open tabs"></div>
               <div id="workspace-tab-panels" class="workspace-tab-panels">
                 <div id="chat-tab-panel" class="workspace-tab-panel chat-tab-panel" role="tabpanel" aria-label="chats">
-                  <button id="export-chat-button" class="ghost small chat-export-button" type="button" aria-label="Export chat as markdown" title="Export chat" disabled>
-                    <svg class="chat-export-icon" viewBox="0 0 24 24" aria-hidden="true">
-                      <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
-                      <path d="M7 10l5 5 5-5"></path>
-                      <path d="M12 15V3"></path>
-                    </svg>
-                    <span>Export chat</span>
-                  </button>
+                  <div class="chat-action-buttons" role="group" aria-label="Chat actions">
+                    <button id="share-chat-button" class="ghost small chat-action-button" type="button" aria-label="Share chat" title="Share chat" hidden disabled>
+                      <svg class="chat-action-icon" viewBox="0 0 24 24" aria-hidden="true">
+                        <circle cx="18" cy="5" r="3"></circle>
+                        <circle cx="6" cy="12" r="3"></circle>
+                        <circle cx="18" cy="19" r="3"></circle>
+                        <path d="m8.6 10.7 6.8-4.4"></path>
+                        <path d="m8.6 13.3 6.8 4.4"></path>
+                      </svg>
+                      <span>Share chat</span>
+                    </button>
+                    <button id="export-chat-button" class="ghost small chat-action-button" type="button" aria-label="Export chat as markdown" title="Export chat" disabled>
+                      <svg class="chat-action-icon" viewBox="0 0 24 24" aria-hidden="true">
+                        <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
+                        <path d="M7 10l5 5 5-5"></path>
+                        <path d="M12 15V3"></path>
+                      </svg>
+                      <span>Export chat</span>
+                    </button>
+                  </div>
                   <div id="messages" class="messages"></div>
                   <div id="tui-bridge-status" class="muted tiny" hidden></div>
                 </div>
@@ -489,6 +516,74 @@
           </div>
         </main>
       </section>
+
+      <div id="share-rules-modal" class="share-modal" hidden>
+        <div id="share-rules-backdrop" class="share-modal-backdrop"></div>
+        <section class="share-dialog share-rules-dialog" role="dialog" aria-modal="true" aria-labelledby="share-rules-title" aria-describedby="share-rules-description" tabindex="-1">
+          <button id="share-rules-close" class="share-dialog-close" type="button" aria-label="Close sharing rules" title="Close">
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <path d="M18 6 6 18"></path>
+              <path d="m6 6 12 12"></path>
+            </svg>
+          </button>
+          <h2 id="share-rules-title">Create a private import link?</h2>
+          <p id="share-rules-description" class="share-dialog-copy">Review what will be shared before creating the link.</p>
+          <ul class="share-rules-list">
+            <li>Only visible questions and answers are included.</li>
+            <li>The link expires after 7 days and supports up to 100 importing accounts.</li>
+            <li>Sensitive paths, secrets, and private workspace references are removed.</li>
+          </ul>
+          <div id="share-rules-error" class="error" role="alert" hidden></div>
+          <div class="share-dialog-actions">
+            <button id="share-rules-cancel" type="button" class="ghost">Cancel</button>
+            <button id="share-rules-create" type="button" class="primary">Create link</button>
+          </div>
+        </section>
+      </div>
+
+      <div id="share-result-modal" class="share-modal" hidden>
+        <div id="share-result-backdrop" class="share-modal-backdrop"></div>
+        <section class="share-dialog share-result-dialog" role="dialog" aria-modal="true" aria-labelledby="share-result-title" aria-describedby="share-result-description" tabindex="-1">
+          <button id="share-result-close" class="share-dialog-close" type="button" aria-label="Close share result" title="Close">
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <path d="M18 6 6 18"></path>
+              <path d="m6 6 12 12"></path>
+            </svg>
+          </button>
+          <h2 id="share-result-title">Your chat snapshot is ready</h2>
+          <p id="share-result-description" class="share-dialog-copy">Anyone with this link must sign in or use Quick Start to view the conversation.</p>
+          <div class="share-url-row">
+            <input id="share-result-url" class="share-url-input" type="text" readonly aria-label="Share link" />
+            <button id="share-result-copy" class="primary share-copy-button" type="button">
+              <svg class="share-copy-icon" viewBox="0 0 24 24" aria-hidden="true">
+                <rect width="14" height="14" x="8" y="8" rx="2"></rect>
+                <path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2"></path>
+              </svg>
+              <span>Copy link</span>
+            </button>
+          </div>
+          <p id="share-result-meta" class="share-result-meta"></p>
+          <div id="share-result-error" class="error" role="alert" hidden></div>
+        </section>
+      </div>
+
+      <div id="share-import-modal" class="share-modal" hidden>
+        <div class="share-modal-backdrop"></div>
+        <section class="share-dialog share-import-dialog" role="dialog" aria-modal="true" aria-labelledby="share-import-title" aria-describedby="share-import-description" tabindex="-1">
+          <div class="share-dialog-kicker">Shared chat</div>
+          <div id="share-import-spinner" class="share-import-spinner" aria-hidden="true"><span></span><span></span><span></span></div>
+          <h2 id="share-import-title">Importing shared chat</h2>
+          <p id="share-import-description" class="share-dialog-copy" aria-live="polite" aria-atomic="true">Creating a private copy in this workspace.</p>
+          <div id="share-import-error" class="error" role="alert" hidden></div>
+          <div id="share-import-actions" class="share-dialog-actions" hidden>
+            <button id="share-import-discard" type="button" class="ghost">Discard link</button>
+            <button id="share-import-retry" type="button" class="primary">Retry import</button>
+            <button id="share-import-close" type="button" class="primary" hidden>Close</button>
+          </div>
+        </section>
+      </div>
+
+      <div id="share-toast" class="share-toast" role="status" aria-live="polite" hidden></div>
 
       <div id="approval-modal" class="approval-modal" hidden>
         <div id="approval-backdrop" class="approval-backdrop"></div>
@@ -581,6 +676,6 @@
 
     <script src="./static/lite/vendor/marked.umd.js"></script>
     <script src="/static/shared/feedback.js?v=20260819-feedback" defer></script>
-    <script type="module" src="./static/lite/app.js?v=20260825-research-preview-terms"></script>
+    <script type="module" src="./static/lite/app.js?v=20260828-chat-actions"></script>
   </body>
 </html>

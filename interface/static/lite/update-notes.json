@@ -1,6 +1,13 @@
 {
   "updates": [
     {
+      "version": "2026-08-29-001",
+      "title": "Chat sharing",
+      "date": "August 29, 2026",
+      "summary": "You can now share conversations using a link.",
+      "items": []
+    },
+    {
       "version": "2026-08-18-001",
       "title": "New skills",
       "date": "August 18, 2026",

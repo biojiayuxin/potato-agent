@@ -33,10 +33,10 @@ Git checkout 里。
   保留作 legacy 回滚来源。
 - interface Python 环境：`/opt/interface-env`。
 
-`POTATO_AGENT_STATE_DIR` 只是在未设置专用变量时，为 mapping、Interface auth/archive DB、model proxy 配置和
-usage DB 推导默认路径的前缀；它不会迁移 credentials、外部数据集、每用户 `HERMES_HOME`、源码或 release。
+`POTATO_AGENT_STATE_DIR` 只是在未设置专用变量时，为 mapping、Interface auth/archive/chat share DB、model proxy
+配置和 usage DB 推导默认路径的前缀；它不会迁移 credentials、外部数据集、每用户 `HERMES_HOME`、源码或 release。
 生产 unit 已显式固定各专用路径，通常不应设置这个总前缀。确需更换状态位置时，应分别设置
-`POTATO_AGENT_MAPPING_PATH`、`INTERFACE_AUTH_DB`、`INTERFACE_ARCHIVE_DB`、
+`POTATO_AGENT_MAPPING_PATH`、`INTERFACE_AUTH_DB`、`INTERFACE_ARCHIVE_DB`、`INTERFACE_CHAT_SHARE_DB`、
 `POTATO_MODEL_PROXY_CONFIG_PATH` 和 `POTATO_MODEL_PROXY_USAGE_DB`，并同步审查 owner/mode、备份迁移及 systemd
 sandbox 路径。
 
@@ -140,7 +140,7 @@ Interface 完整闭包见
 
 1. `/srv/potato_agent` 只允许 `root` 和 `potato-interface` 组读取，普通 Hermes 用户不能读源码。
 2. `/var/lib/potato-agent/data` 由 `potato-interface` 独占，普通 Hermes 用户不能读
-   Interface 用户数据库、归档数据库或包含明文反馈正文和联系邮箱的 Feedback 数据库。
+   Interface 用户数据库、归档数据库、聊天分享快照数据库或包含明文反馈正文和联系邮箱的 Feedback 数据库。
 3. `/srv/spatial_data` 由 `root:potato-interface` 只读维护，空间转录组页面可公开访问，但底层
    SQLite 和轮廓数据不暴露给普通 Linux 用户直接读取。
 4. `/srv/wgcna_data` 由 `root:potato-interface` 只读维护，WGCNA 页面可公开访问，但底层导出
@@ -1249,10 +1249,15 @@ printf '%s\n' "$INTERFACE_EFFECTIVE_ENV" | tr ' ' '\n' |
   grep -Fxq INTERFACE_ARCHIVE_RETENTION_DAYS=99999
 printf '%s\n' "$INTERFACE_EFFECTIVE_ENV" | tr ' ' '\n' |
   grep -Fxq INTERFACE_ARCHIVE_STORAGE_RETENTION_DAYS=30
+printf '%s\n' "$INTERFACE_EFFECTIVE_ENV" | tr ' ' '\n' |
+  grep -Fxq INTERFACE_CHAT_SHARE_DB=/var/lib/potato-agent/data/chat_shares.db
 INTERFACE_EFFECTIVE_BIND=$(printf '%s\n' "$INTERFACE_EFFECTIVE_ENV" | tr ' ' '\n' |
   sed -n 's/^INTERFACE_BIND_HOST=//p')
 test -n "$INTERFACE_EFFECTIVE_BIND"
-curl -fsS "http://$INTERFACE_EFFECTIVE_BIND:3000/health"
+IFS=',' read -r -a INTERFACE_EFFECTIVE_HOSTS <<<"$INTERFACE_EFFECTIVE_BIND"
+for INTERFACE_EFFECTIVE_HOST in "${INTERFACE_EFFECTIVE_HOSTS[@]}"; do
+  curl -fsS "http://$INTERFACE_EFFECTIVE_HOST:3000/health"
+done
 case "$INTERFACE_EFFECTIVE_EXEC" in
   *'-m interface.serve --port 3000'*) ;;
   *) false ;;
@@ -1943,6 +1948,7 @@ Environment=INTERFACE_RUNTIME_IDLE_TIMEOUT_SECONDS=1800
 Environment=POTATO_AGENT_MAPPING_PATH=/var/lib/potato-agent/config/users_mapping.yaml
 Environment=INTERFACE_AUTH_DB=/var/lib/potato-agent/data/interface.db
 Environment=INTERFACE_ARCHIVE_DB=/var/lib/potato-agent/data/archive.db
+Environment=INTERFACE_CHAT_SHARE_DB=/var/lib/potato-agent/data/chat_shares.db
 Environment=INTERFACE_FEEDBACK_DB=/var/lib/potato-agent/data/feedback.db
 Environment=INTERFACE_TUI_GATEWAY_PYTHON=/opt/potato-hermes-lite/current/venv/bin/python3
 Environment=SPATIAL_VIEWER_DATA_ROOT=/srv/spatial_data/current
@@ -2021,6 +2027,44 @@ systemctl status potato-interface.service
 Interface 首次启动会在 `INTERFACE_FEEDBACK_DB` 创建 `feedback.db`；升级旧版本时会在事务中补齐缺少的列，
 不需要手工运行 SQLite DDL。该数据库保存明文反馈正文和可选联系邮箱、投递状态、Resend ID 与时间戳，默认保留
 30 天；不保存客户端 IP。文件应为 `potato-interface:potato-interface 0600`，父目录保持 `0700`。
+
+#### 聊天分享（默认启用）
+
+聊天分享在未设置 `INTERFACE_CHAT_SHARING_ENABLED` 时默认开启。正式账号可以为已经保存且当前不在运行中的聊天
+创建链接；正式账号和 Quick Start 临时账号都可以在认证后导入。链接没有未登录公开预览。需要全站临时停用时，
+在 site drop-in 中显式设置 `Environment=INTERFACE_CHAT_SHARING_ENABLED=false` 并重启 Interface；停用只隐藏入口并
+拒绝创建/导入 API，不删除现有记录，重新启用后尚未过期且未失效的链接会恢复可用。
+
+生产必须显式设置
+`INTERFACE_CHAT_SHARE_DB=/var/lib/potato-agent/data/chat_shares.db`。Interface 会自动创建或迁移 schema；父目录必须
+保持 `potato-interface:potato-interface 0700`，数据库及 `-wal`、`-shm`、`-journal` sidecar 必须为 `0600`。
+数据库包含不可变聊天快照、owner/source 标识、接收者 receipt、限流事件和 token 的 SHA-256 哈希，不能放入
+公开静态目录、用户 home、源码树或部署日志，也不能授予普通 mapped 用户读取权限。
+
+运行契约如下：
+
+- 快照只包含页面可见且已经完成的 `user`/`assistant` 文本；分享记录还会保存经过字符清理和私有路径脱敏的
+  源标题，空标题回退为首条可见用户消息。消息 ID、原时间戳、推理内容、tool call、进度、文件和附件元数据
+  不会进入快照。导入会生成新的会话 ID、消息 ID 和时间戳，标题使用 `原标题 (shared)`（重名时递增编号），
+  并成为接收账号自己的独立副本；分享者看不到接收者身份，也不能撤回已经导入的副本。
+- 链接固定 7 天过期，每个链接最多由 100 个不同账号领取；接收者计数单调增加，删除接收账号或导入副本不会
+  释放名额。正式账号每小时最多创建 10 个链接、同时最多保留 20 个有效链接；每个接收身份每小时最多导入
+  20 个不同链接。上述限额是应用常量，不通过站点环境变量扩大。
+- bearer token 只在创建响应中返回一次，数据库不保存明文。创建、导入和错误响应使用 `no-store`，反向代理也
+  不得缓存这些 API；应用、代理、审计和故障报告均不得记录 URL fragment、token、快照正文或导入正文。
+- 删除或自动归档源聊天会先撤销并清空尚未导入的分享快照，再删除 Hermes 会话；活动 lifecycle claim 会在每个
+  compression lineage 删除前续租，阻止并发创建。成功后转为 1 小时 tombstone，失败只回滚本次 claim；崩溃
+  遗留 claim、source/owner/recipient tombstone 和过期链接由启动清理及每小时后台任务回收。不要手工删除这些
+  协调记录或绕过分享清理直接删除源会话。
+- 删除已导入的目标聊天会保留已使用名额，同一账号再次打开链接不会重新创建副本。正式账号注销、系统托管用户
+  deprovision 和 Quick Start 清理都必须先清理该身份的分享 ownership/receipt，再删除认证记录或 Linux 用户；
+  运维脚本应使用与 Interface 相同的 `INTERFACE_CHAT_SHARE_DB`。
+
+`chat_shares.db` 必须纳入 Interface 私有状态备份。在线 WAL 数据库不能只复制主文件，应在停止写入方后备份，
+或使用 SQLite backup API 生成一致性快照并执行 `PRAGMA integrity_check`。恢复归档聊天时，
+`restore_archived_chats.py --apply` 默认探测该数据库并将其纳入恢复前备份；非默认路径必须显式传 `--share-db`。
+该脚本要求 Interface 和受影响 Hermes services 已停止，并只在 Hermes 会话与 display transcript 都恢复成功后
+清除对应 source tombstone，使恢复后的聊天可以重新创建链接。
 
 #### Daily Updates（需单独部署）
 
@@ -2181,8 +2225,9 @@ model proxy、Interface 顺序重启。新增的 auth DB 表可以保留，旧�
 - mapping 至少包含一个用户，全部 mapped unit 已存在，`/usr/local/bin/hermes` 是 symlink；
 - 已完成独立、可恢复的数据备份，而不是只依赖 cutover 的状态指纹。
 
-`feedback.db` 会保存明文反馈正文和可选联系邮箱。它必须包含在 Interface 数据备份中，备份目录只能由 root
-读取，并按批准的备份保留策略清理；不能因长期遗留备份而绕过应用内 30 天清理。
+`feedback.db` 会保存明文反馈正文和可选联系邮箱，`chat_shares.db` 会保存聊天分享快照和导入 receipt。两者都
+必须包含在 Interface 数据备份中，备份目录只能由 root 读取，并按批准的备份保留策略清理；不能因长期遗留
+备份而绕过应用内的数据保留和失效规则。
 
 如果 mapping、任一 Interface DB 或其 WAL/SHM 仍在 `/srv/potato_agent`，或者新旧位置同时存在状态，这属于
 单独的旧状态迁移，不得与 Lite release 切换合并执行。本 README 不提供危险的文件复制捷径：迁移必须在
@@ -2899,10 +2944,15 @@ PYTHONDONTWRITEBYTECODE=1 "$BUILD_PYTHON" -B \
 检查网页服务：
 
 ```bash
-INTERFACE_HEALTH_HOST=$(systemctl show potato-interface.service --property=Environment --value |
+INTERFACE_BIND_HOSTS=$(systemctl show potato-interface.service --property=Environment --value |
   tr ' ' '\n' | sed -n 's/^INTERFACE_BIND_HOST=//p')
-test -n "$INTERFACE_HEALTH_HOST"
-INTERFACE_HTTP_ORIGIN="http://$INTERFACE_HEALTH_HOST:3000"
+test -n "$INTERFACE_BIND_HOSTS"
+IFS=',' read -r -a INTERFACE_HEALTH_HOSTS <<<"$INTERFACE_BIND_HOSTS"
+for INTERFACE_HEALTH_HOST in "${INTERFACE_HEALTH_HOSTS[@]}"; do
+  curl -fsS "http://$INTERFACE_HEALTH_HOST:3000/health" |
+    python3 -m json.tool >/dev/null
+done
+INTERFACE_HTTP_ORIGIN="http://${INTERFACE_HEALTH_HOSTS[0]}:3000"
 curl -fsS "$INTERFACE_HTTP_ORIGIN/health" | python3 -m json.tool >/dev/null
 curl -fsS "$INTERFACE_HTTP_ORIGIN/lite" >/dev/null
 curl -fsS "$INTERFACE_HTTP_ORIGIN/about" >/dev/null
@@ -2952,6 +3002,40 @@ if not required.issubset(columns):
 PY
 ```
 
+检查聊天分享数据库权限和 schema；探针只读 metadata，不查询 token 哈希、快照或 receipt 内容：
+
+```bash
+CHAT_SHARE_DB=/var/lib/potato-agent/data/chat_shares.db
+test "$(stat -c '%U:%G:%a' "$CHAT_SHARE_DB")" = potato-interface:potato-interface:600
+/opt/interface-env/bin/python - "$CHAT_SHARE_DB" <<'PY'
+import sqlite3
+import sys
+
+required = {
+    "chat_shares",
+    "chat_share_imports",
+    "chat_share_rate_events",
+    "chat_share_source_lifecycle_claims",
+}
+with sqlite3.connect(f"file:{sys.argv[1]}?mode=ro", uri=True) as conn:
+    tables = {
+        str(row[0])
+        for row in conn.execute("select name from sqlite_master where type='table'")
+    }
+    columns = {
+        str(row[1]) for row in conn.execute("pragma table_info(chat_shares)")
+    }
+if not required.issubset(tables):
+    raise SystemExit(f"chat share schema missing tables: {sorted(required - tables)}")
+if "token_sha256" not in columns or "token" in columns:
+    raise SystemExit("chat share token storage schema is unsafe")
+PY
+```
+
+最后用正式账号创建一条不含敏感信息的测试聊天和分享链接，再分别用另一个正式账号及 Quick Start 完成导入；确认
+未登录访问只能进入认证流程、两个导入会话都是独立副本、源聊天删除后尚未导入的链接失效。不要把测试 token、
+完整分享 URL 或正文写入命令、日志、截图和验收报告。
+
 真实邮件 smoke test 会产生外部邮件并占用全站每小时 20 次额度，只在 owner 批准后从浏览器提交一条可识别反馈。
 随后仅核对数据库状态/Resend ID、Resend 投递事件和固定收件箱，不把正文或联系邮箱写入命令、日志或验收报告。
 
@@ -2980,6 +3064,7 @@ sudo -u "$ORDINARY_USER" test ! -r /var/lib/potato-agent/config/users_mapping.ya
 sudo -u "$ORDINARY_USER" test ! -r /var/lib/potato-agent/config/model_proxy.yaml
 sudo -u "$ORDINARY_USER" test ! -r /var/lib/potato-agent/data/interface.db
 sudo -u "$ORDINARY_USER" test ! -r /var/lib/potato-agent/data/archive.db
+sudo -u "$ORDINARY_USER" test ! -r /var/lib/potato-agent/data/chat_shares.db
 sudo -u "$ORDINARY_USER" test ! -r /var/lib/potato-agent/data/feedback.db
 sudo -u "$ORDINARY_USER" test ! -r /var/lib/potato-agent/model-proxy/usage.db
 sudo -u "$ORDINARY_USER" test ! -r /etc/potato-agent/credentials/interface-session-secret
@@ -2992,6 +3077,7 @@ sudo -u "$ORDINARY_USER" test ! -r /srv/gene_catalog/current/gene_catalog.sqlite
 sudo -u "$ORDINARY_USER" test ! -r /srv/pan_genome/current/pan_genome.sqlite
 sudo -u potato-interface test ! -r /var/lib/potato-agent/config/model_proxy.yaml
 sudo -u potato-model-proxy test ! -r /var/lib/potato-agent/data/interface.db
+sudo -u potato-model-proxy test ! -r /var/lib/potato-agent/data/chat_shares.db
 sudo -u potato-model-proxy test ! -r /var/lib/potato-agent/data/feedback.db
 ```
 
@@ -3089,6 +3175,7 @@ unit 中应包含：
 - `/var/lib/potato-agent/config/model_proxy.yaml`
 - `/var/lib/potato-agent/data/interface.db`
 - `/var/lib/potato-agent/data/archive.db`
+- `/var/lib/potato-agent/data/chat_shares.db`
 - `/var/lib/potato-agent/data/feedback.db`
 - `/var/lib/potato-agent/model-proxy/usage.db`
 - 上述 SQLite 对应的 `-wal`、`-shm` 和 `-journal` sidecar

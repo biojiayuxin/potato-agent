@@ -103,7 +103,7 @@ def test_about_and_shared_feedback_assets_are_public(tmp_path, monkeypatch) -> N
         normalized_about_html = " ".join(about_html.split()).lower()
         for api_domain in (
             "genomic data",
-            "bulk rna-seq",
+            "gene expression across materials and tissues",
             "spatial transcriptomics",
             "wgcna networks",
             "genome-wide gene function prediction",

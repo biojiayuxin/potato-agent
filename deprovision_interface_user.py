@@ -6,7 +6,16 @@ import argparse
 import sys
 from pathlib import Path
 
-from interface.auth_db import DEFAULT_AUTH_DB_PATH, delete_user_by_mapping_username
+from interface.auth_db import (
+    DEFAULT_AUTH_DB_PATH,
+    delete_user_by_mapping_username,
+    is_temporary_user,
+    list_users,
+)
+from interface.chat_share_store import (
+    DEFAULT_CHAT_SHARE_DB_PATH,
+    invalidate_user_chat_share_data,
+)
 from interface.hermes_service import (
     remove_linux_user,
     require_binary,
@@ -46,6 +55,12 @@ def build_parser() -> argparse.ArgumentParser:
         help=f"Path to interface auth DB (default: {DEFAULT_AUTH_DB_PATH})",
     )
     parser.add_argument(
+        "--share-db",
+        type=Path,
+        default=DEFAULT_CHAT_SHARE_DB_PATH,
+        help=f"Path to chat share DB (default: {DEFAULT_CHAT_SHARE_DB_PATH})",
+    )
+    parser.add_argument(
         "--delete-home",
         action="store_true",
         help="Also delete /home/<linux_user> by removing the Linux user with userdel -r.",
@@ -64,6 +79,31 @@ def main() -> int:
         raise DeprovisionError(
             f"User {args.username!r} not found in users_mapping.yaml."
         )
+
+    auth_user = next(
+        (
+            user
+            for user in list_users(db_path=args.auth_db)
+            if user.mapping_username == args.username
+        ),
+        None,
+    )
+    if auth_user is None:
+        raise DeprovisionError(
+            f"User {args.username!r} not found in the interface auth DB; "
+            "chat share ownership cannot be cleaned safely."
+        )
+
+    account_namespace = (
+        "temporary"
+        if is_temporary_user(auth_user.id, db_path=args.auth_db)
+        else "formal"
+    )
+    invalidate_user_chat_share_data(
+        auth_user.id,
+        recipient_user_id=f"{account_namespace}:{auth_user.id}",
+        db_path=args.share_db,
+    )
 
     stop_and_remove_service(target.systemd_service)
     remove_linux_user(target.linux_user, delete_home=args.delete_home)

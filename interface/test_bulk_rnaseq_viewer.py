@@ -176,7 +176,7 @@ def test_bulk_rnaseq_page_route_serves_static_page() -> None:
     try:
         response = client.get("/bulk-rnaseq")
         assert response.status_code == 200
-        assert "Bulk RNA-Seq" in response.text
+        assert "Gene Expression Across Materials and Tissues" in response.text
     finally:
         client.close()
 

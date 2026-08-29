@@ -130,6 +130,29 @@ insert into archived_sessions (
     return True
 
 
+def archived_session_exists(
+    mapping_username: str,
+    original_session_id: str,
+    *,
+    db_path: Path = DEFAULT_ARCHIVE_DB_PATH,
+) -> bool:
+    normalized_mapping = str(mapping_username or "").strip()
+    normalized_session = str(original_session_id or "").strip()
+    if not normalized_mapping or not normalized_session:
+        return False
+    ensure_archive_db(db_path)
+    with _connect_archive_db(db_path) as conn:
+        row = conn.execute(
+            """
+            select 1 from archived_sessions
+            where mapping_username = ? and original_session_id = ?
+            limit 1
+            """,
+            (normalized_mapping, normalized_session),
+        ).fetchone()
+    return row is not None
+
+
 def start_archive_run(db_path: Path = DEFAULT_ARCHIVE_DB_PATH) -> str:
     ensure_archive_db(db_path)
     run_id = str(uuid.uuid4())

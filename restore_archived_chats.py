@@ -18,6 +18,11 @@ from typing import Any, Iterator
 
 import yaml
 
+from interface.chat_share_store import (
+    DEFAULT_CHAT_SHARE_DB_PATH,
+    clear_source_session_invalidation,
+)
+
 
 DEFAULT_ARCHIVE_DB = Path("/var/lib/potato-agent/data/archive.db")
 DEFAULT_INTERFACE_DB = Path("/var/lib/potato-agent/data/interface.db")
@@ -99,6 +104,7 @@ class RestorePaths:
     archive_db: Path = DEFAULT_ARCHIVE_DB
     interface_db: Path = DEFAULT_INTERFACE_DB
     mapping: Path = DEFAULT_MAPPING
+    chat_share_db: Path | None = None
 
 
 @dataclass(frozen=True)
@@ -167,6 +173,15 @@ def _absolute_regular_file(path: Path, label: str) -> Path:
     if not resolved.is_file():
         raise RestoreError(f"{label} not found: {resolved}")
     return resolved
+
+
+def _optional_absolute_regular_file(path: Path | None, label: str) -> Path | None:
+    if path is None:
+        return None
+    expanded = path.expanduser().absolute()
+    if not expanded.exists():
+        return None
+    return _absolute_regular_file(expanded, label)
 
 
 def _connect_read_only(path: Path) -> sqlite3.Connection:
@@ -549,6 +564,10 @@ def preflight_restore(
         archive_db=_absolute_regular_file(paths.archive_db, "Archive database"),
         interface_db=_absolute_regular_file(paths.interface_db, "Interface database"),
         mapping=_absolute_regular_file(paths.mapping, "Mapping file"),
+        chat_share_db=_optional_absolute_regular_file(
+            paths.chat_share_db,
+            "Chat share database",
+        ),
     )
     bindings = _load_bindings(paths)
     summary = RestoreSummary()
@@ -710,6 +729,8 @@ def create_backups(
     while not parent.exists() and parent != parent.parent:
         parent = parent.parent
     required_bytes = paths.archive_db.stat().st_size + paths.interface_db.stat().st_size
+    if paths.chat_share_db is not None:
+        required_bytes += paths.chat_share_db.stat().st_size
     for mapping_username in affected_mappings:
         required_bytes += bindings[mapping_username].state_db.stat().st_size
     available_bytes = shutil.disk_usage(parent).free
@@ -721,6 +742,8 @@ def create_backups(
     try:
         _backup_database(paths.archive_db, target / "archive.db")
         _backup_database(paths.interface_db, target / "interface.db")
+        if paths.chat_share_db is not None:
+            _backup_database(paths.chat_share_db, target / "chat-shares.db")
         for mapping_username in sorted(affected_mappings):
             destination = target / f"state--{_safe_backup_name(mapping_username)}.db"
             _backup_database(bindings[mapping_username].state_db, destination)
@@ -728,6 +751,9 @@ def create_backups(
             "created_at": int(time.time()),
             "archive_db": "archive.db",
             "interface_db": "interface.db",
+            "chat_share_db": (
+                "chat-shares.db" if paths.chat_share_db is not None else None
+            ),
             "state_databases": {
                 mapping_username: f"state--{_safe_backup_name(mapping_username)}.db"
                 for mapping_username in sorted(affected_mappings)
@@ -1037,6 +1063,16 @@ def apply_restore(
         finally:
             interface_conn.close()
             _restore_database_metadata(paths.interface_db, metadata)
+
+        if paths.chat_share_db is not None:
+            for mapping_username in sorted(mappings):
+                binding = bindings[mapping_username]
+                for chat in _iter_archived_chats(archive_conn, mapping_username):
+                    clear_source_session_invalidation(
+                        binding.auth_user_id,
+                        chat.logical_session_id,
+                        db_path=paths.chat_share_db,
+                    )
     return summary
 
 
@@ -1052,6 +1088,10 @@ def run_restore(
         archive_db=_absolute_regular_file(paths.archive_db, "Archive database"),
         interface_db=_absolute_regular_file(paths.interface_db, "Interface database"),
         mapping=_absolute_regular_file(paths.mapping, "Mapping file"),
+        chat_share_db=_optional_absolute_regular_file(
+            paths.chat_share_db,
+            "Chat share database",
+        ),
     )
     summary, bindings = preflight_restore(
         normalized_paths,
@@ -1121,6 +1161,15 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--archive-db", type=Path, default=DEFAULT_ARCHIVE_DB)
     parser.add_argument("--interface-db", type=Path, default=DEFAULT_INTERFACE_DB)
+    parser.add_argument(
+        "--share-db",
+        type=Path,
+        default=DEFAULT_CHAT_SHARE_DB_PATH,
+        help=(
+            "Optional chat share DB whose source tombstones are cleared after "
+            "a successful restore"
+        ),
+    )
     parser.add_argument("--mapping", type=Path, default=DEFAULT_MAPPING)
     parser.add_argument(
         "--mapping-username",
@@ -1157,6 +1206,7 @@ def main(argv: list[str] | None = None) -> int:
         archive_db=args.archive_db,
         interface_db=args.interface_db,
         mapping=args.mapping,
+        chat_share_db=args.share_db,
     )
     try:
         summary, backup_dir = run_restore(

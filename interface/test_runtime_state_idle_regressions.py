@@ -718,6 +718,14 @@ def test_idle_check_cleans_temporary_user(monkeypatch) -> None:
 
     monkeypatch.setattr(app_mod, "RUNTIME_IDLE_TIMEOUT_SECONDS", 300)
     monkeypatch.setattr(app_mod, "TEMPORARY_USER_CLEANUP_RETRY_SECONDS", 60)
+    invalidated_share_users: list[tuple[str, str]] = []
+    monkeypatch.setattr(
+        app_mod,
+        "invalidate_user_chat_share_data",
+        lambda checked_user_id, *, recipient_user_id: invalidated_share_users.append(
+            (checked_user_id, recipient_user_id)
+        ),
+    )
     monkeypatch.setattr(
         app_mod,
         "cleanup_expired_runtime_leases",
@@ -901,6 +909,7 @@ def test_idle_check_cleans_temporary_user(monkeypatch) -> None:
 
     assert asyncio.run(app_mod._run_runtime_idle_check_once()) == 1
     assert closed_for_cleanup == [user.id]
+    assert invalidated_share_users == [(user.id, f"temporary:{user.id}")]
     assert deprovisioned == [("temp_1", True)]
     assert removed_mappings == ["temp_1"]
     assert auth_db.get_user_by_id(user.id, db_path=db_path) is None

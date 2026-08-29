@@ -11,7 +11,7 @@ from pathlib import Path
 import yaml
 
 import restore_archived_chats as restore
-from interface import archive_store
+from interface import archive_store, chat_share_store
 
 
 STATE_SCHEMA = """
@@ -363,6 +363,42 @@ class RestoreArchivedChatsTests(unittest.TestCase):
         third, _ = restore.run_restore(self.paths)
         self.assertTrue(third.ok, third.errors)
         self.assertEqual(third.already_restored, 1)
+
+    def test_restore_clears_source_share_tombstone_and_backs_up_share_db(self) -> None:
+        self.archive_chat(
+            session_id="restored-share-source",
+            message_id=350,
+            title="Restored share source",
+        )
+        share_db = self.root / "chat-shares.db"
+        chat_share_store.invalidate_source_session_shares(
+            "auth-alice",
+            "restored-share-source",
+            lifecycle_claim_id="archive-claim",
+            db_path=share_db,
+        )
+        paths = restore.RestorePaths(
+            archive_db=self.archive_db,
+            interface_db=self.interface_db,
+            mapping=self.mapping_path,
+            chat_share_db=share_db,
+        )
+
+        restored, backup_dir = restore.run_restore(
+            paths,
+            apply=True,
+            backup_dir=self.root / "backup-with-shares",
+        )
+
+        self.assertTrue(restored.ok, restored.errors)
+        self.assertIsNotNone(backup_dir)
+        self.assertTrue((backup_dir / "chat-shares.db").is_file())
+        with sqlite3.connect(str(share_db)) as conn:
+            tombstones = conn.execute(
+                "select owner_user_id, source_session_id "
+                "from chat_share_source_tombstones"
+            ).fetchall()
+        self.assertEqual(tombstones, [])
 
     def test_conflicting_live_session_blocks_restore_without_writes(self) -> None:
         self.archive_chat(

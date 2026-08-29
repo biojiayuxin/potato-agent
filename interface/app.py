@@ -37,11 +37,12 @@ from fastapi import (
     WebSocketDisconnect,
     status,
 )
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.responses import Response as FastAPIResponse
 from fastapi.responses import StreamingResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, ValidationError
 
 from interface.auth_db import (
     EMAIL_VERIFICATION_PURPOSE_PASSWORD_RESET,
@@ -81,6 +82,7 @@ from interface.auth_db import (
     verify_password,
 )
 from interface.archive_store import (
+    archived_session_exists,
     archive_session_record,
     cleanup_expired_archived_sessions,
     count_archived_sessions,
@@ -89,8 +91,34 @@ from interface.archive_store import (
     start_archive_run,
 )
 from interface.background_jobs import has_active_background_processes
+from interface.chat_share_store import (
+    CHAT_SHARE_MAX_RECIPIENTS,
+    CLAIM_STATUS_CLAIMED,
+    CLAIM_STATUS_COMPLETED,
+    CLAIM_STATUS_IN_PROGRESS,
+    CLAIM_STATUS_RATE_LIMITED,
+    CLAIM_STATUS_RECIPIENT_LIMIT,
+    CLAIM_STATUS_TARGET_DELETED,
+    CLAIM_STATUS_UNAVAILABLE,
+    ChatShareLimitError,
+    ChatShareValidationError,
+    chat_share_import_claim_is_valid,
+    claim_chat_share_import,
+    clear_source_session_invalidation,
+    cleanup_expired_chat_shares,
+    complete_chat_share_import,
+    create_chat_share,
+    ensure_chat_share_store,
+    fail_chat_share_import,
+    finalize_source_session_invalidation,
+    heartbeat_source_session_invalidation,
+    invalidate_source_session_shares,
+    invalidate_user_chat_share_data,
+    mark_chat_share_import_target_deleted_by_session,
+)
 from interface.display_store import (
     cleanup_turn_submission_receipts,
+    create_display_messages_if_absent,
     create_turn_submission_receipt,
     delete_display_user_data,
     delete_display_messages,
@@ -171,7 +199,7 @@ from interface.runtime_state import (
     temporary_cleanup_claim_is_valid,
 )
 from interface.request_limits import RequestBodyLimitMiddleware
-from interface.redaction import force_redact_value
+from interface.redaction import force_redact_text, force_redact_value
 from interface.subprocess_env import interface_subprocess_env
 from interface.secret_config import (
     load_session_cookie_secure,
@@ -273,6 +301,13 @@ RUNTIME_IDLE_CHECK_INTERVAL_SECONDS = int(
 TEMPORARY_USER_CLEANUP_RETRY_SECONDS = int(
     os.getenv("INTERFACE_TEMPORARY_USER_CLEANUP_RETRY_SECONDS", "60")
 )
+CHAT_SHARING_ENABLED = os.getenv(
+    "INTERFACE_CHAT_SHARING_ENABLED", "true"
+).strip().lower() in {"1", "true", "yes", "on"}
+CHAT_SHARE_CLEANUP_INTERVAL_SECONDS = 60 * 60
+CHAT_SHARE_REQUEST_HEADER = "X-Potato-Request"
+CHAT_SHARE_REQUEST_HEADER_VALUE = "1"
+CHAT_SHARE_TOKEN_RE = re.compile(r"^[A-Za-z0-9_-]{32,128}$")
 TURN_SUBMISSION_RECEIPT_HEARTBEAT_SECONDS = 30
 TEMPORARY_USER_PREFIX = "temp"
 TEMPORARY_USER_EMAIL_DOMAIN = "temporary.potato-agent.local"
@@ -446,6 +481,16 @@ class FeedbackRequest(BaseModel):
     page_path: str
 
 
+class ChatShareImportRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    token: str
+
+
+class ChatShareCreateRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+
 class SessionDisplaySyncRequest(BaseModel):
     messages: list[dict[str, Any]]
     draft_title: str = ""
@@ -501,6 +546,87 @@ def _normalized_file_browser_mode() -> str:
 
 def _now_seconds() -> int:
     return int(datetime.now(UTC).timestamp())
+
+
+def _chat_share_recipient_id(user: CurrentUser) -> str:
+    account_kind = "temporary" if user.is_temporary else "formal"
+    return f"{account_kind}:{user.id}"
+
+
+def _chat_share_recipient_id_for_user_id(
+    user_id: str, *, is_temporary: bool
+) -> str:
+    account_kind = "temporary" if is_temporary else "formal"
+    return f"{account_kind}:{str(user_id or '').strip()}"
+
+
+def _require_chat_share_request(request: Request) -> None:
+    if not CHAT_SHARING_ENABLED:
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "code": "sharing_disabled",
+                "message": "Chat sharing is temporarily unavailable.",
+            },
+        )
+    if request.headers.get(CHAT_SHARE_REQUEST_HEADER, "").strip() != (
+        CHAT_SHARE_REQUEST_HEADER_VALUE
+    ):
+        raise HTTPException(
+            status_code=403,
+            detail={
+                "code": "share_request_required",
+                "message": "Protected share request header is required.",
+            },
+        )
+    content_type = request.headers.get("content-type", "").split(";", 1)[0]
+    if content_type.strip().lower() != "application/json":
+        raise HTTPException(
+            status_code=415,
+            detail={
+                "code": "json_required",
+                "message": "Chat sharing requests must use JSON.",
+            },
+        )
+
+
+async def _validate_chat_share_json_body(
+    request: Request,
+    model: type[BaseModel],
+) -> BaseModel:
+    try:
+        body = await request.json()
+    except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+        raise RequestValidationError(
+            [
+                {
+                    "type": "json_invalid",
+                    "loc": ("body",),
+                    "msg": "Invalid JSON body",
+                    "input": None,
+                }
+            ],
+            body=None,
+        ) from exc
+    try:
+        return model.model_validate(body)
+    except ValidationError as exc:
+        errors = []
+        for error in exc.errors():
+            normalized = dict(error)
+            normalized["loc"] = ("body", *tuple(error.get("loc") or ()))
+            errors.append(normalized)
+        raise RequestValidationError(errors, body=body) from exc
+
+
+def _normalize_chat_share_token_or_404(value: Any) -> str:
+    token = str(value or "").strip()
+    if not CHAT_SHARE_TOKEN_RE.fullmatch(token):
+        raise HTTPException(
+            status_code=404,
+            detail={"code": "share_unavailable", "message": "Share link unavailable."},
+        )
+    return token
 
 
 def _validate_signup_email(email: str) -> str:
@@ -815,6 +941,7 @@ def _serialize_user(user: CurrentUser) -> dict[str, Any]:
         "mapping_username": user.mapping_username,
         "workspace_root": str(_get_user_workspace_root(user)),
         "is_temporary": bool(user.is_temporary),
+        "features": {"chat_sharing": CHAT_SHARING_ENABLED},
     }
 
 
@@ -1308,6 +1435,21 @@ class _UserSessionDBProxy:
 
     def set_session_title(self, session_id: str, title: str) -> bool:
         return bool(self._call("set_session_title", session_id=session_id, title=title))
+
+    def import_shared_session(
+        self,
+        *,
+        session_id: str,
+        title: str,
+        messages: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        result = self._call(
+            "import_shared_session",
+            session_id=session_id,
+            title=title,
+            messages=messages,
+        )
+        return result if isinstance(result, dict) else {}
 
     def delete_session(self, session_id: str) -> bool:
         return bool(self._call("delete_session", session_id=session_id))
@@ -1922,6 +2064,332 @@ def _session_export_title(
     )
 
 
+def _chat_share_error(
+    status_code: int,
+    code: str,
+    message: str,
+    *,
+    retry_after: int = 0,
+) -> HTTPException:
+    headers = (
+        {"Retry-After": str(max(1, int(retry_after)))}
+        if int(retry_after) > 0
+        else None
+    )
+    return HTTPException(
+        status_code=status_code,
+        detail={"code": code, "message": message},
+        headers=headers,
+    )
+
+
+def _chat_share_live_state_is_active(live_state: dict[str, Any] | None) -> bool:
+    return bool(
+        isinstance(live_state, dict)
+        and str(live_state.get("status") or "").strip() in ACTIVE_LIVE_STATUSES
+    )
+
+
+def _chat_share_source_revision(
+    context: tuple[
+        str,
+        dict[str, Any] | None,
+        str,
+        dict[str, Any] | None,
+        list[dict[str, Any]],
+    ],
+) -> tuple[Any, ...]:
+    logical_session_id, logical_session, tip_session_id, projected_session, _ = context
+
+    def session_revision(session: dict[str, Any] | None) -> tuple[Any, ...]:
+        if not isinstance(session, dict):
+            return ()
+        return (
+            str(session.get("id") or ""),
+            str(session.get("source") or ""),
+            str(session.get("title") or ""),
+            int(session.get("message_count") or 0),
+            float(session.get("last_active") or session.get("started_at") or 0),
+            float(session.get("ended_at") or 0),
+            str(session.get("end_reason") or ""),
+        )
+
+    return (
+        logical_session_id,
+        tip_session_id,
+        session_revision(logical_session),
+        session_revision(projected_session),
+    )
+
+
+def _redact_chat_share_private_paths(content: str, target: HermesTarget) -> str:
+    redacted = force_redact_text(content)
+    private_paths = {
+        str(path or "").strip().rstrip("/")
+        for path in (target.home_dir, target.hermes_home, target.workdir)
+        if str(path or "").strip().rstrip("/") not in {"", "/"}
+    }
+    terminators = r"\s<>\"'`()\[\]{}"
+    boundary = r"(?=$|[\s<>\"'`()\[\]{},.;:!?，。；：！？])"
+    for private_path in sorted(private_paths, key=len, reverse=True):
+        pattern = re.compile(
+            re.escape(private_path)
+            + rf"(?:/[^{terminators}]+)*"
+            + boundary
+        )
+        redacted = pattern.sub("[private path]", redacted)
+    return redacted
+
+
+def _sanitize_chat_share_display_messages(
+    display_messages: list[dict[str, Any]],
+    target: HermesTarget,
+) -> list[dict[str, str]]:
+    sanitized: list[dict[str, str]] = []
+    for message in display_messages:
+        if not isinstance(message, dict) or not bool(message.get("done", True)):
+            continue
+        role = str(message.get("role") or "").strip()
+        if role not in {"user", "assistant"}:
+            continue
+
+        raw_content = str(message.get("content") or "")
+        if role == "user":
+            content, _ = _parse_stored_user_content_for_export(raw_content)
+            if raw_content.startswith(ATTACHMENT_BLOCK_START) and content == raw_content:
+                content = ""
+            content = _normalize_markdown_body(content)
+        else:
+            content = _strip_export_progress_content(raw_content)
+
+        content = _redact_chat_share_private_paths(content, target).strip()
+        if content:
+            sanitized.append({"role": role, "content": content})
+    return sanitized
+
+
+def _chat_share_source_title(
+    logical_session: dict[str, Any] | None,
+    projected_session: dict[str, Any] | None,
+    display_meta: dict[str, Any] | None,
+    target: HermesTarget,
+) -> str:
+    title = (
+        str((logical_session or {}).get("title") or "").strip()
+        or str((projected_session or {}).get("title") or "").strip()
+        or str((display_meta or {}).get("draft_title") or "").strip()
+    )
+    return _redact_chat_share_private_paths(title, target).strip()
+
+
+def _load_chat_share_snapshot_sync(
+    user: CurrentUser,
+    session_id: str,
+) -> tuple[str, str, list[dict[str, str]]]:
+    requested_session_id = str(session_id or "").strip()
+    if not requested_session_id or requested_session_id == "draft":
+        raise _chat_share_error(
+            409,
+            "session_not_shareable",
+            "Open a saved chat before creating a share link.",
+        )
+
+    first_context = _load_session_context_sync(
+        user.target,
+        requested_session_id,
+        include_messages=False,
+    )
+    logical_session_id, logical_session, _, projected_session, _ = first_context
+    if not logical_session or not _is_interface_managed_source(
+        logical_session.get("source")
+    ):
+        raise _chat_share_error(
+            404,
+            "session_not_found",
+            "Session not found.",
+        )
+
+    live_before = get_live_session_state(user.id, logical_session_id)
+    if _chat_share_live_state_is_active(live_before):
+        raise _chat_share_error(
+            409,
+            "session_active",
+            "Wait for the current response to finish before sharing.",
+        )
+
+    display_before = get_display_session_meta(user.id, logical_session_id)
+    if display_before is None:
+        raise _chat_share_error(
+            409,
+            "display_transcript_unavailable",
+            "The visible chat transcript is not ready to share.",
+        )
+    raw_display_messages = display_before.get("messages")
+    if not isinstance(raw_display_messages, list):
+        raw_display_messages = []
+    messages = _sanitize_chat_share_display_messages(
+        raw_display_messages,
+        user.target,
+    )
+    if not messages:
+        raise _chat_share_error(
+            409,
+            "no_visible_messages",
+            "The chat has no visible questions or answers to share.",
+        )
+
+    second_context = _load_session_context_sync(
+        user.target,
+        logical_session_id,
+        include_messages=False,
+    )
+    display_after = get_display_session_meta(user.id, logical_session_id)
+    live_after = get_live_session_state(user.id, logical_session_id)
+    if (
+        _chat_share_live_state_is_active(live_after)
+        or live_before != live_after
+        or _chat_share_source_revision(first_context)
+        != _chat_share_source_revision(second_context)
+        or display_before != display_after
+    ):
+        raise _chat_share_error(
+            409,
+            "session_changed",
+            "The chat changed while its share snapshot was being created.",
+        )
+
+    title = _chat_share_source_title(
+        logical_session,
+        projected_session,
+        display_before,
+        user.target,
+    )
+    return logical_session_id, title, messages
+
+
+def _import_shared_session_sync(
+    target: HermesTarget,
+    *,
+    session_id: str,
+    title: str,
+    messages: list[dict[str, Any]],
+) -> dict[str, Any]:
+    with _open_session_db(target) as db:
+        importer = getattr(db, "import_shared_session", None)
+        if callable(importer):
+            result = importer(session_id=session_id, title=title, messages=messages)
+        else:
+            from interface.session_db_rpc import execute as execute_session_db_rpc
+
+            result = execute_session_db_rpc(
+                db,
+                "import_shared_session",
+                {"session_id": session_id, "title": title, "messages": messages},
+            )
+    if not isinstance(result, dict):
+        raise RuntimeError("Shared chat import returned an invalid result")
+    return result
+
+
+def _fresh_shared_display_messages(
+    messages: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    timestamp = _now_seconds()
+    return [
+        {
+            "id": uuid.uuid4().hex,
+            "role": str(message.get("role") or ""),
+            "content": str(message.get("content") or ""),
+            "reasoningContent": "",
+            "toolCalls": [],
+            "progressLines": [],
+            "files": [],
+            "timestamp": timestamp,
+            "done": True,
+            "source": "shared_import",
+        }
+        for message in messages
+        if isinstance(message, dict)
+        and str(message.get("role") or "") in {"user", "assistant"}
+    ]
+
+
+def _raw_messages_match_shared_snapshot(
+    raw_messages: list[dict[str, Any]],
+    shared_messages: list[dict[str, Any]],
+) -> bool:
+    if len(raw_messages) != len(shared_messages):
+        return False
+    return all(
+        str(raw.get("role") or "") == str(shared.get("role") or "")
+        and isinstance(raw.get("content"), str)
+        and str(raw.get("content") or "") == str(shared.get("content") or "")
+        for raw, shared in zip(raw_messages, shared_messages)
+        if isinstance(raw, dict) and isinstance(shared, dict)
+    ) and all(
+        isinstance(raw, dict) and isinstance(shared, dict)
+        for raw, shared in zip(raw_messages, shared_messages)
+    )
+
+
+def _load_imported_chat_response_sync(
+    user: CurrentUser,
+    imported_session_id: str,
+    *,
+    shared_messages: list[dict[str, Any]],
+) -> dict[str, Any] | None:
+    (
+        logical_session_id,
+        logical_session,
+        tip_session_id,
+        projected_session,
+        raw_messages,
+    ) = _load_session_context_sync(
+        user.target,
+        imported_session_id,
+        include_messages=True,
+    )
+    if (
+        logical_session_id != imported_session_id
+        or not logical_session
+        or not _is_interface_managed_source(logical_session.get("source"))
+    ):
+        return None
+
+    display_messages = get_display_messages(user.id, logical_session_id)
+    if display_messages is None:
+        if _raw_messages_match_shared_snapshot(raw_messages, shared_messages):
+            display_candidate = _fresh_shared_display_messages(shared_messages)
+        else:
+            display_candidate = _build_fallback_display_messages(raw_messages)
+        create_display_messages_if_absent(
+            user.id,
+            logical_session_id,
+            display_candidate,
+        )
+        display_messages = get_display_messages(user.id, logical_session_id)
+    if display_messages is None:
+        raise RuntimeError("Unable to persist the imported display transcript")
+
+    display_meta = get_display_session_meta(user.id, logical_session_id)
+    live_state = get_live_session_state(user.id, logical_session_id)
+    return {
+        "session": _normalize_logical_session_row(
+            projected_session or logical_session,
+            logical_session_id=logical_session_id,
+            logical_session=logical_session,
+            display_meta=display_meta,
+            live_state=live_state,
+            resume_session_id=tip_session_id or logical_session_id,
+        ),
+        "messages": [
+            _normalize_display_message(message)
+            for message in display_messages
+            if isinstance(message, dict)
+        ],
+    }
+
+
 def _display_message_bucket_key(message: dict[str, Any]) -> str:
     return str(message.get("role") or "").strip()
 
@@ -2200,6 +2668,68 @@ def _sanitize_session_title_or_raise(raw_title: Any) -> str:
     return sanitized
 
 
+def _invalidate_chat_share_session_lifecycle_sync(
+    *,
+    owner_user_id: str,
+    logical_session_id: str,
+) -> str:
+    lifecycle_claim_id = uuid.uuid4().hex
+    invalidate_source_session_shares(
+        owner_user_id,
+        logical_session_id,
+        lifecycle_claim_id=lifecycle_claim_id,
+    )
+    return lifecycle_claim_id
+
+
+def _rollback_chat_share_session_lifecycle_sync(
+    *,
+    owner_user_id: str,
+    logical_session_id: str,
+    lifecycle_claim_id: str,
+) -> None:
+    clear_source_session_invalidation(
+        owner_user_id,
+        logical_session_id,
+        lifecycle_claim_id=lifecycle_claim_id,
+    )
+
+
+def _heartbeat_chat_share_session_lifecycle_sync(
+    *,
+    owner_user_id: str,
+    logical_session_id: str,
+    lifecycle_claim_id: str,
+) -> None:
+    refreshed = heartbeat_source_session_invalidation(
+        owner_user_id,
+        logical_session_id,
+        lifecycle_claim_id=lifecycle_claim_id,
+    )
+    if not refreshed:
+        raise RuntimeError("Chat share lifecycle claim is no longer active")
+
+
+def _complete_chat_share_session_lifecycle_sync(
+    *,
+    owner_user_id: str,
+    recipient_user_id: str,
+    logical_session_id: str,
+    lifecycle_claim_id: str,
+) -> None:
+    finalized = finalize_source_session_invalidation(
+        owner_user_id,
+        logical_session_id,
+        lifecycle_claim_id=lifecycle_claim_id,
+    )
+    if not finalized:
+        raise RuntimeError("Chat share lifecycle claim is no longer active")
+    mark_chat_share_import_target_deleted_by_session(
+        recipient_user_id=recipient_user_id,
+        imported_session_id=logical_session_id,
+    )
+
+
 def _archive_expired_target_sync(
     target: HermesTarget,
     auth_user: Any,
@@ -2216,6 +2746,8 @@ def _archive_expired_target_sync(
                 session.get("last_active") or session.get("started_at") or 0
             )
             if not session_id or last_active >= cutoff:
+                continue
+            if archived_session_exists(target.username, session_id):
                 continue
 
             tip_session_id = _get_logical_session_tip_id(db, session_id)
@@ -2234,6 +2766,13 @@ def _archive_expired_target_sync(
                 str(display_meta.get("draft_title") or "") if display_meta else ""
             )
 
+            lifecycle_claim_id = ""
+            if auth_user is not None:
+                lifecycle_claim_id = _invalidate_chat_share_session_lifecycle_sync(
+                    owner_user_id=auth_user.id,
+                    logical_session_id=session_id,
+                )
+
             archived = archive_session_record(
                 mapping_username=target.username,
                 email_snapshot="",
@@ -2243,13 +2782,57 @@ def _archive_expired_target_sync(
                 draft_title=draft_title,
             )
             if not archived:
+                if auth_user is not None and lifecycle_claim_id:
+                    _rollback_chat_share_session_lifecycle_sync(
+                        owner_user_id=auth_user.id,
+                        logical_session_id=session_id,
+                        lifecycle_claim_id=lifecycle_claim_id,
+                    )
                 continue
 
-            for lineage_session_id in reversed(
-                _collect_compression_lineage_session_ids(db, session_id)
-            ):
-                db.delete_session(lineage_session_id)
+            try:
+                for lineage_session_id in reversed(
+                    _collect_compression_lineage_session_ids(db, session_id)
+                ):
+                    if auth_user is not None:
+                        _heartbeat_chat_share_session_lifecycle_sync(
+                            owner_user_id=auth_user.id,
+                            logical_session_id=session_id,
+                            lifecycle_claim_id=lifecycle_claim_id,
+                        )
+                    if not db.delete_session(lineage_session_id):
+                        raise RuntimeError(
+                            f"Failed to delete archived session {lineage_session_id}"
+                        )
+            except Exception:
+                if (
+                    auth_user is not None
+                    and lifecycle_claim_id
+                    and db.get_session(session_id) is not None
+                ):
+                    with contextlib.suppress(Exception):
+                        _rollback_chat_share_session_lifecycle_sync(
+                            owner_user_id=auth_user.id,
+                            logical_session_id=session_id,
+                            lifecycle_claim_id=lifecycle_claim_id,
+                        )
+                raise
             if auth_user is not None:
+                try:
+                    _complete_chat_share_session_lifecycle_sync(
+                        owner_user_id=auth_user.id,
+                        recipient_user_id=_chat_share_recipient_id_for_user_id(
+                            auth_user.id,
+                            is_temporary=is_temporary_user(auth_user.id),
+                        ),
+                        logical_session_id=session_id,
+                        lifecycle_claim_id=lifecycle_claim_id,
+                    )
+                except Exception:
+                    LOGGER.exception(
+                        "Failed to finalize chat share state for archived session %s",
+                        session_id,
+                    )
                 delete_display_messages(auth_user.id, session_id)
             archived_count += 1
     return archived_count
@@ -2306,6 +2889,15 @@ async def _archive_scheduler_loop() -> None:
             await _archive_expired_sessions_once()
         except Exception:
             pass
+
+
+async def _chat_share_cleanup_loop() -> None:
+    while True:
+        await asyncio.sleep(CHAT_SHARE_CLEANUP_INTERVAL_SECONDS)
+        try:
+            await asyncio.to_thread(cleanup_expired_chat_shares)
+        except Exception:
+            LOGGER.exception("Chat share cleanup failed")
 
 
 async def _mark_temporary_cleanup_failed(user_id: str, error_message: str) -> None:
@@ -2431,6 +3023,14 @@ async def _cleanup_temporary_user_candidate(
         if not await claim_is_valid():
             await restore_active_claim()
             return False
+        await asyncio.to_thread(
+            invalidate_user_chat_share_data,
+            user_id,
+            recipient_user_id=_chat_share_recipient_id_for_user_id(
+                user_id,
+                is_temporary=True,
+            ),
+        )
         await asyncio.to_thread(
             revoke_runtime_session,
             user_id,
@@ -2611,7 +3211,21 @@ async def _run_runtime_idle_check_once() -> int:
             continue
         auth_user = users_by_id.get(user_id)
         if auth_user is None:
-            await asyncio.to_thread(delete_temporary_user_record, user_id)
+            try:
+                await asyncio.to_thread(
+                    invalidate_user_chat_share_data,
+                    user_id,
+                    recipient_user_id=_chat_share_recipient_id_for_user_id(
+                        user_id,
+                        is_temporary=True,
+                    ),
+                )
+                await asyncio.to_thread(delete_temporary_user_record, user_id)
+            except Exception as exc:
+                await _mark_temporary_cleanup_failed(
+                    user_id,
+                    str(exc) or type(exc).__name__,
+                )
             continue
         target = await asyncio.to_thread(
             mapping_store.resolve_target,
@@ -2630,6 +3244,14 @@ async def _run_runtime_idle_check_once() -> int:
                     or ""
                 ).strip()
                 try:
+                    await asyncio.to_thread(
+                        invalidate_user_chat_share_data,
+                        user_id,
+                        recipient_user_id=_chat_share_recipient_id_for_user_id(
+                            user_id,
+                            is_temporary=True,
+                        ),
+                    )
                     await _delete_temporary_user_local_state(
                         user_id,
                         mapping_username,
@@ -3114,6 +3736,23 @@ def _interface_request_body_limit(scope: dict[str, Any]) -> int:
     return 2 * 1024 * 1024
 
 
+def _interface_request_body_error_headers(
+    scope: dict[str, Any],
+    status_code: int,
+) -> list[tuple[bytes, bytes]]:
+    del status_code
+    path = str(scope.get("path") or "")
+    if path.startswith("/api/chat-shares/") or re.fullmatch(
+        r"/api/sessions/[^/]+/shares", path
+    ):
+        return [
+            (b"cache-control", b"no-store"),
+            (b"pragma", b"no-cache"),
+            (b"x-content-type-options", b"nosniff"),
+        ]
+    return []
+
+
 @app.middleware("http")
 async def refresh_authenticated_activity(request: Request, call_next):
     if _should_refresh_activity_for_request(request):
@@ -3143,12 +3782,19 @@ async def refresh_authenticated_activity(request: Request, call_next):
 @app.middleware("http")
 async def protect_admin_responses(request: Request, call_next):
     response = await call_next(request)
-    if str(request.scope.get("path") or "").startswith("/admin"):
+    request_path = str(request.scope.get("path") or "")
+    if request_path.startswith("/admin"):
         response.headers["Cache-Control"] = "no-store"
         response.headers["Pragma"] = "no-cache"
         response.headers["X-Content-Type-Options"] = "nosniff"
         response.headers["X-Frame-Options"] = "DENY"
         response.headers["Referrer-Policy"] = "same-origin"
+    if request_path.startswith("/api/chat-shares/") or re.fullmatch(
+        r"/api/sessions/[^/]+/shares", request_path
+    ):
+        response.headers["Cache-Control"] = "no-store"
+        response.headers["Pragma"] = "no-cache"
+        response.headers["X-Content-Type-Options"] = "nosniff"
     return response
 
 
@@ -3169,6 +3815,8 @@ async def on_startup() -> None:
     )
     ensure_feedback_store()
     app.state.feedback_cleanup = cleanup_feedback_submissions()
+    ensure_chat_share_store()
+    app.state.chat_share_cleanup = cleanup_expired_chat_shares()
     ensure_runtime_state_store()
     app.state.tui_gateway_bridges = TuiGatewayBridgeRegistry()
     app.state.session_run_manager = SessionRunManager(
@@ -3178,6 +3826,9 @@ async def on_startup() -> None:
     app.state.signup_worker_task = asyncio.create_task(_signup_worker_loop())
     app.state.runtime_idle_scheduler_task = asyncio.create_task(
         _runtime_idle_scheduler_loop()
+    )
+    app.state.chat_share_cleanup_task = asyncio.create_task(
+        _chat_share_cleanup_loop()
     )
     app.state.system_resource_sampler = SystemResourceSampler()
     app.state.system_resource_sampler_task = asyncio.create_task(
@@ -3201,6 +3852,11 @@ async def on_shutdown() -> None:
     )
     if runtime_idle_scheduler_task is not None:
         runtime_idle_scheduler_task.cancel()
+    chat_share_cleanup_task = getattr(
+        app.state, "chat_share_cleanup_task", None
+    )
+    if chat_share_cleanup_task is not None:
+        chat_share_cleanup_task.cancel()
     system_resource_sampler_task = getattr(
         app.state, "system_resource_sampler_task", None
     )
@@ -3214,6 +3870,10 @@ async def on_shutdown() -> None:
     pending_tasks = [
         task
         for task in (
+            archive_scheduler_task,
+            signup_worker_task,
+            runtime_idle_scheduler_task,
+            chat_share_cleanup_task,
             system_resource_sampler_task,
             reconciliation_task,
         )
@@ -4280,6 +4940,246 @@ async def get_sessions(
     }
 
 
+@app.post("/api/sessions/{session_id}/shares")
+async def create_session_share(
+    session_id: str,
+    request: Request,
+    user: CurrentUser = Depends(get_current_user),
+) -> dict[str, Any]:
+    _require_chat_share_request(request)
+    await _validate_chat_share_json_body(request, ChatShareCreateRequest)
+    if user.is_temporary:
+        raise _chat_share_error(
+            403,
+            "formal_account_required",
+            "Chat sharing is only available to signed-in accounts.",
+        )
+
+    logical_session_id, title, messages = await asyncio.to_thread(
+        _load_chat_share_snapshot_sync,
+        user,
+        session_id,
+    )
+    try:
+        created = await asyncio.to_thread(
+            create_chat_share,
+            owner_user_id=user.id,
+            source_session_id=logical_session_id,
+            title=title,
+            messages=messages,
+        )
+    except ChatShareLimitError as exc:
+        raise _chat_share_error(
+            429,
+            exc.code,
+            "Too many chat share links have been created. Try again later.",
+            retry_after=exc.retry_after,
+        ) from exc
+    except ChatShareValidationError as exc:
+        detail = str(exc).lower()
+        if "too large" in detail or "too many" in detail:
+            raise _chat_share_error(
+                413,
+                "share_too_large",
+                "This chat is too large to share.",
+            ) from exc
+        raise _chat_share_error(
+            409,
+            "session_not_shareable",
+            "This chat cannot be shared in its current state.",
+        ) from exc
+    except Exception as exc:
+        LOGGER.exception("Failed to create a chat share")
+        raise _chat_share_error(
+            503,
+            "sharing_unavailable",
+            "Chat sharing is temporarily unavailable.",
+        ) from exc
+
+    return {
+        "token": created.token,
+        "expires_at": created.expires_at,
+        "max_recipients": CHAT_SHARE_MAX_RECIPIENTS,
+    }
+
+
+@app.post("/api/chat-shares/import", response_model=None)
+async def import_chat_share(
+    request: Request,
+    user: CurrentUser = Depends(get_current_user),
+) -> dict[str, Any] | JSONResponse:
+    _require_chat_share_request(request)
+    payload = await _validate_chat_share_json_body(request, ChatShareImportRequest)
+    assert isinstance(payload, ChatShareImportRequest)
+    token = _normalize_chat_share_token_or_404(payload.token)
+    recipient_user_id = _chat_share_recipient_id(user)
+    try:
+        claim = await asyncio.to_thread(
+            claim_chat_share_import,
+            token=token,
+            recipient_user_id=recipient_user_id,
+        )
+    except Exception as exc:
+        LOGGER.exception("Failed to claim a chat share import")
+        raise _chat_share_error(
+            503,
+            "sharing_unavailable",
+            "Chat sharing is temporarily unavailable.",
+        ) from exc
+
+    if claim.status == CLAIM_STATUS_UNAVAILABLE:
+        raise _chat_share_error(
+            404,
+            "share_unavailable",
+            "Share link unavailable.",
+        )
+    if claim.status in {CLAIM_STATUS_RECIPIENT_LIMIT, CLAIM_STATUS_TARGET_DELETED}:
+        raise _chat_share_error(
+            410,
+            "share_import_unavailable",
+            "This share link cannot be imported into this account.",
+        )
+    if claim.status == CLAIM_STATUS_RATE_LIMITED:
+        raise _chat_share_error(
+            429,
+            "share_import_rate_limited",
+            "Too many shared chats have been imported. Try again later.",
+            retry_after=claim.retry_after,
+        )
+    if claim.status == CLAIM_STATUS_IN_PROGRESS:
+        return JSONResponse(
+            status_code=202,
+            headers={"Retry-After": "2"},
+            content={"pending": True},
+        )
+
+    shared_messages = [dict(message) for message in claim.messages]
+    if claim.status == CLAIM_STATUS_COMPLETED:
+        try:
+            imported = await asyncio.to_thread(
+                _load_imported_chat_response_sync,
+                user,
+                claim.imported_session_id,
+                shared_messages=shared_messages,
+            )
+        except Exception as exc:
+            LOGGER.exception("Failed to load a completed chat share import")
+            raise _chat_share_error(
+                503,
+                "sharing_unavailable",
+                "Chat sharing is temporarily unavailable.",
+            ) from exc
+        if imported is None:
+            try:
+                await asyncio.to_thread(
+                    mark_chat_share_import_target_deleted_by_session,
+                    recipient_user_id=recipient_user_id,
+                    imported_session_id=claim.imported_session_id,
+                )
+            except Exception as exc:
+                raise _chat_share_error(
+                    503,
+                    "sharing_unavailable",
+                    "Chat sharing is temporarily unavailable.",
+                ) from exc
+            raise _chat_share_error(
+                410,
+                "share_import_target_deleted",
+                "The previously imported chat has been deleted.",
+            )
+        return {"created": False, **imported}
+
+    if claim.status != CLAIM_STATUS_CLAIMED:
+        raise _chat_share_error(
+            503,
+            "sharing_unavailable",
+            "Chat sharing is temporarily unavailable.",
+        )
+
+    try:
+        claim_is_valid = await asyncio.to_thread(
+            chat_share_import_claim_is_valid,
+            share_id=claim.share_id,
+            recipient_user_id=recipient_user_id,
+            claim_id=claim.claim_id,
+        )
+    except Exception as exc:
+        with contextlib.suppress(Exception):
+            await asyncio.to_thread(
+                fail_chat_share_import,
+                share_id=claim.share_id,
+                recipient_user_id=recipient_user_id,
+                claim_id=claim.claim_id,
+                error_code="claim_check_failed",
+            )
+        raise _chat_share_error(
+            503,
+            "sharing_unavailable",
+            "Chat sharing is temporarily unavailable.",
+        ) from exc
+    if not claim_is_valid:
+        with contextlib.suppress(Exception):
+            await asyncio.to_thread(
+                fail_chat_share_import,
+                share_id=claim.share_id,
+                recipient_user_id=recipient_user_id,
+                claim_id=claim.claim_id,
+                error_code="claim_invalid",
+            )
+        return JSONResponse(
+            status_code=202,
+            headers={"Retry-After": "1"},
+            content={"pending": True},
+        )
+
+    try:
+        import_result = await asyncio.to_thread(
+            _import_shared_session_sync,
+            user.target,
+            session_id=claim.imported_session_id,
+            title=claim.title,
+            messages=shared_messages,
+        )
+        imported = await asyncio.to_thread(
+            _load_imported_chat_response_sync,
+            user,
+            claim.imported_session_id,
+            shared_messages=shared_messages,
+        )
+        if imported is None:
+            raise RuntimeError("Imported chat session is unavailable")
+        completed = await asyncio.to_thread(
+            complete_chat_share_import,
+            share_id=claim.share_id,
+            recipient_user_id=recipient_user_id,
+            claim_id=claim.claim_id,
+            imported_title=str(import_result.get("title") or ""),
+        )
+    except Exception as exc:
+        with contextlib.suppress(Exception):
+            await asyncio.to_thread(
+                fail_chat_share_import,
+                share_id=claim.share_id,
+                recipient_user_id=recipient_user_id,
+                claim_id=claim.claim_id,
+                error_code="import_failed",
+            )
+        LOGGER.exception("Failed to import a shared chat")
+        raise _chat_share_error(
+            503,
+            "sharing_unavailable",
+            "Chat sharing is temporarily unavailable.",
+        ) from exc
+
+    if not completed:
+        return JSONResponse(
+            status_code=202,
+            headers={"Retry-After": "1"},
+            content={"pending": True},
+        )
+    return {"created": True, **imported}
+
+
 def _get_live_poll_snapshot_sync(
     user_id: str,
     session_id: str,
@@ -5053,7 +5953,13 @@ async def respond_session_approval(
             await registry.maybe_close_if_unused(user.id)
 
 
-def _delete_session_sync(target: HermesTarget, session_id: str) -> str:
+def _delete_session_sync(
+    target: HermesTarget,
+    session_id: str,
+    *,
+    owner_user_id: str,
+    recipient_user_id: str,
+) -> str:
     with _open_session_db(target) as db:
         logical_session_id, logical_session, _, _ = _resolve_logical_session_context(
             db, session_id
@@ -5062,10 +5968,49 @@ def _delete_session_sync(target: HermesTarget, session_id: str) -> str:
             logical_session.get("source")
         ):
             raise HTTPException(status_code=404, detail="Session not found")
-        for lineage_session_id in reversed(
-            _collect_compression_lineage_session_ids(db, logical_session_id)
-        ):
-            db.delete_session(lineage_session_id)
+        lifecycle_claim_id = ""
+        try:
+            lifecycle_claim_id = _invalidate_chat_share_session_lifecycle_sync(
+                owner_user_id=owner_user_id,
+                logical_session_id=logical_session_id,
+            )
+            for lineage_session_id in reversed(
+                _collect_compression_lineage_session_ids(db, logical_session_id)
+            ):
+                _heartbeat_chat_share_session_lifecycle_sync(
+                    owner_user_id=owner_user_id,
+                    logical_session_id=logical_session_id,
+                    lifecycle_claim_id=lifecycle_claim_id,
+                )
+                if not db.delete_session(lineage_session_id):
+                    raise RuntimeError(
+                        f"Failed to delete session {lineage_session_id}"
+                    )
+        except Exception as exc:
+            if lifecycle_claim_id and db.get_session(logical_session_id) is not None:
+                with contextlib.suppress(Exception):
+                    _rollback_chat_share_session_lifecycle_sync(
+                        owner_user_id=owner_user_id,
+                        logical_session_id=logical_session_id,
+                        lifecycle_claim_id=lifecycle_claim_id,
+                    )
+            raise _chat_share_error(
+                503,
+                "sharing_cleanup_unavailable",
+                "The chat could not be deleted because sharing state is unavailable.",
+            ) from exc
+        try:
+            _complete_chat_share_session_lifecycle_sync(
+                owner_user_id=owner_user_id,
+                recipient_user_id=recipient_user_id,
+                logical_session_id=logical_session_id,
+                lifecycle_claim_id=lifecycle_claim_id,
+            )
+        except Exception:
+            LOGGER.exception(
+                "Failed to finalize chat share state for deleted session %s",
+                logical_session_id,
+            )
     return logical_session_id
 
 
@@ -5139,6 +6084,8 @@ async def delete_session(
         _delete_session_sync,
         user.target,
         session_id,
+        owner_user_id=user.id,
+        recipient_user_id=_chat_share_recipient_id(user),
     )
     await asyncio.to_thread(
         _delete_interface_session_state_sync,
@@ -5403,4 +6350,5 @@ async def upload_file(
 app.add_middleware(
     RequestBodyLimitMiddleware,
     limit_for_scope=_interface_request_body_limit,
+    error_headers_for_scope=_interface_request_body_error_headers,
 )

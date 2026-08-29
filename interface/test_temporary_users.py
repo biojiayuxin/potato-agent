@@ -519,16 +519,18 @@ def _load_app(tmp_path, monkeypatch):
     mapping_path = tmp_path / "users_mapping.yaml"
     mapping_path.write_text("users: []\n", encoding="utf-8")
     monkeypatch.setenv("INTERFACE_AUTH_DB", str(db_path))
+    monkeypatch.setenv("INTERFACE_CHAT_SHARE_DB", str(tmp_path / "chat_shares.db"))
     monkeypatch.setenv("POTATO_AGENT_MAPPING_PATH", str(mapping_path))
     monkeypatch.setenv("INTERFACE_SESSION_SECRET", "test-secret")
     for module_name in (
         "interface.auth_db",
         "interface.runtime_state",
         "interface.display_store",
+        "interface.chat_share_store",
         "interface.mapping",
         "interface.app",
     ):
-        sys.modules.pop(module_name, None)
+        monkeypatch.delitem(sys.modules, module_name, raising=False)
 
     auth_db_mod = importlib.import_module("interface.auth_db")
     app_mod = importlib.import_module("interface.app")

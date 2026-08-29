@@ -11,6 +11,7 @@
 - 模型：通过 `tui_gateway` 读取当前模型/模型列表
 - 文件树/下载/上传：由 `interface` 自己提供
 - 展示态消息：把页面展示用 transcript 持久化到 `interface.db`
+- 聊天分享：生成登录后导入的不可变快照链接，并在独立私有 SQLite 中维护有效期、接收者额度和导入幂等状态
 - 会话归档：后台定时把旧会话归档到 `archive.db`
 - 前端：Lite 页面位于 `interface/static/lite/`
 - 空间转录组查看器：公开页面 `/spatial`，数据从 `/srv/spatial_data/current` 只读加载
@@ -39,6 +40,10 @@
   网页用户、密码、signup jobs
 - `display_store.py`
   页面展示态 transcript 持久化
+- `chat_share_store.py`
+  聊天分享快照、bearer token 哈希、接收者计数、导入 receipt 和限流账本
+- `session_db_rpc.py`
+  通过用户自己的 Linux 身份访问 Hermes `state.db`，并把分享快照导入为真实 `tui` 会话
 - `archive_store.py`
   归档会话和归档运行记录
 - `feedback_store.py`
@@ -160,7 +165,7 @@
   - `user_readable`：显示目录输入框，允许打开任意当前 Linux 用户有权限读取的目录
 - `INTERFACE_MAX_UPLOAD_BYTES` 默认为 200 MB，用于限制单个上传请求，并限制单条消息的附件总大小
 - 上传文件会保存到每用户工作区下的 `.<INTERFACE_UPLOAD_DIR_NAME>` 目录，默认是 `.potato-interface-uploads/`
-- `POTATO_AGENT_STATE_DIR` 只为未显式配置的 mapping、auth/archive DB、proxy 配置和 usage DB 推导默认前缀；
+- `POTATO_AGENT_STATE_DIR` 只为未显式配置的 mapping、运行时状态库、proxy 配置和 usage DB 推导默认前缀；
   它不会重定位 credentials、外部数据集、每用户状态、源码或 release。生产 unit 应使用各专用路径变量
 - `SPATIAL_VIEWER_DATA_ROOT` 默认 `/srv/spatial_data/current`；建议目录 owner 为 `root`、group 为 `potato-interface`，目录 `0750`、文件 `0640`
 - `WGCNA_DATABASE_URL` 指向 WGCNA PostgreSQL 数据库，例如 `postgresql:///potato_wgcna?host=/var/run/postgresql`
@@ -187,6 +192,13 @@
 - `feedback.db` 以明文保存反馈正文、可选联系邮箱、提交 ID、`pending/sent/failed` 状态、Resend ID
   和时间戳，保留 30 天；不保存客户端 IP。数据库及其目录使用私有权限，日志仍不得包含反馈正文、
   联系邮箱或 Resend 响应正文
+
+## 聊天分享
+
+- 正式账号可以为已保存的聊天生成分享链接；接收者登录正式账号或使用 Quick Start 后，聊天会作为独立副本
+  自动导入，不提供未登录公开预览
+- 分享只复制页面可见的问答内容，不复制推理、工具过程、附件或原会话身份。有效期、限额、私有存储、删除、
+  归档、账号清理和恢复规则统一见根目录 [`HPC_DEPLOYMENT.md`](../HPC_DEPLOYMENT.md) 的聊天分享章节
 
 ## 当前边界
 
