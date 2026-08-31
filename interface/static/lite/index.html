@@ -6,7 +6,7 @@
     <meta name="referrer" content="no-referrer" />
     <title>Potato Agent</title>
     <link rel="icon" type="image/png" href="./static/favicon.png" />
-    <link rel="stylesheet" href="./static/lite/styles.css?v=20260828-chat-actions" />
+    <link rel="stylesheet" href="./static/lite/styles.css?v=20260831-update-scrollbar" />
     <link rel="stylesheet" href="/static/shared/feedback.css?v=20260819-feedback" />
   </head>
   <body>
@@ -282,11 +282,11 @@
                     id="update-notes-button"
                     class="update-notes-button"
                     type="button"
-                    aria-label="Workspace updates"
+                    aria-label="Potato Agent updates"
                     aria-haspopup="dialog"
                     aria-expanded="false"
                     aria-controls="update-notes-panel"
-                    title="Workspace updates"
+                    title="Potato Agent updates"
                   >
                     <svg class="update-notes-icon" viewBox="0 0 24 24" aria-hidden="true">
                       <path d="M6 8a6 6 0 0 1 12 0c0 7 3 9 3 9H3s3-2 3-9"></path>
@@ -310,7 +310,12 @@
                     </button>
                   </div>
                   <p id="update-notes-summary" class="update-notes-summary"></p>
-                  <ul id="update-notes-list" class="update-notes-list"></ul>
+                  <div id="update-notes-scroll" class="update-notes-scroll" role="region" aria-label="Update history" tabindex="0">
+                    <ul id="update-notes-list" class="update-notes-list"></ul>
+                  </div>
+                  <div id="update-notes-actions" class="update-notes-actions" hidden>
+                    <button id="update-notes-more" class="update-notes-more" type="button" aria-controls="update-notes-list" aria-expanded="false" hidden>More</button>
+                  </div>
                 </section>
               </div>
             </div>
@@ -676,6 +681,6 @@
 
     <script src="./static/lite/vendor/marked.umd.js"></script>
     <script src="/static/shared/feedback.js?v=20260819-feedback" defer></script>
-    <script type="module" src="./static/lite/app.js?v=20260828-chat-actions"></script>
+    <script type="module" src="./static/lite/app.js?v=20260831-update-history"></script>
   </body>
 </html>

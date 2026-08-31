@@ -61,6 +61,7 @@ const state = {
   temporaryConfirmResolve: null,
   temporaryConfirmPreviousFocus: null,
   updateNotes: null,
+  updateNotesExpanded: false,
   pendingSessionPromise: null,
   shouldAutoScrollMessages: true,
   liveSessionMessages: new Map(),
@@ -222,7 +223,10 @@ const dom = {
   updateNotesTitle: document.getElementById('update-notes-title'),
   updateNotesDate: document.getElementById('update-notes-date'),
   updateNotesSummary: document.getElementById('update-notes-summary'),
+  updateNotesScroll: document.getElementById('update-notes-scroll'),
   updateNotesList: document.getElementById('update-notes-list'),
+  updateNotesActions: document.getElementById('update-notes-actions'),
+  updateNotesMore: document.getElementById('update-notes-more'),
   updateNotesClose: document.getElementById('update-notes-close'),
   sidebarSettingsButton: document.querySelector('.sidebar-settings-button'),
   sidebarSettingsMenu: document.getElementById('sidebar-settings-menu'),
@@ -338,6 +342,8 @@ let dailyUpdatesObserver = null;
 let dailyUpdatesFallbackScrollBound = false;
 let dailyUpdatesRequestGeneration = 0;
 let dailyUpdatesRefreshTimer = null;
+let updateNotesLoadPromise = null;
+let updateNotesPanelOpening = false;
 
 const SIDEBAR_WIDTH_KEY = 'lite_sidebar_width';
 const FILES_WIDTH_KEY = 'lite_files_width';
@@ -3150,10 +3156,38 @@ const getSeenUpdateNotesVersion = () => {
   }
 };
 
+const parseUpdateNotesVersion = (value) => {
+  const match = String(value || '').trim().match(/^(\d{4})-(\d{2})-(\d{2})(?:-(\d+))?$/);
+  if (!match) return null;
+  return match.slice(1).map((part) => Number(part || 0));
+};
+
+const compareUpdateNotesVersions = (left, right) => {
+  const normalizedLeft = String(left || '').trim();
+  const normalizedRight = String(right || '').trim();
+  if (normalizedLeft === normalizedRight) return 0;
+  if (!normalizedLeft) return -1;
+  if (!normalizedRight) return 1;
+
+  const leftParts = parseUpdateNotesVersion(normalizedLeft);
+  const rightParts = parseUpdateNotesVersion(normalizedRight);
+  if (leftParts && rightParts) {
+    for (let index = 0; index < leftParts.length; index += 1) {
+      if (leftParts[index] !== rightParts[index]) {
+        return leftParts[index] > rightParts[index] ? 1 : -1;
+      }
+    }
+    return 0;
+  }
+  return normalizedLeft.localeCompare(normalizedRight, 'en', { numeric: true });
+};
+
 const markUpdateNotesSeen = () => {
   const version = String(state.updateNotes?.version || '').trim();
   if (!version) return;
   try {
+    const seenVersion = getSeenUpdateNotesVersion();
+    if (compareUpdateNotesVersions(version, seenVersion) <= 0) return;
     localStorage.setItem(getUpdateNotesSeenKey(), version);
   } catch {
     // Ignore localStorage failures; the badge can reappear in storage-restricted browsers.
@@ -3201,14 +3235,13 @@ const normalizeUpdateNotesPayload = (payload) => {
     })
     .filter(Boolean)
     .sort((a, b) => b.sortValue - a.sortValue)
-    .slice(0, UPDATE_NOTES_VISIBLE_LIMIT)
     .map(({ sortValue, ...update }) => update);
 
   const latest = normalizedUpdates[0];
   if (!latest) return null;
   return {
     version: latest.version,
-    title: 'Workspace updates',
+    title: 'Potato Agent updates',
     date: '',
     summary: '',
     updates: normalizedUpdates,
@@ -3226,9 +3259,19 @@ const renderUpdateNotesContent = () => {
     dom.updateNotesSummary.textContent = state.updateNotes.summary;
     dom.updateNotesSummary.hidden = !state.updateNotes.summary;
   }
+  const allUpdates = Array.isArray(state.updateNotes.updates) ? state.updateNotes.updates : [];
+  const hasMore = allUpdates.length > UPDATE_NOTES_VISIBLE_LIMIT;
+  const showMoreButton = hasMore && !state.updateNotesExpanded;
+  if (dom.updateNotesActions) dom.updateNotesActions.hidden = !showMoreButton;
+  if (dom.updateNotesMore) {
+    dom.updateNotesMore.hidden = !showMoreButton;
+    dom.updateNotesMore.setAttribute('aria-expanded', state.updateNotesExpanded ? 'true' : 'false');
+  }
   if (!dom.updateNotesList) return;
   dom.updateNotesList.innerHTML = '';
-  const updates = Array.isArray(state.updateNotes.updates) ? state.updateNotes.updates : [];
+  const updates = state.updateNotesExpanded
+    ? allUpdates
+    : allUpdates.slice(0, UPDATE_NOTES_VISIBLE_LIMIT);
   dom.updateNotesList.hidden = updates.length === 0;
   for (const update of updates) {
     const section = document.createElement('li');
@@ -3273,9 +3316,22 @@ const renderUpdateNotesContent = () => {
   }
 };
 
+const expandUpdateNotes = () => {
+  const updates = Array.isArray(state.updateNotes?.updates) ? state.updateNotes.updates : [];
+  if (state.updateNotesExpanded || updates.length <= UPDATE_NOTES_VISIBLE_LIMIT) return;
+  const scrollTop = dom.updateNotesScroll?.scrollTop || 0;
+  state.updateNotesExpanded = true;
+  renderUpdateNotesContent();
+  if (dom.updateNotesScroll) {
+    dom.updateNotesScroll.scrollTop = scrollTop;
+    dom.updateNotesScroll.focus({ preventScroll: true });
+  }
+};
+
 const renderUpdateNotesUnreadState = () => {
   const version = String(state.updateNotes?.version || '').trim();
-  const unread = Boolean(version) && getSeenUpdateNotesVersion() !== version;
+  const unread = Boolean(version)
+    && compareUpdateNotesVersions(version, getSeenUpdateNotesVersion()) > 0;
   if (dom.updateNotesButton) {
     dom.updateNotesButton.hidden = !version;
   }
@@ -3287,6 +3343,9 @@ const renderUpdateNotesUnreadState = () => {
 
 const openUpdateNotesPanel = () => {
   if (!dom.updateNotesPanel) return;
+  const version = String(state.updateNotes?.version || '').trim();
+  const seenVersion = getSeenUpdateNotesVersion();
+  if (!version || (seenVersion && compareUpdateNotesVersions(version, seenVersion) < 0)) return;
   renderUpdateNotesContent();
   closeSidebarSettingsMenu();
   if (dom.updateNotesBackdrop) {
@@ -3300,6 +3359,8 @@ const openUpdateNotesPanel = () => {
 const closeUpdateNotesPanel = ({ markSeen = true } = {}) => {
   if (!dom.updateNotesPanel || dom.updateNotesPanel.hidden) return;
   dom.updateNotesPanel.hidden = true;
+  state.updateNotesExpanded = false;
+  if (dom.updateNotesScroll) dom.updateNotesScroll.scrollTop = 0;
   if (dom.updateNotesBackdrop) {
     dom.updateNotesBackdrop.hidden = true;
   }
@@ -3309,31 +3370,59 @@ const closeUpdateNotesPanel = ({ markSeen = true } = {}) => {
   }
 };
 
-const toggleUpdateNotesPanel = () => {
+const toggleUpdateNotesPanel = async () => {
   if (!dom.updateNotesPanel) return;
   if (dom.updateNotesPanel.hidden) {
-    openUpdateNotesPanel();
+    if (updateNotesPanelOpening) return;
+    updateNotesPanelOpening = true;
+    try {
+      await loadUpdateNotes();
+      openUpdateNotesPanel();
+    } finally {
+      updateNotesPanelOpening = false;
+    }
     return;
   }
   closeUpdateNotesPanel();
 };
 
 const loadUpdateNotes = async () => {
-  try {
-    const response = await fetch(UPDATE_NOTES_PATH, {
-      method: 'GET',
-      cache: 'no-store',
-      credentials: 'same-origin',
-    });
-    if (!response.ok) {
-      throw new Error(`Failed to load update notes (${response.status})`);
+  if (updateNotesLoadPromise) return updateNotesLoadPromise;
+  const request = (async () => {
+    try {
+      const response = await fetch(UPDATE_NOTES_PATH, {
+        method: 'GET',
+        cache: 'no-store',
+        credentials: 'same-origin',
+      });
+      if (!response.ok) {
+        throw new Error(`Failed to load update notes (${response.status})`);
+      }
+      const updateNotes = normalizeUpdateNotesPayload(await response.json());
+      if (!updateNotes) throw new Error('Update notes payload is empty');
+      const currentVersion = String(state.updateNotes?.version || '').trim();
+      const seenVersion = getSeenUpdateNotesVersion();
+      if (
+        (currentVersion && compareUpdateNotesVersions(updateNotes.version, currentVersion) < 0)
+        || (seenVersion && compareUpdateNotesVersions(updateNotes.version, seenVersion) < 0)
+      ) {
+        return false;
+      }
+      state.updateNotes = updateNotes;
+      renderUpdateNotesContent();
+      renderUpdateNotesUnreadState();
+      return true;
+    } catch {
+      renderUpdateNotesUnreadState();
+      return false;
     }
-    state.updateNotes = normalizeUpdateNotesPayload(await response.json());
-  } catch {
-    state.updateNotes = null;
+  })();
+  updateNotesLoadPromise = request;
+  try {
+    return await request;
+  } finally {
+    if (updateNotesLoadPromise === request) updateNotesLoadPromise = null;
   }
-  renderUpdateNotesContent();
-  renderUpdateNotesUnreadState();
 };
 
 const initUpdateNotes = () => {
@@ -8943,7 +9032,7 @@ dom.changePasswordButton?.addEventListener('click', openPasswordModal);
 
 dom.updateNotesButton?.addEventListener('click', (event) => {
   event.stopPropagation();
-  toggleUpdateNotesPanel();
+  toggleUpdateNotesPanel().catch(() => {});
 });
 
 dom.updateNotesPanel?.addEventListener('click', (event) => {
@@ -8958,6 +9047,8 @@ dom.updateNotesClose?.addEventListener('click', (event) => {
   event.stopPropagation();
   closeUpdateNotesPanel();
 });
+
+dom.updateNotesMore?.addEventListener('click', expandUpdateNotes);
 
 dom.sidebarSettingsButton?.addEventListener('click', (event) => {
   event.stopPropagation();
@@ -9230,6 +9321,9 @@ dom.filePathInput?.addEventListener('keydown', async (event) => {
 });
 
 window.addEventListener('focus', refreshFileTreeAfterFocus);
+window.addEventListener('pageshow', () => {
+  loadUpdateNotes().catch(() => {});
+});
 document.addEventListener('visibilitychange', () => {
   if (document.hidden) {
     pauseFileTreeChangePolling();
@@ -9244,6 +9338,7 @@ document.addEventListener('visibilitychange', () => {
     refreshDailyUpdatesIfNeeded().catch(() => {});
     scheduleDailyUpdatesRefresh();
   }
+  loadUpdateNotes().catch(() => {});
   refreshFileTreeAfterFocus();
 });
 

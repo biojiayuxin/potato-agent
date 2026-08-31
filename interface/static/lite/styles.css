@@ -3176,7 +3176,9 @@ button.stretch {
   z-index: 80;
   width: min(520px, calc(100vw - 40px));
   max-height: min(560px, calc(100vh - 56px));
-  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
   padding: 24px;
   border: 1px solid var(--border);
   border-radius: 14px;
@@ -3186,6 +3188,7 @@ button.stretch {
 }
 
 .update-notes-heading {
+  flex: 0 0 auto;
   display: flex;
   align-items: flex-start;
   justify-content: space-between;
@@ -3234,6 +3237,21 @@ button.stretch {
   line-height: 1.6;
 }
 
+.update-notes-scroll {
+  flex: 1 1 auto;
+  min-height: 0;
+  margin: 18px -18px 0 0;
+  padding-right: 18px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
+}
+
+.update-notes-scroll:focus-visible {
+  outline: 2px solid var(--primary);
+  outline-offset: 3px;
+}
+
 .update-notes-list {
   margin: 18px 0 0;
   padding: 0;
@@ -3241,6 +3259,37 @@ button.stretch {
   color: var(--text);
   font-size: 15px;
   line-height: 1.6;
+}
+
+.update-notes-scroll .update-notes-list {
+  margin-top: 0;
+}
+
+.update-notes-actions {
+  flex: 0 0 auto;
+  margin-top: 18px;
+  padding-top: 12px;
+  border-top: 1px solid var(--border);
+}
+
+.update-notes-more {
+  min-height: 32px;
+  padding: 4px 2px;
+  border: 0;
+  background: transparent;
+  color: var(--primary);
+  font-size: 14px;
+  line-height: 1.4;
+  font-weight: 700;
+}
+
+.update-notes-more:hover {
+  color: var(--primary-hover);
+}
+
+.update-notes-more:focus-visible {
+  outline: 2px solid var(--primary);
+  outline-offset: 2px;
 }
 
 .update-notes-entry {
@@ -4658,20 +4707,23 @@ button.stretch {
     width: auto;
     max-height: none;
     box-sizing: border-box;
-    overflow-y: auto;
+    overflow: hidden;
     padding: 18px;
     border-radius: 12px;
     transform: none;
   }
 
   .update-notes-heading {
-    position: sticky;
-    top: -18px;
-    z-index: 1;
+    position: static;
     margin: -18px -18px 0;
     padding: 18px 18px 12px;
     background: var(--panel);
     border-bottom: 1px solid var(--border);
+  }
+
+  .update-notes-scroll {
+    margin-right: -12px;
+    padding-right: 12px;
   }
 
   .update-notes-title {
