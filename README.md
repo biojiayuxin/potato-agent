@@ -16,10 +16,13 @@ genomics, and bioinformatics workflows. See
 [`skills/potato-knowledge-bioinformatics/`](skills/potato-knowledge-bioinformatics/)
 for the available skills.
 
-Potato Agent is built on [Hermes Agent](hermes-agent/). We substantially streamlined the
-original codebase by removing components that are unnecessary for this project while
-preserving the core agent loop. The resulting [Hermes Lite](hermes-lite/) runtime powers
-Potato Agent as a multi-user platform designed for concurrent use on HPC systems.
+Potato Agent is a multi-user agent platform developed for research communities and HPC
+environments. Its agent core adapts selected open-source components from
+[Hermes Agent](hermes-agent/), including the agent loop, tool and skill use, contextual
+memory, and sub-agent collaboration. Around this core, we developed the multi-user
+architecture—including access control, isolated user workspaces, centralized model
+proxying, and the agent gateway—and packaged the streamlined runtime as
+[Hermes Lite](hermes-lite/).
 
 ## Repository Layout
 
