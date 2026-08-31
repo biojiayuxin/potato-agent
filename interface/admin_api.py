@@ -27,6 +27,7 @@ from interface.auth_db import (
     is_temporary_user,
     verify_password,
 )
+from interface.runtime_state import list_active_runtime_user_ids
 from interface.secret_config import load_session_cookie_secure, load_session_secret
 
 
@@ -45,6 +46,7 @@ VALID_OVERVIEW_SORTS = frozenset(
     {
         "default",
         "user",
+        "runtime_active",
         "created_at",
         "input_tokens",
         "output_tokens",
@@ -287,6 +289,7 @@ def _entity_row(
     entity: dict[str, Any],
     *,
     usage: dict[str, Any],
+    runtime_active: bool,
 ) -> dict[str, Any]:
     retired = bool(entity["is_retired"])
     snapshot = entity.get("storage") if not retired else None
@@ -308,6 +311,7 @@ def _entity_row(
         "account_type": str(entity["account_type"]),
         "lifecycle": "retired" if retired else "current",
         "active": bool(entity["active"]),
+        "runtime_active": bool(runtime_active and not retired and entity["active"]),
         "created_at": _iso_timestamp(entity.get("created_at")),
         "retired_at": _iso_timestamp(entity.get("retired_at")),
         "usage": usage,
@@ -340,6 +344,8 @@ def _overview_group_rank(row: dict[str, Any]) -> int:
 def _overview_column_sort_value(row: dict[str, Any], sort_by: str) -> str | int | float | None:
     if sort_by == "user":
         return _overview_user_sort_value(row)
+    if sort_by == "runtime_active":
+        return int(bool(row.get("runtime_active")))
     if sort_by == "created_at":
         return _overview_created_at_sort_value(row)
     if sort_by == "storage_bytes":
@@ -505,6 +511,7 @@ async def admin_overview(
         usage_by_principal = {}
         usage_available = False
 
+    active_runtime_user_ids = list_active_runtime_user_ids(db_path=ADMIN_AUTH_DB_PATH)
     rows: list[dict[str, Any]] = []
     normalized_query = q.strip().casefold()
     for entity in list_overview_entities(db_path=ADMIN_AUTH_DB_PATH):
@@ -531,7 +538,14 @@ async def admin_overview(
         ).casefold()
         if normalized_query and normalized_query not in searchable:
             continue
-        rows.append(_entity_row(entity, usage=entity_usage))
+        rows.append(
+            _entity_row(
+                entity,
+                usage=entity_usage,
+                runtime_active=str(entity.get("user_id") or "")
+                in active_runtime_user_ids,
+            )
+        )
 
     _sort_overview_rows(rows, sort_by=sort, direction=direction)
     total_users = len(rows)

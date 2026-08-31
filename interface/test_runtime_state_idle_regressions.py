@@ -24,6 +24,7 @@ from interface.runtime_state import (
     get_runtime_idle_eligibility,
     get_runtime_state,
     heartbeat_runtime_lease,
+    list_active_runtime_user_ids,
     list_idle_temporary_user_candidates,
     list_idle_runtime_candidates,
     mark_foreground_activity,
@@ -39,6 +40,45 @@ from interface.runtime_state import (
 
 def _temp_db_path() -> Path:
     return Path(tempfile.mkdtemp(prefix="potato-runtime-state-test-")) / "interface.db"
+
+
+def test_active_runtime_user_ids_include_only_enabled_started_users() -> None:
+    db_path = _temp_db_path()
+    active = auth_db.upsert_user(
+        username="active",
+        email="active@example.com",
+        password="Password1!",
+        mapping_username="active",
+        name="Active",
+        db_path=db_path,
+    )
+    inactive = auth_db.upsert_user(
+        username="inactive",
+        email="inactive@example.com",
+        password="Password1!",
+        mapping_username="inactive",
+        name="Inactive",
+        db_path=db_path,
+    )
+    waiting = auth_db.upsert_user(
+        username="waiting",
+        email="waiting@example.com",
+        password="Password1!",
+        mapping_username="waiting",
+        name="Waiting",
+        db_path=db_path,
+    )
+    mark_runtime_started(active.id, db_path=db_path)
+    mark_runtime_started(inactive.id, db_path=db_path)
+    with auth_db.connect_auth_db(db_path) as conn:
+        conn.execute("UPDATE users SET active = 0 WHERE id = ?", (inactive.id,))
+        conn.commit()
+
+    assert list_active_runtime_user_ids(db_path=db_path) == {active.id}
+
+    revoke_runtime_session(active.id, reason="idle_timeout", db_path=db_path)
+    assert list_active_runtime_user_ids(db_path=db_path) == set()
+    assert waiting.id not in list_active_runtime_user_ids(db_path=db_path)
 
 
 def test_foreground_activity_resets_idle_baseline_after_long_turn() -> None:

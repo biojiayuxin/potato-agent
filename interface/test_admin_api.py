@@ -7,7 +7,7 @@ from fastapi import FastAPI, Request
 from fastapi.testclient import TestClient
 from starlette.requests import Request as StarletteRequest
 
-from interface import admin_api, admin_store, auth_db
+from interface import admin_api, admin_store, auth_db, runtime_state
 from interface.admin_usage_client import AdminUsageUnavailable
 
 
@@ -156,7 +156,8 @@ def test_overview_merges_retired_temp_and_hides_service_principal(
 ) -> None:
     client, db_path = _build_client(tmp_path, monkeypatch)
     _create_user(db_path, "admin", admin=True)
-    _create_user(db_path, "alice")
+    alice = _create_user(db_path, "alice")
+    runtime_state.mark_runtime_started(alice.id, db_path=db_path)
     retired_name = "temp_1234567890_0123abcd"
     retired = auth_db.create_temporary_user(
         username=retired_name,
@@ -215,10 +216,16 @@ def test_overview_merges_retired_temp_and_hides_service_principal(
     payload = response.json()
     by_mapping = {row["mapping_username"]: row for row in payload["users"]}
     assert set(by_mapping) == {"admin", "alice", retired_name}
+    assert by_mapping["alice"]["runtime_active"] is True
+    assert by_mapping["admin"]["runtime_active"] is False
     retired_row = by_mapping[retired_name]
     assert retired_row["lifecycle"] == "retired"
     assert retired_row["email"] is None
     assert retired_row["storage"] is None
+    assert retired_row["runtime_active"] is False
+    assert payload["totals"]["usage"]["input_tokens"] == 2
+    assert payload["totals"]["usage"]["output_tokens"] == 3
+    assert payload["totals"]["usage"]["cache_read_tokens"] == 4
     assert payload["totals"]["usage"]["total_tokens"] == 14
 
 
@@ -244,7 +251,8 @@ def test_overview_defaults_to_type_groups_then_newest_registration_and_sorts_col
 ) -> None:
     client, db_path = _build_client(tmp_path, monkeypatch)
     _create_user(db_path, "admin", admin=True)
-    _create_user(db_path, "alice")
+    alice = _create_user(db_path, "alice")
+    runtime_state.mark_runtime_started(alice.id, db_path=db_path)
     active_temp_name = "temp_1234567890_11111111"
     auth_db.create_temporary_user(
         username=active_temp_name,
@@ -312,6 +320,25 @@ def test_overview_defaults_to_type_groups_then_newest_registration_and_sorts_col
     assert default_payload["sorting"] == {"sort": "default", "direction": "desc"}
     assert all(row["created_at"] for row in default_payload["users"])
 
+    activity_ascending = client.get(
+        "/admin/api/overview?sort=runtime_active&direction=asc"
+    ).json()
+    assert [row["runtime_active"] for row in activity_ascending["users"]] == [
+        False,
+        False,
+        False,
+        True,
+    ]
+    activity_descending = client.get(
+        "/admin/api/overview?sort=runtime_active&direction=desc"
+    ).json()
+    assert [row["runtime_active"] for row in activity_descending["users"]] == [
+        True,
+        False,
+        False,
+        False,
+    ]
+
     newest = client.get(
         "/admin/api/overview?sort=created_at&direction=desc"
     ).json()
@@ -361,10 +388,13 @@ def test_admin_table_has_separate_sortable_columns_without_type_column() -> None
     assert "监控面板" in html
     assert "管理员检测面板" not in html
     assert "管理员观测" not in html
-    assert html.count('class="sort-heading"') == 8
+    assert html.count('class="sort-heading"') == 9
+    assert html.count("</th>") == 9
+    assert 'data-sort="runtime_active"' in html
     assert "sort-button" not in html
     assert "data-direction" not in html
     for label in (
+        "活跃",
         "注册时间",
         "输入 Token",
         "输出 Token",
@@ -380,6 +410,7 @@ def test_admin_table_has_separate_sortable_columns_without_type_column() -> None
     assert 'data-sort="missing_usage_request_count"' not in html
     assert 'sort: "default"' in javascript
     assert 'data-label="类型"' not in javascript
+    assert 'data-label="活跃"' in javascript
     assert 'data-label="Usage 缺失"' not in javascript
     for redundant_text in (
         "整机资源",
@@ -398,6 +429,16 @@ def test_admin_table_has_separate_sortable_columns_without_type_column() -> None
     assert "source-status" not in stylesheet
     assert "采样于" not in javascript
     assert "padding-left: 15px" in stylesheet
+    for summary_id in (
+        "total-input-tokens",
+        "total-output-tokens",
+        "total-cache-read-tokens",
+        "total-tokens",
+    ):
+        assert f'id="{summary_id}"' in html
+        assert f'elements["{summary_id}"]' in javascript
+    assert "Token 总量" not in html
+    assert "minmax(110px, 0.65fr) repeat(4, minmax(170px, 1.25fr))" in stylesheet
     assert "Linux 页缓存" not in html
     assert "page-cache" not in html
     assert "page-cache" not in javascript
@@ -405,10 +446,24 @@ def test_admin_table_has_separate_sortable_columns_without_type_column() -> None
     assert 'classList.toggle("with-swap", hasSwap)' in javascript
     assert "repeat(4, minmax(0, 1fr))" in stylesheet
     assert 'closest(".sort-heading[data-sort]")' in javascript
-    assert 'state.direction === "asc" ? "desc" : "asc"' in javascript
+    assert 'state.direction === "desc" ? "asc" : "desc"' in javascript
+    assert 'const nextDirection = direction === "desc" ? "升序" : "降序"' in javascript
+    assert "升序排列" not in html
+    assert html.count("降序排列") == 9
     assert "border-bottom: 1px dashed" in stylesheet
     assert "text-align: center" in stylesheet
     assert "--filter-control-height: 42px" in stylesheet
+    assert "const SYSTEM_REFRESH_INTERVAL_MS = 5000" in javascript
+    assert "const OVERVIEW_REFRESH_INTERVAL_MS = 60 * 1000" in javascript
+    assert "loadOverview({ silent: true, skipIfBusy: true })" in javascript
+    assert "state.systemRefreshTimer = window.setInterval(loadSystem, SYSTEM_REFRESH_INTERVAL_MS)" in javascript
+    assert "row.runtime_active" in javascript
+    assert 'const activityLabel = row.runtime_active ? "运行中" : "休眠"' in javascript
+    assert "runtimeStatus" not in javascript
+    assert ".runtime-status" not in stylesheet
+    assert ".activity-dot.active" in stylesheet
+    assert ".activity-dot.sleeping" in stylesheet
+    assert "background: #22c55e" in stylesheet
 
 
 def test_admin_page_response_is_no_store(monkeypatch) -> None:

@@ -73,7 +73,19 @@
           <strong id="total-users">--</strong>
         </article>
         <article class="summary-item">
-          <span>Token 总量</span>
+          <span>输入 Token</span>
+          <strong id="total-input-tokens">--</strong>
+        </article>
+        <article class="summary-item">
+          <span>输出 Token</span>
+          <strong id="total-output-tokens">--</strong>
+        </article>
+        <article class="summary-item">
+          <span>缓存读</span>
+          <strong id="total-cache-read-tokens">--</strong>
+        </article>
+        <article class="summary-item">
+          <span>Token 合计</span>
           <strong id="total-tokens">--</strong>
         </article>
       </div>
@@ -104,14 +116,15 @@
         <table>
           <thead>
             <tr>
-              <th aria-sort="none"><button class="sort-heading" type="button" data-sort="user" title="点击按用户升序排列">用户</button></th>
-              <th aria-sort="none"><button class="sort-heading" type="button" data-sort="created_at" title="点击按注册时间升序排列">注册时间</button></th>
-              <th aria-sort="none"><button class="sort-heading" type="button" data-sort="input_tokens" title="点击按输入 Token 升序排列">输入 Token</button></th>
-              <th aria-sort="none"><button class="sort-heading" type="button" data-sort="output_tokens" title="点击按输出 Token 升序排列">输出 Token</button></th>
-              <th aria-sort="none"><button class="sort-heading" type="button" data-sort="cache_read_tokens" title="点击按缓存读升序排列">缓存读</button></th>
-              <th aria-sort="none"><button class="sort-heading" type="button" data-sort="total_tokens" title="点击按 Token 合计升序排列">Token 合计</button></th>
-              <th aria-sort="none"><button class="sort-heading" type="button" data-sort="request_count" title="点击按请求数升序排列">请求</button></th>
-              <th aria-sort="none"><button class="sort-heading" type="button" data-sort="storage_bytes" title="点击按目录空间升序排列">目录空间</button></th>
+              <th aria-sort="none"><button class="sort-heading" type="button" data-sort="user" title="点击按用户降序排列">用户</button></th>
+              <th aria-sort="none"><button class="sort-heading" type="button" data-sort="runtime_active" title="点击按活跃降序排列">活跃</button></th>
+              <th aria-sort="none"><button class="sort-heading" type="button" data-sort="created_at" title="点击按注册时间降序排列">注册时间</button></th>
+              <th aria-sort="none"><button class="sort-heading" type="button" data-sort="input_tokens" title="点击按输入 Token 降序排列">输入 Token</button></th>
+              <th aria-sort="none"><button class="sort-heading" type="button" data-sort="output_tokens" title="点击按输出 Token 降序排列">输出 Token</button></th>
+              <th aria-sort="none"><button class="sort-heading" type="button" data-sort="cache_read_tokens" title="点击按缓存读降序排列">缓存读</button></th>
+              <th aria-sort="none"><button class="sort-heading" type="button" data-sort="total_tokens" title="点击按 Token 合计降序排列">Token 合计</button></th>
+              <th aria-sort="none"><button class="sort-heading" type="button" data-sort="request_count" title="点击按请求数降序排列">请求</button></th>
+              <th aria-sort="none"><button class="sort-heading" type="button" data-sort="storage_bytes" title="点击按目录空间降序排列">目录空间</button></th>
             </tr>
           </thead>
           <tbody id="users-body"></tbody>

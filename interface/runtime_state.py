@@ -302,6 +302,24 @@ def get_runtime_state(
     return dict(row) if row is not None else None
 
 
+def list_active_runtime_user_ids(
+    db_path: Path = DEFAULT_AUTH_DB_PATH,
+) -> set[str]:
+    ensure_runtime_state_store(db_path)
+    with connect_auth_db(db_path) as conn:
+        rows = conn.execute(
+            """
+            SELECT rs.user_id
+            FROM runtime_state rs
+            JOIN users u ON u.id = rs.user_id
+            WHERE rs.runtime_started_at > 0
+              AND u.active = 1
+            ORDER BY rs.user_id
+            """
+        ).fetchall()
+    return {str(row["user_id"]) for row in rows}
+
+
 def delete_runtime_state(user_id: str, db_path: Path = DEFAULT_AUTH_DB_PATH) -> None:
     ensure_runtime_state_store(db_path)
     normalized_user_id = user_id.strip()
