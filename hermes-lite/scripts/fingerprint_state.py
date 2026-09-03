@@ -16,10 +16,10 @@ from typing import Any, Mapping
 import yaml
 
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 DEFAULT_MAPPING = Path("/var/lib/potato-agent/config/users_mapping.yaml")
 DEFAULT_DATA_DIR = Path("/var/lib/potato-agent/data")
-METADATA_ONLY_HERMES_SUBTREES = ("home",)
+EXCLUDED_HERMES_SUBTREES = ("home",)
 _STABLE_STAT_FIELDS = (
     "st_dev",
     "st_ino",
@@ -128,129 +128,17 @@ def _entry(path: Path) -> dict[str, Any]:
     return _metadata(path, info, special)
 
 
-def _metadata_tree_record(root: Path) -> dict[str, Any]:
-    try:
-        root_info = os.lstat(root)
-    except FileNotFoundError:
-        return {"path": str(root), "type": "missing"}
-    if not stat.S_ISDIR(root_info.st_mode) or stat.S_ISLNK(root_info.st_mode):
-        raise FingerprintError(f"metadata-only root must be a real directory: {root}")
-
-    digest = hashlib.sha256()
-    counts = {
-        "entries": 0,
-        "directories": 0,
-        "regular_files": 0,
-        "symlinks": 0,
-        "special_files": 0,
-        "regular_bytes": 0,
-    }
-
-    def visit(path: Path, relative: str) -> None:
-        try:
-            before = os.lstat(path)
-        except OSError as exc:
-            raise FingerprintError(f"cannot stat metadata-only path: {path}: {exc}") from exc
-        mode = before.st_mode
-        if stat.S_ISDIR(mode):
-            kind = "directory"
-        elif stat.S_ISREG(mode):
-            kind = "regular"
-        elif stat.S_ISLNK(mode):
-            kind = "symlink"
-        elif stat.S_ISFIFO(mode):
-            kind = "fifo"
-        elif stat.S_ISSOCK(mode):
-            kind = "socket"
-        elif stat.S_ISBLK(mode):
-            kind = "block"
-        elif stat.S_ISCHR(mode):
-            kind = "character"
-        else:
-            kind = "other"
-        item = {
-            "path": relative,
-            "type": kind,
-            "mode": f"{stat.S_IMODE(mode):04o}",
-            "uid": before.st_uid,
-            "gid": before.st_gid,
-            "size": before.st_size,
-            "mtime_ns": before.st_mtime_ns,
-            "ctime_ns": before.st_ctime_ns,
-        }
-        if kind == "symlink":
-            try:
-                item["target"] = os.readlink(path)
-            except OSError as exc:
-                raise FingerprintError(
-                    f"cannot read metadata-only symlink: {path}: {exc}"
-                ) from exc
-
-        counts["entries"] += 1
-        if kind == "directory":
-            counts["directories"] += 1
-        elif kind == "regular":
-            counts["regular_files"] += 1
-            counts["regular_bytes"] += before.st_size
-        elif kind == "symlink":
-            counts["symlinks"] += 1
-        else:
-            counts["special_files"] += 1
-        digest.update(_canonical_json(item))
-
-        if kind == "directory":
-            flags = (
-                os.O_RDONLY
-                | getattr(os, "O_CLOEXEC", 0)
-                | getattr(os, "O_NOFOLLOW", 0)
-                | getattr(os, "O_DIRECTORY", 0)
-            )
-            try:
-                descriptor = os.open(path, flags)
-            except OSError as exc:
-                raise FingerprintError(
-                    f"cannot enumerate metadata-only directory: {path}: {exc}"
-                ) from exc
-            try:
-                with os.scandir(descriptor) as iterator:
-                    names = sorted(entry.name for entry in iterator)
-            finally:
-                os.close(descriptor)
-            for name in names:
-                child_relative = name if relative == "." else f"{relative}/{name}"
-                visit(path / name, child_relative)
-
-        try:
-            after = os.lstat(path)
-        except OSError as exc:
-            raise FingerprintError(
-                f"metadata-only path disappeared during fingerprint: {path}: {exc}"
-            ) from exc
-        if _stable_signature(before) != _stable_signature(after):
-            raise FingerprintError(
-                f"metadata-only path changed while it was fingerprinted: {path}"
-            )
-
-    visit(root, ".")
-    record = _metadata(root, os.lstat(root), "metadata_tree")
-    record.update(counts)
-    record["tree_sha256"] = digest.hexdigest()
-    record["verification"] = "metadata_only"
-    return record
-
-
 def _fingerprint_tree(
-    root: Path, *, metadata_only_roots: tuple[Path, ...] = ()
+    root: Path, *, excluded_roots: tuple[Path, ...] = ()
 ) -> list[dict[str, Any]]:
     root = _absolute_no_follow(root)
-    metadata_only_roots = frozenset(
-        _absolute_no_follow(path) for path in metadata_only_roots
+    excluded_roots = frozenset(
+        _absolute_no_follow(path) for path in excluded_roots
     )
     entries: list[dict[str, Any]] = []
 
     def visit(path: Path) -> None:
-        if path in metadata_only_roots:
-            entries.append(_metadata_tree_record(path))
+        if path in excluded_roots:
             return
         record = _entry(path)
         entries.append(record)
@@ -319,14 +207,14 @@ def capture_state(*, mapping_path: Path, data_dir: Path) -> dict[str, Any]:
     hermes_homes = _target_hermes_homes(mapping)
     records: dict[str, dict[str, Any]] = {}
     for root in (data_dir, *hermes_homes):
-        metadata_roots = (
-            tuple(root / name for name in METADATA_ONLY_HERMES_SUBTREES)
+        excluded_roots = (
+            tuple(root / name for name in EXCLUDED_HERMES_SUBTREES)
             if root in hermes_homes
             else ()
         )
         for record in _fingerprint_tree(
             root,
-            metadata_only_roots=metadata_roots,
+            excluded_roots=excluded_roots,
         ):
             previous = records.setdefault(record["path"], record)
             if previous != record:
@@ -342,10 +230,10 @@ def capture_state(*, mapping_path: Path, data_dir: Path) -> dict[str, Any]:
             "mapping": str(mapping_path),
             "data": str(data_dir),
             "hermes_homes": [str(path) for path in hermes_homes],
-            "metadata_only": [
+            "excluded": [
                 str(root / name)
                 for root in hermes_homes
-                for name in METADATA_ONLY_HERMES_SUBTREES
+                for name in EXCLUDED_HERMES_SUBTREES
             ],
         },
         "entries": [records[path] for path in sorted(records)],

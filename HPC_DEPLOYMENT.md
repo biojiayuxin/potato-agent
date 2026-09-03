@@ -1045,8 +1045,10 @@ executable、skills、browser 和 runtime profile 也必须指向 current releas
 `cutover_lite_production.sh` 只适用于已有生产：要求现有 `/usr/local/bin/hermes` 是 symlink、mapping 至少有
 一个用户、全部 mapped unit 已存在，并且 inactive release 已由上一小节安装完成。切换会停止 Interface 和
 切换前 active 的 Hermes 服务；Interface 停止后，同端口的独立维护服务会返回 HTTP 503 页面。应安排维护窗口
-并先完成独立数据备份。状态指纹用于证明停服后的切换期间零变化，不是备份；它不读取用户 workdir，
-`.hermes/home` 只做 metadata tree 摘要。
+并确认 `/var/backups/potato-agent/hermes-lite-cutover` 所在文件系统空间充足。cutover 会在所有写入方停止后生成
+本节所列的私有一致性数据备份；异机或离线灾难恢复副本仍是独立运维范围。状态指纹仅用于证明停服后的切换
+期间零变化，不是备份；用户 workdir 和每个 `HERMES_HOME/home` 都被完全排除，既不读取内容，也不遍历目录或
+采集 metadata。
 
 维护服务首次安装会覆盖 `/etc/systemd/system/potato-maintenance.service` 并写入 `/usr/local`，必须先取得 owner
 明确批准，不能把下列命令当作普通代码部署的一部分自动执行。批准后在 Interface 仍在线时安装；脚本只执行
@@ -1179,7 +1181,7 @@ EXPECTED_USER_COUNT=$(
 printf 'reviewed mapped users: %s\n' "$EXPECTED_USER_COUNT"
 ```
 
-人工确认数量、inactive release 和独立备份后执行：
+人工确认数量、inactive release 和备份文件系统可用空间后执行：
 
 ```bash
 sudo "$CODE_SOURCE/hermes-lite/scripts/cutover_lite_production.sh" \
@@ -1196,8 +1198,12 @@ cutover 会：
 - 备份 mapping、全部 mapped unit、旧 `current`/`hermes` target、Interface drop-in，并在停服后把整个现有源码树
   保存到 `code-before/`，写完后才创建 `code-before.complete`；
 - 记录切换前 active 的服务，只停止并最终恢复这些服务，原本 inactive 的 unit 保持 inactive；
-- 停止写入方后采集 mapping、Interface data 和 mapped `HERMES_HOME` 指纹；
 - 仅在专用 model proxy usage DB 尚不存在时迁移旧 usage/quota；已有专用 DB 时保持其当前配额和 usage 不变；
+- 停止所有写入方并完成上述迁移后，使用 SQLite backup API 生成聊天和 usage 数据的一致性快照，逐库执行
+  `PRAGMA integrity_check`，稳定复制模型代理配置并校验 SHA-256；全部内容和 manifest 落盘后才创建
+  `sensitive-state.complete`；
+- 随后采集 mapping、Interface data 和 mapped `HERMES_HOME` 指纹；该指纹完全跳过
+  `HERMES_HOME/home`，但仍校验 `HERMES_HOME/state.db` 等其他状态；
 - 使用 `rsync -aHAX --checksum --delete-delay` 把部署树精确同步到 `CODE_SOURCE`，删除 staging 中不存在的旧代码
   和构建残留，再以相同 metadata/checksum 规则 dry run 确认零 drift；随后原子切换 `current` 与
   `/usr/local/bin/hermes` 并刷新既有 unit 集；
@@ -1206,14 +1212,34 @@ cutover 会：
   新 release、无 `slash_worker`、`pip check` 和 CLI help。
 
 备份写入 root-only 的
-`/var/backups/potato-agent/hermes-lite-cutover/<timestamp>-<release-id>`。切换开始后的错误、中断或终止信号会
+`/var/backups/potato-agent/hermes-lite-cutover/<timestamp>-<release-id>`。其中
+`sensitive-state/` 包含：
+
+- `interface/interface.db`：认证、协调状态和聊天展示记录；
+- `interface/archive.db`：归档会话及消息/展示 JSON；
+- `interface/chat_shares.db`：聊天分享快照、导入 receipt 和 tombstone；
+- `users/<mapping-index>/state.db`：每个 mapped 用户的 Hermes 会话和消息数据库；目录使用 mapping 序号，
+  恢复目标以 root-only manifest 中记录的原始 `state.db` 路径为准；
+- `model-proxy/model_proxy.yaml`：上游模型代理配置和密钥；
+- `model-proxy/usage.db`：模型使用量和配额数据；
+- `manifest.json`：源路径、原 uid/gid/mode、备份相对路径、完整性结果和配置 SHA-256。
+
+所有目录必须为 `root:root 0700`，所有文件及同级 `sensitive-state.complete` 必须为 `root:root 0600`。任一必需
+数据库缺失、损坏、为 symlink、多个用户共享同一 `state.db`、源在备份期间变化或空间不足，cutover 都会失败；
+失败留下的 `sensitive-state/` 没有 complete marker，不能用于恢复。该目录含聊天正文和模型密钥，不能交给普通
+用户读取，也不能写入日志或普通工单。
+
+切换开始后的错误、中断或终止信号会
 恢复旧 unit、drop-in、symlink 和原 active 服务，并从带 complete marker 的 `code-before/` 以
 `rsync --delete-delay` 恢复整个旧源码树；因此切换期间新增的代码也会被删除，源码内容和 metadata 回到切换前
 快照。成功后的人工回滚仍没有独立的一键脚本，必须保留旧 immutable release 和对应 backup，在维护窗口中按
-backup 受控执行；`code-before/` 只覆盖源码树，不替代 mapping、Interface DB 和每用户状态的独立备份。
+backup 受控执行；`code-before/` 只覆盖源码树，数据库和模型代理配置恢复必须使用已完成的
+`sensitive-state/` 人工执行。自动回滚不会用快照覆盖 live 数据；唯一例外是 cutover 首次创建的 `usage.db` 会在
+失败回滚时删除，使旧运行时继续使用原数据来源。
 自动回滚只有在源码、symlink、unit、drop-in、model proxy 和 Hermes 服务全部恢复并验证后，才撤下维护页、
 启动旧 Interface、验证真实 `/health` 并写 `rolled_back`；任何前置恢复步骤失败都会写 `rollback_failed` 并继续
-展示维护页，不能把部分回滚当成成功。
+展示维护页，不能把部分回滚当成成功。脚本不执行备份保留期清理；过期的整个 timestamp backup 目录由管理员
+后续人工确认并删除。
 
 #### 6.7 部署后验证
 
@@ -1280,12 +1306,51 @@ systemctl status "$HERMES_UNIT" --no-pager
 
 pgrep -af '[s]lash_worker|/opt/[h]ermes-agent|[h]ermes-agent-src'
 test -f "$BACKUP/code-before.complete"
+sudo /opt/potato-hermes-lite/current/venv/bin/python3 - "$BACKUP" <<'PY'
+import hashlib
+import json
+import os
+import sqlite3
+import stat
+import sys
+from pathlib import Path
+
+backup = Path(sys.argv[1])
+sensitive = backup / "sensitive-state"
+marker = backup / "sensitive-state.complete"
+assert not sensitive.is_symlink() and sensitive.is_dir()
+assert not marker.is_symlink() and marker.is_file()
+assert marker.read_text(encoding="ascii") == "complete\n"
+for path in (sensitive, *sensitive.rglob("*"), marker):
+    info = os.lstat(path)
+    assert info.st_uid == 0 and info.st_gid == 0
+    if stat.S_ISDIR(info.st_mode):
+        assert stat.S_IMODE(info.st_mode) == 0o700
+    else:
+        assert stat.S_ISREG(info.st_mode)
+        assert stat.S_IMODE(info.st_mode) == 0o600
+
+manifest = json.loads((sensitive / "manifest.json").read_text(encoding="ascii"))
+roles = [item["role"] for item in manifest["databases"]]
+assert set(roles) == {
+    "interface", "archive", "chat_shares", "model_proxy_usage", "user_state"
+}
+assert roles.count("user_state") == manifest["totals"]["mapped_user_databases"]
+for item in manifest["databases"]:
+    database = sensitive / item["backup"]["path"]
+    with sqlite3.connect(f"{database.as_uri()}?mode=ro", uri=True) as connection:
+        assert connection.execute("PRAGMA integrity_check").fetchall() == [("ok",)]
+config = manifest["files"][0]
+config_bytes = (sensitive / config["backup"]["path"]).read_bytes()
+assert hashlib.sha256(config_bytes).hexdigest() == config["backup"]["sha256"]
+print(f"verified {len(roles)} private SQLite backups and model proxy config")
+PY
 cat "$BACKUP/code-sync.log"
 cat "$BACKUP/result.txt"
 cat "$BACKUP/state-compare.json"
 ```
 
-`pgrep` 应无输出，`result.txt` 应为 `complete`，状态比较应为
+`pgrep` 应无输出，备份校验应成功，`result.txt` 应为 `complete`，状态比较应为
 `{"added": [], "changed": [], "removed": []}`。同时确认 Interface 进程中的
 `INTERFACE_TUI_GATEWAY_PYTHON` 和切换前 active 的用户服务 cmdline 都来自新 release。
 
@@ -2280,11 +2345,13 @@ systemctl start potato-user-data-retention.service
   `/var/lib/potato-agent/data/`，且 systemd 实际使用这些路径；
 - 每个 mapped 用户的 `HERMES_HOME` 和 workdir 都在源码树外；
 - mapping 至少包含一个用户，全部 mapped unit 已存在，`/usr/local/bin/hermes` 是 symlink；
-- 已完成独立、可恢复的数据备份，而不是只依赖 cutover 的状态指纹。
+- cutover backup 文件系统有足够空间，并接受脚本在停写后生成的、带完成标记的可恢复数据备份；不能把状态
+  指纹当作备份。
 
-`feedback.db` 会保存明文反馈正文和可选联系邮箱，`chat_shares.db` 会保存聊天分享快照和导入 receipt。两者都
-必须包含在 Interface 数据备份中，备份目录只能由 root 读取，并按批准的备份保留策略清理；不能因长期遗留
-备份而绕过应用内的数据保留和失效规则。
+`feedback.db` 会保存明文反馈正文和可选联系邮箱，`chat_shares.db` 会保存聊天分享快照和导入 receipt。cutover
+的 scoped backup 包含 `chat_shares.db`，不包含本次范围外的 `feedback.db`；需要保留反馈时必须另行生成一致性
+私有备份。所有备份目录只能由 root 读取；当前不做自动保留期清理，由管理员人工删除确认过期的备份，且不能
+因长期遗留备份而绕过应用内的数据保留和失效规则。
 
 如果 mapping、任一 Interface DB 或其 WAL/SHM 仍在 `/srv/potato_agent`，或者新旧位置同时存在状态，这属于
 单独的旧状态迁移，不得与 Lite release 切换合并执行。本 README 不提供危险的文件复制捷径：迁移必须在
@@ -2578,12 +2645,14 @@ print(f"backed up mapped runtime configs: {len(manifest)}")
 PY
 ```
 
-在第一次启动新 Interface 前确认 `archive.db` 已包含在独立备份中。新版启动时会立即清理归档时间超过 30 天的
-正文和旧运行记录，之后每天继续清理；这是有意的数据最小化，不能从 live DB 撤销。
+cutover 会在第一次启动新 Interface 前把 `archive.db` 放入 `sensitive-state/` 并校验，未生成
+`sensitive-state.complete` 就中止。新版启动时会立即清理归档时间超过 30 天的正文和旧运行记录，之后每天继续
+清理；这是有意的数据最小化，不能从 live DB 撤销。
 
 现在按 6.6 小节运行 cutover。脚本会记录原 active 集合后统一停止 Interface、proxy 和 Hermes，使用
-`migrate_model_proxy_usage.py` 从 `interface.db` 幂等迁移 usage/quota 到专用 `usage.db`，再采集状态指纹、
-切换代码、备份并安装两个主 unit，清理旧 secret、`EnvironmentFile=` 和归档保留期 drop-in 后启动服务。
+`migrate_model_proxy_usage.py` 从 `interface.db` 幂等迁移 usage/quota 到专用 `usage.db`，再生成数据库和模型代理
+配置备份、采集状态指纹、切换代码、备份并安装两个主 unit，清理旧 secret、`EnvironmentFile=` 和归档保留期
+drop-in 后启动服务。
 新版主 unit 会强制使用 99999 天在线会话归档阈值和 30 天归档正文保留，旧 drop-in 中的归档阈值
 覆盖不会延续。迁移只复制
 usage/quota 表，不复制认证数据或聊天记录。不要在 cutover 前手工运行迁移，否则无法得到维护窗口停写后的
@@ -2882,8 +2951,8 @@ HTTPS，旧 Cookie 应全部失效。
 1. 按 6.1 至 6.3 小节准备独立 build venv、clean browser assets，并完成 Lite 测试、隔离 verifier 和
    两次确定性构建。
 2. 按 6.4 小节准备完整离线 wheelhouse，并用 `install_lite_release.sh` 安装一个新的 inactive release ID。
-3. 按 6.6 小节生成全新的 root-owned `CODE_SOURCE`，人工核对 mapped user 数，完成独立数据备份后运行
-   `cutover_lite_production.sh`。
+3. 按 6.6 小节生成全新的 root-owned `CODE_SOURCE`，人工核对 mapped user 数和备份文件系统空间后运行
+   `cutover_lite_production.sh`；脚本在停写后生成 scoped 数据备份和 complete marker。
 4. 按 6.7 小节检查 symlink、模块 origin、服务进程、`pip check`、健康状态、cutover 结果和状态指纹差异。
 
 cutover 脚本会自行记录 active 服务、停止写入方、切换并只恢复原来 active 的服务，不要提前手工停止服务；

@@ -51,23 +51,33 @@ def test_capture_hashes_only_declared_state_and_does_not_follow_links(
     assert str(workdir / "must-not-be-read.txt") not in entries
 
 
-def test_capture_uses_metadata_only_for_user_home_subtree(tmp_path: Path) -> None:
+def test_capture_excludes_user_home_subtree_completely(tmp_path: Path) -> None:
     mapping, data, hermes_home, _workdir = _fixture(tmp_path)
     user_home = hermes_home / "home"
     user_home.mkdir()
     dependency = user_home / "large-package.tar"
     dependency.write_bytes(b"package-cache")
+    removed = user_home / "old-small-file"
+    removed.write_text("old\n", encoding="utf-8")
 
-    manifest = capture_state(mapping_path=mapping, data_dir=data)
-    entries = {item["path"]: item for item in manifest["entries"]}
+    before = capture_state(mapping_path=mapping, data_dir=data)
+    entries = {item["path"]: item for item in before["entries"]}
 
+    assert str(user_home) not in entries
     assert str(dependency) not in entries
-    assert entries[str(user_home)]["verification"] == "metadata_only"
-    assert entries[str(user_home)]["type"] == "metadata_tree"
-    assert entries[str(user_home)]["regular_files"] == 1
-    assert entries[str(user_home)]["tree_sha256"]
     assert entries[str(hermes_home / "state.db")]["sha256"]
-    assert str(user_home) in manifest["roots"]["metadata_only"]
+    assert str(user_home) in before["roots"]["excluded"]
+
+    dependency.write_bytes(b"changed-package-cache")
+    removed.unlink()
+    (user_home / "new-small-file").write_text("new\n", encoding="utf-8")
+    after = capture_state(mapping_path=mapping, data_dir=data)
+
+    assert compare_manifests(before, after) == {
+        "added": [],
+        "removed": [],
+        "changed": [],
+    }
 
 
 def test_compare_reports_only_added_removed_and_changed_paths(tmp_path: Path) -> None:

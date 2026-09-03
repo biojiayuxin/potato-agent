@@ -32,6 +32,8 @@ model_proxy_state_dir=/var/lib/potato-agent/model-proxy
 model_proxy_usage_db=${model_proxy_state_dir}/usage.db
 data_dir=/var/lib/potato-agent/data
 auth_db=${data_dir}/interface.db
+archive_db=${data_dir}/archive.db
+chat_shares_db=${data_dir}/chat_shares.db
 credential_dir=/etc/potato-agent/credentials
 session_credential=${credential_dir}/interface-session-secret
 resend_credential=${credential_dir}/resend-api-key
@@ -56,6 +58,7 @@ interface_dropin_dir=/etc/systemd/system/potato-interface.service.d
 interface_exec_dropin=${interface_dropin_dir}/40-security-entrypoint.conf
 interface_dropin=${interface_dropin_dir}/50-hermes-lite.conf
 fingerprint_script=${code_source}/hermes-lite/scripts/fingerprint_state.py
+backup_state_script=${code_source}/hermes-lite/scripts/backup_cutover_state.py
 usage_migration_script=${code_source}/migrate_model_proxy_usage.py
 signup_drain_script=${code_source}/hermes-lite/scripts/signup_drain_gate.py
 refresh_script=${repo}/refresh_hermes_systemd_units.py
@@ -153,6 +156,8 @@ for path in \
   "${mapping}" \
   "${model_proxy_config}" \
   "${auth_db}" \
+  "${archive_db}" \
+  "${chat_shares_db}" \
   "${session_credential}" \
   "${resend_credential}" \
   "${staged_privileged_helper}" \
@@ -168,6 +173,7 @@ for path in \
   "${release}/browser/chrome/chrome-linux64/chrome" \
   "${release}/browser/chrome/chrome-linux64/chrome-sandbox" \
   "${fingerprint_script}" \
+  "${backup_state_script}" \
   "${usage_migration_script}" \
   "${signup_drain_script}"; do
   if [[ ! -e ${path} ]]; then
@@ -927,6 +933,26 @@ if [[ -L ${model_proxy_usage_db} ]] || [[ ! -f ${model_proxy_usage_db} ]] || \
       "${model_proxy_user}:${model_proxy_user}:600" ]]; then
   echo "error: model proxy usage migration produced an unsafe database" >&2
   false
+fi
+
+if ! "${interface_python}" -B "${backup_state_script}" \
+  --mapping "${mapping}" \
+  --destination "${backup}/sensitive-state" \
+  --interface-db "${auth_db}" \
+  --archive-db "${archive_db}" \
+  --chat-shares-db "${chat_shares_db}" \
+  --model-proxy-config "${model_proxy_config}" \
+  --usage-db "${model_proxy_usage_db}" \
+  >"${backup}/sensitive-state.log" 2>&1; then
+  echo "error: sensitive deployment-state backup failed" >&2
+  rollback 2
+fi
+if [[ -L ${backup}/sensitive-state.complete ]] || \
+   [[ ! -f ${backup}/sensitive-state.complete ]] || \
+   [[ $(stat -c '%U:%G:%a' "${backup}/sensitive-state.complete") != \
+      'root:root:600' ]]; then
+  echo "error: sensitive deployment-state backup is not marked complete" >&2
+  rollback 2
 fi
 
 if ! "${interface_python}" -B "${fingerprint_script}" capture \

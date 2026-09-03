@@ -232,7 +232,8 @@
   option 上游 key 都必须创建新值，并在代理验收后撤销旧值
 - 最终验收必须逐用户确认 `model.api_key` 精确等于 mapping 中的随机 proxy token，配置其它位置没有
   `api_key`，`.env` 没有 `OPENAI_API_KEY`；不能只看 cleanup dry-run 的布尔摘要
-- 新版首次启动会清理归档时间超过 30 天的正文，启动前必须先完成独立备份和保留策略确认
+- 新版首次启动会清理归档时间超过 30 天的正文；生产升级必须先由受保护 cutover 生成并校验
+  `archive.db` 一致性快照，且存在 `sensitive-state.complete`
 - 生产 unit 固定使用 99999 天在线会话归档阈值和 30 天归档正文保留；cutover 会清除旧
   drop-in 中的历史覆盖值
 - 一次性迁移、严格停服顺序、随机 proxy token 下发、usage/quota 迁移和普通用户权限复测见根目录

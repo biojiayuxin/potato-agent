@@ -116,6 +116,67 @@ def test_cutover_uses_private_service_boundaries() -> None:
     assert '"http://${interface_probe_host}:3000/health"' in script
 
 
+def test_cutover_creates_consistent_sensitive_state_backup_after_writers_stop() -> None:
+    script = (
+        REPO_ROOT / "hermes-lite" / "scripts" / "cutover_lite_production.sh"
+    ).read_text(encoding="utf-8")
+    helper = (
+        REPO_ROOT / "hermes-lite" / "scripts" / "backup_cutover_state.py"
+    ).read_text(encoding="utf-8")
+
+    assert (
+        "backup_state_script=${code_source}/hermes-lite/scripts/backup_cutover_state.py"
+        in script
+    )
+    assert '"${backup_state_script}"' in script
+    assert '--destination "${backup}/sensitive-state"' in script
+    assert '--mapping "${mapping}"' in script
+    assert '--interface-db "${auth_db}"' in script
+    assert '--archive-db "${archive_db}"' in script
+    assert '--chat-shares-db "${chat_shares_db}"' in script
+    assert '--model-proxy-config "${model_proxy_config}"' in script
+    assert '--usage-db "${model_proxy_usage_db}"' in script
+
+    cutover_start = script.index("cutover_started=1")
+    hermes_stopped = script.index(
+        'if systemctl is-active --quiet "${service}"; then', cutover_start
+    )
+    interface_stopped = script.index(
+        'if systemctl is-active --quiet "${interface_unit}"; then', hermes_stopped
+    )
+    proxy_stopped = script.index(
+        'if systemctl is-active --quiet "${model_proxy_unit}"; then',
+        interface_stopped,
+    )
+    workers_stopped = script.index("unexpected-gateway-processes.txt", proxy_stopped)
+    usage_migration = script.index(
+        '"${interface_python}" -B "${usage_migration_script}"', workers_stopped
+    )
+    sensitive_backup = script.index(
+        '"${interface_python}" -B "${backup_state_script}"', usage_migration
+    )
+    complete_check = script.index(
+        '[[ ! -f ${backup}/sensitive-state.complete ]]', sensitive_backup
+    )
+    fingerprint = script.index('"${backup}/state-before.json"', complete_check)
+    assert (
+        hermes_stopped
+        < interface_stopped
+        < proxy_stopped
+        < workers_stopped
+        < usage_migration
+        < sensitive_backup
+        < complete_check
+        < fingerprint
+    )
+
+    assert "source_conn.backup(destination_conn)" in helper
+    assert "PRAGMA integrity_check" in helper
+    assert "sensitive-state.complete" not in script[:sensitive_backup]
+    assert "cp " not in helper
+    assert "shutil.copy" not in helper
+
+
 def test_packaged_interface_unit_pins_chat_retention_policy() -> None:
     service = (
         REPO_ROOT / "packaging" / "systemd" / "potato-interface.service"
