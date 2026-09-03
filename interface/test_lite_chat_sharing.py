@@ -158,5 +158,5 @@ def test_attachment_only_chat_is_not_shareable() -> None:
 def test_chat_sharing_assets_are_cache_busted() -> None:
     index = LITE_INDEX_PATH.read_text(encoding="utf-8")
 
-    assert "styles.css?v=20260831-update-scrollbar" in index
-    assert "app.js?v=20260831-update-history" in index
+    assert "styles.css?v=20260903-message-fork" in index
+    assert "app.js?v=20260903-message-fork" in index

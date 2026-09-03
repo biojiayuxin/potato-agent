@@ -133,11 +133,13 @@ from interface.display_store import (
     mark_active_live_session_states_failed,
     get_display_session_meta,
     get_display_messages,
+    get_message_fork_boundary,
     get_live_poll_snapshot,
     get_turn_submission_receipt,
     heartbeat_turn_submission_receipt,
     list_display_session_metas,
     save_display_messages,
+    save_message_fork_boundary,
 )
 from interface import file_browser_policy
 from interface.file_browser_policy import (
@@ -238,6 +240,7 @@ from interface.session_run_manager import (
     ATTACHMENT_BLOCK_START,
     ATTACHMENT_HINT_LINE,
     SessionRunManager,
+    build_hermes_user_content,
 )
 from interface.bulk_rnaseq_viewer import router as bulk_rnaseq_viewer_router
 from interface.daily_updates import router as daily_updates_router
@@ -507,6 +510,13 @@ class SessionDisplaySyncRequest(BaseModel):
 
 class SessionTitleUpdateRequest(BaseModel):
     title: str = ""
+
+
+class SessionForkRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    fork_cursor: str = ""
+    request_id: str = ""
 
 
 class SessionTurnSubmitRequest(BaseModel):
@@ -1303,6 +1313,8 @@ class _UserSessionDBProxy:
                         self.spec.username, method, kwargs
                     )
                 except PrivilegedClientError as exc:
+                    if method == "fork_session" and str(exc) == "Fork target marker conflict":
+                        raise ValueError(str(exc)) from exc
                     raise HTTPException(
                         status_code=500,
                         detail=(
@@ -1465,6 +1477,31 @@ class _UserSessionDBProxy:
             session_id=session_id,
             title=title,
             messages=messages,
+        )
+        return result if isinstance(result, dict) else {}
+
+    def fork_session(
+        self,
+        *,
+        target_session_id: str,
+        source_session_id: str,
+        request_id: str,
+        fork_cursor: str,
+        source_title: str,
+        visible_history: list[dict[str, Any]],
+        display_turns: list[dict[str, Any]],
+        raw_boundary: dict[str, Any] | None,
+    ) -> dict[str, Any]:
+        result = self._call(
+            "fork_session",
+            target_session_id=target_session_id,
+            source_session_id=source_session_id,
+            request_id=request_id,
+            fork_cursor=fork_cursor,
+            source_title=source_title,
+            visible_history=visible_history,
+            display_turns=display_turns,
+            raw_boundary=raw_boundary,
         )
         return result if isinstance(result, dict) else {}
 
@@ -1751,8 +1788,9 @@ def _normalize_message_row(message: dict[str, Any]) -> dict[str, Any]:
 
 
 def _normalize_display_message(message: dict[str, Any]) -> dict[str, Any]:
-    return {
-        "id": str(message.get("id") or uuid.uuid4().hex),
+    message_id = str(message.get("id") or uuid.uuid4().hex)
+    normalized = {
+        "id": message_id,
         "role": str(message.get("role") or "assistant"),
         "content": str(message.get("content") or ""),
         "reasoningContent": str(message.get("reasoningContent") or ""),
@@ -1767,6 +1805,9 @@ def _normalize_display_message(message: dict[str, Any]) -> dict[str, Any]:
         "done": bool(message.get("done", True)),
         "source": str(message.get("source") or "display_store"),
     }
+    if normalized["role"] == "assistant" and normalized["done"]:
+        normalized["fork_cursor"] = message_id
+    return normalized
 
 
 def _normalize_tool_call(tool_call: dict[str, Any]) -> dict[str, Any]:
@@ -5382,6 +5423,259 @@ async def _build_submitted_turn_response(
         "session": session,
         **snapshot,
     }
+
+
+def _fork_target_session_id(user_id: str, request_id: str) -> str:
+    digest = hashlib.sha256(
+        f"potato-session-fork\0{user_id}\0{request_id}".encode("utf-8")
+    ).hexdigest()
+    return f"fork_{digest[:32]}"
+
+
+def _fork_display_prefix(
+    messages: list[dict[str, Any]],
+    fork_cursor: str,
+    target_session_id: str,
+) -> tuple[
+    list[dict[str, Any]],
+    list[dict[str, Any]],
+    list[dict[str, Any]],
+]:
+    matching_indexes = [
+        index
+        for index, message in enumerate(messages)
+        if isinstance(message, dict)
+        and str(message.get("id") or "") == fork_cursor
+    ]
+    if len(matching_indexes) != 1:
+        raise ValueError("Fork cursor does not uniquely identify a message")
+    cursor_index = matching_indexes[0]
+    cursor_message = messages[cursor_index]
+    if (
+        str(cursor_message.get("role") or "") != "assistant"
+        or not bool(cursor_message.get("done", True))
+    ):
+        raise ValueError("Only completed assistant messages can be forked")
+
+    normalized_prefix: list[dict[str, Any]] = []
+    for index, message in enumerate(messages[: cursor_index + 1]):
+        normalized = _normalize_display_message(message)
+        normalized.pop("fork_cursor", None)
+        source_message_id = str(message.get("id") or index)
+        normalized["id"] = "fork-" + hashlib.sha256(
+            f"{target_session_id}\0{index}\0{source_message_id}".encode("utf-8")
+        ).hexdigest()[:24]
+        normalized_prefix.append(normalized)
+
+    display_turns: list[dict[str, Any]] = []
+    pending_user: dict[str, Any] | None = None
+    pending_user_index = -1
+    for index, message in enumerate(normalized_prefix):
+        role = str(message.get("role") or "")
+        if role == "user":
+            pending_user = message
+            pending_user_index = index
+            continue
+        if role != "assistant" or pending_user is None:
+            continue
+        user_content = build_hermes_user_content(
+            str(pending_user.get("content") or ""),
+            pending_user.get("files")
+            if isinstance(pending_user.get("files"), list)
+            else [],
+        )
+        display_turns.append(
+            {
+                "user": user_content,
+                "assistant": str(message.get("content") or ""),
+                "user_message_index": pending_user_index,
+                "assistant_message_index": index,
+                "user_timestamp": int(pending_user.get("timestamp") or 0),
+                "assistant_timestamp": int(message.get("timestamp") or 0),
+            }
+        )
+        pending_user = None
+        pending_user_index = -1
+
+    if not display_turns or int(display_turns[-1]["assistant_message_index"]) != len(
+        normalized_prefix
+    ) - 1:
+        raise ValueError("Fork cursor is not part of a complete conversation turn")
+
+    visible_history: list[dict[str, Any]] = []
+    for turn in display_turns:
+        visible_history.extend(
+            [
+                {
+                    "role": "user",
+                    "content": turn["user"],
+                    "timestamp": turn["user_timestamp"],
+                },
+                {
+                    "role": "assistant",
+                    "content": turn["assistant"],
+                    "timestamp": turn["assistant_timestamp"],
+                },
+            ]
+        )
+    return normalized_prefix, visible_history, display_turns
+
+
+def _fork_session_sync(
+    *,
+    user_id: str,
+    target: HermesTarget,
+    requested_session_id: str,
+    fork_cursor: str,
+    request_id: str,
+) -> dict[str, Any]:
+    target_session_id = _fork_target_session_id(user_id, request_id)
+    with _open_session_db(target) as db:
+        logical_session_id, logical_session, tip_session_id, projected_session = (
+            _resolve_logical_session_context(db, requested_session_id)
+        )
+        if not logical_session or not _is_interface_managed_source(
+            logical_session.get("source")
+        ):
+            raise HTTPException(status_code=404, detail="Session not found")
+        raw_messages = db.get_messages(tip_session_id)
+
+        display_meta = get_display_session_meta(user_id, logical_session_id)
+        display_messages = (
+            display_meta.get("messages")
+            if isinstance(display_meta, dict)
+            and isinstance(display_meta.get("messages"), list)
+            else _build_fallback_display_messages(raw_messages)
+        )
+        cloned_display, visible_history, display_turns = _fork_display_prefix(
+            display_messages,
+            fork_cursor,
+            target_session_id,
+        )
+        source_title = _session_export_title(
+            logical_session,
+            projected_session,
+            display_meta,
+            logical_session_id,
+        )
+        raw_boundary = get_message_fork_boundary(
+            user_id,
+            logical_session_id,
+            fork_cursor,
+        )
+        result = db.fork_session(
+            target_session_id=target_session_id,
+            source_session_id=logical_session_id,
+            request_id=request_id,
+            fork_cursor=fork_cursor,
+            source_title=source_title,
+            visible_history=visible_history,
+            display_turns=display_turns,
+            raw_boundary=raw_boundary,
+        )
+
+    inserted_display = create_display_messages_if_absent(
+        user_id,
+        target_session_id,
+        cloned_display,
+    )
+    if not inserted_display and bool(result.get("created")):
+        existing_display = get_display_messages(user_id, target_session_id)
+        if existing_display != cloned_display:
+            raise ValueError("Fork display target conflict")
+
+    boundary_map = result.get("boundary_map")
+    if not isinstance(boundary_map, list):
+        boundary_map = []
+    target_boundary_head = int(result.get("target_boundary_head") or 0)
+    if target_boundary_head and not boundary_map:
+        boundary_map = [
+            {
+                "display_index": len(cloned_display) - 1,
+                "active_message_head": target_boundary_head,
+            }
+        ]
+    for boundary in boundary_map:
+        if not isinstance(boundary, dict):
+            continue
+        try:
+            display_index = int(boundary.get("display_index"))
+            active_message_head = int(boundary.get("active_message_head") or 0)
+        except (TypeError, ValueError):
+            continue
+        if not 0 <= display_index < len(cloned_display) or active_message_head <= 0:
+            continue
+        display_message = cloned_display[display_index]
+        if str(display_message.get("role") or "") != "assistant":
+            continue
+        save_message_fork_boundary(
+            user_id,
+            target_session_id,
+            str(display_message.get("id") or ""),
+            physical_session_id=target_session_id,
+            active_message_head=active_message_head,
+        )
+
+    with _open_session_db(target) as db:
+        (
+            logical_target_id,
+            logical_target,
+            target_tip_id,
+            projected_target,
+            target_raw_messages,
+        ) = _resolve_logical_session_context_snapshot(
+            db,
+            target_session_id,
+            include_messages=True,
+        )
+    current_display = get_display_messages(user_id, target_session_id)
+    if current_display is None:
+        current_display = _build_fallback_display_messages(target_raw_messages)
+    current_display_meta = get_display_session_meta(user_id, target_session_id)
+    live_state = get_live_session_state(user_id, target_session_id)
+    return {
+        "created": bool(result.get("created")),
+        "context_mode": str(result.get("context_mode") or "visible"),
+        "session": _normalize_logical_session_row(
+            projected_target or logical_target or {"id": logical_target_id},
+            logical_session_id=logical_target_id,
+            logical_session=logical_target,
+            display_meta=current_display_meta,
+            live_state=live_state,
+            resume_session_id=target_tip_id or logical_target_id,
+        ),
+        "messages": [
+            _normalize_display_message(message) for message in current_display
+        ],
+        "live": live_state,
+    }
+
+
+@app.post("/api/sessions/{session_id}/forks")
+async def fork_session(
+    session_id: str,
+    payload: SessionForkRequest,
+    user: CurrentUser = Depends(get_current_user),
+) -> dict[str, Any]:
+    fork_cursor = str(payload.fork_cursor or "").strip()
+    request_id = str(payload.request_id or "").strip()
+    if not fork_cursor or len(fork_cursor) > 256:
+        raise HTTPException(status_code=400, detail="Invalid fork cursor")
+    if not request_id or len(request_id) > 128:
+        raise HTTPException(status_code=400, detail="Invalid fork request id")
+    try:
+        return await asyncio.to_thread(
+            _fork_session_sync,
+            user_id=user.id,
+            target=user.target,
+            requested_session_id=str(session_id or "").strip(),
+            fork_cursor=fork_cursor,
+            request_id=request_id,
+        )
+    except ValueError as exc:
+        detail = str(exc)
+        status_code = 409 if "conflict" in detail.lower() else 400
+        raise HTTPException(status_code=status_code, detail=detail) from exc
 
 
 async def _heartbeat_pending_turn_submission(

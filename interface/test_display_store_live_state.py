@@ -18,15 +18,54 @@ from interface.display_store import (
     find_live_session_id_by_run_id,
     finish_turn_submission_receipt,
     get_display_session_meta,
+    get_message_fork_boundary,
     get_live_poll_snapshot,
     get_live_session_state,
     list_live_session_states,
     mark_active_live_session_states_failed,
     save_display_messages,
+    save_message_fork_boundary,
     save_live_session_state,
     get_turn_submission_receipt,
     heartbeat_turn_submission_receipt,
 )
+
+
+def test_message_fork_boundary_is_private_and_write_once() -> None:
+    db_path = Path(tempfile.mkdtemp(prefix="potato-display-store-test-")) / "interface.db"
+    ensure_display_store(db_path)
+    save_display_messages(
+        "user-1",
+        "session-1",
+        [{"id": "assistant-1", "role": "assistant", "content": "answer"}],
+        db_path=db_path,
+    )
+
+    assert save_message_fork_boundary(
+        "user-1",
+        "session-1",
+        "assistant-1",
+        physical_session_id="physical-1",
+        active_message_head=12,
+        db_path=db_path,
+    )
+    assert not save_message_fork_boundary(
+        "user-1",
+        "session-1",
+        "assistant-1",
+        physical_session_id="tampered",
+        active_message_head=99,
+        db_path=db_path,
+    )
+    assert get_message_fork_boundary(
+        "user-1", "session-1", "assistant-1", db_path=db_path
+    ) == {
+        "physical_session_id": "physical-1",
+        "active_message_head": 12,
+    }
+    display = get_display_session_meta("user-1", "session-1", db_path=db_path)
+    assert display is not None
+    assert "physical_session_id" not in display["messages"][0]
 
 
 def test_live_state_round_trip() -> None:

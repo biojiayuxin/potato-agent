@@ -260,3 +260,44 @@ def test_import_allocates_a_stable_unique_title(tmp_path) -> None:
     assert first["title"] == "Source conversation (shared 2)"
     assert retried["title"] == first["title"]
     assert second["title"] == "Source conversation (shared 3)"
+
+
+def test_session_db_rpc_dispatches_idempotent_fork(tmp_path) -> None:
+    db = SessionDB(db_path=tmp_path / "state.db")
+    try:
+        db.create_session("source", "tui", model="model-a")
+        db.set_session_title("source", "Source")
+        db.append_message("source", "user", "question")
+        boundary = db.append_message("source", "assistant", "answer")
+        payload = {
+            "target_session_id": "fork-target",
+            "source_session_id": "source",
+            "request_id": "fork-request",
+            "fork_cursor": "assistant-display",
+            "source_title": "Source",
+            "visible_history": [
+                {"role": "user", "content": "question"},
+                {"role": "assistant", "content": "answer"},
+            ],
+            "display_turns": [
+                {
+                    "user": "question",
+                    "assistant": "answer",
+                    "assistant_message_index": 1,
+                }
+            ],
+            "raw_boundary": {
+                "physical_session_id": "source",
+                "active_message_head": boundary,
+            },
+        }
+
+        first = execute(db, "fork_session", payload)
+        retried = execute(db, "fork_session", payload)
+    finally:
+        db.close()
+
+    assert first["created"] is True
+    assert first["context_mode"] == "raw"
+    assert retried["created"] is False
+    assert retried["session_id"] == "fork-target"

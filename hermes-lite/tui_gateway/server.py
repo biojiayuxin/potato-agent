@@ -2860,6 +2860,82 @@ def _inflight_snapshot(session: dict) -> dict | None:
     }
 
 
+def _fork_boundary_checkpoint(session: dict, agent: Any) -> dict | None:
+    """Capture only state that can prove a later model-history flush."""
+    physical_session_id = str(getattr(agent, "session_id", None) or "").strip()
+    session_key = str(session.get("session_key") or "").strip()
+    session_db = getattr(agent, "_session_db", None)
+    if not physical_session_id or physical_session_id != session_key or session_db is None:
+        return None
+    try:
+        if session_db.get_session(physical_session_id) is None:
+            return None
+        messages = session_db.get_messages(physical_session_id)
+        active_message_head = int(messages[-1].get("id") or 0) if messages else 0
+        flush_index = int(getattr(agent, "_last_flushed_db_idx", -1))
+    except Exception:
+        return None
+    return {
+        "physical_session_id": physical_session_id,
+        "active_message_head": active_message_head,
+        "flush_index": flush_index,
+    }
+
+
+def _validated_fork_raw_boundary(
+    session: dict,
+    agent: Any,
+    before: dict | None,
+    final_response: str,
+) -> dict | None:
+    """Return a private fork boundary only when the completed turn is durable."""
+    after = _fork_boundary_checkpoint(session, agent)
+    if before is None or after is None:
+        return None
+    before_physical_id = str(before.get("physical_session_id") or "")
+    after_physical_id = str(after.get("physical_session_id") or "")
+    session_db = getattr(agent, "_session_db", None)
+    if session_db is None:
+        return None
+
+    with session["history_lock"]:
+        history = list(session.get("history") or [])
+    if int(after.get("flush_index") or -1) != len(history):
+        return None
+    if int(after.get("flush_index") or -1) <= int(before.get("flush_index") or -1):
+        return None
+
+    before_head = int(before.get("active_message_head") or 0)
+    after_head = int(after.get("active_message_head") or 0)
+    if after_head <= 0:
+        return None
+    if before_physical_id == after_physical_id:
+        if after_head <= before_head:
+            return None
+    else:
+        try:
+            if str(session_db.get_compression_tip(before_physical_id) or "") != after_physical_id:
+                return None
+        except Exception:
+            return None
+
+    try:
+        persisted = session_db.get_messages(after_physical_id)
+    except Exception:
+        return None
+    if not persisted:
+        return None
+    head = persisted[-1]
+    if int(head.get("id") or 0) != after_head or str(head.get("role") or "") != "assistant":
+        return None
+    if head.get("content") != final_response:
+        return None
+    return {
+        "physical_session_id": after_physical_id,
+        "active_message_head": after_head,
+    }
+
+
 # ── Methods: session ─────────────────────────────────────────────────
 
 
@@ -4515,6 +4591,7 @@ def _run_prompt_submit(rid, sid: str, session: dict, text: Any) -> None:
                     run_kwargs["task_id"] = session["session_key"]
             except (TypeError, ValueError):
                 pass
+            fork_boundary_before = _fork_boundary_checkpoint(session, agent)
             result = agent.run_conversation(run_message, **run_kwargs)
 
             last_reasoning = None
@@ -4589,6 +4666,14 @@ def _run_prompt_submit(rid, sid: str, session: dict, text: Any) -> None:
             rendered = render_message(raw, cols)
             if rendered:
                 payload["rendered"] = rendered
+            raw_boundary = _validated_fork_raw_boundary(
+                session,
+                agent,
+                fork_boundary_before,
+                raw,
+            )
+            if raw_boundary is not None:
+                payload["_fork_raw_boundary"] = raw_boundary
             with session["history_lock"]:
                 _clear_inflight_turn(session)
             _emit("message.complete", sid, payload)

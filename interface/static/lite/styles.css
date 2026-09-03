@@ -1972,6 +1972,7 @@ button.stretch {
 
 .message-actions {
   display: flex;
+  gap: 4px;
   width: fit-content;
   margin-top: 2px;
   opacity: 0;
@@ -1995,7 +1996,8 @@ button.stretch {
   justify-content: flex-start;
 }
 
-.message-copy-button {
+.message-copy-button,
+.message-fork-button {
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -2007,12 +2009,25 @@ button.stretch {
   padding: 0;
 }
 
-.message-copy-button[hidden] {
+.message-copy-button[hidden],
+.message-fork-button[hidden] {
   display: none !important;
 }
 
-.message-copy-button:hover {
+.message-copy-button:hover,
+.message-fork-button:hover {
   background: var(--surface-subtle-hover);
+}
+
+.message-copy-button:focus-visible,
+.message-fork-button:focus-visible {
+  outline: 2px solid var(--primary);
+  outline-offset: 2px;
+}
+
+.message-fork-button:disabled {
+  cursor: wait;
+  opacity: 0.55;
 }
 
 .message-copy-icon {
@@ -2021,6 +2036,21 @@ button.stretch {
   display: block;
   object-fit: contain;
   pointer-events: none;
+}
+
+.message-fork-icon {
+  display: block;
+  width: 15px;
+  height: 15px;
+  object-fit: contain;
+  pointer-events: none;
+}
+
+@media (hover: none), (pointer: coarse) {
+  .message-actions {
+    opacity: 1;
+    pointer-events: auto;
+  }
 }
 
 .message-content > :first-child {
@@ -4268,7 +4298,8 @@ button.stretch {
   margin-top: 0;
 }
 
-.workspace-view .message-copy-button {
+.workspace-view .message-copy-button,
+.workspace-view .message-fork-button {
   border-color: var(--border);
   background: var(--panel);
   box-shadow: 0 8px 18px rgba(15, 23, 42, 0.07);

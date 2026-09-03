@@ -1681,6 +1681,381 @@ class SessionDB:
 
         return f"{base} #{max_num + 1}"
 
+    @staticmethod
+    def _fork_title_in_transaction(
+        conn: sqlite3.Connection,
+        source_title: str,
+    ) -> str:
+        """Allocate the next ``Title #N`` fork title while holding the write lock."""
+        sanitized = SessionDB.sanitize_title(source_title) or "New chat"
+        match = re.match(r"^(.*?) #(\d+)$", sanitized)
+        base = (match.group(1) if match else sanitized).strip() or "New chat"
+        # Leave stable room for the numeric suffix so long source titles use the
+        # same base on every subsequent fork.
+        base = base[:90].rstrip() or "New chat"
+        escaped = base.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+        rows = conn.execute(
+            "SELECT title FROM sessions WHERE title = ? OR title LIKE ? ESCAPE '\\'",
+            (base, f"{escaped} #%"),
+        ).fetchall()
+        max_num = 1
+        for row in rows:
+            numbered = re.match(r"^.* #(\d+)$", str(row["title"] or ""))
+            if numbered:
+                max_num = max(max_num, int(numbered.group(1)))
+        return f"{base} #{max_num + 1}"
+
+    @classmethod
+    def _fork_raw_turns(
+        cls,
+        conn: sqlite3.Connection,
+        session_id: str,
+        *,
+        through_message_id: int | None = None,
+    ) -> List[Dict[str, Any]]:
+        params: List[Any] = [session_id]
+        boundary_clause = ""
+        if through_message_id is not None:
+            boundary_clause = " AND id <= ?"
+            params.append(int(through_message_id))
+        rows = conn.execute(
+            "SELECT id, role, content FROM messages "
+            "WHERE session_id = ? AND active = 1"
+            f"{boundary_clause} ORDER BY id",
+            params,
+        ).fetchall()
+
+        turns: List[Dict[str, Any]] = []
+        current: Dict[str, Any] | None = None
+        for row in rows:
+            role = str(row["role"] or "")
+            if role == "user":
+                if current is not None and current.get("assistant_id"):
+                    turns.append(current)
+                current = {
+                    "user": cls._decode_content(row["content"]),
+                    "assistant": "",
+                    "assistant_id": 0,
+                }
+                continue
+            if role != "assistant" or current is None:
+                continue
+            content = cls._decode_content(row["content"])
+            if content is None:
+                continue
+            current["assistant"] = content
+            current["assistant_id"] = int(row["id"] or 0)
+        if current is not None and current.get("assistant_id"):
+            turns.append(current)
+        return turns
+
+    @classmethod
+    def _find_legacy_fork_boundary(
+        cls,
+        conn: sqlite3.Connection,
+        lineage: List[sqlite3.Row],
+        display_turns: List[Dict[str, Any]],
+    ) -> Dict[str, Any] | None:
+        """Find one unique, longest exact suffix match against physical segments."""
+        if not display_turns:
+            return None
+        candidates: List[Dict[str, Any]] = []
+        for segment in lineage:
+            physical_id = str(segment["id"] or "")
+            raw_turns = cls._fork_raw_turns(conn, physical_id)
+            for raw_end in range(len(raw_turns)):
+                display_end = len(display_turns) - 1
+                raw_turn = raw_turns[raw_end]
+                display_turn = display_turns[display_end]
+                if (
+                    raw_turn.get("user") != display_turn.get("user")
+                    or raw_turn.get("assistant") != display_turn.get("assistant")
+                ):
+                    continue
+                length = 0
+                pairs: List[tuple[int, int]] = []
+                raw_index = raw_end
+                display_index = display_end
+                while raw_index >= 0 and display_index >= 0:
+                    raw_item = raw_turns[raw_index]
+                    display_item = display_turns[display_index]
+                    if (
+                        raw_item.get("user") != display_item.get("user")
+                        or raw_item.get("assistant") != display_item.get("assistant")
+                    ):
+                        break
+                    length += 1
+                    pairs.append(
+                        (
+                            int(display_item.get("assistant_message_index") or 0),
+                            int(raw_item.get("assistant_id") or 0),
+                        )
+                    )
+                    raw_index -= 1
+                    display_index -= 1
+                candidates.append(
+                    {
+                        "length": length,
+                        "physical_session_id": physical_id,
+                        "message_head": int(raw_turn.get("assistant_id") or 0),
+                        "pairs": pairs,
+                    }
+                )
+        if not candidates:
+            return None
+        longest = max(int(item["length"]) for item in candidates)
+        winners = [item for item in candidates if int(item["length"]) == longest]
+        return winners[0] if len(winners) == 1 else None
+
+    def fork_session(
+        self,
+        *,
+        target_session_id: str,
+        source_session_id: str,
+        request_id: str,
+        fork_cursor: str,
+        source_title: str,
+        visible_history: List[Dict[str, Any]],
+        display_turns: List[Dict[str, Any]],
+        raw_boundary: Dict[str, Any] | None = None,
+    ) -> Dict[str, Any]:
+        """Create an independent, idempotent conversation fork.
+
+        Raw forks copy one physical compression segment without following its
+        ancestors. When no trustworthy boundary exists, old display messages
+        are aligned exactly; ambiguity falls back to safe visible history.
+        """
+
+        marker_identity = {
+            "v": 1,
+            "r": request_id,
+            "s": source_session_id,
+            "c": fork_cursor,
+        }
+
+        def _do(conn: sqlite3.Connection) -> Dict[str, Any]:
+            existing = conn.execute(
+                "SELECT * FROM sessions WHERE id = ?", (target_session_id,)
+            ).fetchone()
+            if existing is not None:
+                try:
+                    existing_config = json.loads(str(existing["model_config"] or "{}"))
+                except (json.JSONDecodeError, TypeError, ValueError):
+                    existing_config = {}
+                marker = (
+                    existing_config.get("_potato_fork")
+                    if isinstance(existing_config, dict)
+                    else None
+                )
+                if not isinstance(marker, dict) or any(
+                    marker.get(key) != value for key, value in marker_identity.items()
+                ):
+                    raise ValueError("Fork target marker conflict")
+                return {
+                    "created": False,
+                    "context_mode": str(marker.get("m") or "visible"),
+                    "session_id": target_session_id,
+                    "title": str(existing["title"] or ""),
+                    "target_boundary_head": int(marker.get("h") or 0),
+                    "boundary_map": [],
+                }
+
+            lineage = self._compression_lineage_rows(conn, source_session_id)
+            if not lineage:
+                raise ValueError("Source session not found")
+            lineage_by_id = {str(row["id"] or ""): row for row in lineage}
+
+            raw_choice: Dict[str, Any] | None = None
+            if isinstance(raw_boundary, dict):
+                physical_id = str(raw_boundary.get("physical_session_id") or "").strip()
+                try:
+                    message_head = int(raw_boundary.get("active_message_head") or 0)
+                except (TypeError, ValueError):
+                    message_head = 0
+                boundary_row = conn.execute(
+                    "SELECT id, role FROM messages "
+                    "WHERE id = ? AND session_id = ? AND active = 1",
+                    (message_head, physical_id),
+                ).fetchone()
+                if (
+                    physical_id in lineage_by_id
+                    and boundary_row is not None
+                    and str(boundary_row["role"] or "") == "assistant"
+                ):
+                    raw_choice = {
+                        "physical_session_id": physical_id,
+                        "message_head": message_head,
+                        "pairs": [],
+                    }
+
+            aligned_choice = self._find_legacy_fork_boundary(
+                conn, lineage, display_turns
+            )
+            if raw_choice is None:
+                raw_choice = aligned_choice
+            elif (
+                aligned_choice is not None
+                and aligned_choice.get("physical_session_id")
+                == raw_choice.get("physical_session_id")
+                and int(aligned_choice.get("message_head") or 0)
+                == int(raw_choice.get("message_head") or 0)
+            ):
+                raw_choice["pairs"] = list(aligned_choice.get("pairs") or [])
+
+            context_mode = "raw" if raw_choice is not None else "visible"
+            metadata_row = (
+                lineage_by_id[str(raw_choice["physical_session_id"])]
+                if raw_choice is not None
+                else lineage[-1]
+            )
+            try:
+                inherited_config = json.loads(str(metadata_row["model_config"] or "{}"))
+            except (json.JSONDecodeError, TypeError, ValueError):
+                inherited_config = {}
+            if not isinstance(inherited_config, dict):
+                inherited_config = {}
+            marker = {**marker_identity, "m": context_mode, "h": 0}
+            inherited_config["_potato_fork"] = marker
+            title = self._fork_title_in_transaction(conn, source_title)
+            conn.execute(
+                """
+                INSERT INTO sessions (
+                    id, source, user_id, model, model_config, system_prompt,
+                    parent_session_id, started_at, cwd, title
+                ) VALUES (?, 'tui', NULL, ?, ?, ?, NULL, ?, ?, ?)
+                """,
+                (
+                    target_session_id,
+                    metadata_row["model"],
+                    json.dumps(inherited_config, ensure_ascii=False),
+                    metadata_row["system_prompt"],
+                    time.time(),
+                    metadata_row["cwd"],
+                    title,
+                ),
+            )
+
+            source_to_target_ids: Dict[int, int] = {}
+            total_messages = 0
+            total_tool_calls = 0
+            if raw_choice is not None:
+                source_rows = conn.execute(
+                    "SELECT * FROM messages WHERE session_id = ? AND active = 1 "
+                    "AND id <= ? ORDER BY id",
+                    (
+                        str(raw_choice["physical_session_id"]),
+                        int(raw_choice["message_head"]),
+                    ),
+                ).fetchall()
+                for row in source_rows:
+                    cursor = conn.execute(
+                        """
+                        INSERT INTO messages (
+                            session_id, role, content, tool_call_id, tool_calls,
+                            tool_name, timestamp, token_count, finish_reason,
+                            reasoning, reasoning_content, reasoning_details,
+                            codex_reasoning_items, codex_message_items,
+                            platform_message_id, observed, active
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, 0, 1)
+                        """,
+                        (
+                            target_session_id,
+                            row["role"],
+                            row["content"],
+                            row["tool_call_id"],
+                            row["tool_calls"],
+                            row["tool_name"],
+                            row["timestamp"],
+                            row["token_count"],
+                            row["finish_reason"],
+                            row["reasoning"],
+                            row["reasoning_content"],
+                            row["reasoning_details"],
+                            row["codex_reasoning_items"],
+                            row["codex_message_items"],
+                        ),
+                    )
+                    source_to_target_ids[int(row["id"])] = int(cursor.lastrowid)
+                    total_messages += 1
+                    if row["tool_calls"]:
+                        try:
+                            calls = json.loads(str(row["tool_calls"]))
+                        except (json.JSONDecodeError, TypeError, ValueError):
+                            calls = []
+                        total_tool_calls += len(calls) if isinstance(calls, list) else 1
+            else:
+                next_timestamp = time.time()
+                for message in visible_history:
+                    role = str(message.get("role") or "")
+                    if role not in {"user", "assistant"}:
+                        continue
+                    timestamp = float(message.get("timestamp") or next_timestamp)
+                    conn.execute(
+                        """
+                        INSERT INTO messages (
+                            session_id, role, content, timestamp, observed, active
+                        ) VALUES (?, ?, ?, ?, 0, 1)
+                        """,
+                        (
+                            target_session_id,
+                            role,
+                            self._encode_content(message.get("content")),
+                            timestamp,
+                        ),
+                    )
+                    total_messages += 1
+                    next_timestamp = max(next_timestamp, timestamp) + 1e-6
+
+            target_boundary_head = 0
+            boundary_map: List[Dict[str, int]] = []
+            if raw_choice is not None:
+                target_boundary_head = int(
+                    source_to_target_ids.get(int(raw_choice["message_head"]), 0)
+                )
+                for display_index, source_message_id in raw_choice.get("pairs") or []:
+                    target_message_id = source_to_target_ids.get(int(source_message_id), 0)
+                    if target_message_id:
+                        boundary_map.append(
+                            {
+                                "display_index": int(display_index),
+                                "active_message_head": int(target_message_id),
+                            }
+                        )
+                if target_boundary_head and not any(
+                    int(item.get("display_index") or -1) == len(visible_history) - 1
+                    for item in boundary_map
+                ):
+                    boundary_map.append(
+                        {
+                            "display_index": len(visible_history) - 1,
+                            "active_message_head": target_boundary_head,
+                        }
+                    )
+                marker["h"] = target_boundary_head
+                inherited_config["_potato_fork"] = marker
+                conn.execute(
+                    "UPDATE sessions SET model_config = ? WHERE id = ?",
+                    (
+                        json.dumps(inherited_config, ensure_ascii=False),
+                        target_session_id,
+                    ),
+                )
+
+            conn.execute(
+                "UPDATE sessions SET message_count = ?, tool_call_count = ? WHERE id = ?",
+                (total_messages, total_tool_calls, target_session_id),
+            )
+            return {
+                "created": True,
+                "context_mode": context_mode,
+                "session_id": target_session_id,
+                "title": title,
+                "target_boundary_head": target_boundary_head,
+                "boundary_map": boundary_map,
+            }
+
+        return self._execute_write(_do)
+
     def get_compression_tip(self, session_id: str) -> Optional[str]:
         """Walk the compression-continuation chain forward and return the tip.
 

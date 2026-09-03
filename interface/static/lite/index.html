@@ -6,7 +6,7 @@
     <meta name="referrer" content="no-referrer" />
     <title>Potato Agent</title>
     <link rel="icon" type="image/png" href="./static/favicon.png" />
-    <link rel="stylesheet" href="./static/lite/styles.css?v=20260831-update-scrollbar" />
+    <link rel="stylesheet" href="./static/lite/styles.css?v=20260903-message-fork" />
     <link rel="stylesheet" href="/static/shared/feedback.css?v=20260819-feedback" />
   </head>
   <body>
@@ -675,12 +675,15 @@
           <button type="button" class="message-copy-button" aria-label="Copy message" title="Copy message">
             <img src="./static/lite/icons/copy_button.png" alt="" class="message-copy-icon" />
           </button>
+          <button type="button" class="message-fork-button" aria-label="Fork conversation here" title="Fork conversation here" hidden>
+            <img src="./static/lite/icons/git-fork.svg" alt="" class="message-fork-icon" />
+          </button>
         </div>
       </article>
     </template>
 
     <script src="./static/lite/vendor/marked.umd.js"></script>
     <script src="/static/shared/feedback.js?v=20260819-feedback" defer></script>
-    <script type="module" src="./static/lite/app.js?v=20260831-update-history"></script>
+    <script type="module" src="./static/lite/app.js?v=20260903-message-fork"></script>
   </body>
 </html>

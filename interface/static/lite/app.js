@@ -21,6 +21,7 @@ const state = {
   activeWorkspaceTab: 'chat',
   filePreviewTabs: [],
   streamingMessageIds: new Set(),
+  forkingMessageCursors: new Set(),
   pendingAttachments: [],
   composerMode: 'chat',
   isSending: false,
@@ -323,6 +324,7 @@ const liveSessionPollGenerationBySessionId = new Map();
 const liveSessionSnapshotAcceptedRequestBySessionId = new Map();
 const confirmedTurnRequestIdsBySessionId = new Map();
 const titleReconciliationsBySessionId = new Map();
+const forkRequestIdsByCursor = new Map();
 let liveSessionPollGenerationCounter = 0;
 let liveSessionSnapshotRequestCounter = 0;
 let fileTreeRefreshTimer = null;
@@ -4733,6 +4735,7 @@ const normalizeMessageForDisplay = (message) => {
     timestamp: Number(message?.timestamp || 0),
     files: hasDisplayShape && Array.isArray(message?.files) ? [...message.files] : [],
     done: hasDisplayShape ? Boolean(message?.done ?? true) : true,
+    forkCursor: String(message?.fork_cursor || message?.forkCursor || '').trim(),
   };
 
   if (role === 'user') {
@@ -4947,6 +4950,9 @@ const mergeAssistantDisplayMessage = (target, source) => {
   }
 
   merged.done = source?.done ?? merged.done;
+  if (source?.forkCursor) {
+    merged.forkCursor = String(source.forkCursor);
+  }
   return merged;
 };
 
@@ -5203,6 +5209,58 @@ const copyTextToClipboard = async (text) => {
   textarea.select();
   document.execCommand('copy');
   textarea.remove();
+};
+
+const forkConversationFromMessage = async (message) => {
+  const sourceSessionId = getActivePersistentSessionId();
+  const forkCursor = String(message?.forkCursor || '').trim();
+  if (!sourceSessionId || !forkCursor) return;
+
+  const operationKey = `${sourceSessionId}\n${forkCursor}`;
+  if (state.forkingMessageCursors.has(operationKey)) return;
+  const requestId = forkRequestIdsByCursor.get(operationKey) || uuid();
+  forkRequestIdsByCursor.set(operationKey, requestId);
+  state.forkingMessageCursors.add(operationKey);
+  renderMessages();
+
+  try {
+    const response = await api(
+      `/api/sessions/${encodeURIComponent(sourceSessionId)}/forks`,
+      {
+        method: 'POST',
+        body: JSON.stringify({
+          fork_cursor: forkCursor,
+          request_id: requestId,
+        }),
+      },
+    );
+    const json = await response.json();
+    const forkedSession = normalizeSessionSnapshot(
+      json?.session
+        ? { ...json.session, persistentSessionId: json.session.id }
+        : null,
+    );
+    if (!forkedSession?.id) {
+      throw new Error('Fork did not return a conversation');
+    }
+    const forkedMessages = Array.isArray(json?.messages)
+      ? json.messages.map(normalizeMessageForDisplay)
+      : [];
+    forkRequestIdsByCursor.delete(operationKey);
+    state.sessions = [
+      { ...forkedSession, live: json?.live || null },
+      ...state.sessions.filter((session) => session.id !== forkedSession.id),
+    ];
+    setLiveSessionMessages(forkedSession.id, forkedMessages);
+    applyLiveStateToSession(forkedSession.id, json?.live || null);
+    closeMobilePanel();
+    await openSession(forkedSession.id);
+  } catch (error) {
+    showChatError(String(error?.message || 'Fork failed. Please try again.'));
+  } finally {
+    state.forkingMessageCursors.delete(operationKey);
+    renderMessages();
+  }
 };
 
 const normalizeShareToken = (value) => {
@@ -5822,6 +5880,7 @@ const renderMessages = () => {
     const streamingIndicator = fragment.querySelector('.message-streaming-indicator');
     const copyButton = fragment.querySelector('.message-copy-button');
     const copyIcon = fragment.querySelector('.message-copy-icon');
+    const forkButton = fragment.querySelector('.message-fork-button');
     const rawContent = getRawMessageText(message);
     const isStreaming = message.role === 'assistant' && state.streamingMessageIds.has(message.id);
 
@@ -5872,6 +5931,21 @@ const renderMessages = () => {
           copyIcon.src = ICON_COPY_PATH;
         }, 3000);
       }
+    });
+
+    const forkCursor = String(message?.forkCursor || '').trim();
+    const forkOperationKey = `${getActivePersistentSessionId()}\n${forkCursor}`;
+    const canFork = Boolean(
+      message.role === 'assistant'
+      && message.done
+      && !isStreaming
+      && forkCursor
+    );
+    forkButton.hidden = !canFork;
+    forkButton.disabled = canFork && state.forkingMessageCursors.has(forkOperationKey);
+    forkButton.setAttribute('aria-busy', forkButton.disabled ? 'true' : 'false');
+    forkButton.addEventListener('click', () => {
+      forkConversationFromMessage(message).catch(() => {});
     });
 
     dom.messages.append(fragment);

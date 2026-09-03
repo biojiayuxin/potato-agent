@@ -653,6 +653,10 @@ def test_prompt_submit_and_resume_use_only_lite_runtime(tmp_path: Path) -> None:
             )
             assert complete["status"] == "complete"
             assert complete["text"] == "Mock reply one"
+            assert complete["_fork_raw_boundary"]["physical_session_id"] == created[
+                "stored_session_id"
+            ]
+            assert complete["_fork_raw_boundary"]["active_message_head"] > 0
 
             provider.state.wait_for_requests(1)
             first_request = provider.state.requests[0]
@@ -682,6 +686,14 @@ def test_prompt_submit_and_resume_use_only_lite_runtime(tmp_path: Path) -> None:
                 "session.resume",
                 {"session_id": created["stored_session_id"], "cols": 100},
             )
+            deadline = time.monotonic() + 2.0
+            while resumed.get("running") and time.monotonic() < deadline:
+                time.sleep(0.01)
+                resumed = gateway.rpc(
+                    "session.resume",
+                    {"session_id": created["stored_session_id"], "cols": 100},
+                )
+            assert resumed.get("running") is False
             resumed_sid = resumed["session_id"]
             serialized_messages = json.dumps(resumed["messages"], ensure_ascii=False)
             assert "first prompt" in serialized_messages
@@ -697,6 +709,13 @@ def test_prompt_submit_and_resume_use_only_lite_runtime(tmp_path: Path) -> None:
             )
             assert second_complete["status"] == "complete"
             assert second_complete["text"] == "Mock reply two"
+            assert second_complete["_fork_raw_boundary"]["physical_session_id"] == created[
+                "stored_session_id"
+            ]
+            assert (
+                second_complete["_fork_raw_boundary"]["active_message_head"]
+                > complete["_fork_raw_boundary"]["active_message_head"]
+            )
             provider.state.wait_for_requests(2)
 
             state_db = gateway.hermes_home / "state.db"

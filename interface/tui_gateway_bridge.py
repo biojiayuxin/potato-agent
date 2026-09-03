@@ -95,6 +95,17 @@ _TITLE_EVENT_TYPES = frozenset(
 _TITLE_TASK_TTL_SECONDS = 60.0
 
 
+def _public_gateway_event(event: dict[str, Any]) -> dict[str, Any]:
+    if str(event.get("type") or "") != "message.complete":
+        return event
+    payload = event.get("payload")
+    if not isinstance(payload, dict) or "_fork_raw_boundary" not in payload:
+        return event
+    public_payload = dict(payload)
+    public_payload.pop("_fork_raw_boundary", None)
+    return {**event, "payload": public_payload}
+
+
 def _contains_profile_parameter(value: Any) -> bool:
     if isinstance(value, dict):
         for key, item in value.items():
@@ -1133,10 +1144,11 @@ class TuiGatewayBridge:
 
         with self._subscribers_lock:
             subscribers = list(self._subscribers)
+        public_event = _public_gateway_event(event)
         stale: list[WebSocket] = []
         for websocket in subscribers:
             try:
-                await self._send_ws(websocket, event)
+                await self._send_ws(websocket, public_event)
             except Exception:
                 stale.append(websocket)
             if generation is not None and self._generation is not generation:

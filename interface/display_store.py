@@ -31,6 +31,19 @@ ON session_display_transcripts(updated_at);
 
 ALTER TABLE session_display_transcripts ADD COLUMN draft_title TEXT NOT NULL DEFAULT '';
 
+CREATE TABLE IF NOT EXISTS session_message_fork_boundaries (
+    user_id TEXT NOT NULL,
+    session_id TEXT NOT NULL,
+    fork_cursor TEXT NOT NULL,
+    physical_session_id TEXT NOT NULL,
+    active_message_head INTEGER NOT NULL,
+    created_at INTEGER NOT NULL,
+    PRIMARY KEY (user_id, session_id, fork_cursor)
+);
+
+CREATE INDEX IF NOT EXISTS idx_session_message_fork_boundaries_session
+ON session_message_fork_boundaries(user_id, session_id);
+
 CREATE TABLE IF NOT EXISTS session_live_state (
     user_id TEXT NOT NULL,
     session_id TEXT NOT NULL,
@@ -112,6 +125,19 @@ CREATE TABLE IF NOT EXISTS session_display_transcripts (
 
 CREATE INDEX IF NOT EXISTS idx_session_display_transcripts_updated_at
 ON session_display_transcripts(updated_at);
+
+CREATE TABLE IF NOT EXISTS session_message_fork_boundaries (
+    user_id TEXT NOT NULL,
+    session_id TEXT NOT NULL,
+    fork_cursor TEXT NOT NULL,
+    physical_session_id TEXT NOT NULL,
+    active_message_head INTEGER NOT NULL,
+    created_at INTEGER NOT NULL,
+    PRIMARY KEY (user_id, session_id, fork_cursor)
+);
+
+CREATE INDEX IF NOT EXISTS idx_session_message_fork_boundaries_session
+ON session_message_fork_boundaries(user_id, session_id);
 
 CREATE TABLE IF NOT EXISTS session_live_state (
     user_id TEXT NOT NULL,
@@ -776,6 +802,86 @@ def create_display_messages_if_absent(
     return cursor.rowcount == 1
 
 
+def save_message_fork_boundary(
+    user_id: str,
+    session_id: str,
+    fork_cursor: str,
+    *,
+    physical_session_id: str,
+    active_message_head: int,
+    db_path: Path = DEFAULT_AUTH_DB_PATH,
+) -> bool:
+    """Persist a gateway-validated model-history boundary exactly once."""
+    normalized_cursor = str(fork_cursor or "").strip()
+    normalized_physical_id = str(physical_session_id or "").strip()
+    try:
+        normalized_head = int(active_message_head)
+    except (TypeError, ValueError):
+        return False
+    if not normalized_cursor or not normalized_physical_id or normalized_head <= 0:
+        return False
+    ensure_display_store(db_path)
+    with connect_auth_db(db_path) as conn:
+        cursor = conn.execute(
+            """
+            INSERT OR IGNORE INTO session_message_fork_boundaries (
+                user_id, session_id, fork_cursor, physical_session_id,
+                active_message_head, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (
+                user_id,
+                session_id,
+                normalized_cursor,
+                normalized_physical_id,
+                normalized_head,
+                int(time.time()),
+            ),
+        )
+        conn.commit()
+    return cursor.rowcount == 1
+
+
+def get_message_fork_boundary(
+    user_id: str,
+    session_id: str,
+    fork_cursor: str,
+    db_path: Path = DEFAULT_AUTH_DB_PATH,
+) -> dict[str, Any] | None:
+    ensure_display_store(db_path)
+    with connect_auth_db(db_path) as conn:
+        row = conn.execute(
+            """
+            SELECT physical_session_id, active_message_head
+            FROM session_message_fork_boundaries
+            WHERE user_id = ? AND session_id = ? AND fork_cursor = ?
+            LIMIT 1
+            """,
+            (user_id, session_id, str(fork_cursor or "").strip()),
+        ).fetchone()
+    if row is None:
+        return None
+    return {
+        "physical_session_id": str(row["physical_session_id"] or ""),
+        "active_message_head": int(row["active_message_head"] or 0),
+    }
+
+
+def delete_message_fork_boundaries(
+    user_id: str,
+    session_id: str,
+    db_path: Path = DEFAULT_AUTH_DB_PATH,
+) -> int:
+    ensure_display_store(db_path)
+    with connect_auth_db(db_path) as conn:
+        cursor = conn.execute(
+            "delete from session_message_fork_boundaries where user_id = ? and session_id = ?",
+            (user_id, session_id),
+        )
+        conn.commit()
+    return int(cursor.rowcount or 0)
+
+
 def set_display_draft_title(
     user_id: str,
     session_id: str,
@@ -807,6 +913,10 @@ def delete_display_messages(
 ) -> bool:
     ensure_display_store(db_path)
     with connect_auth_db(db_path) as conn:
+        conn.execute(
+            "delete from session_message_fork_boundaries where user_id = ? and session_id = ?",
+            (user_id, session_id),
+        )
         cursor = conn.execute(
             "delete from session_display_transcripts where user_id = ? and session_id = ?",
             (user_id, session_id),
@@ -1144,6 +1254,10 @@ def delete_display_user_data(
             "delete from session_display_transcripts where user_id = ?",
             (normalized_user_id,),
         )
+        boundary_cursor = conn.execute(
+            "delete from session_message_fork_boundaries where user_id = ?",
+            (normalized_user_id,),
+        )
         live_cursor = conn.execute(
             "delete from session_live_state where user_id = ?",
             (normalized_user_id,),
@@ -1159,6 +1273,7 @@ def delete_display_user_data(
         conn.commit()
     return {
         "display_messages": int(display_cursor.rowcount or 0),
+        "fork_boundaries": int(boundary_cursor.rowcount or 0),
         "live_states": int(live_cursor.rowcount or 0),
         "events": int(event_cursor.rowcount or 0),
         "turn_submission_receipts": int(receipt_cursor.rowcount or 0),

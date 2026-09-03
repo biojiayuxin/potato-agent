@@ -7,9 +7,11 @@ import sys
 import threading
 from pathlib import Path
 
+import pytest
+
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-HERMES_ROOT = REPO_ROOT / "hermes-agent"
+HERMES_ROOT = REPO_ROOT / "hermes-lite"
 for path in (REPO_ROOT, HERMES_ROOT):
     if str(path) not in sys.path:
         sys.path.insert(0, str(path))
@@ -226,3 +228,43 @@ def test_web_session_db_proxy_direct_call_keeps_kwargs_out_of_argv(
     command, call_kwargs = captured[0]
     assert all(sentinel not in argument for argument in command)
     assert json.loads(str(call_kwargs["input_text"])) == {"session_id": sentinel}
+
+
+def test_web_session_db_proxy_preserves_fork_marker_conflict_from_helper(
+    monkeypatch, tmp_path
+) -> None:
+    from interface import app as interface_app
+    from interface.privileged_client import PrivilegedClientError
+
+    target = HermesTarget(
+        username="alice",
+        email="alice@example.com",
+        display_name="Alice",
+        linux_user="hmx_alice",
+        home_dir=tmp_path,
+        hermes_home=tmp_path / ".hermes",
+        workdir=tmp_path,
+        api_server_host="127.0.0.1",
+        api_port=8655,
+        api_key="sk-user",
+        api_server_model_name="Hermes",
+        systemd_service="hermes-alice.service",
+        extra_env={},
+        config_overrides={},
+    )
+
+    def raise_marker_conflict(*args, **kwargs):
+        raise PrivilegedClientError("Fork target marker conflict")
+
+    monkeypatch.setattr(interface_app.os, "geteuid", lambda: 1000)
+    monkeypatch.setattr(
+        interface_app.privileged_client,
+        "session_db_call",
+        raise_marker_conflict,
+    )
+
+    with pytest.raises(ValueError, match="Fork target marker conflict"):
+        interface_app._UserSessionDBProxy(target)._call(
+            "fork_session",
+            target_session_id="fork-target",
+        )

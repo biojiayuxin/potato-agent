@@ -22,6 +22,8 @@ MAX_SHARED_IMPORT_MESSAGES = 200
 MAX_SHARED_IMPORT_MESSAGE_BYTES = 64 * 1024
 MAX_SHARED_IMPORT_SNAPSHOT_BYTES = 512 * 1024
 MAX_SHARED_IMPORT_TITLE_LENGTH = 100
+MAX_FORK_MESSAGES = 2000
+MAX_FORK_SNAPSHOT_BYTES = 8 * 1024 * 1024
 
 
 def _is_compression_continuation(
@@ -232,7 +234,52 @@ def _import_shared_session(db: SessionDB, kwargs: dict[str, Any]) -> dict[str, A
     }
 
 
+def _fork_session(db: SessionDB, kwargs: dict[str, Any]) -> dict[str, Any]:
+    target_session_id = str(kwargs.get("target_session_id") or "").strip()
+    source_session_id = str(kwargs.get("source_session_id") or "").strip()
+    request_id = str(kwargs.get("request_id") or "").strip()
+    fork_cursor = str(kwargs.get("fork_cursor") or "").strip()
+    visible_history = kwargs.get("visible_history")
+    display_turns = kwargs.get("display_turns")
+    raw_boundary = kwargs.get("raw_boundary")
+    if not target_session_id or len(target_session_id) > 128:
+        raise ValueError("Invalid fork target session id")
+    if not source_session_id or len(source_session_id) > 128:
+        raise ValueError("Invalid fork source session id")
+    if not request_id or len(request_id) > 128:
+        raise ValueError("Invalid fork request id")
+    if not fork_cursor or len(fork_cursor) > 256:
+        raise ValueError("Invalid fork cursor")
+    if not isinstance(visible_history, list) or not isinstance(display_turns, list):
+        raise ValueError("Invalid fork history")
+    if len(visible_history) > MAX_FORK_MESSAGES:
+        raise ValueError("Fork history has too many messages")
+    snapshot_size = len(
+        json.dumps(
+            {"history": visible_history, "turns": display_turns},
+            ensure_ascii=False,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    )
+    if snapshot_size > MAX_FORK_SNAPSHOT_BYTES:
+        raise ValueError("Fork history is too large")
+    if raw_boundary is not None and not isinstance(raw_boundary, dict):
+        raw_boundary = None
+    return db.fork_session(
+        target_session_id=target_session_id,
+        source_session_id=source_session_id,
+        request_id=request_id,
+        fork_cursor=fork_cursor,
+        source_title=str(kwargs.get("source_title") or ""),
+        visible_history=[item for item in visible_history if isinstance(item, dict)],
+        display_turns=[item for item in display_turns if isinstance(item, dict)],
+        raw_boundary=raw_boundary,
+    )
+
+
 def execute(db: SessionDB, method: str, kwargs: dict[str, Any]) -> Any:
+    if method == "fork_session":
+        return _fork_session(db, kwargs)
     if method == "import_shared_session":
         return _import_shared_session(db, kwargs)
     if method == "get_logical_session_context":

@@ -15,7 +15,26 @@ from interface.tui_gateway_bridge import (
     TuiGatewayBridgeError,
     TuiGatewayBridgeRegistry,
     _GatewayGenerationState,
+    _public_gateway_event,
 )
+
+
+def test_public_gateway_event_removes_private_fork_boundary() -> None:
+    event = {
+        "type": "message.complete",
+        "payload": {
+            "text": "answer",
+            "_fork_raw_boundary": {
+                "physical_session_id": "physical-1",
+                "active_message_head": 4,
+            },
+        },
+    }
+
+    public = _public_gateway_event(event)
+
+    assert public["payload"] == {"text": "answer"}
+    assert "_fork_raw_boundary" in event["payload"]
 
 
 class _FakeStdin:

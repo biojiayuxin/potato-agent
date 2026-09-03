@@ -33,6 +33,66 @@ class _ImmediateThread:
         self.target(*self.args, **self.kwargs)
 
 
+def test_fork_boundary_requires_matching_physical_session_flush_and_head() -> None:
+    server = _import_server()
+
+    class _DB:
+        def __init__(self) -> None:
+            self.messages = [
+                {"id": 1, "role": "user", "content": "first"},
+                {"id": 2, "role": "assistant", "content": "old"},
+            ]
+
+        def get_session(self, session_id):
+            return {"id": session_id}
+
+        def get_messages(self, _session_id):
+            return list(self.messages)
+
+        def get_compression_tip(self, session_id):
+            return session_id
+
+    db = _DB()
+
+    class _Agent:
+        session_id = "physical"
+        _session_db = db
+        _last_flushed_db_idx = 2
+
+    agent = _Agent()
+    session = {
+        "session_key": "physical",
+        "history": [
+            {"role": "user", "content": "first"},
+            {"role": "assistant", "content": "old"},
+        ],
+        "history_lock": threading.Lock(),
+    }
+    before = server._fork_boundary_checkpoint(session, agent)
+    db.messages.extend(
+        [
+            {"id": 3, "role": "user", "content": "next"},
+            {"id": 4, "role": "assistant", "content": "answer"},
+        ]
+    )
+    session["history"].extend(
+        [
+            {"role": "user", "content": "next"},
+            {"role": "assistant", "content": "answer"},
+        ]
+    )
+    agent._last_flushed_db_idx = 4
+
+    assert server._validated_fork_raw_boundary(
+        session, agent, before, "answer"
+    ) == {
+        "physical_session_id": "physical",
+        "active_message_head": 4,
+    }
+    agent._last_flushed_db_idx = 3
+    assert server._validated_fork_raw_boundary(session, agent, before, "answer") is None
+
+
 def _patch_prompt_runner(server, monkeypatch, events):
     from hermes_cli import goals
     from tools import approval

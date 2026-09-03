@@ -92,4 +92,4 @@ def test_gateway_exit_clears_active_approval_and_cache_is_busted() -> None:
     assert "pendingApprovalsBySessionId.clear()" in gateway_exit_branch
     assert "syncActiveSessionUiState()" in gateway_exit_branch
     assert "renderApprovalModal()" in gateway_exit_branch
-    assert "app.js?v=20260831-update-history" in index
+    assert "app.js?v=20260903-message-fork" in index

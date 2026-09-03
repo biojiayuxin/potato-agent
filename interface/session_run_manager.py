@@ -16,6 +16,7 @@ from interface.display_store import (
     append_session_event,
     get_display_messages,
     get_live_session_state,
+    save_message_fork_boundary,
     save_display_messages,
     save_live_session_state,
 )
@@ -1253,6 +1254,25 @@ class SessionRunManager:
         elif warning:
             combined = str(assistant.get("content") or "")
             assistant["content"] = f"{combined}\n\n[Warning] {warning}".strip()
+
+        raw_boundary = payload.get("_fork_raw_boundary")
+        if isinstance(raw_boundary, dict):
+            try:
+                await asyncio.to_thread(
+                    save_message_fork_boundary,
+                    context.user_id,
+                    context.session_id,
+                    context.assistant_message_id,
+                    physical_session_id=str(
+                        raw_boundary.get("physical_session_id") or ""
+                    ),
+                    active_message_head=int(
+                        raw_boundary.get("active_message_head") or 0
+                    ),
+                    db_path=self._db_path,
+                )
+            except Exception:
+                pass
         assistant["timestamp"] = now_seconds()
         assistant["done"] = True
         assistant.pop("_lastDeltaEventSeq", None)

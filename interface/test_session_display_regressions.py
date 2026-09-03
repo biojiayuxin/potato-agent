@@ -748,6 +748,214 @@ def test_session_title_update_rejects_overlong_titles() -> None:
         client.close()
 
 
+def test_session_fork_returns_raw_snapshot_and_retry_preserves_follow_up() -> None:
+    client, interface_app_mod, user = _build_client_and_user()
+    try:
+        source_messages = [
+            {
+                "id": "user-1",
+                "role": "user",
+                "content": "列出 test_dir 中的文件",
+                "files": [],
+                "done": True,
+            },
+            {
+                "id": "assistant-1",
+                "role": "assistant",
+                "content": "test_dir 里有 2 个文件：test.py 和 test2.py",
+                "reasoningContent": "need to inspect the folder",
+                "toolCalls": [{"id": "call-1", "function": {"name": "list_directory"}}],
+                "progressLines": ["`🛠️ list_directory test_dir`"],
+                "files": [],
+                "done": True,
+            },
+        ]
+        interface_app_mod.save_display_messages(
+            user.id,
+            "sess_tui_1",
+            source_messages,
+            draft_title="Files",
+        )
+        from interface.display_store import save_live_session_state
+
+        save_live_session_state(
+            user.id,
+            "sess_tui_1",
+            run_id="newer-run",
+            live_session_id="live-1",
+            assistant_message_id="newer-assistant",
+            status="running",
+        )
+
+        first_response = client.post(
+            "/api/sessions/sess_tui_1/forks",
+            json={"fork_cursor": "assistant-1", "request_id": "fork-request-1"},
+        )
+        assert first_response.status_code == 200, first_response.text
+        first = first_response.json()
+        fork_id = first["session"]["id"]
+        assert first["created"] is True
+        assert first["context_mode"] == "raw"
+        assert first["session"]["title"] == "Files #2"
+        assert first["live"] is None
+        assert first["messages"][1]["reasoningContent"] == "need to inspect the folder"
+        assert first["messages"][1]["progressLines"] == ["`🛠️ list_directory test_dir`"]
+        assert first["messages"][1]["fork_cursor"] == first["messages"][1]["id"]
+
+        target = interface_app_mod.mapping_store.resolve_target(
+            mapping_username=user.mapping_username,
+            email=user.email,
+            username=user.username,
+        )
+        assert target is not None
+        conn = sqlite3.connect(str(target.state_db_path))
+        try:
+            source_count = conn.execute(
+                "select count(*) from messages where session_id = 'sess_tui_1'"
+            ).fetchone()[0]
+            conn.execute(
+                "insert into messages (session_id, role, content, timestamp, active) values (?, 'user', ?, ?, 1)",
+                (fork_id, "follow up", 1714509999),
+            )
+            conn.execute(
+                "update sessions set message_count = message_count + 1 where id = ?",
+                (fork_id,),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+        continued_display = [
+            *first["messages"],
+            {
+                "id": "follow-up",
+                "role": "user",
+                "content": "follow up",
+                "done": True,
+            },
+        ]
+        interface_app_mod.save_display_messages(user.id, fork_id, continued_display)
+
+        retry_response = client.post(
+            "/api/sessions/sess_tui_1/forks",
+            json={"fork_cursor": "assistant-1", "request_id": "fork-request-1"},
+        )
+        assert retry_response.status_code == 200, retry_response.text
+        retry = retry_response.json()
+        assert retry["created"] is False
+        assert retry["session"]["id"] == fork_id
+        assert retry["messages"][-1]["content"] == "follow up"
+        conn = sqlite3.connect(str(target.state_db_path))
+        try:
+            assert conn.execute(
+                "select count(*) from messages where session_id = 'sess_tui_1'"
+            ).fetchone()[0] == source_count
+            assert conn.execute(
+                "select count(*) from messages where session_id = ?", (fork_id,)
+            ).fetchone()[0] == 5
+        finally:
+            conn.close()
+    finally:
+        client.close()
+
+
+def test_session_fork_visible_fallback_keeps_attachments_without_fake_tools() -> None:
+    client, interface_app_mod, user = _build_client_and_user()
+    try:
+        interface_app_mod.save_display_messages(
+            user.id,
+            "sess_tui_1",
+            [
+                {
+                    "id": "user-attachment",
+                    "role": "user",
+                    "content": "Analyze this",
+                    "files": [
+                        {
+                            "name": "input.csv",
+                            "localPath": "/workspace/input.csv",
+                            "content_type": "text/csv",
+                            "size": 12,
+                        }
+                    ],
+                    "done": True,
+                },
+                {
+                    "id": "assistant-attachment",
+                    "role": "assistant",
+                    "content": "Visible answer",
+                    "reasoningContent": "display reasoning",
+                    "toolCalls": [{"id": "not-model-history"}],
+                    "progressLines": ["progress"],
+                    "done": True,
+                },
+            ],
+            draft_title="Attachment chat",
+        )
+        response = client.post(
+            "/api/sessions/sess_tui_1/forks",
+            json={
+                "fork_cursor": "assistant-attachment",
+                "request_id": "fork-visible-request",
+            },
+        )
+        assert response.status_code == 200, response.text
+        payload = response.json()
+        assert payload["context_mode"] == "visible"
+        assert payload["messages"][0]["files"][0]["localPath"] == "/workspace/input.csv"
+        assert payload["messages"][1]["reasoningContent"] == "display reasoning"
+
+        target = interface_app_mod.mapping_store.resolve_target(
+            mapping_username=user.mapping_username,
+            email=user.email,
+            username=user.username,
+        )
+        assert target is not None
+        conn = sqlite3.connect(str(target.state_db_path))
+        try:
+            rows = conn.execute(
+                "select role, content, reasoning, tool_calls from messages where session_id = ? order by id",
+                (payload["session"]["id"],),
+            ).fetchall()
+        finally:
+            conn.close()
+        assert [row[0] for row in rows] == ["user", "assistant"]
+        assert "<potato-files>" in rows[0][1]
+        assert "/workspace/input.csv" in rows[0][1]
+        assert rows[1][1] == "Visible answer"
+        assert rows[1][2] is None
+        assert rows[1][3] is None
+    finally:
+        client.close()
+
+
+def test_session_fork_rejects_unfinished_assistant_message() -> None:
+    client, interface_app_mod, user = _build_client_and_user()
+    try:
+        interface_app_mod.save_display_messages(
+            user.id,
+            "sess_tui_1",
+            [
+                {"id": "user-1", "role": "user", "content": "question", "done": True},
+                {
+                    "id": "assistant-running",
+                    "role": "assistant",
+                    "content": "partial",
+                    "done": False,
+                },
+            ],
+        )
+        response = client.post(
+            "/api/sessions/sess_tui_1/forks",
+            json={
+                "fork_cursor": "assistant-running",
+                "request_id": "fork-running-request",
+            },
+        )
+        assert response.status_code == 400, response.text
+    finally:
+        client.close()
+
+
 def run() -> None:
     test_session_list_uses_display_store_draft_title()
     test_session_detail_prefers_saved_display_transcript()
