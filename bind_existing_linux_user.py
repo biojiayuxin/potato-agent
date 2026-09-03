@@ -3,10 +3,19 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
+import os
 import secrets
 import sys
+from pathlib import Path
+from typing import Any
 
-from interface.auth_db import DEFAULT_AUTH_DB_PATH, email_exists, upsert_user, username_exists
+from interface.auth_db import (
+    DEFAULT_AUTH_DB_PATH,
+    email_exists,
+    upsert_user,
+    username_exists,
+)
 from interface.cli_secrets import add_password_source_arguments, read_password
 from interface.hermes_service import (
     get_linux_user_info,
@@ -26,6 +35,7 @@ from interface.mapping import (
 )
 from interface.password_policy import validate_password_complexity
 from interface.model_proxy_config import generate_model_proxy_token
+from interface.user_lifecycle_lock import mapping_lifecycle_lock, user_lifecycle_lock
 
 
 class BindExistingUserError(RuntimeError):
@@ -61,12 +71,49 @@ def main() -> int:
     mapping_path = DEFAULT_MAPPING_PATH
     auth_db_path = DEFAULT_AUTH_DB_PATH
 
+    linux_info = get_linux_user_info(linux_user)
+
+    mapping_lock = (
+        mapping_lifecycle_lock(exclusive=True)
+        if os.geteuid() == 0
+        else contextlib.nullcontext()
+    )
+    user_lock = (
+        user_lifecycle_lock(username, exclusive=True)
+        if os.geteuid() == 0
+        else contextlib.nullcontext()
+    )
+    with mapping_lock:
+        with user_lock:
+            return _bind_user_locked(
+                username=username,
+                email=email,
+                display_name=display_name,
+                linux_user=linux_user,
+                linux_info=linux_info,
+                password=password,
+                mapping_path=mapping_path,
+                auth_db_path=auth_db_path,
+            )
+
+
+def _bind_user_locked(
+    *,
+    username: str,
+    email: str,
+    display_name: str,
+    linux_user: str,
+    linux_info: dict[str, Any],
+    password: str,
+    mapping_path: Path,
+    auth_db_path: Path,
+) -> int:
     if username_exists(username, db_path=auth_db_path):
-        raise BindExistingUserError(f"Interface username {username!r} is already in use.")
+        raise BindExistingUserError(
+            f"Interface username {username!r} is already in use."
+        )
     if email_exists(email, db_path=auth_db_path):
         raise BindExistingUserError(f"Interface email {email!r} is already in use.")
-
-    linux_info = get_linux_user_info(linux_user)
 
     config = load_mapping(mapping_path, resolve_env=False)
     users = config.setdefault("users", [])
@@ -90,6 +137,7 @@ def main() -> int:
         "hermes_home": str(linux_info["home_dir"] / ".hermes"),
         "workdir": str(linux_info["home_dir"]),
         "api_port": None,
+        "retention_identity_nonce": secrets.token_hex(16),
     }
 
     mapping_entry["api_port"] = select_next_port(config)
@@ -112,7 +160,9 @@ def main() -> int:
     resolved_config = load_mapping(mapping_path, resolve_env=True)
     target = MappingStore(mapping_path).get_target_by_username(username)
     if target is None:
-        raise BindExistingUserError(f"Failed to resolve mapping target for {username!r}")
+        raise BindExistingUserError(
+            f"Failed to resolve mapping target for {username!r}"
+        )
 
     install_user_files(resolved_config, target)
     upsert_user(

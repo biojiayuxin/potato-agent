@@ -136,6 +136,36 @@
         <button id="next-page" class="icon-button" type="button" title="下一页" aria-label="下一页">›</button>
       </nav>
     </section>
+
+    <section class="cleanup-band" aria-labelledby="cleanup-heading">
+      <div class="content cleanup-content">
+        <div class="section-heading-row cleanup-heading-row">
+          <div>
+            <h2 id="cleanup-heading">文件清理</h2>
+            <p id="cleanup-policy" class="cleanup-meta">正在加载清理状态</p>
+          </div>
+          <p id="cleanup-run" class="cleanup-run"></p>
+        </div>
+        <div id="cleanup-state" class="cleanup-state" role="status">正在加载清理状态</div>
+        <div id="cleanup-data" hidden>
+          <div class="cleanup-summary" aria-label="文件清理汇总">
+            <div><span>候选</span><strong id="cleanup-candidates">--</strong><small id="cleanup-candidates-bytes">--</small></div>
+            <div><span>已转历史</span><strong id="cleanup-staged">--</strong><small id="cleanup-staged-bytes">--</small></div>
+            <div><span>到期</span><strong id="cleanup-due">--</strong><small id="cleanup-due-bytes">--</small></div>
+            <div><span>永久删除</span><strong id="cleanup-purged">--</strong><small id="cleanup-purged-bytes">--</small></div>
+            <div><span>历史现存</span><strong id="cleanup-history">--</strong><small id="cleanup-history-bytes">--</small></div>
+          </div>
+          <div class="cleanup-table-wrap">
+            <div class="cleanup-table" role="table" aria-label="各用户文件清理状态">
+              <div class="cleanup-table-header" role="row">
+                <span role="columnheader">映射用户</span><span role="columnheader">状态</span><span role="columnheader">原因</span><span role="columnheader">候选</span><span role="columnheader">已转历史</span><span role="columnheader">到期</span><span role="columnheader">永久删除</span>
+              </div>
+              <div id="cleanup-users" role="rowgroup"></div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
   </div>
 
   <script src="/static/admin/app.js" defer></script>

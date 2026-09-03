@@ -3,10 +3,12 @@
 
   const SYSTEM_REFRESH_INTERVAL_MS = 5000;
   const OVERVIEW_REFRESH_INTERVAL_MS = 60 * 1000;
+  const CLEANUP_REFRESH_INTERVAL_MS = 60 * 1000;
   const state = {
     window: "24h", type: "all", q: "", page: 1, totalPages: 1,
     sort: "default", direction: "desc", overviewController: null,
-    overviewRefreshTimer: null, systemRefreshTimer: null, systemRequestInFlight: false
+    overviewRefreshTimer: null, systemRefreshTimer: null, cleanupRefreshTimer: null,
+    systemRequestInFlight: false, cleanupRequestInFlight: false
   };
   const elements = Object.fromEntries([
     "login-view", "dashboard-view", "login-form", "login", "password", "login-error",
@@ -14,7 +16,11 @@
     "memory-available", "system-grid", "swap-metric", "swap-value", "load-value", "sample-time",
     "window-control", "type-filter", "user-search", "total-users", "total-input-tokens",
     "total-output-tokens", "total-cache-read-tokens", "total-tokens",
-    "table-state", "table-wrap", "users-body", "pagination", "previous-page", "next-page", "page-label"
+    "table-state", "table-wrap", "users-body", "pagination", "previous-page", "next-page", "page-label",
+    "cleanup-policy", "cleanup-run", "cleanup-state", "cleanup-data", "cleanup-candidates",
+    "cleanup-candidates-bytes", "cleanup-staged", "cleanup-staged-bytes", "cleanup-due",
+    "cleanup-due-bytes", "cleanup-purged", "cleanup-purged-bytes", "cleanup-history",
+    "cleanup-history-bytes", "cleanup-users"
   ].map((id) => [id, document.getElementById(id)]));
 
   const numberFormatter = new Intl.NumberFormat("zh-CN");
@@ -83,18 +89,22 @@
     elements["admin-name"].textContent = user.name || user.username || user.email;
     loadOverview();
     loadSystem();
+    loadCleanup();
     state.overviewRefreshTimer = window.setInterval(
       () => loadOverview({ silent: true, skipIfBusy: true }),
       OVERVIEW_REFRESH_INTERVAL_MS
     );
     state.systemRefreshTimer = window.setInterval(loadSystem, SYSTEM_REFRESH_INTERVAL_MS);
+    state.cleanupRefreshTimer = window.setInterval(loadCleanup, CLEANUP_REFRESH_INTERVAL_MS);
   }
 
   function stopDashboardPolling() {
     if (state.overviewRefreshTimer) window.clearInterval(state.overviewRefreshTimer);
     if (state.systemRefreshTimer) window.clearInterval(state.systemRefreshTimer);
+    if (state.cleanupRefreshTimer) window.clearInterval(state.cleanupRefreshTimer);
     state.overviewRefreshTimer = null;
     state.systemRefreshTimer = null;
+    state.cleanupRefreshTimer = null;
     if (state.overviewController) state.overviewController.abort();
     state.overviewController = null;
   }
@@ -157,6 +167,74 @@
       if (error.message !== "unauthorized") renderSystem({ status: "unavailable", memory: {}, load: {} });
     }
     finally { state.systemRequestInFlight = false; }
+  }
+
+  const cleanupReasonLabels = {
+    none: "--", runtime_active: "Agent 正在运行", background_jobs: "后台任务运行中",
+    login_session: "登录或 SSH 会话活跃", uid_processes: "用户进程运行中",
+    activity_check_failed: "活动检查失败", lock_busy: "用户入口占用中",
+    invalid_identity: "用户身份预检失败", unsafe_filesystem: "文件系统预检失败",
+    atime_unsupported: "atime 语义不安全", limit_reached: "达到扫描上限",
+    mapping_changed: "映射已变化", new_origin_preview: "新身份需先完成预览",
+    authorization_required: "缺少 enforce 授权", policy_changed: "策略已变化",
+    journal_error: "清理日志异常", other: "其他安全跳过原因"
+  };
+
+  const cleanupStatusLabels = {
+    scanned: "已扫描", skipped: "已跳过", partial: "部分完成", error: "错误"
+  };
+
+  function cleanupCountAndBytes(files, bytes) {
+    return `${formatNumber(files)} 个 · ${formatBytes(bytes)}`;
+  }
+
+  function renderCleanup(data) {
+    if (data.status === "unavailable" || !data.totals) {
+      elements["cleanup-state"].textContent = "文件清理状态暂时不可用";
+      elements["cleanup-state"].hidden = false;
+      elements["cleanup-data"].hidden = true;
+      elements["cleanup-policy"].textContent = "每日 05:00 · Asia/Shanghai";
+      elements["cleanup-run"].textContent = "";
+      return;
+    }
+    const policy = data.policy || {};
+    const mode = policy.mode === "enforce" ? "执行" : "预览";
+    elements["cleanup-policy"].textContent = `${mode}模式 · 未活动 ${policy.inactive_days} 天 · 历史保留 ${policy.history_days} 天 · 每日 05:00`;
+    const run = data.latest_run || {};
+    const runStatus = data.status === "stale" ? "心跳已过期" : ({ running: "运行中", ok: "完成", partial: "部分完成", failed: "失败" }[run.status] || "--");
+    elements["cleanup-run"].textContent = `${runStatus}${run.started_at ? ` · ${formatDate(run.started_at)}` : ""}`;
+    const totals = data.totals;
+    [
+      ["candidates", "candidate_files", "candidate_bytes"],
+      ["staged", "staged_files", "staged_bytes"],
+      ["due", "due_files", "due_bytes"],
+      ["purged", "purged_files", "purged_bytes"],
+      ["history", "history_files", "history_bytes"]
+    ].forEach(([id, countKey, bytesKey]) => {
+      elements[`cleanup-${id}`].textContent = formatNumber(totals[countKey]);
+      elements[`cleanup-${id}-bytes`].textContent = formatBytes(totals[bytesKey]);
+    });
+    elements["cleanup-users"].innerHTML = (data.users || []).map((user) => `<div class="cleanup-table-row" role="row">
+      <span role="cell" data-label="映射用户"><strong>${escapeHtml(user.mapping_username)}</strong></span>
+      <span role="cell" data-label="状态">${escapeHtml(cleanupStatusLabels[user.status] || "错误")}</span>
+      <span role="cell" data-label="原因">${escapeHtml(cleanupReasonLabels[user.reason] || cleanupReasonLabels.other)}</span>
+      <span role="cell" data-label="候选">${cleanupCountAndBytes(user.candidate_files, user.candidate_bytes)}</span>
+      <span role="cell" data-label="已转历史">${cleanupCountAndBytes(user.staged_files, user.staged_bytes)}</span>
+      <span role="cell" data-label="到期">${cleanupCountAndBytes(user.due_files, user.due_bytes)}</span>
+      <span role="cell" data-label="永久删除">${cleanupCountAndBytes(user.purged_files, user.purged_bytes)}</span>
+    </div>`).join("") || '<div class="cleanup-empty">本轮没有映射用户</div>';
+    elements["cleanup-state"].hidden = true;
+    elements["cleanup-data"].hidden = false;
+  }
+
+  async function loadCleanup() {
+    if (elements["dashboard-view"].hidden || state.cleanupRequestInFlight) return;
+    state.cleanupRequestInFlight = true;
+    try { renderCleanup(await requestJson("/admin/api/file-cleanup")); }
+    catch (error) {
+      if (error.message !== "unauthorized") renderCleanup({ status: "unavailable" });
+    }
+    finally { state.cleanupRequestInFlight = false; }
   }
 
   function usageValue(usage, field) {

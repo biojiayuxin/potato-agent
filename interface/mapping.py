@@ -33,7 +33,8 @@ from interface.model_proxy_config import (
 ROOT_DIR = Path(__file__).resolve().parent
 REPO_ROOT = ROOT_DIR.parent
 DEFAULT_MAPPING_PATH = Path(
-    os.getenv("POTATO_AGENT_MAPPING_PATH") or (DEFAULT_STATE_DIR / "config" / "users_mapping.yaml")
+    os.getenv("POTATO_AGENT_MAPPING_PATH")
+    or (DEFAULT_STATE_DIR / "config" / "users_mapping.yaml")
 )
 DEFAULT_START_PORT = 8643
 DEFAULT_API_SERVER_HOST = "127.0.0.1"
@@ -86,6 +87,7 @@ class HermesTarget:
     runtime_profile_path: Path = DEFAULT_ACTIVATION_RUNTIME_PROFILE_PATH
     browser_cdp_url: str = ""
     model_proxy_token: str = field(default_factory=generate_model_proxy_token)
+    retention_identity_nonce: str = ""
 
     @property
     def api_base_url(self) -> str:
@@ -146,6 +148,19 @@ def load_mapping(
 
 
 def write_mapping(path: Path, config: dict[str, Any]) -> None:
+    from interface.user_lifecycle_lock import mapping_lifecycle_lock, mapping_lock_held
+
+    if os.geteuid() != 0:
+        _write_mapping_unlocked(path, config)
+        return
+    if not mapping_lock_held():
+        with mapping_lifecycle_lock(exclusive=True):
+            _write_mapping_unlocked(path, config)
+        return
+    _write_mapping_unlocked(path, config)
+
+
+def _write_mapping_unlocked(path: Path, config: dict[str, Any]) -> None:
     ensure_private_directory(path.parent)
     body = yaml.safe_dump(config, sort_keys=False, allow_unicode=False)
     fd, raw_tmp_path = tempfile.mkstemp(
@@ -349,10 +364,11 @@ def _build_target(config: dict[str, Any], raw_user: dict[str, Any]) -> HermesTar
         runtime_profile_path=activation_runtime_profile_path(
             configured_runtime_profile
         ),
-        browser_cdp_url=local_browser_cdp_url(
-            hermes_cfg.get("browser_cdp_url")
-        ),
+        browser_cdp_url=local_browser_cdp_url(hermes_cfg.get("browser_cdp_url")),
         model_proxy_token=str(raw_user.get("model_proxy_token") or "").strip(),
+        retention_identity_nonce=str(
+            raw_user.get("retention_identity_nonce") or ""
+        ).strip(),
     )
 
 
@@ -378,9 +394,7 @@ def _validate_target(
             )
 
     if not 1 <= target.api_port <= 65535:
-        raise RuntimeError(
-            f"Mapping entry {entry_name!r} has an invalid api_port."
-        )
+        raise RuntimeError(f"Mapping entry {entry_name!r} has an invalid api_port.")
 
     try:
         local_model_proxy_token(target.username, target.model_proxy_token)
@@ -571,6 +585,7 @@ def upsert_user_mapping_entry(
             "api_port": select_next_port(config),
             "api_server_model_name": DEFAULT_MODEL_NAME,
             "systemd_service": f"hermes-{slug}.service",
+            "retention_identity_nonce": secrets.token_hex(16),
         }
         users.append(entry)
 
@@ -597,6 +612,7 @@ def upsert_user_mapping_entry(
     entry.setdefault("api_port", select_next_port(config))
     entry.setdefault("api_server_model_name", DEFAULT_MODEL_NAME)
     entry.setdefault("systemd_service", f"hermes-{slug}.service")
+    entry.setdefault("retention_identity_nonce", secrets.token_hex(16))
 
     other_api_keys = {
         str(item.get("api_key") or "").strip()

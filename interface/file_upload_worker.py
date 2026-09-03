@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
 import json
 import os
 import re
@@ -16,9 +17,14 @@ from typing import BinaryIO
 HARD_MAX_UPLOAD_BYTES = 200 * 1024 * 1024
 COPY_CHUNK_BYTES = 1024 * 1024
 FILENAME_SANITIZE_RE = re.compile(r"[^A-Za-z0-9._-]+")
+MAINTENANCE_ERROR_MARKER = b"POTATO_USER_MAINTENANCE"
 
 
 class UploadTooLargeError(RuntimeError):
+    pass
+
+
+class UploadMaintenanceError(RuntimeError):
     pass
 
 
@@ -174,16 +180,26 @@ def run_upload_command(
         process.stdin.close()
         process.stdin = None
         stdout, stderr = process.communicate()
-    except BaseException:
+    except BaseException as exc:
         if process.stdin is not None and not process.stdin.closed:
-            process.stdin.close()
+            with contextlib.suppress(OSError):
+                process.stdin.close()
+        process.stdin = None
         if process.poll() is None:
             process.kill()
-        process.wait()
+        _stdout, stderr = process.communicate()
+        if MAINTENANCE_ERROR_MARKER in stderr:
+            raise UploadMaintenanceError(
+                "User files are temporarily unavailable during maintenance; retry later."
+            ) from exc
         raise
     if too_large:
         raise UploadTooLargeError("upload exceeds size limit")
     if process.returncode != 0:
+        if MAINTENANCE_ERROR_MARKER in stderr:
+            raise UploadMaintenanceError(
+                "User files are temporarily unavailable during maintenance; retry later."
+            )
         raise RuntimeError("file upload failed")
     try:
         payload = json.loads(stdout.decode("utf-8"))

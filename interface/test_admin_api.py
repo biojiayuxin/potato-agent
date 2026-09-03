@@ -3,11 +3,17 @@ from __future__ import annotations
 import sqlite3
 from types import SimpleNamespace
 
-from fastapi import FastAPI, Request
+from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from starlette.requests import Request as StarletteRequest
 
-from interface import admin_api, admin_store, auth_db, runtime_state
+from interface import (
+    admin_api,
+    admin_store,
+    auth_db,
+    runtime_state,
+    user_data_retention,
+)
 from interface.admin_usage_client import AdminUsageUnavailable
 
 
@@ -140,15 +146,18 @@ def _request(peer: str, forwarded: str = "") -> StarletteRequest:
 
 def test_forwarded_ip_is_used_only_through_trusted_proxy(monkeypatch) -> None:
     monkeypatch.setenv("INTERFACE_ADMIN_TRUSTED_PROXIES", "10.0.0.0/8")
-    assert admin_api.trusted_client_ip(
-        _request("198.51.100.1", "203.0.113.7")
-    ) == "198.51.100.1"
-    assert admin_api.trusted_client_ip(
-        _request("10.0.0.2", "203.0.113.7, 10.0.0.3")
-    ) == "203.0.113.7"
-    assert admin_api.trusted_client_ip(
-        _request("127.0.0.1", "203.0.113.8")
-    ) == "203.0.113.8"
+    assert (
+        admin_api.trusted_client_ip(_request("198.51.100.1", "203.0.113.7"))
+        == "198.51.100.1"
+    )
+    assert (
+        admin_api.trusted_client_ip(_request("10.0.0.2", "203.0.113.7, 10.0.0.3"))
+        == "203.0.113.7"
+    )
+    assert (
+        admin_api.trusted_client_ip(_request("127.0.0.1", "203.0.113.8"))
+        == "203.0.113.8"
+    )
 
 
 def test_overview_merges_retired_temp_and_hides_service_principal(
@@ -339,9 +348,7 @@ def test_overview_defaults_to_type_groups_then_newest_registration_and_sorts_col
         False,
     ]
 
-    newest = client.get(
-        "/admin/api/overview?sort=created_at&direction=desc"
-    ).json()
+    newest = client.get("/admin/api/overview?sort=created_at&direction=desc").json()
     assert [row["mapping_username"] for row in newest["users"]] == [
         retired_name,
         active_temp_name,
@@ -356,26 +363,24 @@ def test_overview_defaults_to_type_groups_then_newest_registration_and_sorts_col
     token_desc_page_two = client.get(
         "/admin/api/overview?sort=total_tokens&direction=desc&page=2"
     ).json()
-    assert [
-        row["usage"]["total_tokens"] for row in token_desc_page_one["users"]
-    ] == [
+    assert [row["usage"]["total_tokens"] for row in token_desc_page_one["users"]] == [
         400,
         300,
     ]
-    assert [
-        row["usage"]["total_tokens"] for row in token_desc_page_two["users"]
-    ] == [
+    assert [row["usage"]["total_tokens"] for row in token_desc_page_two["users"]] == [
         200,
         100,
     ]
 
     for sort_by in admin_api.VALID_OVERVIEW_SORTS - {"default"}:
-        assert client.get(
-            f"/admin/api/overview?sort={sort_by}&direction=asc"
-        ).status_code == 200
-    assert client.get(
-        "/admin/api/overview?sort=missing_usage_request_count"
-    ).status_code == 400
+        assert (
+            client.get(f"/admin/api/overview?sort={sort_by}&direction=asc").status_code
+            == 200
+        )
+    assert (
+        client.get("/admin/api/overview?sort=missing_usage_request_count").status_code
+        == 400
+    )
     assert client.get("/admin/api/overview?sort=invalid").status_code == 400
     assert client.get("/admin/api/overview?direction=sideways").status_code == 400
 
@@ -456,7 +461,10 @@ def test_admin_table_has_separate_sortable_columns_without_type_column() -> None
     assert "const SYSTEM_REFRESH_INTERVAL_MS = 5000" in javascript
     assert "const OVERVIEW_REFRESH_INTERVAL_MS = 60 * 1000" in javascript
     assert "loadOverview({ silent: true, skipIfBusy: true })" in javascript
-    assert "state.systemRefreshTimer = window.setInterval(loadSystem, SYSTEM_REFRESH_INTERVAL_MS)" in javascript
+    assert (
+        "state.systemRefreshTimer = window.setInterval(loadSystem, SYSTEM_REFRESH_INTERVAL_MS)"
+        in javascript
+    )
     assert "row.runtime_active" in javascript
     assert 'const activityLabel = row.runtime_active ? "运行中" : "休眠"' in javascript
     assert "runtimeStatus" not in javascript
@@ -470,10 +478,102 @@ def test_admin_page_response_is_no_store(monkeypatch) -> None:
     from interface import app as app_module
 
     marked = []
-    monkeypatch.setattr(app_module, "mark_foreground_activity", lambda *_args: marked.append(1))
+    monkeypatch.setattr(
+        app_module, "mark_foreground_activity", lambda *_args: marked.append(1)
+    )
     client = TestClient(app_module.app)
     response = client.get("/admin")
     assert response.status_code == 200
     assert response.headers["cache-control"] == "no-store"
     assert response.headers["x-frame-options"] == "DENY"
     assert marked == []
+
+
+def test_file_cleanup_api_is_admin_only_and_sanitizes_reasons(
+    tmp_path, monkeypatch
+) -> None:
+    client, db_path = _build_client(tmp_path, monkeypatch)
+    assert client.get("/admin/api/file-cleanup").status_code == 401
+    _create_user(db_path, "admin", admin=True)
+    assert _signin(client).status_code == 200
+    now = 100.0
+    monkeypatch.setattr(admin_api.time, "time", lambda: now)
+    monkeypatch.setattr(
+        admin_api,
+        "read_cleanup_status",
+        lambda _path: {
+            "schema_version": 1,
+            "updated_at": "1970-01-01T00:01:40Z",
+            "updated_at_epoch": now,
+            "heartbeat_at": None,
+            "policy": {
+                "mode": "preview",
+                "inactive_days": 30,
+                "history_days": 30,
+                "policy_sha256": "a" * 64,
+            },
+            "schedule": {
+                "time": "05:00",
+                "timezone": "Asia/Shanghai",
+                "persistent": True,
+            },
+            "latest_run": {
+                "id": "run",
+                "mode": "preview",
+                "status": "ok",
+                "started_at": "1970-01-01T00:01:39Z",
+                "started_at_epoch": 99.0,
+                "finished_at": "1970-01-01T00:01:40Z",
+                "finished_at_epoch": now,
+                "policy_sha256": "a" * 64,
+            },
+            "totals": {
+                "candidate_files": 1,
+                "candidate_bytes": 4096,
+                "staged_files": 0,
+                "staged_bytes": 0,
+                "due_files": 0,
+                "due_bytes": 0,
+                "purged_files": 0,
+                "purged_bytes": 0,
+                "errors": 0,
+                "history_files": 0,
+                "history_bytes": 0,
+            },
+            "users": [
+                {
+                    "mapping_username": "alice",
+                    "status": "skipped",
+                    "reason": "unexpected-internal-detail",
+                    "candidate_files": 1,
+                    "candidate_bytes": 4096,
+                    "staged_files": 0,
+                    "staged_bytes": 0,
+                    "due_files": 0,
+                    "due_bytes": 0,
+                    "purged_files": 0,
+                    "purged_bytes": 0,
+                    "errors": 0,
+                }
+            ],
+        },
+    )
+    response = client.get("/admin/api/file-cleanup")
+    assert response.status_code == 200
+    assert response.json()["users"][0]["reason"] == "other"
+    assert "path" not in response.text.casefold()
+
+
+def test_file_cleanup_api_hides_corrupt_status_details(tmp_path, monkeypatch) -> None:
+    client, db_path = _build_client(tmp_path, monkeypatch)
+    _create_user(db_path, "admin", admin=True)
+    assert _signin(client).status_code == 200
+
+    def unavailable(_path):
+        raise user_data_retention.RetentionError("secret /home/alice/path")
+
+    monkeypatch.setattr(admin_api, "read_cleanup_status", unavailable)
+    response = client.get("/admin/api/file-cleanup")
+    assert response.status_code == 200
+    assert response.json()["status"] == "unavailable"
+    assert "/home/alice" not in response.text

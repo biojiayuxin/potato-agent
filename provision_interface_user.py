@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
+import os
 import sys
 from pathlib import Path
 
@@ -22,6 +24,7 @@ from interface.mapping import (
     write_mapping,
 )
 from interface.password_policy import validate_password_complexity
+from interface.user_lifecycle_lock import mapping_lifecycle_lock, user_lifecycle_lock
 
 
 class ProvisionError(RuntimeError):
@@ -62,33 +65,47 @@ def main() -> int:
     require_binary("systemctl")
     require_binary("useradd")
 
-    config = load_mapping(args.mapping, resolve_env=False)
-    display_name = args.display_name or args.username
-
-    upsert_user_mapping_entry(
-        config,
-        username=args.username,
-        email=args.email,
-        display_name=display_name,
+    mapping_lock = (
+        mapping_lifecycle_lock(exclusive=True)
+        if os.geteuid() == 0
+        else contextlib.nullcontext()
     )
-    build_targets_from_config(config)
-    write_mapping(args.mapping, config)
-
-    resolved_config = load_mapping(args.mapping, resolve_env=True)
-
-    target = MappingStore(args.mapping).get_target_by_username(args.username)
-    if target is None:
-        raise ProvisionError(f"Failed to resolve mapping target for {args.username!r}")
-
-    install_user_files(resolved_config, target)
-    upsert_user(
-        username=args.username,
-        email=args.email,
-        password=password,
-        mapping_username=args.username,
-        name=display_name,
-        db_path=args.auth_db,
+    user_lock = (
+        user_lifecycle_lock(args.username, exclusive=True)
+        if os.geteuid() == 0
+        else contextlib.nullcontext()
     )
+    with mapping_lock:
+        with user_lock:
+            config = load_mapping(args.mapping, resolve_env=False)
+            display_name = args.display_name or args.username
+
+            upsert_user_mapping_entry(
+                config,
+                username=args.username,
+                email=args.email,
+                display_name=display_name,
+            )
+            build_targets_from_config(config)
+            write_mapping(args.mapping, config)
+
+            resolved_config = load_mapping(args.mapping, resolve_env=True)
+
+            target = MappingStore(args.mapping).get_target_by_username(args.username)
+            if target is None:
+                raise ProvisionError(
+                    f"Failed to resolve mapping target for {args.username!r}"
+                )
+
+            install_user_files(resolved_config, target)
+            upsert_user(
+                username=args.username,
+                email=args.email,
+                password=password,
+                mapping_username=args.username,
+                name=display_name,
+                db_path=args.auth_db,
+            )
 
     print(f"Interface user: {args.username}")
     print(f"Email: {args.email}")

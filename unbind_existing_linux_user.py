@@ -3,10 +3,17 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
+import os
 import sys
+from pathlib import Path
 
 from interface.auth_db import DEFAULT_AUTH_DB_PATH, connect_auth_db
-from interface.hermes_service import require_binary, require_root, stop_and_remove_service
+from interface.hermes_service import (
+    require_binary,
+    require_root,
+    stop_and_remove_service,
+)
 from interface.mapping import (
     DEFAULT_MAPPING_PATH,
     MappingStore,
@@ -14,6 +21,7 @@ from interface.mapping import (
     remove_user_mapping_entry,
     write_mapping,
 )
+from interface.user_lifecycle_lock import mapping_lifecycle_lock, user_lifecycle_lock
 
 
 class UnbindExistingUserError(RuntimeError):
@@ -31,7 +39,9 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def _delete_interface_state(username: str, email: str, auth_db: Path) -> tuple[int, int]:
+def _delete_interface_state(
+    username: str, email: str, auth_db: Path
+) -> tuple[int, int]:
     with connect_auth_db(auth_db) as conn:
         rows = conn.execute(
             "select id from users where mapping_username = ? or username = ?",
@@ -68,22 +78,39 @@ def main() -> int:
     mapping_path = DEFAULT_MAPPING_PATH
     auth_db_path = DEFAULT_AUTH_DB_PATH
 
+    mapping_lock = (
+        mapping_lifecycle_lock(exclusive=True)
+        if os.geteuid() == 0
+        else contextlib.nullcontext()
+    )
+    user_lock = (
+        user_lifecycle_lock(args.username, exclusive=True, publish_marker=True)
+        if os.geteuid() == 0
+        else contextlib.nullcontext()
+    )
+    with mapping_lock:
+        with user_lock:
+            return _unbind_locked(args.username, mapping_path, auth_db_path)
+
+
+def _unbind_locked(username: str, mapping_path: Path, auth_db_path: Path) -> int:
+
     config = load_mapping(mapping_path, resolve_env=False)
-    target = MappingStore(mapping_path).get_target_by_username(args.username)
+    target = MappingStore(mapping_path).get_target_by_username(username)
     if target is None:
         raise UnbindExistingUserError(
-            f"User {args.username!r} not found in users_mapping.yaml."
+            f"User {username!r} not found in users_mapping.yaml."
         )
 
     stop_and_remove_service(target.systemd_service)
     deleted_users, deleted_transcripts = _delete_interface_state(
-        args.username, target.email, auth_db_path
+        username, target.email, auth_db_path
     )
-    removed = remove_user_mapping_entry(config, args.username)
+    removed = remove_user_mapping_entry(config, username)
     if removed:
         write_mapping(mapping_path, config)
 
-    print(f"Unbound interface user: {args.username}")
+    print(f"Unbound interface user: {username}")
     print(f"Removed Hermes service: {target.systemd_service}")
     print(f"Removed interface auth rows: {deleted_users}")
     print(f"Removed display transcripts: {deleted_transcripts}")

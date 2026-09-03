@@ -1,0 +1,32 @@
+[Unit]
+Description=Potato Agent two-stage user data retention
+After=local-fs.target potato-storage-snapshot.service
+ConditionPathExists=/etc/potato-agent/user-data-retention.yaml
+ConditionPathExists=/var/lib/potato-agent/config/users_mapping.yaml
+
+[Service]
+Type=oneshot
+User=root
+Group=root
+WorkingDirectory=/srv/potato_agent
+Environment=PYTHONPATH=/srv/potato_agent
+ExecStart=/opt/interface-env/bin/python -B -m interface.user_data_retention run
+TimeoutStartSec=4h
+UMask=0077
+Nice=10
+IOSchedulingClass=idle
+IOSchedulingPriority=7
+PrivateNetwork=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=false
+NoNewPrivileges=true
+CapabilityBoundingSet=CAP_CHOWN CAP_DAC_OVERRIDE CAP_FOWNER
+AmbientCapabilities=CAP_CHOWN CAP_DAC_OVERRIDE CAP_FOWNER
+LockPersonality=true
+RestrictSUIDSGID=true
+RestrictRealtime=true
+SystemCallArchitectures=native
+
+[Install]
+WantedBy=multi-user.target

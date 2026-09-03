@@ -144,6 +144,25 @@ th:nth-child(9) { width: 16%; }
 .icon-button { width: 36px; height: 36px; padding: 0; border-color: #c7d0ca; background: white; color: #37413c; font-size: 24px; line-height: 1; }
 .icon-button:hover { background: var(--soft); }
 
+.cleanup-band { border-top: 1px solid var(--line); background: #e9eeeb; padding: 30px 0 48px; }
+.cleanup-content { width: min(1320px, calc(100% - 40px)); }
+.cleanup-heading-row { align-items: end; }
+.cleanup-meta, .cleanup-run { margin: 6px 0 0; color: var(--muted); font-size: 12px; }
+.cleanup-run { text-align: right; }
+.cleanup-summary { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); margin-top: 18px; border: 1px solid #cbd4cf; background: var(--surface); }
+.cleanup-summary > div { min-width: 0; min-height: 105px; padding: 16px 18px; display: flex; flex-direction: column; justify-content: space-between; }
+.cleanup-summary > div + div { border-left: 1px solid var(--line); }
+.cleanup-summary span, .cleanup-summary small { color: var(--muted); font-size: 12px; }
+.cleanup-summary strong { font-size: 24px; overflow-wrap: anywhere; }
+.cleanup-table-wrap { margin-top: 18px; overflow-x: auto; border-top: 1px solid #b9c3bd; }
+.cleanup-table { min-width: 980px; background: var(--surface); }
+.cleanup-table-header, .cleanup-table-row { display: grid; grid-template-columns: 16fr 10fr 18fr repeat(4, 14fr); }
+.cleanup-table-header { background: #eef2ef; color: #5c6761; font-size: 11px; font-weight: 750; }
+.cleanup-table-header span, .cleanup-table-row > span { min-width: 0; padding: 11px 10px; text-align: center; overflow-wrap: anywhere; }
+.cleanup-table-row > span { padding-block: 14px; border-bottom: 1px solid var(--line); font-size: 12px; }
+.cleanup-state { min-height: 110px; margin-top: 18px; display: grid; place-items: center; border-block: 1px solid var(--line); color: var(--muted); font-size: 13px; }
+.cleanup-empty { color: var(--muted); text-align: center; }
+
 @media (max-width: 900px) {
   .system-grid, .system-grid.with-swap { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .system-grid.with-swap .load-metric { grid-column: 1 / -1; }
@@ -153,6 +172,10 @@ th:nth-child(9) { width: 16%; }
   .summary-item:nth-child(odd) { padding-left: 0; border-left: 0; }
   .controls { grid-template-columns: 1fr 170px; }
   .search-field { grid-column: 1 / -1; }
+  .cleanup-summary { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .cleanup-summary > div + div { border-left: 0; }
+  .cleanup-summary > div:nth-child(even) { border-left: 1px solid var(--line); }
+  .cleanup-summary > div:nth-child(n + 3) { border-top: 1px solid var(--line); }
 }
 
 @media (max-width: 640px) {
@@ -181,6 +204,15 @@ th:nth-child(9) { width: 16%; }
   td:first-child, td:last-child { grid-column: 1 / -1; }
   td:last-child { border-top: 1px solid var(--line); }
   .pagination { justify-content: center; }
+  .cleanup-content { width: min(100% - 24px, 1180px); }
+  .cleanup-heading-row { align-items: flex-start; flex-direction: column; gap: 4px; }
+  .cleanup-run { text-align: left; }
+  .cleanup-table-wrap { overflow: visible; border-top: 0; }
+  .cleanup-table { min-width: 0; }
+  .cleanup-table-header { display: none; }
+  .cleanup-table-row { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); margin-bottom: 10px; border: 1px solid var(--line); border-radius: 6px; background: white; }
+  .cleanup-table-row > span::before { content: attr(data-label); display: block; margin-bottom: 6px; color: var(--muted); font-size: 10px; font-weight: 750; text-transform: uppercase; }
+  .cleanup-table-row > span:first-child, .cleanup-table-row > span:nth-child(3), .cleanup-table-row > span:last-child { grid-column: 1 / -1; }
 }
 
 @media (max-width: 390px) {
@@ -191,4 +223,7 @@ th:nth-child(9) { width: 16%; }
   .summary-grid { grid-template-columns: 1fr; }
   .summary-item, .summary-item:first-child, .summary-item + .summary-item { padding: 14px 0; border-left: 0; border-top: 1px solid var(--line); }
   .summary-item:first-child { border-top: 0; }
+  .cleanup-summary { grid-template-columns: 1fr; }
+  .cleanup-summary > div, .cleanup-summary > div:nth-child(even) { min-height: 88px; border-left: 0; border-top: 1px solid var(--line); }
+  .cleanup-summary > div:first-child { border-top: 0; }
 }

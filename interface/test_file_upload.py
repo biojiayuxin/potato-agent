@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import asyncio
 from contextlib import contextmanager
+import io
+import sys
 import tempfile
 from pathlib import Path
 from types import SimpleNamespace
@@ -25,6 +27,20 @@ class _DummyBridgeRegistry:
 
     async def close_for_reconfigure(self, user_id: str) -> bool:
         return True
+
+
+def test_upload_runner_preserves_helper_maintenance_marker() -> None:
+    command = [
+        sys.executable,
+        "-c",
+        "import sys; sys.stderr.write('POTATO_USER_MAINTENANCE'); raise SystemExit(1)",
+    ]
+    with pytest.raises(interface_app_mod.UploadMaintenanceError):
+        interface_app_mod.run_upload_command(
+            command,
+            io.BytesIO(b""),
+            max_bytes=1024,
+        )
 
 
 class _TurnBridge:
@@ -153,31 +169,37 @@ users:
     monkeypatch.setattr(
         interface_app_mod,
         "create_turn_submission_receipt",
-        lambda user_id, request_id, *, requested_session_id: display_store_mod.create_turn_submission_receipt(
-            user_id,
-            request_id,
-            requested_session_id=requested_session_id,
-            db_path=auth_db,
+        lambda user_id, request_id, *, requested_session_id: (
+            display_store_mod.create_turn_submission_receipt(
+                user_id,
+                request_id,
+                requested_session_id=requested_session_id,
+                db_path=auth_db,
+            )
         ),
     )
     monkeypatch.setattr(
         interface_app_mod,
         "finish_turn_submission_receipt",
-        lambda user_id, request_id, *, session_id: display_store_mod.finish_turn_submission_receipt(
-            user_id,
-            request_id,
-            session_id=session_id,
-            db_path=auth_db,
+        lambda user_id, request_id, *, session_id: (
+            display_store_mod.finish_turn_submission_receipt(
+                user_id,
+                request_id,
+                session_id=session_id,
+                db_path=auth_db,
+            )
         ),
     )
     monkeypatch.setattr(
         interface_app_mod,
         "fail_turn_submission_receipt",
-        lambda user_id, request_id, *, error_message: display_store_mod.fail_turn_submission_receipt(
-            user_id,
-            request_id,
-            error_message=error_message,
-            db_path=auth_db,
+        lambda user_id, request_id, *, error_message: (
+            display_store_mod.fail_turn_submission_receipt(
+                user_id,
+                request_id,
+                error_message=error_message,
+                db_path=auth_db,
+            )
         ),
     )
     monkeypatch.setattr(
@@ -202,7 +224,9 @@ users:
     monkeypatch.setattr(
         interface_app_mod,
         "mark_foreground_activity",
-        lambda user_id: runtime_state_mod.mark_foreground_activity(user_id, db_path=auth_db),
+        lambda user_id: runtime_state_mod.mark_foreground_activity(
+            user_id, db_path=auth_db
+        ),
     )
     monkeypatch.setattr(interface_app_mod.os, "geteuid", lambda: 0)
     monkeypatch.setattr(
@@ -276,6 +300,26 @@ def test_upload_file_rejects_file_over_limit(monkeypatch) -> None:
         )
         assert response.status_code == 413, response.text
         assert response.json()["detail"] == "Upload file too large (> 1 MB)."
+    finally:
+        client.close()
+
+
+def test_upload_file_returns_retryable_maintenance_error(monkeypatch) -> None:
+    client, _ = _build_client_and_user(monkeypatch)
+    monkeypatch.setattr(
+        interface_app_mod,
+        "run_upload_command",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            interface_app_mod.UploadMaintenanceError("retry later")
+        ),
+    )
+    try:
+        response = client.post(
+            "/api/files/upload",
+            files={"file": ("notes.txt", b"hello potato", "text/plain")},
+        )
+        assert response.status_code == 503, response.text
+        assert response.json()["detail"] == interface_app_mod.MAINTENANCE_ERROR_MESSAGE
     finally:
         client.close()
 
@@ -410,7 +454,9 @@ async def test_submit_turn_records_receipt_before_bridge_and_cancellation(
         await hold_bridge.wait()
         raise AssertionError("cancelled submission must not acquire a bridge")
 
-    monkeypatch.setattr(interface_app_mod, "create_turn_submission_receipt", create_receipt)
+    monkeypatch.setattr(
+        interface_app_mod, "create_turn_submission_receipt", create_receipt
+    )
     monkeypatch.setattr(interface_app_mod, "fail_turn_submission_receipt", fail_receipt)
     monkeypatch.setattr(interface_app_mod, "_get_tui_bridge_for_user", get_bridge)
     monkeypatch.setattr(

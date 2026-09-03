@@ -13,6 +13,7 @@ from interface import file_browser_policy
 from interface.file_stream_worker import FileStreamAccessError
 from interface.mapping import HermesTarget
 from interface import privileged_helper
+from interface.user_lifecycle_lock import UserMaintenanceError
 
 
 def _target() -> HermesTarget:
@@ -34,6 +35,31 @@ def _target() -> HermesTarget:
     )
 
 
+def test_helper_emits_structured_maintenance_error(monkeypatch, capsys) -> None:
+    monkeypatch.setattr(privileged_helper, "require_root", lambda: None)
+    monkeypatch.setattr(privileged_helper, "require_binary", lambda binary: None)
+    monkeypatch.setattr(privileged_helper.os, "geteuid", lambda: 0)
+    monkeypatch.setattr(
+        privileged_helper,
+        "acquire_user_entry_lock",
+        lambda username: (_ for _ in ()).throw(UserMaintenanceError("retry later")),
+    )
+    monkeypatch.setattr(
+        privileged_helper.sys,
+        "argv",
+        ["privileged-helper", "ensure-runtime", "--username", "alice"],
+    )
+
+    assert privileged_helper.main() == 1
+    payload = json.loads(capsys.readouterr().out)
+    assert payload == {
+        "ok": False,
+        "error": "retry later",
+        "type": "UserMaintenanceError",
+        "error_code": "maintenance",
+    }
+
+
 def test_exec_tui_gateway_chdirs_to_target_workdir(monkeypatch) -> None:
     calls: list[tuple[str, object]] = []
 
@@ -42,7 +68,9 @@ def test_exec_tui_gateway_chdirs_to_target_workdir(monkeypatch) -> None:
         "ensure_user_runtime_temp_dir",
         lambda target: calls.append(("ensure_temp", target)),
     )
-    monkeypatch.setattr(privileged_helper.os, "chdir", lambda path: calls.append(("chdir", path)))
+    monkeypatch.setattr(
+        privileged_helper.os, "chdir", lambda path: calls.append(("chdir", path))
+    )
     monkeypatch.setattr(
         privileged_helper.os,
         "execvp",
@@ -107,10 +135,7 @@ def test_helper_tui_gateway_command_injects_explicit_profile_path(monkeypatch) -
     assert "TERMINAL_ENV=local" in command
     assert "TMPDIR=/home/hmx_alice/.hermes/tmp" in command
     assert "AGENT_BROWSER_ENGINE=chrome" in command
-    assert (
-        "BROWSER_CDP_URL=ws://127.0.0.1:9222/devtools/browser/local"
-        in command
-    )
+    assert "BROWSER_CDP_URL=ws://127.0.0.1:9222/devtools/browser/local" in command
     assert "CAMOFOX_URL=" in command
     assert (
         "HERMES_BUNDLED_SKILLS=/opt/potato-hermes-lite/current/share/hermes/skills"

@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
+import os
 import sys
 from pathlib import Path
 
@@ -29,6 +31,7 @@ from interface.mapping import (
     MappingStore,
     write_mapping,
 )
+from interface.user_lifecycle_lock import mapping_lifecycle_lock, user_lifecycle_lock
 
 
 class DeprovisionError(RuntimeError):
@@ -73,6 +76,22 @@ def main() -> int:
     require_root()
     require_binary("systemctl")
 
+    mapping_lock = (
+        mapping_lifecycle_lock(exclusive=True)
+        if os.geteuid() == 0
+        else contextlib.nullcontext()
+    )
+    user_lock = (
+        user_lifecycle_lock(args.username, exclusive=True, publish_marker=True)
+        if os.geteuid() == 0
+        else contextlib.nullcontext()
+    )
+    with mapping_lock:
+        with user_lock:
+            return _deprovision_locked(args)
+
+
+def _deprovision_locked(args: argparse.Namespace) -> int:
     config = load_mapping(args.mapping, resolve_env=False)
     target = MappingStore(args.mapping).get_target_by_username(args.username)
     if target is None:

@@ -3,9 +3,9 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
 import json
 import os
-import pwd
 import subprocess
 import sys
 from pathlib import Path
@@ -68,10 +68,18 @@ from interface.runtime_state import (
     runtime_sleep_claim_is_valid,
 )
 from interface.subprocess_env import interface_subprocess_env
+from interface.user_lifecycle_lock import (
+    MAINTENANCE_ERROR_CODE,
+    MAINTENANCE_ERROR_MARKER,
+    UserMaintenanceError,
+    acquire_user_entry_lock,
+    mapping_lifecycle_lock,
+    user_lifecycle_lock,
+)
 
 
-DEFAULT_SESSION_DB_PYTHON = (
-    os.getenv("INTERFACE_TUI_GATEWAY_PYTHON") or str(DEFAULT_HERMES_LITE_PYTHON)
+DEFAULT_SESSION_DB_PYTHON = os.getenv("INTERFACE_TUI_GATEWAY_PYTHON") or str(
+    DEFAULT_HERMES_LITE_PYTHON
 )
 USER_SESSION_DB_RPC_PATH = Path(__file__).with_name("session_db_rpc.py")
 USER_SESSION_DB_RPC_SOURCE = USER_SESSION_DB_RPC_PATH.read_text(encoding="utf-8")
@@ -145,7 +153,11 @@ def _session_db_call(target: HermesTarget, method: str, kwargs: dict[str, Any]) 
     stdout_lines = [line for line in result.stdout.splitlines() if line.strip()]
     raw_payload = stdout_lines[-1] if stdout_lines else ""
     if not raw_payload:
-        detail = result.stderr.strip() or result.stdout.strip() or f"exit code {result.returncode}"
+        detail = (
+            result.stderr.strip()
+            or result.stdout.strip()
+            or f"exit code {result.returncode}"
+        )
         raise RuntimeError(detail)
     payload = json.loads(raw_payload)
     if not isinstance(payload, dict) or not payload.get("ok"):
@@ -202,7 +214,9 @@ def _probe_path(target: HermesTarget, path: Path) -> dict[str, Any]:
     )
     result = _run_as_user(target, ["python3", "-c", script, str(path)])
     if result.returncode != 0:
-        raise RuntimeError(result.stderr.strip() or result.stdout.strip() or "path probe failed")
+        raise RuntimeError(
+            result.stderr.strip() or result.stdout.strip() or "path probe failed"
+        )
     return json.loads(result.stdout.strip() or "{}")
 
 
@@ -236,7 +250,9 @@ def _list_directory(
     )
     result = _run_as_user(target, ["python3", "-c", script, str(path), relative_path])
     if result.returncode != 0:
-        raise RuntimeError(result.stderr.strip() or result.stdout.strip() or "directory access failed")
+        raise RuntimeError(
+            result.stderr.strip() or result.stdout.strip() or "directory access failed"
+        )
     payload = json.loads(result.stdout.strip() or "{}")
     error = str(payload.get("error") or "").strip()
     if error:
@@ -389,28 +405,60 @@ def main() -> int:
     require_binary("runuser")
 
     try:
+        entry_lock = None
+        guarded_commands = {
+            "tui-gateway",
+            "ensure-runtime",
+            "session-db",
+            "file-tree",
+            "file-stream-v2",
+            "file-upload",
+            "patch-active-model",
+            "get-active-model",
+        }
+        if args.command in guarded_commands and os.geteuid() == 0:
+            entry_lock = acquire_user_entry_lock(args.username)
+            if args.command in {"tui-gateway", "file-stream-v2", "file-upload"}:
+                entry_lock.make_inheritable()
+
         if args.command == "tui-gateway":
             _exec_tui_gateway(_load_target(args.username))
             raise RuntimeError("failed to exec tui_gateway")
 
         if args.command == "provision-user":
-            config = load_mapping(DEFAULT_MAPPING_PATH, resolve_env=False)
-            if args.email:
-                upsert_user_mapping_entry(
-                    config,
-                    username=args.username,
-                    email=args.email,
-                    display_name=args.display_name or args.username,
-                )
-                build_targets_from_config(config)
-                write_mapping(DEFAULT_MAPPING_PATH, config)
-            config = load_mapping(DEFAULT_MAPPING_PATH, resolve_env=True)
-            target = _load_target(args.username)
-            install_user_files(config, target)
+            mapping_lock = (
+                mapping_lifecycle_lock(exclusive=True)
+                if os.geteuid() == 0
+                else contextlib.nullcontext()
+            )
+            user_lock = (
+                user_lifecycle_lock(args.username, exclusive=True)
+                if os.geteuid() == 0
+                else contextlib.nullcontext()
+            )
+            with mapping_lock, user_lock:
+                config = load_mapping(DEFAULT_MAPPING_PATH, resolve_env=False)
+                if args.email:
+                    upsert_user_mapping_entry(
+                        config,
+                        username=args.username,
+                        email=args.email,
+                        display_name=args.display_name or args.username,
+                    )
+                    build_targets_from_config(config)
+                    write_mapping(DEFAULT_MAPPING_PATH, config)
+                config = load_mapping(DEFAULT_MAPPING_PATH, resolve_env=True)
+                target = _load_target(args.username)
+                install_user_files(config, target)
             return _emit({"ok": True, "target": {"username": target.username}})
 
         if args.command == "ensure-runtime":
-            return _emit({"ok": True, "result": ensure_service_ready(_load_target(args.username))})
+            return _emit(
+                {
+                    "ok": True,
+                    "result": ensure_service_ready(_load_target(args.username)),
+                }
+            )
 
         if args.command == "stop-runtime":
             target = _load_target(args.username)
@@ -423,24 +471,43 @@ def main() -> int:
             return _emit({"ok": True})
 
         if args.command == "remove-mapping":
-            config = load_mapping(DEFAULT_MAPPING_PATH, resolve_env=False)
-            removed = remove_user_mapping_entry(config, args.username)
-            if removed:
-                write_mapping(DEFAULT_MAPPING_PATH, config)
+            mapping_lock = (
+                mapping_lifecycle_lock(exclusive=True)
+                if os.geteuid() == 0
+                else contextlib.nullcontext()
+            )
+            user_lock = (
+                user_lifecycle_lock(args.username, exclusive=True)
+                if os.geteuid() == 0
+                else contextlib.nullcontext()
+            )
+            with mapping_lock, user_lock:
+                config = load_mapping(DEFAULT_MAPPING_PATH, resolve_env=False)
+                removed = remove_user_mapping_entry(config, args.username)
+                if removed:
+                    write_mapping(DEFAULT_MAPPING_PATH, config)
             return _emit({"ok": True, "removed": removed})
 
         if args.command == "has-background-jobs":
             target = _load_target(args.username)
-            return _emit({"ok": True, "active": has_active_background_processes(target)})
+            return _emit(
+                {"ok": True, "active": has_active_background_processes(target)}
+            )
 
         if args.command == "home-usage":
             allocated_bytes = measure_home_allocated_bytes(_load_target(args.username))
             return _emit({"ok": True, "allocated_bytes": allocated_bytes})
 
         if args.command == "deprovision-user":
-            target = _load_target(args.username)
-            stop_and_remove_service(target.systemd_service)
-            remove_linux_user(target.linux_user, delete_home=bool(args.delete_home))
+            user_lock = (
+                user_lifecycle_lock(args.username, exclusive=True, publish_marker=True)
+                if os.geteuid() == 0
+                else contextlib.nullcontext()
+            )
+            with user_lock:
+                target = _load_target(args.username)
+                stop_and_remove_service(target.systemd_service)
+                remove_linux_user(target.linux_user, delete_home=bool(args.delete_home))
             return _emit({"ok": True})
 
         if args.command == "stop-idle-runtime":
@@ -455,7 +522,9 @@ def main() -> int:
                     return _emit({"ok": True, "stopped": False, "reason": reason})
                 if has_active_background_processes(target):
                     mark_background_activity(args.user_id)
-                    return _emit({"ok": True, "stopped": False, "reason": "background_jobs"})
+                    return _emit(
+                        {"ok": True, "stopped": False, "reason": "background_jobs"}
+                    )
                 claim_id = claim_runtime_sleep(
                     args.user_id,
                     idle_timeout_seconds=max(int(args.idle_timeout_seconds), 1),
@@ -599,11 +668,18 @@ def main() -> int:
         raise RuntimeError(f"Unsupported command: {args.command}")
     except Exception as exc:
         if getattr(args, "command", "") in {"file-stream-v2", "file-upload"}:
-            print(str(exc), file=sys.stderr)
+            print(
+                MAINTENANCE_ERROR_MARKER
+                if isinstance(exc, UserMaintenanceError)
+                else str(exc),
+                file=sys.stderr,
+            )
             return 1
         if getattr(args, "command", "") == "home-usage":
             error_code = (
-                "timeout" if isinstance(exc, subprocess.TimeoutExpired) else "unavailable"
+                "timeout"
+                if isinstance(exc, subprocess.TimeoutExpired)
+                else "unavailable"
             )
             return _emit(
                 {
@@ -612,7 +688,10 @@ def main() -> int:
                     "error_code": error_code,
                 }
             )
-        return _emit({"ok": False, "error": str(exc), "type": type(exc).__name__})
+        payload = {"ok": False, "error": str(exc), "type": type(exc).__name__}
+        if isinstance(exc, UserMaintenanceError):
+            payload["error_code"] = MAINTENANCE_ERROR_CODE
+        return _emit(payload)
 
 
 if __name__ == "__main__":

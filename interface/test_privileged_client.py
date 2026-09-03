@@ -8,7 +8,11 @@ from pathlib import Path
 import pytest
 
 from interface.mapping import HermesTarget
-from interface.privileged_client import PrivilegedClient, build_direct_tui_gateway_command
+from interface.privileged_client import (
+    PrivilegedClient,
+    PrivilegedMaintenanceError,
+    build_direct_tui_gateway_command,
+)
 
 
 def test_privileged_client_uses_helper_when_not_root(monkeypatch) -> None:
@@ -32,9 +36,7 @@ def test_privileged_client_uses_helper_when_not_root(monkeypatch) -> None:
     )
 
     client = PrivilegedClient(helper_python="/opt/interface-env/bin/python")
-    result = client.session_db_call(
-        "alice", "get_session", {"session_id": sentinel}
-    )
+    result = client.session_db_call("alice", "get_session", {"session_id": sentinel})
 
     assert result == {"status": "ready"}
     assert calls
@@ -53,9 +55,34 @@ def test_privileged_client_uses_helper_when_not_root(monkeypatch) -> None:
     assert json.loads(str(call_kwargs["input_text"])) == {"session_id": sentinel}
 
 
+def test_privileged_client_preserves_maintenance_error_code(monkeypatch) -> None:
+    monkeypatch.setattr("interface.privileged_client.os.geteuid", lambda: 1000)
+    monkeypatch.setattr(
+        "interface.privileged_client.subprocess.run",
+        lambda *args, **kwargs: subprocess.CompletedProcess(
+            args[0],
+            0,
+            stdout=json.dumps(
+                {
+                    "ok": False,
+                    "error": "temporarily unavailable",
+                    "error_code": "maintenance",
+                }
+            ),
+            stderr="",
+        ),
+    )
+
+    with pytest.raises(PrivilegedMaintenanceError):
+        PrivilegedClient().file_tree("alice", mode="home_only", root=None, path=None)
+
+
 def test_tui_gateway_command_uses_exec_helper_when_not_root(monkeypatch) -> None:
     monkeypatch.setattr("interface.privileged_client.os.geteuid", lambda: 1000)
-    monkeypatch.setenv("INTERFACE_PRIVILEGED_HELPER", "/usr/local/libexec/potato-agent-privileged-helper")
+    monkeypatch.setenv(
+        "INTERFACE_PRIVILEGED_HELPER",
+        "/usr/local/libexec/potato-agent-privileged-helper",
+    )
     target = HermesTarget(
         username="alice",
         email="alice@example.com",
@@ -85,7 +112,9 @@ def test_tui_gateway_command_uses_exec_helper_when_not_root(monkeypatch) -> None
     ]
 
 
-def test_tui_gateway_helper_command_does_not_accept_profile_override(monkeypatch) -> None:
+def test_tui_gateway_helper_command_does_not_accept_profile_override(
+    monkeypatch,
+) -> None:
     monkeypatch.setattr("interface.privileged_client.os.geteuid", lambda: 1000)
     monkeypatch.setenv(
         "INTERFACE_PRIVILEGED_HELPER",
@@ -151,10 +180,7 @@ def test_direct_tui_gateway_command_injects_runtime_profile_guards(monkeypatch) 
     assert "TERMINAL_ENV=local" in command
     assert "TMPDIR=/home/hmx_alice/.hermes/tmp" in command
     assert "AGENT_BROWSER_ENGINE=chrome" in command
-    assert (
-        "BROWSER_CDP_URL=ws://127.0.0.1:9222/devtools/browser/local"
-        in command
-    )
+    assert "BROWSER_CDP_URL=ws://127.0.0.1:9222/devtools/browser/local" in command
     assert "CAMOFOX_URL=" in command
     assert (
         "HERMES_BUNDLED_SKILLS=/opt/potato-hermes-lite/current/share/hermes/skills"
@@ -261,7 +287,9 @@ def test_has_active_background_processes_uses_helper_when_not_root(monkeypatch) 
 
     monkeypatch.setattr("interface.privileged_client.subprocess.run", fake_run)
 
-    active = PrivilegedClient(helper_python="/opt/interface-env/bin/python").has_active_background_processes("alice")
+    active = PrivilegedClient(
+        helper_python="/opt/interface-env/bin/python"
+    ).has_active_background_processes("alice")
 
     assert active is False
     assert calls
@@ -286,7 +314,9 @@ def test_stop_idle_runtime_uses_helper_when_not_root(monkeypatch) -> None:
 
     monkeypatch.setattr("interface.privileged_client.subprocess.run", fake_run)
 
-    result = PrivilegedClient(helper_python="/opt/interface-env/bin/python").stop_idle_runtime(
+    result = PrivilegedClient(
+        helper_python="/opt/interface-env/bin/python"
+    ).stop_idle_runtime(
         "alice",
         "user-1",
         idle_timeout_seconds=321,
@@ -303,7 +333,9 @@ def test_stop_idle_runtime_uses_helper_when_not_root(monkeypatch) -> None:
     assert calls[0][timeout_index + 1] == "321"
 
 
-def test_stop_idle_runtime_rechecks_eligibility_inside_service_lock(monkeypatch) -> None:
+def test_stop_idle_runtime_rechecks_eligibility_inside_service_lock(
+    monkeypatch,
+) -> None:
     events: list[str] = []
     target = HermesTarget(
         username="alice",

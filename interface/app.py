@@ -148,6 +148,7 @@ from interface.file_browser_policy import (
 from interface.file_stream_worker import build_file_stream_worker_command
 from interface.file_upload_worker import (
     HARD_MAX_UPLOAD_BYTES,
+    UploadMaintenanceError,
     UploadTooLargeError,
     build_file_upload_worker_command,
     run_upload_command,
@@ -217,7 +218,15 @@ from interface.password_policy import (
     password_complexity_error,
 )
 from interface.process_utils import SESSION_DB_INNER_TIMEOUT_SECONDS, run_process_group
-from interface.privileged_client import PrivilegedClientError, privileged_client
+from interface.privileged_client import (
+    PrivilegedClientError,
+    PrivilegedMaintenanceError,
+    privileged_client,
+)
+from interface.user_lifecycle_lock import (
+    MAINTENANCE_ERROR_MARKER,
+    MAINTENANCE_ERROR_MESSAGE,
+)
 from interface.tui_gateway_bridge import (
     TuiGatewayBridge,
     TuiGatewayBridgeError,
@@ -413,8 +422,8 @@ HERMES_SRC = REPO_ROOT / "hermes-lite"
 if str(HERMES_SRC) not in sys.path:
     sys.path.insert(0, str(HERMES_SRC))
 
-DEFAULT_SESSION_DB_PYTHON = (
-    os.getenv("INTERFACE_TUI_GATEWAY_PYTHON") or str(DEFAULT_HERMES_LITE_PYTHON)
+DEFAULT_SESSION_DB_PYTHON = os.getenv("INTERFACE_TUI_GATEWAY_PYTHON") or str(
+    DEFAULT_HERMES_LITE_PYTHON
 )
 USER_SESSION_DB_RPC_PATH = ROOT_DIR / "session_db_rpc.py"
 USER_SESSION_DB_RPC_SOURCE = USER_SESSION_DB_RPC_PATH.read_text(encoding="utf-8")
@@ -553,9 +562,7 @@ def _chat_share_recipient_id(user: CurrentUser) -> str:
     return f"{account_kind}:{user.id}"
 
 
-def _chat_share_recipient_id_for_user_id(
-    user_id: str, *, is_temporary: bool
-) -> str:
+def _chat_share_recipient_id_for_user_id(user_id: str, *, is_temporary: bool) -> str:
     account_kind = "temporary" if is_temporary else "formal"
     return f"{account_kind}:{str(user_id or '').strip()}"
 
@@ -657,14 +664,12 @@ def _validate_feedback_contact_email(contact_email: str) -> str:
         or local_part.startswith(".")
         or local_part.endswith(".")
         or ".." in local_part
-        or re.fullmatch(r"[A-Za-z0-9.!#$%&'*+/=?^_`{|}~-]+", local_part)
-        is None
+        or re.fullmatch(r"[A-Za-z0-9.!#$%&'*+/=?^_`{|}~-]+", local_part) is None
     ):
         raise HTTPException(status_code=400, detail="Invalid contact email address.")
     domain_labels = domain.split(".")
     if not domain or any(
-        re.fullmatch(r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?", label)
-        is None
+        re.fullmatch(r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?", label) is None
         for label in domain_labels
     ):
         raise HTTPException(status_code=400, detail="Invalid contact email address.")
@@ -752,9 +757,7 @@ def _validate_signup_payload(
         )
     _validate_password_complexity(password)
     if not verification_id:
-        raise HTTPException(
-            status_code=400, detail="Email verification is required."
-        )
+        raise HTTPException(status_code=400, detail="Email verification is required.")
     if not re.fullmatch(r"\d{6}", verification_code):
         raise HTTPException(
             status_code=400, detail="Verification code must be 6 digits."
@@ -1104,7 +1107,11 @@ def _expand_user_directory_input(user: CurrentUser, path: str | None) -> Path:
 
 def _resolve_file_browser_root(user: CurrentUser, requested_root: str | None) -> Path:
     home = _normalize_logical_absolute_path(user.target.home_dir.resolve())
-    root = home if not requested_root else _expand_user_directory_input(user, requested_root)
+    root = (
+        home
+        if not requested_root
+        else _expand_user_directory_input(user, requested_root)
+    )
     _authorize_file_browser_target(user, root)
     return root
 
@@ -1149,7 +1156,9 @@ def _probe_path_as_user(path: Path, *, linux_user: str) -> dict[str, Any]:
     try:
         payload = json.loads(result.stdout.strip() or "{}")
     except json.JSONDecodeError as exc:
-        raise HTTPException(status_code=500, detail="Invalid path probe response") from exc
+        raise HTTPException(
+            status_code=500, detail="Invalid path probe response"
+        ) from exc
     return payload if isinstance(payload, dict) else {}
 
 
@@ -1160,7 +1169,9 @@ def _assert_user_can_open_directory(path: Path, *, linux_user: str) -> None:
     if not payload.get("is_dir"):
         raise HTTPException(status_code=400, detail="Requested path is not a directory")
     if not (payload.get("readable") and payload.get("enterable")):
-        raise HTTPException(status_code=403, detail="Permission denied for this directory")
+        raise HTTPException(
+            status_code=403, detail="Permission denied for this directory"
+        )
 
 
 def _assert_user_can_read_file(path: Path, *, linux_user: str) -> None:
@@ -1232,7 +1243,9 @@ def _list_directory_as_user(
     try:
         payload = json.loads(result.stdout.strip() or "{}")
     except json.JSONDecodeError as exc:
-        raise HTTPException(status_code=500, detail="Invalid directory access response") from exc
+        raise HTTPException(
+            status_code=500, detail="Invalid directory access response"
+        ) from exc
 
     error = str(payload.get("error") or "").strip()
     if error == "not_found":
@@ -1240,7 +1253,9 @@ def _list_directory_as_user(
     if error == "not_directory":
         raise HTTPException(status_code=400, detail="Requested path is not a directory")
     if error == "permission_denied":
-        raise HTTPException(status_code=403, detail="Permission denied for this directory")
+        raise HTTPException(
+            status_code=403, detail="Permission denied for this directory"
+        )
     entries = payload.get("entries") if isinstance(payload.get("entries"), list) else []
     return [item for item in entries if isinstance(item, dict)]
 
@@ -1367,7 +1382,9 @@ class _UserSessionDBProxy:
             ) from exc
 
         if not isinstance(payload, dict) or not payload.get("ok"):
-            detail = str(payload.get("error") or result.stderr.strip() or "unknown error")
+            detail = str(
+                payload.get("error") or result.stderr.strip() or "unknown error"
+            )
             error_type = str(payload.get("type") or "").strip()
             if error_type == "ValueError":
                 raise ValueError(detail)
@@ -1695,7 +1712,8 @@ def _normalize_logical_session_row(
         in {"queued", "starting", "running", "awaiting_approval"}
     )
     normalized["has_pending_approval"] = bool(
-        isinstance(live_state, dict) and isinstance(live_state.get("pending_approval"), dict)
+        isinstance(live_state, dict)
+        and isinstance(live_state.get("pending_approval"), dict)
     )
 
     return normalized
@@ -1982,7 +2000,9 @@ def _export_message_section(message: dict[str, Any]) -> tuple[str, str] | None:
         content, parsed_files = _parse_stored_user_content_for_export(
             normalized.get("content")
         )
-        files = normalized.get("files") if isinstance(normalized.get("files"), list) else []
+        files = (
+            normalized.get("files") if isinstance(normalized.get("files"), list) else []
+        )
         if not files and parsed_files:
             files = parsed_files
 
@@ -2072,9 +2092,7 @@ def _chat_share_error(
     retry_after: int = 0,
 ) -> HTTPException:
     headers = (
-        {"Retry-After": str(max(1, int(retry_after)))}
-        if int(retry_after) > 0
-        else None
+        {"Retry-After": str(max(1, int(retry_after)))} if int(retry_after) > 0 else None
     )
     return HTTPException(
         status_code=status_code,
@@ -2133,9 +2151,7 @@ def _redact_chat_share_private_paths(content: str, target: HermesTarget) -> str:
     boundary = r"(?=$|[\s<>\"'`()\[\]{},.;:!?，。；：！？])"
     for private_path in sorted(private_paths, key=len, reverse=True):
         pattern = re.compile(
-            re.escape(private_path)
-            + rf"(?:/[^{terminators}]+)*"
-            + boundary
+            re.escape(private_path) + rf"(?:/[^{terminators}]+)*" + boundary
         )
         redacted = pattern.sub("[private path]", redacted)
     return redacted
@@ -2156,7 +2172,10 @@ def _sanitize_chat_share_display_messages(
         raw_content = str(message.get("content") or "")
         if role == "user":
             content, _ = _parse_stored_user_content_for_export(raw_content)
-            if raw_content.startswith(ATTACHMENT_BLOCK_START) and content == raw_content:
+            if (
+                raw_content.startswith(ATTACHMENT_BLOCK_START)
+                and content == raw_content
+            ):
                 content = ""
             content = _normalize_markdown_body(content)
         else:
@@ -2401,7 +2420,9 @@ def _tool_call_merge_key(tool_call: dict[str, Any], index: int) -> str:
         return f"id:{tool_id}"
 
     function = (
-        normalized.get("function") if isinstance(normalized.get("function"), dict) else {}
+        normalized.get("function")
+        if isinstance(normalized.get("function"), dict)
+        else {}
     )
     name = str(function.get("name") or "").strip()
     arguments = str(function.get("arguments") or "")
@@ -2429,7 +2450,9 @@ def _merge_display_tool_calls(
 
         existing = merged[existing_index]
         existing_function = (
-            existing.get("function") if isinstance(existing.get("function"), dict) else {}
+            existing.get("function")
+            if isinstance(existing.get("function"), dict)
+            else {}
         )
         fallback_function = (
             normalized_fallback.get("function")
@@ -2465,28 +2488,36 @@ def _merge_display_message_with_fallback(
     if str(merged.get("role") or "") != str(fallback.get("role") or ""):
         return merged
 
-    if not str(merged.get("content") or "").strip() and str(
-        fallback.get("content") or ""
-    ).strip():
+    if (
+        not str(merged.get("content") or "").strip()
+        and str(fallback.get("content") or "").strip()
+    ):
         merged["content"] = str(fallback.get("content") or "")
 
-    if not str(merged.get("reasoningContent") or "").strip() and str(
-        fallback.get("reasoningContent") or ""
-    ).strip():
+    if (
+        not str(merged.get("reasoningContent") or "").strip()
+        and str(fallback.get("reasoningContent") or "").strip()
+    ):
         merged["reasoningContent"] = str(fallback.get("reasoningContent") or "")
 
     merged["toolCalls"] = _merge_display_tool_calls(
         merged.get("toolCalls") if isinstance(merged.get("toolCalls"), list) else [],
-        fallback.get("toolCalls") if isinstance(fallback.get("toolCalls"), list) else [],
+        fallback.get("toolCalls")
+        if isinstance(fallback.get("toolCalls"), list)
+        else [],
     )
 
     _append_progress_entries(
         merged,
-        fallback.get("progressLines") if isinstance(fallback.get("progressLines"), list) else [],
+        fallback.get("progressLines")
+        if isinstance(fallback.get("progressLines"), list)
+        else [],
     )
 
     merged_files = merged.get("files") if isinstance(merged.get("files"), list) else []
-    fallback_files = fallback.get("files") if isinstance(fallback.get("files"), list) else []
+    fallback_files = (
+        fallback.get("files") if isinstance(fallback.get("files"), list) else []
+    )
     if not merged_files and fallback_files:
         merged["files"] = fallback_files
 
@@ -2520,7 +2551,9 @@ def _merge_display_transcripts(
 
     fallback_buckets: dict[str, list[dict[str, Any]]] = {}
     for message in fallback:
-        fallback_buckets.setdefault(_display_message_bucket_key(message), []).append(message)
+        fallback_buckets.setdefault(_display_message_bucket_key(message), []).append(
+            message
+        )
 
     bucket_offsets: dict[str, int] = {}
     merged: list[dict[str, Any]] = []
@@ -2530,14 +2563,18 @@ def _merge_display_transcripts(
         bucket_offsets[bucket_key] = bucket_index + 1
         fallback_bucket = fallback_buckets.get(bucket_key, [])
         fallback_message = (
-            fallback_bucket[bucket_index] if bucket_index < len(fallback_bucket) else None
+            fallback_bucket[bucket_index]
+            if bucket_index < len(fallback_bucket)
+            else None
         )
         merged.append(_merge_display_message_with_fallback(message, fallback_message))
 
     return merged
 
 
-def _collect_compression_lineage_session_ids(db: Any, logical_session_id: str) -> list[str]:
+def _collect_compression_lineage_session_ids(
+    db: Any, logical_session_id: str
+) -> list[str]:
     logical_id = str(logical_session_id or "").strip()
     if not logical_id:
         return []
@@ -2624,8 +2661,7 @@ def _resolve_logical_session_context_snapshot(
     logical_session = db.get_session(logical_session_id)
     tip_session_id = _get_logical_session_tip_id(db, logical_session_id)
     projected_session = (
-        _get_projected_logical_session_row(db, logical_session_id)
-        or logical_session
+        _get_projected_logical_session_row(db, logical_session_id) or logical_session
     )
     messages = db.get_messages(tip_session_id) if include_messages else []
     return (
@@ -2637,9 +2673,7 @@ def _resolve_logical_session_context_snapshot(
     )
 
 
-def _session_title_error(
-    status_code: int, code: str, message: str
-) -> HTTPException:
+def _session_title_error(status_code: int, code: str, message: str) -> HTTPException:
     return HTTPException(
         status_code=status_code,
         detail={"code": code, "message": message},
@@ -2848,8 +2882,7 @@ async def _archive_expired_sessions_once() -> None:
         )
         cutoff = time.time() - (ARCHIVE_RETENTION_DAYS * 86400)
         auth_users = {
-            user.mapping_username: user
-            for user in await asyncio.to_thread(list_users)
+            user.mapping_username: user for user in await asyncio.to_thread(list_users)
         }
 
         for target in await asyncio.to_thread(mapping_store.load_targets):
@@ -3185,9 +3218,7 @@ async def _run_runtime_idle_check_once() -> int:
         return 0
 
     stopped = 0
-    users_by_id = {
-        user.id: user for user in await asyncio.to_thread(list_users)
-    }
+    users_by_id = {user.id: user for user in await asyncio.to_thread(list_users)}
     for candidate in candidates:
         auth_user = users_by_id.get(str(candidate.get("user_id") or ""))
         if auth_user is None:
@@ -3388,7 +3419,10 @@ class _DownloadLimiter:
     def acquire(self, user_id: str) -> bool:
         with self._lock:
             user_count = self._by_user.get(user_id, 0)
-            if self._total >= MAX_DOWNLOADS_GLOBAL or user_count >= MAX_DOWNLOADS_PER_USER:
+            if (
+                self._total >= MAX_DOWNLOADS_GLOBAL
+                or user_count >= MAX_DOWNLOADS_PER_USER
+            ):
                 return False
             self._total += 1
             self._by_user[user_id] = user_count + 1
@@ -3422,7 +3456,9 @@ def _terminate_file_stream(opened: _OpenFileStream) -> None:
         process.stderr.close()
 
 
-def _read_file_stream_metadata(process: subprocess.Popen[bytes]) -> tuple[dict[str, Any], bytes]:
+def _read_file_stream_metadata(
+    process: subprocess.Popen[bytes],
+) -> tuple[dict[str, Any], bytes]:
     if process.stdout is None:
         raise RuntimeError("file stream did not provide stdout")
     fd = process.stdout.fileno()
@@ -3475,8 +3511,15 @@ def _open_file_stream(command: list[str]) -> _OpenFileStream:
         opened.metadata = metadata
         opened.prefetched = prefetched
         return opened
-    except BaseException:
+    except BaseException as exc:
+        stderr = b""
+        with contextlib.suppress(subprocess.TimeoutExpired):
+            process.wait(timeout=0.1)
+        if process.poll() is not None and process.stderr is not None:
+            stderr = process.stderr.read(4096)
         _terminate_file_stream(opened)
+        if MAINTENANCE_ERROR_MARKER.encode("ascii") in stderr:
+            raise PrivilegedMaintenanceError(MAINTENANCE_ERROR_MESSAGE) from exc
         raise
 
 
@@ -3555,6 +3598,8 @@ async def _load_file_preview_context(
             root=root,
             path=path,
         )
+    except PrivilegedMaintenanceError as exc:
+        raise HTTPException(status_code=503, detail=MAINTENANCE_ERROR_MESSAGE) from exc
     except (OSError, RuntimeError, PrivilegedClientError) as exc:
         raise HTTPException(status_code=403, detail="File access denied") from exc
     try:
@@ -3601,7 +3646,9 @@ def _iter_open_file_stream(
         if opened.prefetched:
             total += len(opened.prefetched)
             if max_bytes is not None and total > max_bytes:
-                raise HTTPException(status_code=413, detail="File is too large to preview.")
+                raise HTTPException(
+                    status_code=413, detail="File is too large to preview."
+                )
             yield opened.prefetched
             opened.prefetched = b""
 
@@ -3620,7 +3667,9 @@ def _iter_open_file_stream(
                 break
             total += len(chunk)
             if max_bytes is not None and total > max_bytes:
-                raise HTTPException(status_code=413, detail="File is too large to preview.")
+                raise HTTPException(
+                    status_code=413, detail="File is too large to preview."
+                )
             yield chunk
         returncode = process.wait(timeout=2)
         if returncode != 0 or total != int(opened.metadata["size"]):
@@ -3768,9 +3817,7 @@ async def refresh_authenticated_activity(request: Request, call_next):
             )
             if activity_recorded is False:
                 reason = (
-                    "temporary_user_expired"
-                    if user.is_temporary
-                    else "idle_timeout"
+                    "temporary_user_expired" if user.is_temporary else "idle_timeout"
                 )
                 return JSONResponse(
                     status_code=401,
@@ -3827,9 +3874,7 @@ async def on_startup() -> None:
     app.state.runtime_idle_scheduler_task = asyncio.create_task(
         _runtime_idle_scheduler_loop()
     )
-    app.state.chat_share_cleanup_task = asyncio.create_task(
-        _chat_share_cleanup_loop()
-    )
+    app.state.chat_share_cleanup_task = asyncio.create_task(_chat_share_cleanup_loop())
     app.state.system_resource_sampler = SystemResourceSampler()
     app.state.system_resource_sampler_task = asyncio.create_task(
         app.state.system_resource_sampler.run()
@@ -3852,9 +3897,7 @@ async def on_shutdown() -> None:
     )
     if runtime_idle_scheduler_task is not None:
         runtime_idle_scheduler_task.cancel()
-    chat_share_cleanup_task = getattr(
-        app.state, "chat_share_cleanup_task", None
-    )
+    chat_share_cleanup_task = getattr(app.state, "chat_share_cleanup_task", None)
     if chat_share_cleanup_task is not None:
         chat_share_cleanup_task.cancel()
     system_resource_sampler_task = getattr(
@@ -4004,7 +4047,9 @@ async def auth_session(request: Request) -> dict[str, Any]:
 
 
 @app.post("/api/runtime/start")
-async def start_runtime(user: CurrentUser = Depends(get_current_user)) -> dict[str, Any]:
+async def start_runtime(
+    user: CurrentUser = Depends(get_current_user),
+) -> dict[str, Any]:
     try:
         runtime = await asyncio.to_thread(privileged_client.ensure_runtime, user.target)
         await asyncio.to_thread(mark_runtime_started, user.id)
@@ -4049,7 +4094,9 @@ async def tui_gateway_websocket(websocket: WebSocket) -> None:
 
             request_id = str(payload.get("id") or "")
             method = str(payload.get("method") or "").strip()
-            params = payload.get("params") if isinstance(payload.get("params"), dict) else {}
+            params = (
+                payload.get("params") if isinstance(payload.get("params"), dict) else {}
+            )
             if not method:
                 await websocket.send_text(
                     json.dumps(
@@ -4196,9 +4243,7 @@ async def signin(payload: SigninRequest, response: Response) -> Any:
     )
     if record is None or not record.active:
         raise HTTPException(status_code=401, detail="Invalid credentials")
-    if not await asyncio.to_thread(
-        verify_password, payload.password, password_hash
-    ):
+    if not await asyncio.to_thread(verify_password, payload.password, password_hash):
         raise HTTPException(status_code=401, detail="Invalid credentials")
 
     agreement = current_agreement_metadata()
@@ -4249,7 +4294,9 @@ async def signin(payload: SigninRequest, response: Response) -> Any:
         target=target,
         is_temporary=await asyncio.to_thread(is_temporary_user, record.id),
     )
-    _set_session_cookie(response, _create_session_token(user.id, record.auth_session_version))
+    _set_session_cookie(
+        response, _create_session_token(user.id, record.auth_session_version)
+    )
     return _serialize_user(user)
 
 
@@ -4626,11 +4673,25 @@ async def signup(payload: SignupRequest) -> dict[str, Any]:
         raise HTTPException(status_code=status_code, detail=exc.message) from exc
     except sqlite3.IntegrityError as exc:
         detail = str(exc).lower()
-        if "signup_jobs.email" in detail or "users.email" in detail or "email" in detail:
-            raise HTTPException(status_code=409, detail="Email is already taken.") from exc
-        if "signup_jobs.username" in detail or "users.username" in detail or "username" in detail:
-            raise HTTPException(status_code=409, detail="Username is already taken.") from exc
-        raise HTTPException(status_code=409, detail="Username or email is already taken.") from exc
+        if (
+            "signup_jobs.email" in detail
+            or "users.email" in detail
+            or "email" in detail
+        ):
+            raise HTTPException(
+                status_code=409, detail="Email is already taken."
+            ) from exc
+        if (
+            "signup_jobs.username" in detail
+            or "users.username" in detail
+            or "username" in detail
+        ):
+            raise HTTPException(
+                status_code=409, detail="Username is already taken."
+            ) from exc
+        raise HTTPException(
+            status_code=409, detail="Username or email is already taken."
+        ) from exc
     except Exception as exc:
         raise HTTPException(
             status_code=500, detail=f"Failed to create signup job: {exc}"
@@ -4708,9 +4769,7 @@ async def signout(response: Response) -> dict[str, Any]:
 @app.get("/api/models")
 async def get_models(user: CurrentUser = Depends(get_current_user)) -> dict[str, Any]:
     try:
-        config = await asyncio.to_thread(
-            mapping_store.load_config, resolve_env=True
-        )
+        config = await asyncio.to_thread(mapping_store.load_config, resolve_env=True)
         model_options = normalize_model_options(config)
         active_id = await asyncio.to_thread(
             _get_active_model_id_for_user,
@@ -4752,9 +4811,7 @@ async def update_active_model(
         raise HTTPException(status_code=400, detail="Model id is required")
 
     try:
-        config = await asyncio.to_thread(
-            mapping_store.load_config, resolve_env=True
-        )
+        config = await asyncio.to_thread(mapping_store.load_config, resolve_env=True)
         model_options = normalize_model_options(config)
     except ModelOptionsError as exc:
         raise HTTPException(
@@ -4896,7 +4953,11 @@ def _load_normalized_sessions_sync(
                     "tool_call_count": 0,
                 },
                 logical_session_id=logical_session_id,
-                logical_session={"id": logical_session_id, "source": "tui", "title": ""},
+                logical_session={
+                    "id": logical_session_id,
+                    "source": "tui",
+                    "title": "",
+                },
                 display_meta=display_meta,
                 live_state=live_state,
                 resume_session_id=logical_session_id,
@@ -5197,9 +5258,7 @@ def _get_live_poll_snapshot_sync(
         return None
     messages = snapshot.get("messages")
     if isinstance(messages, list):
-        snapshot["messages"] = [
-            _normalize_display_message(item) for item in messages
-        ]
+        snapshot["messages"] = [_normalize_display_message(item) for item in messages]
     return snapshot
 
 
@@ -5241,9 +5300,7 @@ async def get_submitted_turn(
             normalized_request_id,
         ),
     )
-    session_id = str(
-        live_session_id or (receipt or {}).get("session_id") or ""
-    ).strip()
+    session_id = str(live_session_id or (receipt or {}).get("session_id") or "").strip()
     if not session_id:
         receipt_status = str((receipt or {}).get("status") or "")
         if receipt_status == "pending":
@@ -5259,7 +5316,9 @@ async def get_submitted_turn(
         if receipt_status == "failed":
             raise HTTPException(
                 status_code=409,
-                detail=str((receipt or {}).get("last_error") or "Turn submission failed"),
+                detail=str(
+                    (receipt or {}).get("last_error") or "Turn submission failed"
+                ),
             )
         raise HTTPException(status_code=404, detail="Submitted turn not found")
     response = await _build_submitted_turn_response(
@@ -5315,9 +5374,7 @@ async def _build_submitted_turn_response(
         logical_session={"id": session_id, "source": "tui", "title": ""},
         display_meta=display_meta,
         live_state=live_state if isinstance(live_state, dict) else None,
-        resume_session_id=str(
-            (live_state or {}).get("tip_session_id") or session_id
-        ),
+        resume_session_id=str((live_state or {}).get("tip_session_id") or session_id),
     )
     return {
         "ok": True,
@@ -5541,8 +5598,8 @@ def _update_session_title_sync(
     list[dict[str, Any]],
 ]:
     with _open_session_db(target) as db:
-        logical_session_id, logical_session, tip_session_id, _ = _resolve_logical_session_context(
-            db, session_id
+        logical_session_id, logical_session, tip_session_id, _ = (
+            _resolve_logical_session_context(db, session_id)
         )
         if not logical_session or not _is_interface_managed_source(
             logical_session.get("source")
@@ -5657,7 +5714,9 @@ async def submit_session_turn(
         else []
     )
     if not prompt and not attachments:
-        raise HTTPException(status_code=400, detail="Prompt or attachments are required")
+        raise HTTPException(
+            status_code=400, detail="Prompt or attachments are required"
+        )
     if _attachment_total_size_bytes(attachments) > MAX_UPLOAD_SIZE_BYTES:
         raise HTTPException(
             status_code=413,
@@ -5695,7 +5754,9 @@ async def submit_session_turn(
             )
             if existing_response is not None:
                 return existing_response
-        detail = str(receipt.get("last_error") or "Turn submission is already in progress")
+        detail = str(
+            receipt.get("last_error") or "Turn submission is already in progress"
+        )
         raise HTTPException(status_code=409, detail=detail)
 
     receipt_heartbeat_task = asyncio.create_task(
@@ -5765,15 +5826,15 @@ async def submit_session_turn(
             fallback_messages = _build_fallback_display_messages(raw_messages)
 
         if not logical_session_id:
-            raise HTTPException(status_code=500, detail="Failed to resolve logical session id")
+            raise HTTPException(
+                status_code=500, detail="Failed to resolve logical session id"
+            )
 
         display_messages = await asyncio.to_thread(
             get_display_messages, user.id, logical_session_id
         )
         base_messages = (
-            display_messages
-            if display_messages is not None
-            else fallback_messages
+            display_messages if display_messages is not None else fallback_messages
         )
 
         await session_run_manager.ensure_session_bound(
@@ -5810,17 +5871,17 @@ async def submit_session_turn(
         )
 
         live_state, display_meta = await asyncio.gather(
-            asyncio.to_thread(
-                get_live_session_state, user.id, logical_session_id
-            ),
-            asyncio.to_thread(
-                get_display_session_meta, user.id, logical_session_id
-            ),
+            asyncio.to_thread(get_live_session_state, user.id, logical_session_id),
+            asyncio.to_thread(get_display_session_meta, user.id, logical_session_id),
         )
         normalized_session = _normalize_logical_session_row(
-            projected_session or logical_session or {"id": logical_session_id, "source": "tui"},
+            projected_session
+            or logical_session
+            or {"id": logical_session_id, "source": "tui"},
             logical_session_id=logical_session_id,
-            logical_session=logical_session or projected_session or {"id": logical_session_id, "source": "tui"},
+            logical_session=logical_session
+            or projected_session
+            or {"id": logical_session_id, "source": "tui"},
             display_meta=display_meta,
             live_state=live_state,
             resume_session_id=tip_session_id or logical_session_id,
@@ -5832,7 +5893,10 @@ async def submit_session_turn(
             "ok": True,
             "created": created_new_session,
             "session": normalized_session,
-            "messages": [_normalize_display_message(item) for item in submit_result.get("messages", [])],
+            "messages": [
+                _normalize_display_message(item)
+                for item in submit_result.get("messages", [])
+            ],
             "live": live_state,
         }
     except asyncio.CancelledError:
@@ -5912,9 +5976,7 @@ async def respond_session_approval(
         raise HTTPException(status_code=400, detail="Invalid approval choice")
     approval_id = str(payload.approval_id or "").strip()
 
-    live_state = await asyncio.to_thread(
-        get_live_session_state, user.id, session_id
-    )
+    live_state = await asyncio.to_thread(get_live_session_state, user.id, session_id)
     pending_approval = (
         live_state.get("pending_approval") if isinstance(live_state, dict) else None
     )
@@ -5983,9 +6045,7 @@ def _delete_session_sync(
                     lifecycle_claim_id=lifecycle_claim_id,
                 )
                 if not db.delete_session(lineage_session_id):
-                    raise RuntimeError(
-                        f"Failed to delete session {lineage_session_id}"
-                    )
+                    raise RuntimeError(f"Failed to delete session {lineage_session_id}")
         except Exception as exc:
             if lifecycle_claim_id and db.get_session(logical_session_id) is not None:
                 with contextlib.suppress(Exception):
@@ -6118,12 +6178,18 @@ async def files_tree(
                 root=root,
                 path=path,
             )
+        except PrivilegedMaintenanceError as exc:
+            raise HTTPException(
+                status_code=503, detail=MAINTENANCE_ERROR_MESSAGE
+            ) from exc
         except PrivilegedClientError as exc:
             raise HTTPException(status_code=403, detail=str(exc)) from exc
         return {
             "root": str(payload.get("root") or ""),
             "path": str(payload.get("path") or ""),
-            "entries": payload.get("entries") if isinstance(payload.get("entries"), list) else [],
+            "entries": payload.get("entries")
+            if isinstance(payload.get("entries"), list)
+            else [],
         }
 
     return await asyncio.to_thread(
@@ -6159,6 +6225,10 @@ async def open_directory(
                 root=path,
                 path="",
             )
+        except PrivilegedMaintenanceError as exc:
+            raise HTTPException(
+                status_code=503, detail=MAINTENANCE_ERROR_MESSAGE
+            ) from exc
         except PrivilegedClientError as exc:
             raise HTTPException(status_code=403, detail=str(exc)) from exc
         opened_path = str(payload.get("root") or "")
@@ -6167,7 +6237,9 @@ async def open_directory(
             "root": opened_path,
             "path": "",
             "opened_path": opened_path,
-            "entries": payload.get("entries") if isinstance(payload.get("entries"), list) else [],
+            "entries": payload.get("entries")
+            if isinstance(payload.get("entries"), list)
+            else [],
         }
 
     return await asyncio.to_thread(_open_direct_file_tree, user, path)
@@ -6198,13 +6270,17 @@ async def files_preview_text(
             root=root,
             path=path,
         )
+    except PrivilegedMaintenanceError as exc:
+        raise HTTPException(status_code=503, detail=MAINTENANCE_ERROR_MESSAGE) from exc
     except (OSError, RuntimeError, PrivilegedClientError) as exc:
         raise HTTPException(status_code=403, detail="File access denied") from exc
     info = _preview_info_from_metadata(opened.metadata, path=path, root=root)
     try:
         _ensure_previewable_size(info)
         if info["raw_preview_type"] != "text":
-            raise HTTPException(status_code=415, detail="Requested file is not text-previewable")
+            raise HTTPException(
+                status_code=415, detail="Requested file is not text-previewable"
+            )
         data = await asyncio.to_thread(
             _read_open_file_stream_bytes,
             opened,
@@ -6238,13 +6314,17 @@ async def files_preview_content(
             root=root,
             path=path,
         )
+    except PrivilegedMaintenanceError as exc:
+        raise HTTPException(status_code=503, detail=MAINTENANCE_ERROR_MESSAGE) from exc
     except (OSError, RuntimeError, PrivilegedClientError) as exc:
         raise HTTPException(status_code=403, detail="File access denied") from exc
     info = _preview_info_from_metadata(opened.metadata, path=path, root=root)
     try:
         _ensure_previewable_size(info)
         if info["raw_preview_type"] not in {"image", "pdf"}:
-            raise HTTPException(status_code=415, detail="Requested file is not inline-previewable")
+            raise HTTPException(
+                status_code=415, detail="Requested file is not inline-previewable"
+            )
     except BaseException:
         await asyncio.to_thread(_terminate_file_stream, opened)
         raise
@@ -6254,7 +6334,9 @@ async def files_preview_content(
         "X-Content-Type-Options": "nosniff",
     }
     if str(info["mime_type"]).split(";", 1)[0].strip().lower() == "image/svg+xml":
-        headers["Content-Security-Policy"] = "default-src 'none'; img-src data:; style-src 'unsafe-inline'"
+        headers["Content-Security-Policy"] = (
+            "default-src 'none'; img-src data:; style-src 'unsafe-inline'"
+        )
     size = info.get("size")
     if isinstance(size, int) and size >= 0:
         headers["Content-Length"] = str(size)
@@ -6281,6 +6363,9 @@ async def files_download(
             root=root,
             path=path,
         )
+    except PrivilegedMaintenanceError as exc:
+        _DOWNLOAD_LIMITER.release(user.id)
+        raise HTTPException(status_code=503, detail=MAINTENANCE_ERROR_MESSAGE) from exc
     except (OSError, RuntimeError, PrivilegedClientError) as exc:
         _DOWNLOAD_LIMITER.release(user.id)
         raise HTTPException(status_code=403, detail="File access denied") from exc
@@ -6333,6 +6418,8 @@ async def upload_file(
             status_code=413,
             detail=_upload_file_too_large_detail(),
         ) from exc
+    except UploadMaintenanceError as exc:
+        raise HTTPException(status_code=503, detail=MAINTENANCE_ERROR_MESSAGE) from exc
     except (OSError, RuntimeError, PrivilegedClientError) as exc:
         raise HTTPException(status_code=403, detail="File upload failed") from exc
     finally:

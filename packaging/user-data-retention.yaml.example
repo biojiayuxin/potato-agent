@@ -1,0 +1,15 @@
+# Install as /etc/potato-agent/user-data-retention.yaml, root:root 0600.
+# Keep preview until seven complete scheduled runs and explicit authorization.
+mode: preview
+inactive_days: 30
+history_days: 30
+max_files_per_user: 1000000
+max_files_total: 5000000
+max_runtime_seconds: 14400
+min_uid: 1000
+filesystems:
+  - uuid: REPLACE-WITH-FILESYSTEM-UUID
+    mountpoint: /mnt/potato-users
+    home_bases:
+      - /mnt/potato-users/home
+    history_root: /mnt/potato-users/.potato-user-history

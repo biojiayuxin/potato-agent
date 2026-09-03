@@ -2215,6 +2215,63 @@ model proxy、Interface 顺序重启。新增的 auth DB 表可以保留，旧�
 失败时恢复数据库备份。只要任一已安装 unit 仍引用 `admin-usage-token`，就不得删除该 credential。
 补充的安全边界和故障模式见 [`interface/ADMIN_OBSERVABILITY.md`](interface/ADMIN_OBSERVABILITY.md)。
 
+### 16.1 两阶段用户文件保留
+
+代码发布只包含清理程序、只读管理员状态页和 unit 模板。Lite cutover 不创建 history/state 目录，
+不安装或启用 `potato-user-data-retention.timer`，也不修改 `/srv`、systemd 或任何用户 home。
+以下操作都是 owner 单独批准的生产变更。
+
+每个受管文件系统先创建同盘、root-only 的 history root。状态目录允许 Interface 组只穿越并读取
+`status.json`；journal、manifest、授权与恢复资料不得放入可读子目录。示例路径必须替换为实际路径：
+
+```bash
+install -d -o root -g root -m 0700 /mnt/potato-users/.potato-user-history
+install -d -o root -g potato-interface -m 0750 /var/lib/potato-agent/retention
+install -d -o root -g potato-interface -m 0750 /run/potato-agent/user-lifecycle
+install -D -o root -g root -m 0600 \
+  /srv/potato_agent/packaging/user-data-retention.yaml.example \
+  /etc/potato-agent/user-data-retention.yaml
+```
+
+编辑配置中的 UUID、mountpoint、允许 home 基目录和同盘 history root，保持 `mode: preview`。
+首次验证和预览不会 rename、rmdir、unlink 或 purge：
+
+```bash
+/opt/interface-env/bin/python -B -m interface.user_data_retention validate
+/opt/interface-env/bin/python -B -m interface.user_data_retention preview
+```
+
+检查状态和聚合日志不含 home 或归档路径后，只安装模板并启用 preview timer。它固定在
+`05:00 Asia/Shanghai`，位于 04:00 存储快照之后：
+
+```bash
+systemd-analyze verify \
+  /srv/potato_agent/packaging/systemd/potato-user-data-retention.service \
+  /srv/potato_agent/packaging/systemd/potato-user-data-retention.timer
+install -D -o root -g root -m 0644 \
+  /srv/potato_agent/packaging/systemd/potato-user-data-retention.service \
+  /etc/systemd/system/potato-user-data-retention.service
+install -D -o root -g root -m 0644 \
+  /srv/potato_agent/packaging/systemd/potato-user-data-retention.timer \
+  /etc/systemd/system/potato-user-data-retention.timer
+systemctl daemon-reload
+systemctl enable --now potato-user-data-retention.timer
+```
+
+至少观察七次完整 `preview/ok` 日跑并完成用户通知后，才能把配置原子更新为 root:root 0600 的
+`mode: enforce`，在 24 小时内基于相同策略的完整 preview 执行双门授权，并在维护窗口手工运行：
+
+```bash
+/opt/interface-env/bin/python -B -m interface.user_data_retention preview
+/opt/interface-env/bin/python -B -m interface.user_data_retention authorize-enforce --confirm
+systemctl start potato-user-data-retention.service
+```
+
+首次 enforce 后用一次性测试账号完成归档和 `restore --origin ORIGIN --run RUN [--path RELATIVE]`
+演练；不得使用 `potato_agent`。同盘 stage 不释放空间，只有 30 天后的 purge 才释放空间，且没有
+磁盘紧张提前删除机制。回滚时先禁用 timer、把配置切回 preview 并执行
+`revoke-enforce`；history 和 journal 不随代码回滚删除。
+
 ## 升级已有部署
 
 自动 Lite cutover 只支持状态边界已经稳定的生产环境。开始前必须同时满足：

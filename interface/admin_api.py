@@ -29,6 +29,12 @@ from interface.auth_db import (
 )
 from interface.runtime_state import list_active_runtime_user_ids
 from interface.secret_config import load_session_cookie_secure, load_session_secret
+from interface.user_data_retention import (
+    ALLOWED_REASONS,
+    DEFAULT_STATUS_PATH as DEFAULT_FILE_CLEANUP_STATUS_PATH,
+    RetentionError,
+    read_cleanup_status,
+)
 
 
 ADMIN_COOKIE_NAME = "potato_admin_token"
@@ -38,7 +44,9 @@ ADMIN_SESSION_TTL_SECONDS = 4 * 3600
 ADMIN_SESSION_SECRET = load_session_secret()
 ADMIN_COOKIE_SECURE = load_session_cookie_secure()
 ADMIN_AUTH_DB_PATH = DEFAULT_AUTH_DB_PATH
-ADMIN_DUMMY_PASSWORD_HASH = "$2b$12$niguf.onTxAI39wN5IxuaOZJtea0nKCdXoc2TNVcUY5PuSb0asjj2"
+ADMIN_DUMMY_PASSWORD_HASH = (
+    "$2b$12$niguf.onTxAI39wN5IxuaOZJtea0nKCdXoc2TNVcUY5PuSb0asjj2"
+)
 ADMIN_STATIC_DIR = Path(__file__).resolve().parent / "static" / "admin"
 WINDOW_SECONDS = {"24h": 24 * 3600, "7d": 7 * 24 * 3600, "30d": 30 * 24 * 3600}
 VALID_USER_TYPES = frozenset({"all", "formal", "temporary", "retired"})
@@ -58,6 +66,10 @@ VALID_OVERVIEW_SORTS = frozenset(
 )
 VALID_SORT_DIRECTIONS = frozenset({"asc", "desc"})
 OVERVIEW_PAGE_SIZE = 25
+FILE_CLEANUP_STATUS_PATH = Path(
+    os.getenv("POTATO_USER_DATA_RETENTION_STATUS") or DEFAULT_FILE_CLEANUP_STATUS_PATH
+)
+FILE_CLEANUP_HEARTBEAT_STALE_SECONDS = 15 * 60
 
 
 class AdminSigninRequest(BaseModel):
@@ -72,7 +84,9 @@ router = APIRouter()
 def _iso_timestamp(value: float | int | None) -> str | None:
     if value is None:
         return None
-    return datetime.fromtimestamp(float(value), tz=UTC).isoformat().replace("+00:00", "Z")
+    return (
+        datetime.fromtimestamp(float(value), tz=UTC).isoformat().replace("+00:00", "Z")
+    )
 
 
 def _create_admin_token(user: InterfaceUser) -> str:
@@ -153,11 +167,15 @@ def _resolve_admin(request: Request) -> InterfaceUser | None:
 async def require_admin(request: Request) -> InterfaceUser:
     user = _resolve_admin(request)
     if user is None:
-        raise HTTPException(status_code=401, detail="Administrator authentication required")
+        raise HTTPException(
+            status_code=401, detail="Administrator authentication required"
+        )
     return user
 
 
-def _trusted_proxy_networks() -> tuple[ipaddress.IPv4Network | ipaddress.IPv6Network, ...]:
+def _trusted_proxy_networks() -> tuple[
+    ipaddress.IPv4Network | ipaddress.IPv6Network, ...
+]:
     networks: list[ipaddress.IPv4Network | ipaddress.IPv6Network] = []
     for raw_value in (os.getenv("INTERFACE_ADMIN_TRUSTED_PROXIES") or "").split(","):
         value = raw_value.strip()
@@ -228,7 +246,9 @@ def _request_origin(request: Request) -> str:
     except ValueError:
         peer = None
     if peer is not None and _is_trusted_proxy(peer):
-        forwarded_scheme = request.headers.get("x-forwarded-proto", "").split(",", 1)[0].strip()
+        forwarded_scheme = (
+            request.headers.get("x-forwarded-proto", "").split(",", 1)[0].strip()
+        )
         if forwarded_scheme in {"http", "https"}:
             scheme = forwarded_scheme
     return f"{scheme}://{request.headers.get('host', request.url.netloc)}".lower()
@@ -341,7 +361,9 @@ def _overview_group_rank(row: dict[str, Any]) -> int:
     return 1 if row.get("account_type") == "temporary" else 0
 
 
-def _overview_column_sort_value(row: dict[str, Any], sort_by: str) -> str | int | float | None:
+def _overview_column_sort_value(
+    row: dict[str, Any], sort_by: str
+) -> str | int | float | None:
     if sort_by == "user":
         return _overview_user_sort_value(row)
     if sort_by == "runtime_active":
@@ -528,7 +550,9 @@ async def admin_overview(
         account_type = str(entity["account_type"])
         if type == "formal" and account_type != "formal":
             continue
-        if type == "temporary" and (account_type != "temporary" or lifecycle != "current"):
+        if type == "temporary" and (
+            account_type != "temporary" or lifecycle != "current"
+        ):
             continue
         if type == "retired" and lifecycle != "retired":
             continue
@@ -595,7 +619,11 @@ async def admin_system(
             "status": "unavailable",
             "sampled_at": None,
             "cpu_percent": None,
-            "memory": {"used_bytes": None, "available_bytes": None, "total_bytes": None},
+            "memory": {
+                "used_bytes": None,
+                "available_bytes": None,
+                "total_bytes": None,
+            },
             "page_cache_bytes": None,
             "swap_bytes": None,
             "load": {"one": None, "five": None, "fifteen": None},
@@ -603,3 +631,47 @@ async def admin_system(
     payload = sampler.snapshot()
     payload["sampled_at"] = _iso_timestamp(payload.get("sampled_at"))
     return payload
+
+
+@router.get("/admin/api/file-cleanup")
+async def admin_file_cleanup(
+    _admin: InterfaceUser = Depends(require_admin),
+) -> dict[str, Any]:
+    try:
+        payload = read_cleanup_status(FILE_CLEANUP_STATUS_PATH)
+    except RetentionError:
+        return {
+            "status": "unavailable",
+            "policy": None,
+            "schedule": {
+                "time": "05:00",
+                "timezone": "Asia/Shanghai",
+                "persistent": True,
+            },
+            "latest_run": None,
+            "totals": None,
+            "users": [],
+        }
+    users = []
+    for item in payload["users"]:
+        sanitized = dict(item)
+        if sanitized["reason"] not in ALLOWED_REASONS:
+            sanitized["reason"] = "other"
+        users.append(sanitized)
+    source_status = "available"
+    latest = dict(payload["latest_run"])
+    heartbeat_epoch = payload.get("updated_at_epoch")
+    if (
+        latest.get("status") == "running"
+        and isinstance(heartbeat_epoch, (int, float))
+        and time.time() - float(heartbeat_epoch) > FILE_CLEANUP_HEARTBEAT_STALE_SECONDS
+    ):
+        source_status = "stale"
+    return {
+        "status": source_status,
+        "policy": payload["policy"],
+        "schedule": payload["schedule"],
+        "latest_run": latest,
+        "totals": payload["totals"],
+        "users": users,
+    }

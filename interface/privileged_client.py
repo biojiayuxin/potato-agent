@@ -54,9 +54,14 @@ from interface.runtime_state import (
     runtime_sleep_claim_is_valid,
 )
 from interface.subprocess_env import interface_subprocess_env
+from interface.user_lifecycle_lock import MAINTENANCE_ERROR_CODE
 
 
 class PrivilegedClientError(RuntimeError):
+    pass
+
+
+class PrivilegedMaintenanceError(PrivilegedClientError):
     pass
 
 
@@ -110,8 +115,12 @@ def build_direct_tui_gateway_command(target: HermesTarget) -> list[str]:
 
 class PrivilegedClient:
     def __init__(self, *, helper_python: str | None = None) -> None:
-        self.helper_python = helper_python or os.getenv("INTERFACE_HELPER_PYTHON") or sys.executable
-        self.force_helper = os.getenv("INTERFACE_FORCE_PRIVILEGED_HELPER", "").strip().lower() in {
+        self.helper_python = (
+            helper_python or os.getenv("INTERFACE_HELPER_PYTHON") or sys.executable
+        )
+        self.force_helper = os.getenv(
+            "INTERFACE_FORCE_PRIVILEGED_HELPER", ""
+        ).strip().lower() in {
             "1",
             "true",
             "yes",
@@ -168,7 +177,11 @@ class PrivilegedClient:
         stdout_lines = [line for line in result.stdout.splitlines() if line.strip()]
         raw_payload = stdout_lines[-1] if stdout_lines else ""
         if not raw_payload:
-            detail = result.stderr.strip() or result.stdout.strip() or f"exit code {result.returncode}"
+            detail = (
+                result.stderr.strip()
+                or result.stdout.strip()
+                or f"exit code {result.returncode}"
+            )
             raise PrivilegedClientError(force_redact_text(detail))
         try:
             payload = json.loads(raw_payload)
@@ -180,9 +193,12 @@ class PrivilegedClient:
             detail = str(payload.get("error") or "privileged helper failed")
             if error_code:
                 detail = f"{detail} ({error_code})"
-            raise PrivilegedClientError(
-                force_redact_text(detail)
+            error_type = (
+                PrivilegedMaintenanceError
+                if error_code == MAINTENANCE_ERROR_CODE
+                else PrivilegedClientError
             )
+            raise error_type(force_redact_text(detail))
         return payload
 
     def provision_user(
@@ -381,7 +397,9 @@ class PrivilegedClient:
                 target, option, proxy_base_url=get_model_proxy_base_url(config)
             )
             return
-        self._call_helper(["patch-active-model", "--username", username, "--model-id", model_id])
+        self._call_helper(
+            ["patch-active-model", "--username", username, "--model-id", model_id]
+        )
 
     def get_active_model_id(self, username: str) -> str:
         if self._can_call_directly():
@@ -400,7 +418,9 @@ class PrivilegedClient:
             raise PrivilegedClientError("privileged helper returned no active model")
         return active_id
 
-    def session_db_call(self, username: str, method: str, kwargs: dict[str, Any]) -> Any:
+    def session_db_call(
+        self, username: str, method: str, kwargs: dict[str, Any]
+    ) -> Any:
         payload = self._call_helper(
             [
                 "session-db",
