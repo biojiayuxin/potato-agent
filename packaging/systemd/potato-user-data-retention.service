@@ -24,7 +24,6 @@ NoNewPrivileges=true
 CapabilityBoundingSet=CAP_CHOWN CAP_DAC_OVERRIDE CAP_FOWNER
 AmbientCapabilities=CAP_CHOWN CAP_DAC_OVERRIDE CAP_FOWNER
 LockPersonality=true
-RestrictSUIDSGID=true
 RestrictRealtime=true
 SystemCallArchitectures=native
 

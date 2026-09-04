@@ -2306,6 +2306,27 @@ install -D -o root -g root -m 0600 \
 /opt/interface-env/bin/python -B -m interface.user_data_retention preview
 ```
 
+直接运行 CLI 的 preview 不会继承 systemd service 的 seccomp 和文件系统沙箱，因此不能替代 unit
+运行时兼容性验证。尤其不要为该 service 启用 `RestrictSUIDSGID=true`：在当前 systemd 255 环境中，
+该选项会连只读的 `openat2(2)` 一并以 `ENOSYS` 拒绝，而清理程序必须使用
+`openat2(RESOLVE_BENEATH|RESOLVE_NO_SYMLINKS|RESOLVE_NO_XDEV)` 做逐文件重新校验，不能降级。
+表现为 timer 正常触发、service 退出码为 0，但 run 为 `partial` 且全部用户报告
+`journal_error`；这不代表 SQLite journal 损坏。
+
+安装 unit 前，必须在使用相同 systemd/kernel 的目标机或预发布机上，以装有 pytest 和 Interface
+依赖的测试 Python 执行 transient systemd 集成探针。该测试读取模板中的实际 `[Service]` hardening
+属性，只打开仓库内的清理模块并调用 `openat2`/`statx`，不会扫描、移动或删除用户文件：
+
+```bash
+sudo env POTATO_RUN_SYSTEMD_INTEGRATION=1 \
+  /path/to/test-venv/bin/python -m pytest -q \
+  interface/test_user_data_retention.py \
+  -k retention_systemd_sandbox_allows_required_syscalls
+```
+
+探针必须通过；skip、`ENOSYS` 或其他失败都不得继续安装或启用 timer。常规非 root 测试默认跳过
+该探针，设置了 `POTATO_RUN_SYSTEMD_INTEGRATION=1` 却不是 root 或 systemd 不可用时则明确失败。
+
 检查状态和聚合日志不含 home 或归档路径后，只安装模板并启用 preview timer。它固定在
 `05:00 Asia/Shanghai`，位于 04:00 存储快照之后：
 

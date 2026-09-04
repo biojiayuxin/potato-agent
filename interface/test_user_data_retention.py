@@ -1,7 +1,11 @@
 from __future__ import annotations
 
+import configparser
 import json
 import os
+import shutil
+import subprocess
+import sys
 import time
 import uuid
 from dataclasses import replace
@@ -732,7 +736,82 @@ def test_retention_units_are_preview_safe_templates() -> None:
     assert "PrivateNetwork=true" in service
     assert "IOSchedulingClass=idle" in service
     assert "ProtectProc=" not in service
+    assert "RestrictSUIDSGID=" not in service
     assert "interface.user_data_retention run" in service
     assert "05:00:00 Asia/Shanghai" in timer
     assert "Persistent=true" in timer
     assert "systemctl enable" not in service + timer
+
+
+@pytest.mark.skipif(
+    os.environ.get("POTATO_RUN_SYSTEMD_INTEGRATION") != "1",
+    reason="set POTATO_RUN_SYSTEMD_INTEGRATION=1 for the root systemd probe",
+)
+def test_retention_systemd_sandbox_allows_required_syscalls() -> None:
+    if os.geteuid() != 0:
+        pytest.fail("the transient systemd integration test must run as root")
+    systemd_run = shutil.which("systemd-run")
+    if systemd_run is None or not Path("/run/systemd/system").is_dir():
+        pytest.fail("the transient systemd integration test requires a running systemd")
+
+    repository_root = Path(__file__).parents[1].resolve()
+    service_path = (
+        repository_root / "packaging" / "systemd" / "potato-user-data-retention.service"
+    )
+    parser = configparser.ConfigParser(interpolation=None, strict=False)
+    parser.optionxform = str
+    with service_path.open(encoding="utf-8") as service_file:
+        parser.read_file(service_file)
+
+    # systemd-run supplies these execution properties for the read-only probe.
+    ignored_properties = {
+        "Type",
+        "User",
+        "Group",
+        "WorkingDirectory",
+        "Environment",
+        "ExecStart",
+        "TimeoutStartSec",
+    }
+    command = [
+        systemd_run,
+        "--quiet",
+        "--wait",
+        "--pipe",
+        "--collect",
+        f"--unit=potato-retention-syscall-test-{uuid.uuid4().hex[:12]}",
+        f"--property=WorkingDirectory={repository_root}",
+        f"--property=Environment=PYTHONPATH={repository_root}",
+    ]
+    for key, value in parser.items("Service"):
+        if key not in ignored_properties:
+            command.append(f"--property={key}={value}")
+
+    probe = "\n".join(
+        (
+            "import os",
+            "from interface.user_data_retention import openat2_beneath, statx_fd",
+            "root_fd = os.open('.', os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC | os.O_NOATIME)",
+            "try:",
+            "    file_fd = openat2_beneath(root_fd, b'interface/user_data_retention.py', "
+            "getattr(os, 'O_PATH', os.O_RDONLY) | os.O_CLOEXEC | os.O_NOFOLLOW)",
+            "    try:",
+            "        statx_fd(file_fd)",
+            "    finally:",
+            "        os.close(file_fd)",
+            "finally:",
+            "    os.close(root_fd)",
+            "print('retention-syscall-probe-ok')",
+        )
+    )
+    result = subprocess.run(
+        [*command, sys.executable, "-B", "-c", probe],
+        check=False,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        timeout=30,
+    )
+
+    assert result.returncode == 0, result.stdout
+    assert "retention-syscall-probe-ok" in result.stdout
