@@ -680,18 +680,15 @@ def test_spatial_api_does_not_refresh_runtime_activity() -> None:
 def test_spatial_entry_and_static_paths_are_prefixed() -> None:
     lite_index = (REPO_ROOT / "interface/static/lite/index.html").read_text(encoding="utf-8")
     assert '<header class="portal-header">' in lite_index
-    assert '<nav class="portal-nav" aria-label="Portal modules">' in lite_index
-    assert '<button class="portal-nav-item active" type="button" aria-current="page">Potato Agent</button>' in lite_index
-    assert '<a class="portal-nav-item" href="/spatial">Spatial Expression</a>' in lite_index
+    assert '/static/shared/navigation.js?v=' in lite_index
+    assert 'data-portal-module="lite"' in lite_index
     assert "spatial-entry-button" not in lite_index
 
     spatial_index = (REPO_ROOT / "interface/static/spatial/index.html").read_text(encoding="utf-8")
     assert 'href="/static/spatial/style.css?v=' in spatial_index
     assert '<header class="portal-header">' in spatial_index
-    assert '<nav class="portal-nav" aria-label="Portal modules">' in spatial_index
-    assert 'href="/lite">Potato Agent</a>' in spatial_index
-    assert 'href="/spatial" aria-current="page">Spatial Expression</a>' in spatial_index
-    assert 'href="/wgcna">WGCNA Network</a>' in spatial_index
+    assert '/static/shared/navigation.js?v=' in spatial_index
+    assert 'data-portal-module="spatial"' in spatial_index
     assert "agent-return" not in spatial_index
     assert 'id="dotplotTooltip"' in spatial_index
     assert 'src="/static/spatial/app.js?v=' in spatial_index

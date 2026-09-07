@@ -398,6 +398,43 @@ def get_admin_usage_aggregate(
     return result
 
 
+def get_admin_usage_daily(
+    *,
+    start_at: float,
+    end_at: float,
+    db_path: Path | str | None = None,
+) -> list[dict[str, Any]]:
+    # Read-only access keeps a missing source distinct from an empty usage window.
+    uri = _resolve_db_path(db_path).resolve().as_uri() + "?mode=ro"
+    conn = sqlite3.connect(uri, uri=True, timeout=SQLITE_BUSY_TIMEOUT_SECONDS)
+    conn.row_factory = sqlite3.Row
+    try:
+        rows = conn.execute(
+            """
+            select date(cast(started_at as integer), 'unixepoch', '+8 hours') as date,
+                   mapping_username,
+                   coalesce(sum(input_tokens), 0) as input_tokens,
+                   coalesce(sum(output_tokens), 0) as output_tokens,
+                   coalesce(sum(cache_read_tokens), 0) as cache_read_tokens,
+                   coalesce(sum(cache_write_tokens), 0) as cache_write_tokens
+            from model_proxy_usage_requests
+            where started_at >= ? and started_at < ?
+              and status_code >= 200 and status_code < 300
+            group by date, mapping_username
+            order by date, mapping_username
+            """,
+            (float(start_at), float(end_at)),
+        ).fetchall()
+    finally:
+        conn.close()
+    result = []
+    for row in rows:
+        item = dict(row)
+        item["total_tokens"] = sum(int(item[field]) for field in TOKEN_FIELDS)
+        result.append(item)
+    return result
+
+
 def get_principal_catalog_page(
     *,
     page: int,

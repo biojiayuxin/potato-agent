@@ -207,7 +207,7 @@ def test_polling_does_not_resolve_user_or_refresh_activity(api, monkeypatch):
 def test_page_coverage_excludes_versioned_legal_document():
     static = Path(__file__).parent / "static"
     pages = list(static.glob("*/index.html")) + [static / "lite/high-resolution-required.html"]
-    assert len(pages) == 10
+    assert len(pages) == 11
     for page in pages:
         html = page.read_text()
         assert html.count('/static/shared/announcement.js?') == 1, page

@@ -170,9 +170,9 @@
       "version": "2026-06-09-002",
       "title": "Workspace updates",
       "date": "June 9, 2026",
-      "summary": "本次更新用于验证更新提示功能。",
+      "summary": "This update verifies update notifications.",
       "items": [
-        "测试更新提示"
+        "Test update notification."
       ]
     }
   ]

@@ -26,6 +26,8 @@ Git checkout 里。
 - Pan-genome Orthogroups 公开 API：`/api/pan-genome/`；运行数据库放在
   `/srv/pan_genome/current/pan_genome.sqlite`，完整构建和发布见
   [`interface/PAN_GENOME.md`](interface/PAN_GENOME.md)。
+- Public Dashboard 入口：`/dashboard`；通过 Interface 公开汇总 model proxy 已记录用量，并读取静态更新记录，
+  部署和维护见 [16.2 节](#162-公开-dashboard)。
 - 新 Hermes 源码和构建入口：仓库内的 `hermes-lite/`。
 - 当前 immutable 运行时：`/opt/potato-hermes-lite/current`；精确版本和 wheel hash 见下方
   “Hermes Lite 运行时”章节。
@@ -2357,6 +2359,124 @@ systemctl start potato-user-data-retention.service
 演练；不得使用 `potato_agent`。同盘 stage 不释放空间，只有 30 天后的 purge 才释放空间，且没有
 磁盘紧张提前删除机制。回滚时先禁用 timer、把配置切回 preview 并执行
 `revoke-enforce`；history 和 journal 不随代码回滚删除。
+
+### 16.2 公开 Dashboard
+
+Dashboard 随 Interface 部署，无需登录；`Admin sign in` 跳转现有 `/admin`，继续使用管理员认证。
+本节适用于首次发布 Dashboard，以及后续仅修改其统计或页面的增量发布。它不需要独立服务、定时任务、
+前端构建、新 Python 依赖或 Dashboard 专用数据库迁移，也不需要构建或切换 Hermes Lite release。
+
+#### 依赖与发布范围
+
+用量链路为：浏览器请求 `/api/dashboard/usage`，Interface 使用内部 credential 查询 model proxy 的
+`/internal/admin/usage/daily`，再按现有 admin 用户目录筛选并汇总。部署前确认：
+
+- 第 12、14 节的 model proxy 和 Interface 已正常运行，两者加载同一个 `admin-usage-token` credential；
+  默认内部地址为 `http://127.0.0.1:8765`，Interface 如已配置 `POTATO_ADMIN_USAGE_BASE_URL`，沿用该地址。
+  复用现有 credential，无需新增或轮换密钥；内部接口不通过公网反向代理发布。
+- 现有 auth DB、admin schema 和历史用户目录已初始化；保留 `user_usage_identities` 中已清理临时用户的记录。
+  从尚无 admin 统计的旧版本升级时，先完成第 16 节所述基础升级，并确认 Interface 启动时的
+  `principal_catalog_v1` 对账完成。公开 Dashboard 本身不要求晋升管理员或启用存储快照 timer。
+- `POTATO_MODEL_PROXY_USAGE_DB` 指向现有专用用量库，由 model proxy 读取；Interface 只通过内部 API 取统计，
+  不应获得该数据库的直接读取权限。统计使用固定的 `Asia/Shanghai` 时区，无需修改宿主时区。
+
+首次发布必须包含同一审查版本的以下文件及其依赖，不能只复制 `static/dashboard/`：
+
+| 范围 | 文件与资源 |
+| --- | --- |
+| Interface 后端 | `interface/app.py`、`interface/dashboard_api.py`、`interface/admin_usage_client.py` |
+| Model proxy 统计 | `interface/model_proxy.py`、`interface/token_usage_store.py` |
+| Dashboard 页面 | 完整 `interface/static/dashboard/`，包含 PotatoOmics 更新 JSON |
+| 共用页面资源 | `interface/static/genes/styles.css`、`interface/static/background.png`、`interface/static/favicon.png`、`interface/static/shared/` 中的导航、导航图标、公告与 Feedback 资源 |
+| 公共入口与 Agent 更新 | 同版公共页面的导航接入改动，以及 `interface/static/lite/update-notes.json`；以审查后的变更清单为准 |
+
+在已批准的维护窗口内，从审查后的 staging 按文件清单发布到 `/srv/potato_agent`，保留现有 owner/mode，
+备份被替换的代码并记录校验和；遵守下文“升级已有部署”的状态隔离要求。首次发布或修改两侧 Python 代码后，
+先重启 model proxy 并确认健康，再重启 Interface。模型请求和正在进行的网页会话可能受到重启影响。
+下面的命令在代码同步完成后执行；`INTERFACE_HTTP_ORIGIN` 使用“验证”章节从实际绑定地址推导的值：
+
+```bash
+systemctl restart potato-model-proxy.service
+curl -fsS http://127.0.0.1:8765/healthz | python3 -m json.tool >/dev/null
+systemctl restart potato-interface.service
+curl -fsS "$INTERFACE_HTTP_ORIGIN/health" | python3 -m json.tool >/dev/null
+```
+
+后续只修改 HTML/CSS/JS 或更新 JSON 时，同步相应静态文件即可，无需重启服务；修改 CSS/JS 时同步更新
+引用页面的资源版本参数。共用导航的修改须连同所有引用页面发布。回滚时恢复本次发布前的配套代码，
+Python 代码回滚后按上述顺序重启；Dashboard 没有需要回滚的数据迁移，不覆盖运行中的数据库或 credential。
+
+#### 发布验收
+
+使用无 Cookie 的请求检查实际对外入口，不能仅凭本机端口正常就认定域名已发布。以下示例中将
+`PUBLIC_ORIGIN` 替换为站点实际地址；显式 HTTP profile 使用已批准的 `http://<server-address>:3000`。
+内部接口检查在服务器本机执行，预期未认证返回 `401`：
+
+```bash
+PUBLIC_ORIGIN=https://agent.example.com
+curl -fsS "$PUBLIC_ORIGIN/dashboard" >/dev/null
+curl -fsS "$PUBLIC_ORIGIN/static/dashboard/potato-omics-updates.json" | python3 -m json.tool >/dev/null
+curl -fsS "$PUBLIC_ORIGIN/static/lite/update-notes.json" | python3 -m json.tool >/dev/null
+curl -fsS "$PUBLIC_ORIGIN/api/dashboard/usage" | python3 -c '
+import json, sys
+from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo
+
+data = json.load(sys.stdin)
+today = datetime.now(ZoneInfo("Asia/Shanghai")).date()
+fields = {"input_tokens", "output_tokens", "cache_read_tokens", "cache_write_tokens"}
+assert set(data) == {"status", "time_zone", "start_date", "through_date", "days"}
+assert data["status"] == "available", "Dashboard usage is unavailable"
+assert data["time_zone"] == "Asia/Shanghai"
+assert data["start_date"] == (today - timedelta(days=30)).isoformat()
+assert data["through_date"] == (today - timedelta(days=1)).isoformat()
+assert len(data["days"]) == 30
+for offset, day in enumerate(data["days"]):
+    assert set(day) == fields | {"date", "total_tokens"}
+    assert day["date"] == (today - timedelta(days=30-offset)).isoformat()
+    assert all(type(day[key]) is int and day[key] >= 0 for key in fields | {"total_tokens"})
+    assert day["total_tokens"] == sum(day[key] for key in fields)
+print("Dashboard usage: available; 30 complete days; public fields verified")
+'
+test "$(curl -sS -o /dev/null -w '%{http_code}' \
+  'http://127.0.0.1:8765/internal/admin/usage/daily?start_at=0&end_at=1')" = 401
+```
+
+再用桌面和手机浏览器确认匿名访问、7/30 天切换、图表悬停/键盘聚焦/触摸、两栏独立 `More` 和内部滚动条、
+共用导航、公告与右下角 Feedback，以及 `Admin sign in` 跳转；同时按第 16 节验证 admin 权限未放宽。
+代码发布前在独立测试环境、仓库根目录运行相关回归；浏览器测试需要 Playwright/Chromium，且使用模拟用量，
+不能代替上面的实际数据链路验收：
+
+```bash
+python -m pytest interface/test_dashboard.py interface/test_token_usage_store.py \
+  interface/test_model_proxy.py interface/test_admin_proxy_usage.py \
+  interface/test_admin_api.py interface/test_admin_store.py \
+  interface/test_about_feedback.py interface/test_announcement.py interface/test_lite_daily_updates.py
+POTATO_DASHBOARD_BROWSER_TESTS=1 POTATO_NAVIGATION_BROWSER_TESTS=1 \
+  python -m pytest interface/test_dashboard_browser.py interface/test_navigation_browser.py
+```
+
+可通过 `POTATO_PLAYWRIGHT_EXECUTABLE` 指定已有 Chromium，使用 `POTATO_DASHBOARD_SCREENSHOTS` 和
+`POTATO_NAVIGATION_SCREENSHOTS` 保留验收截图。
+
+#### 缓存与更新记录维护
+
+- 用量按每个 Interface 进程的北京时间日期缓存，次日首个请求重新汇总截至昨日的 30 个完整自然日；
+  7/30 天切换由前端对同一数据求和，不会触发不同范围的数据库查询。历史数据或用户目录修正后，已成功缓存的
+  当日结果通常要等下一个北京时间自然日才刷新；重启 Interface 也会清空缓存，但应安排维护窗口。
+- 数据源故障时 API 仍可能返回 HTTP `200`，但正文为 `status: unavailable`、`days: null`，页面显示
+  `Unavailable`。因此健康检查必须检查正文；成功查询的空窗口才显示零。失败后服务器冷却 60 秒再接受重试，
+  可见页面也每分钟刷新。排查两侧代码版本、内部地址、credential、用量库及用户目录，不将缺失库重建为空库。
+- PotatoOmics 更新仅维护 `interface/static/dashboard/potato-omics-updates.json`；顶层 `updates` 为数组，
+  每项包含字符串 `version`、`date`、`title`、`summary` 和字符串数组 `items`，`source_commits` 保留溯源且不在
+  页面展示。沿用 `YYYY-MM-DD-NNN` 递增版本及英文日期格式（如 `September 8, 2026`）；前端按版本、日期倒序
+  排列并以纯文本渲染，不读取 Git。发布前用 `python3 -m json.tool` 检查 JSON，并验证浏览器展示。
+- Potato Agent 更新直接读取 `interface/static/lite/update-notes.json`，保持单一数据源；修改其版本会影响 Lite
+  现有更新提示，不能为 Dashboard 另造一份。两类更新独立加载，某类失败只影响该栏；它们与 PubMed
+  Daily Updates worker 无依赖关系。
+- 页面已移除公共资源区，也不再请求 `/api/dashboard/resources`，无需为 Dashboard 单独部署基因组、基因或
+  表达数据库。该 API 仍保留，各资源独立返回可用状态并缓存五分钟。页面不单独展示 `Cache write`，但 API 和
+  总量仍保留缓存写入计数，验收求和时不得忽略。
 
 ## 升级已有部署
 

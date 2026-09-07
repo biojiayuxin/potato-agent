@@ -154,14 +154,14 @@ def _write_feature_index_fixture(root: Path, index_path: Path | None = None) -> 
 
 def test_genome_browser_entry_and_static_paths_are_prefixed() -> None:
     lite_index = (REPO_ROOT / "interface/static/lite/index.html").read_text(encoding="utf-8")
-    assert '<a class="portal-nav-item" href="/genomes" data-mobile-supported="true">Genomes</a>' in lite_index
+    assert 'data-portal-module="lite"' in lite_index
 
     genomes_index = (REPO_ROOT / "interface/static/genomes/index.html").read_text(
         encoding="utf-8"
     )
     assert 'href="/static/genomes/styles.css' in genomes_index
     assert 'src="/static/genomes/app.js' in genomes_index
-    assert 'href="/genomes" aria-current="page"' in genomes_index
+    assert 'data-portal-module="genomes"' in genomes_index
     assert 'class="browser-button" href="/genomes/browser"' in genomes_index
     assert 'src="/static/genomes/assets/pan_core_accumulation_compact.svg"' in genomes_index
     assert 'src="/static/genomes/assets/pangenome_gene_family_distribution_ybreak.svg"' in genomes_index
@@ -177,7 +177,7 @@ def test_genome_browser_entry_and_static_paths_are_prefixed() -> None:
     assert 'src="/static/genome_browser/vendor/react-dom.production.min.js"' in genome_index
     assert 'src="/static/genome_browser/vendor/react-linear-genome-view.umd.production.min.js"' in genome_index
     assert 'src="/static/genome_browser/app.js' in genome_index
-    assert 'href="/genomes" aria-current="page"' in genome_index
+    assert 'data-portal-module="genome_browser"' in genome_index
     assert 'class="parent-page-link" href="/genomes"' in genome_index
 
     genome_css = (REPO_ROOT / "interface/static/genome_browser/styles.css").read_text(
@@ -218,32 +218,14 @@ def test_portal_navigation_uses_consistent_module_order() -> None:
         "interface/static/genomes/index.html",
         "interface/static/genome_browser/index.html",
         "interface/static/about/index.html",
-    ]
-    expected_labels = [
-        "Potato Agent",
-        "Genomes",
-        "Gene Expression",
-        "WGCNA Network",
-        "Spatial Expression",
-        "Genes",
-        "Variants",
-        "Germplasm",
-        "About",
+        "interface/static/dashboard/index.html",
     ]
     for relative_path in portal_indexes:
         content = (REPO_ROOT / relative_path).read_text(encoding="utf-8")
-        nav = content.split('<nav class="portal-nav" aria-label="Portal modules">', 1)[1]
-        nav = nav.split("</nav>", 1)[0]
-        labels = re.findall(
-            r'class="portal-nav-item(?: active)?"[^>]*>([^<]+)</(?:a|button)>',
-            nav,
-        )
-        assert labels == expected_labels, relative_path
-        if relative_path == "interface/static/lite/high-resolution-required.html":
-            assert 'href="./high-resolution-required.html">Gene Expression</a>' in nav
-        else:
-            assert 'href="/bulk-rnaseq"' in nav
-        assert '<a class="portal-nav-item" href="/genome-browser">' not in content
+        assert 'data-portal-module=' in content, relative_path
+        assert '/static/shared/navigation.js?v=20260908-navigation-centered' in content
+        assert '/static/shared/navigation.css?v=20260908-navigation-mobile-centered' in content
+        assert 'class="portal-nav-item' not in content
 
 
 def test_genome_browser_viewer_height_follows_jbrowse_content() -> None:

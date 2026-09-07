@@ -1,0 +1,95 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Dashboard | Potato Agent</title>
+    <link rel="icon" type="image/png" href="/static/favicon.png" />
+    <link rel="stylesheet" href="/static/genes/styles.css?v=20260907-navigation" />
+    <link rel="stylesheet" href="/static/dashboard/styles.css?v=20260907-navigation" />
+    <link rel="stylesheet" href="/static/shared/feedback.css?v=20260819-feedback" />
+    <link rel="stylesheet" href="/static/shared/announcement.css?v=20260906-compact" />
+    <script src="/static/shared/announcement.js?v=20260906" defer></script>
+    <script src="/static/dashboard/app.js?v=20260907-header" defer></script>
+    <link rel="stylesheet" href="/static/shared/navigation.css?v=20260908-navigation-mobile-centered" />
+    <script src="/static/shared/navigation.js?v=20260908-navigation-centered" defer></script>
+  </head>
+  <body>
+    <div class="genes-app dashboard-app">
+      <header class="portal-header">
+        <section class="portal-hero" aria-labelledby="portal-title">
+          <div class="portal-hero-content">
+            <h1 id="portal-title">Potato Agent: AI-Driven Data and Knowledge Exploration on an Agent-Ready Potato Multi-Omics Platform</h1>
+          </div>
+        </section>
+        <nav class="portal-nav" aria-label="Portal modules" data-portal-module="dashboard"></nav>
+      </header>
+
+      <main class="dashboard-main">
+        <div class="dashboard-heading">
+          <div class="dashboard-title-row">
+            <h2>Dashboard</h2>
+            <a class="admin-link" href="/admin">Admin sign in <span aria-hidden="true">&nearr;</span></a>
+          </div>
+          <fieldset class="period-control">
+            <legend class="visually-hidden">Usage period</legend>
+            <label><input type="radio" name="period" value="7" /><span>7 days</span></label>
+            <label><input type="radio" name="period" value="30" checked /><span>30 days</span></label>
+          </fieldset>
+        </div>
+
+        <section class="usage-section" aria-labelledby="usage-title" aria-busy="true" id="usage-section">
+          <div class="section-heading">
+            <h3 id="usage-title">Recorded token usage</h3>
+            <p id="usage-period">Asia/Shanghai &middot; Through yesterday</p>
+          </div>
+          <dl class="token-overview" aria-live="polite">
+            <div class="token-metric total-metric"><dt>Total tokens</dt><dd data-token="total_tokens">Loading</dd></div>
+            <div class="token-metric input-metric"><dt>Input</dt><dd data-token="input_tokens">Loading</dd></div>
+            <div class="token-metric output-metric"><dt>Output</dt><dd data-token="output_tokens">Loading</dd></div>
+            <div class="token-metric read-metric"><dt>Cache read</dt><dd data-token="cache_read_tokens">Loading</dd></div>
+          </dl>
+        </section>
+
+        <section class="trend-section" aria-labelledby="trend-title">
+          <div class="section-heading"><h3 id="trend-title">Daily trend</h3><span class="chart-legend">Total tokens</span></div>
+          <p id="chart-status" class="chart-status" role="status">Loading</p>
+          <div class="trend-layout" id="trend-layout" hidden>
+            <div class="chart-area">
+              <div class="y-axis" aria-hidden="true"><span id="axis-max"></span><span id="axis-mid"></span><span>0</span></div>
+              <div class="plot-scroll" id="plot-scroll">
+                <div class="plot" id="plot" role="group" aria-label="Daily recorded token usage"></div>
+                <div class="x-axis" id="x-axis" aria-hidden="true"></div>
+              </div>
+            </div>
+            <aside class="day-detail" aria-label="Selected day" aria-live="polite" aria-atomic="true">
+              <p class="detail-date" id="detail-date"></p>
+              <p class="detail-total" id="detail-total"></p>
+              <p class="detail-unit">total tokens</p>
+              <dl id="detail-tokens"></dl>
+            </aside>
+          </div>
+        </section>
+
+        <section class="updates-section" aria-labelledby="updates-title">
+          <div class="section-heading"><h3 id="updates-title">Recent updates</h3></div>
+          <div class="updates-grid">
+            <section class="update-column omics-updates" aria-labelledby="omics-title" id="omics-updates">
+              <div class="update-heading"><h4 id="omics-title">PotatoOmics</h4></div>
+              <p class="updates-status" role="status">Loading</p>
+              <ol class="update-list" id="omics-history" tabindex="0" aria-labelledby="omics-title"></ol>
+              <button class="more-updates" type="button" aria-controls="omics-history" aria-expanded="false" hidden>More</button>
+            </section>
+            <section class="update-column agent-updates" aria-labelledby="agent-title" id="agent-updates">
+              <div class="update-heading"><h4 id="agent-title">Potato Agent</h4></div>
+              <p class="updates-status" role="status">Loading</p>
+              <ol class="update-list" id="agent-history" tabindex="0" aria-labelledby="agent-title"></ol>
+              <button class="more-updates" type="button" aria-controls="agent-history" aria-expanded="false" hidden>More</button>
+            </section>
+          </div>
+        </section>
+      </main>
+    </div>
+    <script src="/static/shared/feedback.js?v=20260819-feedback" defer></script>
+  </body>
+</html>

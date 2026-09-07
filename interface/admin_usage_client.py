@@ -51,13 +51,25 @@ def _headers() -> dict[str, str]:
 async def fetch_usage_aggregate(
     *, start_at: float, end_at: float
 ) -> list[dict[str, Any]]:
+    return await _fetch_usage("aggregate", start_at=start_at, end_at=end_at)
+
+
+async def fetch_usage_daily(
+    *, start_at: float, end_at: float
+) -> list[dict[str, Any]]:
+    return await _fetch_usage("daily", start_at=start_at, end_at=end_at)
+
+
+async def _fetch_usage(
+    endpoint: str, *, start_at: float, end_at: float
+) -> list[dict[str, Any]]:
     try:
         async with httpx.AsyncClient(
             timeout=DEFAULT_ADMIN_USAGE_TIMEOUT_SECONDS,
             trust_env=False,
         ) as client:
             response = await client.get(
-                f"{_base_url()}/internal/admin/usage/aggregate",
+                f"{_base_url()}/internal/admin/usage/{endpoint}",
                 params={"start_at": start_at, "end_at": end_at},
                 headers=_headers(),
             )

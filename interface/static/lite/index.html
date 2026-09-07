@@ -6,10 +6,12 @@
     <meta name="referrer" content="no-referrer" />
     <title>Potato Agent</title>
     <link rel="icon" type="image/png" href="./static/favicon.png" />
-    <link rel="stylesheet" href="./static/lite/styles.css?v=20260903-message-fork" />
+    <link rel="stylesheet" href="./static/lite/styles.css?v=20260907-navigation" />
     <link rel="stylesheet" href="/static/shared/feedback.css?v=20260819-feedback" />
     <link rel="stylesheet" href="/static/shared/announcement.css?v=20260906-compact">
     <script src="/static/shared/announcement.js?v=20260906" defer></script>
+    <link rel="stylesheet" href="/static/shared/navigation.css?v=20260908-navigation-mobile-centered" />
+    <script src="/static/shared/navigation.js?v=20260908-navigation-centered" defer></script>
   </head>
   <body>
     <div id="app" class="app-shell">
@@ -20,22 +22,7 @@
               <h1 id="portal-title">Potato Agent: AI-Driven Data and Knowledge Exploration on an Agent-Ready Potato Multi-Omics Platform</h1>
             </div>
           </section>
-          <nav class="portal-nav" aria-label="Portal modules">
-            <button class="portal-nav-item active" type="button" aria-current="page">Potato Agent</button>
-            <button id="portal-nav-toggle" class="portal-nav-toggle" type="button" aria-label="Open module navigation" aria-expanded="false" title="Modules">
-              <span class="portal-nav-toggle-bar"></span>
-              <span class="portal-nav-toggle-bar"></span>
-              <span class="portal-nav-toggle-bar"></span>
-            </button>
-            <a class="portal-nav-item" href="/genomes" data-mobile-supported="true">Genomes</a>
-            <a class="portal-nav-item" href="/bulk-rnaseq">Gene Expression</a>
-            <a class="portal-nav-item" href="/wgcna">WGCNA Network</a>
-            <a class="portal-nav-item" href="/spatial">Spatial Expression</a>
-            <a class="portal-nav-item" href="/genes" data-mobile-supported="true">Genes</a>
-            <button class="portal-nav-item" type="button" aria-disabled="true" tabindex="-1">Variants</button>
-            <button class="portal-nav-item" type="button" aria-disabled="true" tabindex="-1">Germplasm</button>
-            <a class="portal-nav-item" href="/about" data-mobile-supported="true">About</a>
-          </nav>
+          <nav class="portal-nav" aria-label="Portal modules" data-portal-module="lite"></nav>
         </header>
         <div class="login-stage">
           <section id="daily-updates-panel" class="daily-updates-panel" lang="en" aria-labelledby="daily-updates-title">
@@ -686,6 +673,6 @@
 
     <script src="./static/lite/vendor/marked.umd.js"></script>
     <script src="/static/shared/feedback.js?v=20260819-feedback" defer></script>
-    <script type="module" src="./static/lite/app.js?v=20260903-message-fork"></script>
+    <script type="module" src="./static/lite/app.js?v=20260907-navigation"></script>
   </body>
 </html>

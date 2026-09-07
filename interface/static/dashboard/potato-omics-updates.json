@@ -1,0 +1,44 @@
+{
+  "updates": [
+    {
+      "version": "2026-09-08-001",
+      "title": "Dashboard and navigation",
+      "date": "September 8, 2026",
+      "summary": "Added a dashboard and improved navigation across the platform.",
+      "items": [],
+      "source_commits": []
+    },
+    {
+      "version": "2026-08-24-002",
+      "title": "Spatial plots as vector PDF",
+      "date": "August 24, 2026",
+      "summary": "Download spatial expression plots as vector PDFs for figures and presentations.",
+      "items": [],
+      "source_commits": ["b132ae9"]
+    },
+    {
+      "version": "2026-08-24-001",
+      "title": "Expression heatmaps as vector PDF",
+      "date": "August 24, 2026",
+      "summary": "Export gene expression heatmaps as vector PDFs, with labels and legends preserved.",
+      "items": [],
+      "source_commits": ["e1f4d15"]
+    },
+    {
+      "version": "2026-08-17-001",
+      "title": "More flexible gene-symbol search",
+      "date": "August 17, 2026",
+      "summary": "Find gene symbols with or without the St prefix. Exact matches remain first in the results.",
+      "items": [],
+      "source_commits": ["4c6b802"]
+    },
+    {
+      "version": "2026-07-28-001",
+      "title": "Genome accession catalog",
+      "date": "July 28, 2026",
+      "summary": "Browse genome accessions, filter by ploidy, and open an accession in the genome browser.",
+      "items": ["Search accessions and explore their source publications."],
+      "source_commits": ["1e4af19"]
+    }
+  ]
+}

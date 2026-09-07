@@ -29,6 +29,31 @@
 - Daily Updates：未登录页公开展示 PubMed 马铃薯研究，由独立 systemd worker 每日生成双语总结，
   Interface 从 `/srv/daily_updates/data/daily_updates.sqlite` 只读加载；部署和迁移见
   [`DAILY_UPDATES.md`](DAILY_UPDATES.md)
+- Dashboard：公开英文页面 `/dashboard`，展示已记录 Token 用量与两类更新。
+
+## Public Dashboard
+
+部署依赖、两侧代码发布与重启顺序、匿名验收和更新记录维护见
+[`HPC_DEPLOYMENT.md` 的 16.2 节](../HPC_DEPLOYMENT.md#162-公开-dashboard)。Dashboard 无需独立服务或定时任务。
+
+`/api/dashboard/usage` 固定返回北京时间截至昨日的 30 个完整自然日，前端从同一份数据计算
+7/30 天概览。Interface 复用 admin 用户目录，包含当前正式用户、临时用户和已清理临时用户，
+排除服务账户；公开响应仅包含日期、时区、可用状态及 Token 汇总。
+代理侧 `/internal/admin/usage/daily` 复用内部认证与时间范围校验，通过只读 SQLite 查询按日期、
+用户聚合，无数据库迁移。总量包含输入、输出、缓存读和缓存写，口径与 admin 相同；
+页面展示总量、输入、输出和缓存读，不单独展示缓存写。
+用量缓存在每个 Interface 进程中按北京时间日期失效，并合并并发请求；失败后冷却 60 秒。
+缺失数据源返回 `unavailable`，完整空窗口返回零用量。
+
+`/api/dashboard/resources` 复用 Genome Browser manifest、Gene Catalog 和 Bulk RNA-Seq
+统计入口，仅输出计数及模块信息，缓存五分钟，各资源独立处理失败；Dashboard 页面不再请求此接口。
+Potato Agent 更新直接读取 `static/lite/update-notes.json`；PotatoOmics 更新手工维护于
+`static/dashboard/potato-omics-updates.json`，保留 `source_commits` 供溯源，运行时不读取 Git。
+
+后端测试：`python -m pytest interface/test_dashboard.py`。
+浏览器测试：`POTATO_DASHBOARD_BROWSER_TESTS=1 python -m pytest interface/test_dashboard_browser.py`，
+需要 Playwright/Chromium，可通过 `POTATO_PLAYWRIGHT_EXECUTABLE` 指定浏览器，
+`POTATO_DASHBOARD_SCREENSHOTS` 指定截图目录。浏览器测试使用模拟用量数据。
 
 ## 目录
 

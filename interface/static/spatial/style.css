@@ -57,92 +57,6 @@ button:disabled {
   background: url('../background.png') center center / cover no-repeat;
 }
 
-.portal-header {
-  width: min(1180px, 100%);
-  justify-self: center;
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
-  position: relative;
-  z-index: 2;
-}
-
-.portal-hero {
-  position: relative;
-  text-align: center;
-}
-
-.portal-hero-content {
-  position: relative;
-  max-width: 960px;
-  margin: 0 auto;
-  padding: 4px 16px 2px;
-  color: #12203b;
-}
-
-.portal-hero h1 {
-  margin: 0;
-  font-size: 32px;
-  line-height: 1.08;
-  font-weight: 800;
-  letter-spacing: 0;
-}
-
-.portal-nav {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  width: 100%;
-  min-height: 58px;
-  padding: 8px;
-  overflow-x: auto;
-  border: 1px solid rgba(255, 255, 255, 0.46);
-  border-radius: 14px;
-  background: rgba(255, 255, 255, 0.52);
-  box-shadow: var(--shadow);
-  backdrop-filter: blur(18px) saturate(150%);
-  scrollbar-width: thin;
-}
-
-.portal-nav-item {
-  flex: 0 0 auto;
-  min-height: 40px;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  padding: 0 16px;
-  border: 1px solid rgba(22, 101, 52, 0.18);
-  border-radius: 8px;
-  color: #17324d;
-  background: rgba(255, 255, 255, 0.62);
-  font-size: 14px;
-  font-weight: 800;
-  letter-spacing: 0;
-  line-height: 1;
-  text-decoration: none;
-  white-space: nowrap;
-  transition: background 140ms ease, border-color 140ms ease, color 140ms ease, box-shadow 140ms ease;
-}
-
-.portal-nav-item:hover {
-  border-color: rgba(22, 101, 52, 0.34);
-  background: rgba(255, 255, 255, 0.84);
-}
-
-.portal-nav-item.active {
-  border-color: rgba(22, 101, 52, 0.58);
-  color: #ffffff;
-  background: var(--primary);
-  box-shadow: 0 10px 24px rgba(22, 101, 52, 0.28);
-}
-
-.portal-nav-item:disabled {
-  cursor: default;
-  opacity: 0.58;
-  color: rgba(23, 50, 77, 0.72);
-  background: rgba(255, 255, 255, 0.38);
-}
-
 .spatial-main {
   width: min(1680px, 100%);
   height: 100%;
@@ -489,10 +403,6 @@ canvas {
     min-height: 100vh;
     padding: 16px;
     overflow: auto;
-  }
-
-  .portal-hero h1 {
-    font-size: 24px;
   }
 
   .spatial-main {

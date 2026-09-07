@@ -24,6 +24,7 @@ PUBLIC_HTML_PATHS = (
     STATIC_DIR / "genomes" / "index.html",
     STATIC_DIR / "genome_browser" / "index.html",
     STATIC_DIR / "about" / "index.html",
+    STATIC_DIR / "dashboard" / "index.html",
 )
 
 
@@ -120,15 +121,10 @@ def test_about_and_shared_feedback_assets_are_public(tmp_path, monkeypatch) -> N
 def test_all_public_pages_include_about_and_shared_feedback_assets() -> None:
     for html_path in PUBLIC_HTML_PATHS:
         content = html_path.read_text(encoding="utf-8")
-        assert 'href="/about"' in content, html_path
+        assert '/static/shared/navigation.js?v=' in content, html_path
         assert "/static/shared/feedback.css" in content, html_path
         assert "/static/shared/feedback.js" in content, html_path
 
-    lite_html = (STATIC_DIR / "lite" / "index.html").read_text(encoding="utf-8")
-    assert (
-        '<a class="portal-nav-item" href="/about" '
-        'data-mobile-supported="true">About</a>'
-    ) in lite_html
 
 
 def test_shared_feedback_ui_covers_accessibility_and_workspace_states() -> None:

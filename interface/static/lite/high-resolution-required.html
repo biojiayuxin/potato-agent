@@ -5,10 +5,12 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>High-resolution device required</title>
     <link rel="icon" type="image/png" href="../favicon.png" />
-    <link rel="stylesheet" href="./styles.css?v=20260709-index-document-scroll" />
+    <link rel="stylesheet" href="./styles.css?v=20260907-navigation" />
     <link rel="stylesheet" href="/static/shared/feedback.css?v=20260819-feedback" />
     <link rel="stylesheet" href="/static/shared/announcement.css?v=20260906-compact">
     <script src="/static/shared/announcement.js?v=20260906" defer></script>
+    <link rel="stylesheet" href="/static/shared/navigation.css?v=20260908-navigation-mobile-centered" />
+    <script src="/static/shared/navigation.js?v=20260908-navigation-centered" defer></script>
   </head>
   <body>
     <div class="app-shell">
@@ -19,22 +21,7 @@
               <h1 id="portal-title">Potato Agent: AI-Driven Data and Knowledge Exploration on an Agent-Ready Potato Multi-Omics Platform</h1>
             </div>
           </section>
-          <nav class="portal-nav" aria-label="Portal modules">
-            <a class="portal-nav-item active" href="/lite" aria-current="page">Potato Agent</a>
-            <button id="portal-nav-toggle" class="portal-nav-toggle" type="button" aria-label="Open module navigation" aria-expanded="false" title="Modules">
-              <span class="portal-nav-toggle-bar"></span>
-              <span class="portal-nav-toggle-bar"></span>
-              <span class="portal-nav-toggle-bar"></span>
-            </button>
-            <a class="portal-nav-item" href="/genomes">Genomes</a>
-            <a class="portal-nav-item" href="./high-resolution-required.html">Gene Expression</a>
-            <a class="portal-nav-item" href="./high-resolution-required.html">WGCNA Network</a>
-            <a class="portal-nav-item" href="./high-resolution-required.html">Spatial Expression</a>
-            <a class="portal-nav-item" href="/genes">Genes</a>
-            <a class="portal-nav-item" href="./high-resolution-required.html" aria-disabled="true" tabindex="-1">Variants</a>
-            <a class="portal-nav-item" href="./high-resolution-required.html" aria-disabled="true" tabindex="-1">Germplasm</a>
-            <a class="portal-nav-item" href="/about">About</a>
-          </nav>
+          <nav class="portal-nav" aria-label="Portal modules" data-portal-module="notice"></nav>
         </header>
 
         <div class="login-stage">
@@ -53,15 +40,5 @@
     </div>
 
     <script src="/static/shared/feedback.js?v=20260819-feedback" defer></script>
-    <script>
-      const nav = document.querySelector('.portal-nav');
-      const toggle = document.getElementById('portal-nav-toggle');
-      toggle?.addEventListener('click', () => {
-        const expanded = !nav?.classList.contains('expanded');
-        nav?.classList.toggle('expanded', expanded);
-        toggle.setAttribute('aria-expanded', expanded ? 'true' : 'false');
-        toggle.setAttribute('aria-label', expanded ? 'Close module navigation' : 'Open module navigation');
-      });
-    </script>
   </body>
 </html>

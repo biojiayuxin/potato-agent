@@ -5,10 +5,12 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Genomes - Genome Browser | Potato Research</title>
     <link rel="icon" type="image/png" href="/static/favicon.png" />
-    <link rel="stylesheet" href="/static/genome_browser/styles.css?v=20260728-genomes-parent" />
+    <link rel="stylesheet" href="/static/genome_browser/styles.css?v=20260907-navigation" />
     <link rel="stylesheet" href="/static/shared/feedback.css?v=20260819-feedback" />
     <link rel="stylesheet" href="/static/shared/announcement.css?v=20260906-compact">
     <script src="/static/shared/announcement.js?v=20260906" defer></script>
+    <link rel="stylesheet" href="/static/shared/navigation.css?v=20260908-navigation-mobile-centered" />
+    <script src="/static/shared/navigation.js?v=20260908-navigation-centered" defer></script>
   </head>
   <body>
     <div class="genome-browser-app">
@@ -18,17 +20,7 @@
             <h1 id="portal-title">Potato Agent: AI-Driven Data and Knowledge Exploration on an Agent-Ready Potato Multi-Omics Platform</h1>
           </div>
         </section>
-        <nav class="portal-nav" aria-label="Portal modules">
-          <a class="portal-nav-item" href="/lite">Potato Agent</a>
-          <a class="portal-nav-item active" href="/genomes" aria-current="page">Genomes</a>
-          <a class="portal-nav-item" href="/bulk-rnaseq">Gene Expression</a>
-          <a class="portal-nav-item" href="/wgcna">WGCNA Network</a>
-          <a class="portal-nav-item" href="/spatial">Spatial Expression</a>
-          <a class="portal-nav-item" href="/genes">Genes</a>
-          <button class="portal-nav-item" type="button" disabled>Variants</button>
-          <button class="portal-nav-item" type="button" disabled>Germplasm</button>
-          <a class="portal-nav-item" href="/about">About</a>
-        </nav>
+        <nav class="portal-nav" aria-label="Portal modules" data-portal-module="genome_browser"></nav>
       </header>
 
       <main class="browser-main">

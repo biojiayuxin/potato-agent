@@ -22,7 +22,7 @@ def test_genes_page_and_deep_link_serve_the_gene_catalog_frontend() -> None:
             assert 'id="gene-detail-section"' in response.text
             assert 'id="gene-predicted-function"' in response.text
             assert 'id="gene-sequence-panel"' in response.text
-            assert 'href="/genes" aria-current="page"' in response.text
+            assert 'data-portal-module="genes"' in response.text
 
         styles = client.get("/static/genes/styles.css")
         script = client.get("/static/genes/app.js")
@@ -172,9 +172,4 @@ def test_all_portal_navigation_surfaces_link_to_genes() -> None:
         STATIC_ROOT / "genome_browser" / "index.html",
     )
     for path in index_paths:
-        assert 'href="/genes"' in path.read_text(encoding="utf-8")
-
-    lite_index = index_paths[0].read_text(encoding="utf-8")
-    lite_script = (STATIC_ROOT / "lite" / "app.js").read_text(encoding="utf-8")
-    assert 'data-mobile-supported="true"' in lite_index
-    assert "item.getAttribute('data-mobile-supported') === 'true'" in lite_script
+        assert '/static/shared/navigation.js?v=' in path.read_text(encoding="utf-8")

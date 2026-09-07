@@ -22,7 +22,8 @@ def test_daily_updates_layout_keeps_login_first_on_small_screens() -> None:
     assert "grid-template-columns: minmax(0, 1fr) minmax(400px, 480px);" in styles
     login_view = styles[styles.index(".login-view,") : styles.index(".login-view::before")]
     assert "grid-template-columns: minmax(0, 1fr);" in login_view
-    portal_header = styles[styles.index(".portal-header {") : styles.index(".portal-hero {")]
+    navigation_styles = (REPO_ROOT / "interface/static/shared/navigation.css").read_text(encoding="utf-8")
+    portal_header = navigation_styles.split(".portal-header {", 1)[1].split("}", 1)[0]
     assert "min-width: 0;" in portal_header
     assert "max-width: 100%;" in portal_header
     login_stage = styles[styles.index(".login-stage {") : styles.index(".high-resolution-view")]
@@ -34,8 +35,8 @@ def test_daily_updates_layout_keeps_login_first_on_small_screens() -> None:
     assert ".daily-updates-panel" in mobile
     assert "order: 2;" in mobile
     assert ".high-resolution-view .login-stage" in styles
-    assert "styles.css?v=20260903-message-fork" in index
-    assert "app.js?v=20260903-message-fork" in index
+    assert "styles.css?v=20260907-navigation" in index
+    assert "app.js?v=20260907-navigation" in index
 
 
 def test_daily_updates_hides_redundant_pubmed_metadata_and_uses_larger_type() -> None:

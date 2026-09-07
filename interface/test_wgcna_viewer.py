@@ -16,13 +16,13 @@ from interface import wgcna_viewer as wgcna_viewer_mod
 
 def test_wgcna_entry_and_static_paths_are_prefixed() -> None:
     lite_index = (REPO_ROOT / "interface/static/lite/index.html").read_text(encoding="utf-8")
-    assert '<a class="portal-nav-item" href="/wgcna">WGCNA Network</a>' in lite_index
+    assert 'data-portal-module="lite"' in lite_index
 
     wgcna_index = (REPO_ROOT / "interface/static/wgcna/index.html").read_text(encoding="utf-8")
     assert 'href="/static/wgcna/styles.css' in wgcna_index
     assert 'src="/static/wgcna/vendor/cytoscape.min.js"' in wgcna_index
     assert 'src="/static/wgcna/app.js' in wgcna_index
-    assert 'href="/wgcna" aria-current="page"' in wgcna_index
+    assert 'data-portal-module="wgcna"' in wgcna_index
     assert 'href="/styles.css"' not in wgcna_index
     assert 'src="/app.js"' not in wgcna_index
 

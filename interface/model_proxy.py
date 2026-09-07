@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import hmac
 import ipaddress
 import logging
 import math
 import os
+import sqlite3
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -1061,6 +1063,28 @@ async def admin_usage_aggregate(
             "coverage": "fully consumed successful proxy responses",
             "items": items,
         },
+        headers={"Cache-Control": "no-store"},
+    )
+
+
+@app.get("/internal/admin/usage/daily")
+async def admin_usage_daily(
+    request: Request,
+    start_at: float,
+    end_at: float,
+) -> JSONResponse:
+    _require_admin_usage_access(request)
+    _validate_admin_usage_window(start_at, end_at)
+    try:
+        items = await asyncio.to_thread(
+            token_usage_store.get_admin_usage_daily,
+            start_at=start_at,
+            end_at=end_at,
+        )
+    except (OSError, sqlite3.Error):
+        raise HTTPException(status_code=503, detail="Usage source is unavailable") from None
+    return JSONResponse(
+        content={"time_zone": "Asia/Shanghai", "items": items},
         headers={"Cache-Control": "no-store"},
     )
 

@@ -127,8 +127,6 @@ const dom = {
   dailyUpdatesSentinel: document.getElementById('daily-updates-sentinel'),
   dailyUpdatesLanguageEn: document.getElementById('daily-updates-language-en'),
   dailyUpdatesLanguageZh: document.getElementById('daily-updates-language-zh'),
-  portalNav: document.querySelector('.portal-nav'),
-  portalNavToggle: document.getElementById('portal-nav-toggle'),
   authHomeView: document.getElementById('auth-home-view'),
   shareLoginBanner: document.getElementById('share-login-banner'),
   authPanelHeader: document.getElementById('auth-panel-header'),
@@ -394,8 +392,6 @@ const DAILY_UPDATES_FRESHNESS_MS = 5 * 60 * 1000;
 const DAILY_UPDATES_REFRESH_INTERVAL_MS = 15 * 60 * 1000;
 const EMAIL_VERIFICATION_COUNTDOWN_INTERVAL_MS = 1000;
 const MOBILE_PANEL_MEDIA_QUERY = '(max-width: 1180px)';
-const PORTAL_SMALL_SCREEN_MEDIA_QUERY = '(max-width: 800px)';
-const HIGH_RESOLUTION_NOTICE_PATH = '/static/lite/high-resolution-required.html';
 const SHARE_IMPORT_DEFAULT_RETRY_MS = 1500;
 const SHARE_IMPORT_MAX_RETRY_MS = 60 * 60 * 1000;
 const SHARE_IMPORT_REQUEST_TIMEOUT_MS = 30 * 1000;
@@ -405,10 +401,6 @@ const SHARE_REQUEST_HEADERS = { 'X-Potato-Request': '1' };
 const mobilePanelMediaQuery = typeof window.matchMedia === 'function'
   ? window.matchMedia(MOBILE_PANEL_MEDIA_QUERY)
   : { matches: false };
-const portalSmallScreenMediaQuery = typeof window.matchMedia === 'function'
-  ? window.matchMedia(PORTAL_SMALL_SCREEN_MEDIA_QUERY)
-  : { matches: false };
-
 const applyThemeMode = () => {
   document.documentElement.dataset.themeMode = 'light';
   document.documentElement.dataset.theme = 'light';
@@ -2712,36 +2704,6 @@ const showChatError = (message) => {
     }
     state.chatErrorTimer = null;
   }, 10000);
-};
-
-const setPortalNavExpanded = (expanded) => {
-  const nextExpanded = Boolean(expanded);
-  dom.portalNav?.classList.toggle('expanded', nextExpanded);
-  if (!dom.portalNavToggle) return;
-  dom.portalNavToggle.setAttribute('aria-expanded', nextExpanded ? 'true' : 'false');
-  dom.portalNavToggle.setAttribute(
-    'aria-label',
-    nextExpanded ? 'Close module navigation' : 'Open module navigation'
-  );
-};
-
-const handlePortalNavClick = (event) => {
-  if (dom.portalNavToggle && event.target instanceof Element && dom.portalNavToggle.contains(event.target)) {
-    event.preventDefault();
-    if (!portalSmallScreenMediaQuery.matches) return;
-    setPortalNavExpanded(!dom.portalNav?.classList.contains('expanded'));
-    return;
-  }
-
-  if (!portalSmallScreenMediaQuery.matches) return;
-  const item = event.target instanceof Element
-    ? event.target.closest('.portal-nav-item')
-    : null;
-  if (!item || !dom.portalNav?.contains(item) || item.classList.contains('active')) return;
-  if (item.getAttribute('data-mobile-supported') === 'true') return;
-
-  event.preventDefault();
-  window.location.assign(HIGH_RESOLUTION_NOTICE_PATH);
 };
 
 const isTemporaryConfirmModalOpen = () => Boolean(dom.temporaryConfirmModal && !dom.temporaryConfirmModal.hidden);
@@ -8832,7 +8794,6 @@ const bootstrapSession = async () => {
   }
 };
 
-dom.portalNav?.addEventListener('click', handlePortalNavClick);
 
 dom.dailyUpdatesLanguageEn?.addEventListener('click', () => {
   setDailyUpdatesLanguage('en');
@@ -9427,18 +9388,6 @@ if (typeof mobilePanelMediaQuery.addEventListener === 'function') {
   mobilePanelMediaQuery.addEventListener('change', handleMobilePanelMediaChange);
 } else if (typeof mobilePanelMediaQuery.addListener === 'function') {
   mobilePanelMediaQuery.addListener(handleMobilePanelMediaChange);
-}
-
-const handlePortalSmallScreenMediaChange = () => {
-  if (!portalSmallScreenMediaQuery.matches) {
-    setPortalNavExpanded(false);
-  }
-};
-
-if (typeof portalSmallScreenMediaQuery.addEventListener === 'function') {
-  portalSmallScreenMediaQuery.addEventListener('change', handlePortalSmallScreenMediaChange);
-} else if (typeof portalSmallScreenMediaQuery.addListener === 'function') {
-  portalSmallScreenMediaQuery.addListener(handlePortalSmallScreenMediaChange);
 }
 
 window.addEventListener('hashchange', () => {
