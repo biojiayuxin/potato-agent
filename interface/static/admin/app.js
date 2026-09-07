@@ -77,6 +77,10 @@
 
   function showLogin() {
     stopDashboardPolling();
+    announcementLoaded = false;
+    announcementRecord = null;
+    elementsForAnnouncement.form.reset();
+    updateAnnouncementPreview();
     elements["dashboard-view"].hidden = true;
     elements["login-view"].hidden = false;
     elements.password.value = "";
@@ -90,6 +94,8 @@
     loadOverview();
     loadSystem();
     loadCleanup();
+    loadAnnouncement();
+    announcementStatusTimer = window.setInterval(updateAnnouncementState, 1000);
     state.overviewRefreshTimer = window.setInterval(
       () => loadOverview({ silent: true, skipIfBusy: true }),
       OVERVIEW_REFRESH_INTERVAL_MS
@@ -99,6 +105,7 @@
   }
 
   function stopDashboardPolling() {
+    window.clearInterval(announcementStatusTimer);
     if (state.overviewRefreshTimer) window.clearInterval(state.overviewRefreshTimer);
     if (state.systemRefreshTimer) window.clearInterval(state.systemRefreshTimer);
     if (state.cleanupRefreshTimer) window.clearInterval(state.cleanupRefreshTimer);
@@ -387,6 +394,161 @@
   elements["next-page"].addEventListener("click", () => {
     if (state.page < state.totalPages) { state.page += 1; loadOverview(); }
   });
+
+  const elementsForAnnouncement = Object.fromEntries([
+    "form", "message", "count", "preview-text", "start", "end", "state", "timing",
+    "result", "publish", "save", "withdraw", "reload"
+  ].map((name) => [name, document.getElementById(`announcement-${name}`)]));
+  let announcementRecord = null;
+  let announcementLoaded = false;
+  let announcementBusy = false;
+  let announcementStatusTimer = null;
+  let announcementServerOffset = 0;
+  const announcementLabels = { scheduled: "待生效", active: "展示中", ended: "已结束", withdrawn: "已撤下" };
+  const beijingInputFormatter = new Intl.DateTimeFormat("en-CA", {
+    timeZone: "Asia/Shanghai", year: "numeric", month: "2-digit", day: "2-digit",
+    hour: "2-digit", minute: "2-digit", second: "2-digit", hourCycle: "h23"
+  });
+
+  function beijingInput(value) {
+    if (!value) return "";
+    const parts = Object.fromEntries(beijingInputFormatter.formatToParts(new Date(value)).map(({ type, value: part }) => [type, part]));
+    return `${parts.year}-${parts.month}-${parts.day}T${parts.hour}:${parts.minute}:${parts.second}`;
+  }
+
+  function announcementMode() {
+    return elementsForAnnouncement.form.elements["announcement-mode"].value;
+  }
+
+  function updateAnnouncementControls() {
+    const e = elementsForAnnouncement;
+    e.publish.disabled = announcementBusy || !announcementLoaded;
+    e.save.disabled = announcementBusy || !announcementLoaded || !announcementRecord;
+    e.withdraw.disabled = announcementBusy || !announcementLoaded || !announcementRecord || announcementRecord.withdrawn;
+    e.reload.disabled = announcementBusy;
+    e.message.disabled = announcementBusy;
+    e.end.disabled = announcementBusy;
+    e.start.disabled = announcementBusy || announcementMode() === "immediate";
+    e.start.required = announcementMode() === "scheduled";
+    e.form.querySelectorAll('input[type="radio"]').forEach((input) => { input.disabled = announcementBusy; });
+    e.publish.textContent = announcementRecord ? "重新发布" : "发布";
+  }
+
+  function updateAnnouncementPreview() {
+    const e = elementsForAnnouncement;
+    e["preview-text"].textContent = e.message.value;
+    e.count.textContent = `${Array.from(e.message.value).length} / 500`;
+    e.message.setCustomValidity("");
+  }
+
+  function updateAnnouncementState() {
+    const record = announcementRecord;
+    if (!announcementLoaded) return;
+    const now = Date.now() + announcementServerOffset;
+    const status = !record ? null : record.withdrawn ? "withdrawn"
+      : Date.parse(record.starts_at) > now ? "scheduled"
+        : record.ends_at && Date.parse(record.ends_at) <= now ? "ended" : "active";
+    elementsForAnnouncement.state.textContent = status ? announcementLabels[status] : "未发布";
+    elementsForAnnouncement.timing.textContent = record
+      ? `${formatDate(record.starts_at)} 起 · ${record.ends_at ? `${formatDate(record.ends_at)} 结束` : "至手动撤下"}（北京时间）`
+      : "";
+  }
+
+  function acceptAnnouncement(data) {
+    announcementRecord = data.announcement;
+    announcementLoaded = true;
+    announcementServerOffset = Date.parse(data.server_time) - Date.now();
+    const e = elementsForAnnouncement;
+    e.message.value = announcementRecord?.message || "";
+    e.start.value = beijingInput(announcementRecord?.starts_at);
+    e.end.value = beijingInput(announcementRecord?.ends_at);
+    e.form.elements["announcement-mode"].value = announcementRecord
+      && Date.parse(announcementRecord.starts_at) > Date.now() + announcementServerOffset ? "scheduled" : "immediate";
+    updateAnnouncementPreview();
+    updateAnnouncementState();
+    updateAnnouncementControls();
+  }
+
+  function announcementResult(message, error = false) {
+    const element = elementsForAnnouncement.result;
+    element.textContent = message;
+    element.hidden = !message;
+    element.dataset.error = String(error);
+  }
+
+  async function loadAnnouncement() {
+    if (announcementBusy) return;
+    announcementBusy = true;
+    updateAnnouncementControls();
+    announcementResult("");
+    try {
+      const data = await requestJson("/admin/api/announcement", { cache: "no-store" });
+      if (!elements["dashboard-view"].hidden) acceptAnnouncement(data);
+    } catch (error) {
+      if (error.message !== "unauthorized") announcementResult("通知加载失败，请刷新重试。", true);
+    } finally {
+      announcementBusy = false;
+      updateAnnouncementControls();
+    }
+  }
+
+  function announcementContent(action) {
+    const e = elementsForAnnouncement;
+    const message = e.message.value.trim();
+    e.message.setCustomValidity(!message || Array.from(e.message.value).length > 500 ? "请输入 1 至 500 字符的正文。" : "");
+    e.end.setCustomValidity("");
+    if (!e.form.reportValidity()) return null;
+    const preserveStart = action === "save"
+      && Date.parse(announcementRecord.starts_at) <= Date.now() + announcementServerOffset;
+    const startsAt = announcementMode() === "scheduled" ? new Date(`${e.start.value}+08:00`).toISOString()
+      : preserveStart ? announcementRecord.starts_at : null;
+    const endsAt = e.end.value ? new Date(`${e.end.value}+08:00`).toISOString() : null;
+    const start = startsAt ? Date.parse(startsAt) : Date.now() + announcementServerOffset;
+    if (endsAt && Date.parse(endsAt) <= start) {
+      e.end.setCustomValidity("结束时间必须晚于开始时间。");
+      e.form.reportValidity();
+      return null;
+    }
+    return { message, starts_at: startsAt, ends_at: endsAt };
+  }
+
+  async function changeAnnouncement(action) {
+    if (announcementBusy || !announcementLoaded) return;
+    let payload = action === "withdraw" ? { id: announcementRecord.id } : announcementContent(action);
+    if (!payload) return;
+    if (action === "save") payload.id = announcementRecord.id;
+    announcementBusy = true;
+    updateAnnouncementControls();
+    announcementResult("");
+    try {
+      const data = await requestJson(`/admin/api/announcement${action === "save" ? "" : `/${action}`}`, {
+        method: action === "save" ? "PUT" : "POST",
+        headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload)
+      });
+      if (!elements["dashboard-view"].hidden) {
+        acceptAnnouncement(data);
+        announcementResult(action === "withdraw" ? "通知已撤下。" : action === "save" ? "修改已保存。" : "通知已发布。");
+      }
+      window.dispatchEvent(new Event("announcement:changed"));
+    } catch (error) {
+      if (error.message !== "unauthorized") announcementResult(error.status === 409
+        ? "通知已被替换，请刷新后再修改。" : error.status === 422
+          ? "正文或时间无效，请检查后重试。" : "操作失败，请重试。", true);
+    } finally {
+      announcementBusy = false;
+      updateAnnouncementControls();
+    }
+  }
+
+  elementsForAnnouncement.message.addEventListener("input", updateAnnouncementPreview);
+  elementsForAnnouncement.form.addEventListener("change", () => {
+    elementsForAnnouncement.end.setCustomValidity("");
+    updateAnnouncementControls();
+  });
+  elementsForAnnouncement.form.addEventListener("submit", (event) => { event.preventDefault(); changeAnnouncement("publish"); });
+  elementsForAnnouncement.save.addEventListener("click", () => changeAnnouncement("save"));
+  elementsForAnnouncement.withdraw.addEventListener("click", () => changeAnnouncement("withdraw"));
+  elementsForAnnouncement.reload.addEventListener("click", loadAnnouncement);
 
   bootstrap();
 })();

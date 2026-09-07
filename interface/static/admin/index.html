@@ -6,7 +6,9 @@
   <meta name="color-scheme" content="light">
   <title>Potato Agent 管理</title>
   <link rel="icon" href="/favicon.ico">
-  <link rel="stylesheet" href="/static/admin/styles.css">
+  <link rel="stylesheet" href="/static/admin/styles.css?v=20260906-admin-layout">
+  <link rel="stylesheet" href="/static/shared/announcement.css?v=20260906-compact">
+  <script src="/static/shared/announcement.js?v=20260906" defer></script>
 </head>
 <body>
   <main id="login-view" class="login-view">
@@ -59,6 +61,50 @@
           <div class="metric load-metric"><span>负载 1 / 5 / 15</span><strong id="load-value">--</strong></div>
         </div>
         <p id="sample-time" class="sample-time"></p>
+      </div>
+    </section>
+
+    <section class="announcement-band" aria-labelledby="announcement-heading">
+      <div class="content announcement-content">
+        <div class="section-heading-row">
+          <h2 id="announcement-heading">全站通知</h2>
+          <div class="announcement-heading-actions">
+            <span id="announcement-state" role="status">正在加载</span>
+            <button id="announcement-reload" class="icon-button" type="button" title="刷新通知" aria-label="刷新通知">&#8635;</button>
+          </div>
+        </div>
+        <form id="announcement-form" novalidate>
+          <div class="announcement-copy-grid">
+            <label class="announcement-field" for="announcement-message">
+              <span class="announcement-label">正文 <output id="announcement-count">0 / 500</output></span>
+              <textarea id="announcement-message" rows="1" required></textarea>
+            </label>
+            <div class="announcement-field">
+              <span>条幅预览</span>
+              <div class="announcement-preview"><span id="announcement-preview-text"></span><span aria-hidden="true">&#215;</span></div>
+            </div>
+          </div>
+          <div class="announcement-time-grid">
+            <fieldset class="announcement-mode">
+              <legend>开始方式</legend>
+              <label><input type="radio" name="announcement-mode" value="immediate" checked>立即</label>
+              <label><input type="radio" name="announcement-mode" value="scheduled">定时</label>
+            </fieldset>
+            <label class="announcement-field" for="announcement-start">开始时间（北京时间）
+              <input id="announcement-start" type="datetime-local" step="1" disabled>
+            </label>
+            <label class="announcement-field" for="announcement-end">结束时间（北京时间，可留空）
+              <input id="announcement-end" type="datetime-local" step="1">
+            </label>
+          </div>
+          <p id="announcement-timing" class="announcement-timing"></p>
+          <p id="announcement-result" class="announcement-result" role="status" hidden></p>
+          <div class="announcement-actions">
+            <button id="announcement-publish" class="primary-button" type="submit" disabled>发布</button>
+            <button id="announcement-save" class="quiet-button" type="button" disabled>保存修改</button>
+            <button id="announcement-withdraw" class="quiet-button" type="button" disabled>撤下</button>
+          </div>
+        </form>
       </div>
     </section>
 

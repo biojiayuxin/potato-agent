@@ -29,6 +29,16 @@ _AUTH_DB_INIT_LOCK = threading.RLock()
 _AUTH_DB_IDENTITIES: dict[str, tuple[int, int]] = {}
 
 SCHEMA_SQL = """
+CREATE TABLE IF NOT EXISTS site_announcement (
+    singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+    id TEXT NOT NULL UNIQUE,
+    message TEXT NOT NULL CHECK (length(message) BETWEEN 1 AND 500),
+    starts_at REAL NOT NULL,
+    ends_at REAL CHECK (ends_at IS NULL OR ends_at > starts_at),
+    withdrawn INTEGER NOT NULL DEFAULT 0 CHECK (withdrawn IN (0, 1)),
+    updated_at REAL NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS users (
     id TEXT PRIMARY KEY,
     username TEXT NOT NULL UNIQUE,

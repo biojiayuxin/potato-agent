@@ -250,6 +250,7 @@ from interface.pan_genome import router as pan_genome_router
 from interface.spatial_viewer import router as spatial_viewer_router
 from interface.wgcna_viewer import router as wgcna_viewer_router
 from interface.admin_api import router as admin_router
+from interface.announcement_api import router as announcement_router
 from interface.admin_usage_client import (
     AdminUsageUnavailable,
     reconcile_principals_once,
@@ -3771,6 +3772,7 @@ app.include_router(pan_genome_router)
 app.include_router(spatial_viewer_router)
 app.include_router(wgcna_viewer_router)
 app.include_router(admin_router)
+app.include_router(announcement_router)
 
 
 def _should_refresh_activity_for_request(request: Request) -> bool:
@@ -3783,7 +3785,7 @@ def _should_refresh_activity_for_request(request: Request) -> bool:
         return False
     if path.startswith("/api/bulk-rnaseq/"):
         return False
-    if path == "/api/daily-updates":
+    if path in {"/api/daily-updates", "/api/announcement", "/api/announcement/"}:
         return False
     if path.startswith("/api/genome-browser/"):
         return False

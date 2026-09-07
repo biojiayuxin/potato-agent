@@ -26,7 +26,7 @@ body {
   color: var(--ink);
 }
 
-button, input, select { font: inherit; letter-spacing: 0; }
+button, input, select, textarea { font: inherit; letter-spacing: 0; }
 button { cursor: pointer; }
 button:disabled { cursor: not-allowed; opacity: .48; }
 
@@ -57,7 +57,7 @@ button:disabled { cursor: not-allowed; opacity: .48; }
 
 form { display: grid; gap: 8px; margin-top: 28px; }
 form label, .select-field span, .search-field span { font-size: 13px; font-weight: 650; color: #414a45; }
-input, select {
+input, select, textarea {
   width: 100%;
   min-height: 42px;
   padding: 9px 11px;
@@ -67,7 +67,7 @@ input, select {
   color: var(--ink);
   outline: none;
 }
-input:focus, select:focus { border-color: var(--accent); box-shadow: 0 0 0 3px rgba(23, 107, 82, .13); }
+input:focus, select:focus, textarea:focus { border-color: var(--accent); box-shadow: 0 0 0 3px rgba(23, 107, 82, .13); }
 form input + label { margin-top: 8px; }
 
 .primary-button, .quiet-button, .icon-button, .segments button {
@@ -88,6 +88,35 @@ form input + label { margin-top: 8px; }
 .admin-name { max-width: 240px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--muted); font-size: 13px; }
 
 .system-band { background: #252c28; color: white; padding: 25px 0 23px; }
+.announcement-band { padding: 24px 0; background: var(--surface); border-bottom: 1px solid var(--line); }
+.announcement-content form { margin-top: 18px; gap: 16px; }
+.announcement-heading-actions { display: flex; align-items: center; gap: 12px; font-size: 13px; color: var(--muted); }
+.announcement-heading-actions .icon-button { width: 38px; background: var(--soft); font-size: 22px; }
+.announcement-copy-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 20px; }
+.announcement-field { display: flex; flex-direction: column; gap: 8px; min-width: 0; font-size: 13px; font-weight: 650; }
+.announcement-label { display: flex; justify-content: space-between; gap: 12px; }
+.announcement-label output { font-weight: 400; color: var(--muted); }
+.announcement-field textarea { resize: vertical; height: 31px; min-height: 31px; padding: 3px 8px; font: 400 14px/1.6 system-ui, sans-serif; }
+.announcement-preview { display: grid; grid-template-columns: 24px minmax(0, 1fr) 24px; align-items: start; gap: 8px; padding: 3px max(8px, env(safe-area-inset-right)) 3px max(8px, env(safe-area-inset-left)); background: #fff3be; color: #352e18; border-bottom: 1px solid #decf83; font: 400 14px/1.6 system-ui, sans-serif; text-align: center; }
+#announcement-preview-text { grid-column: 2; min-width: 0; max-height: min(220px, 32vh); max-height: min(220px, 32dvh); overflow: auto; overscroll-behavior: contain; white-space: pre-wrap; overflow-wrap: anywhere; }
+.announcement-preview > span:last-child { grid-column: 3; width: 24px; height: 24px; font: 400 22px/24px system-ui, sans-serif; }
+.announcement-time-grid { display: grid; grid-template-columns: 180px repeat(2, minmax(0, 1fr)); align-items: end; gap: 20px; }
+.announcement-mode { margin: 0; padding: 0; border: 0; min-width: 0; }
+.announcement-mode legend { margin-bottom: 8px; font-size: 13px; font-weight: 650; }
+.announcement-mode label { display: inline-flex; align-items: center; gap: 6px; min-height: 42px; margin-right: 12px; }
+.announcement-mode input { width: 16px; min-height: 16px; margin: 0; accent-color: var(--accent); }
+.announcement-field input { min-width: 0; max-width: 100%; font-weight: 400; }
+.announcement-field input:disabled { background: var(--soft); color: var(--muted); }
+.announcement-timing, .announcement-result { margin: 0; font-size: 13px; line-height: 1.6; overflow-wrap: anywhere; }
+.announcement-timing { color: var(--muted); }
+.announcement-result[data-error="true"] { color: var(--red); }
+.announcement-actions { display: flex; flex-wrap: wrap; gap: 10px; }
+.announcement-actions .primary-button { margin: 0; padding: 7px 16px; }
+
+@media (max-width: 760px) {
+  .announcement-copy-grid, .announcement-time-grid { grid-template-columns: minmax(0, 1fr); gap: 16px; }
+}
+
 .section-heading-row { display: flex; align-items: flex-start; justify-content: space-between; gap: 20px; }
 .section-heading-row h2 { margin: 2px 0 0; font-size: 19px; line-height: 1.25; }
 

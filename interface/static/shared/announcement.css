@@ -1,0 +1,106 @@
+:root {
+  --announcement-height: 0px;
+  --announcement-viewport-height: calc(100vh - var(--announcement-height));
+}
+
+@supports (height: 100dvh) {
+  :root { --announcement-viewport-height: calc(100dvh - var(--announcement-height)); }
+}
+
+.has-announcements body {
+  padding-top: var(--announcement-height);
+  box-sizing: border-box;
+}
+
+.site-announcement {
+  position: fixed;
+  inset: 0 0 auto;
+  z-index: 11000;
+  display: grid;
+  grid-template-columns: 24px minmax(0, 1fr) 24px;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 3px max(8px, env(safe-area-inset-right)) 3px max(8px, env(safe-area-inset-left));
+  border-bottom: 1px solid #decf83;
+  background: #fff3be;
+  color: #352e18;
+  box-sizing: border-box;
+  font: 400 14px/1.6 system-ui, sans-serif;
+  letter-spacing: 0;
+  text-align: center;
+}
+
+.site-announcement[hidden] { display: none !important; }
+
+.site-announcement-message {
+  grid-column: 2;
+  min-width: 0;
+  padding: 0;
+  max-height: min(220px, 32vh);
+  max-height: min(220px, 32dvh);
+  overflow: auto;
+  overscroll-behavior: contain;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  box-sizing: border-box;
+}
+
+.site-announcement-close {
+  grid-column: 3;
+  width: 24px;
+  height: 24px;
+  min-height: 24px;
+  padding: 0;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: #352e18;
+  font: 400 22px/1 system-ui, sans-serif;
+  cursor: pointer;
+}
+
+.site-announcement-close:hover { background: #f3e4a4; }
+.site-announcement-close:focus-visible,
+.site-announcement-message:focus-visible { outline: 2px solid #75601b; outline-offset: -2px; }
+
+/* Full-height surfaces share the space left below the measured banner. */
+.has-announcements .app-shell,
+.has-announcements .login-view,
+.has-announcements .genes-app,
+.has-announcements .genomes-app,
+.has-announcements .genome-browser-app,
+.has-announcements .bulk-app,
+.has-announcements .wgcna-app,
+.has-announcements .spatial-app { min-height: var(--announcement-viewport-height); }
+
+.has-announcements .workspace-view,
+.has-announcements .spatial-app { height: var(--announcement-viewport-height); }
+
+.has-announcements .mobile-panel-backdrop,
+.has-announcements .feedback-modal,
+.has-announcements .approval-modal,
+.has-announcements .password-modal,
+.has-announcements .share-modal,
+.has-announcements .temporary-confirm-modal,
+.has-announcements .update-notes-backdrop { top: var(--announcement-height); }
+
+.has-announcements .update-notes-panel {
+  top: calc(50% + var(--announcement-height) / 2);
+  max-height: min(560px, calc(var(--announcement-viewport-height) - 56px));
+}
+
+@media (max-width: 1180px) {
+  .has-announcements .workspace-view .sidebar,
+  .has-announcements .workspace-view .files-panel {
+    top: var(--announcement-height);
+    height: var(--announcement-viewport-height);
+  }
+  .has-announcements .update-notes-panel {
+    top: calc(var(--announcement-height) + 12px + env(safe-area-inset-top));
+    max-height: none;
+  }
+}
+
+@media (max-width: 860px) {
+  .has-announcements .spatial-app { height: auto; }
+}
