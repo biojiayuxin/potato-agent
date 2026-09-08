@@ -173,7 +173,7 @@ def test_dashboard_period_chart_history_and_layout(site, browser, tmp_path, widt
     expect(page.locator('.day-bar')).to_have_count(30)
 
     assert page.evaluate("document.documentElement.scrollWidth <= innerWidth")
-    expect(page.locator('#portal-title')).to_have_text('Potato Agent: AI-Driven Data and Knowledge Exploration on an Agent-Ready Potato Multi-Omics Platform')
+    expect(page.locator('#portal-title')).to_have_text('PotatoOmics: An AI-powered multi-omics database for intelligent Q&A and skills-based informatics analyses')
     expect(page.locator('.dashboard-title-row .admin-link')).to_be_visible()
     assert page.locator('.bar-fill').evaluate_all("bars => bars.every(bar => bar.getBoundingClientRect().height > 0)")
     assert page.evaluate("""() => [...document.querySelectorAll('main h2, main h3, main h4, main h5, main dd')].filter(e => e.getClientRects().length).every(e => e.scrollWidth <= e.clientWidth + 1)""")
