@@ -10,6 +10,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 import pytest
+import yaml
 
 
 SCRIPT_PATH = (
@@ -42,11 +43,13 @@ def _write_config(hermes_home: Path, base_url: str, *, token: str = TOKEN) -> No
     )
 
 
-def _run(hermes_home: Path, *arguments: str) -> subprocess.CompletedProcess[str]:
+def _run(
+    hermes_home: Path, *arguments: str, python_options: tuple[str, ...] = ()
+) -> subprocess.CompletedProcess[str]:
     env = os.environ.copy()
     env["HERMES_HOME"] = str(hermes_home)
     return subprocess.run(
-        [sys.executable, str(SCRIPT_PATH), *arguments],
+        [sys.executable, *python_options, str(SCRIPT_PATH), *arguments],
         capture_output=True,
         text=True,
         check=False,
@@ -58,11 +61,15 @@ def _run(hermes_home: Path, *arguments: str) -> subprocess.CompletedProcess[str]
 class _ProxyServer(ThreadingHTTPServer):
     response_status = 200
     response_payload: dict = {}
+    response_body: bytes | None = None
+    response_headers: dict = {}
     captured: dict = {}
+    request_count = 0
 
 
 class _ProxyHandler(BaseHTTPRequestHandler):
     def do_POST(self) -> None:  # noqa: N802
+        self.server.request_count += 1
         length = int(self.headers.get("content-length", "0"))
         body = self.rfile.read(length)
         self.server.captured = {
@@ -70,10 +77,14 @@ class _ProxyHandler(BaseHTTPRequestHandler):
             "authorization": self.headers.get("authorization"),
             "body": json.loads(body),
         }
-        rendered = json.dumps(self.server.response_payload).encode("utf-8")
+        rendered = self.server.response_body
+        if rendered is None:
+            rendered = json.dumps(self.server.response_payload).encode("utf-8")
         self.send_response(self.server.response_status)
         self.send_header("content-type", "application/json")
         self.send_header("content-length", str(len(rendered)))
+        for name, value in self.server.response_headers.items():
+            self.send_header(name, value)
         self.end_headers()
         self.wfile.write(rendered)
 
@@ -275,3 +286,146 @@ def test_client_url_builder_accepts_literal_ipv4_and_ipv6_loopback() -> None:
         module._search_url("https://[::1]:8765/v1")
         == "https://[::1]:8765/v1/search"
     )
+
+
+def test_client_runs_with_only_pyyaml_and_ignores_environment_proxies(
+    tmp_path, proxy_server, monkeypatch
+) -> None:
+    hermes_home = tmp_path / "hermes"
+    port = proxy_server.server_address[1]
+    _write_config(hermes_home, f"http://127.0.0.1:{port}/v1")
+    proxy_server.response_payload = _success_payload()
+    packages = tmp_path / "packages"
+    packages.mkdir()
+    (packages / "yaml").symlink_to(Path(yaml.__file__).parent, target_is_directory=True)
+    monkeypatch.setenv("PYTHONPATH", str(packages))
+    for name in ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY"):
+        monkeypatch.setenv(name, "http://127.0.0.1:1")
+        monkeypatch.setenv(name.lower(), "http://127.0.0.1:1")
+    monkeypatch.setenv("NO_PROXY", "")
+    monkeypatch.setenv("no_proxy", "")
+
+    query = "caf\u00e9 \u641c\u7d22"
+    result = _run(hermes_home, query, python_options=("-S",))
+
+    assert result.returncode == 0, result.stderr
+    assert json.loads(result.stdout.splitlines()[1]) == _success_payload()
+    assert proxy_server.captured["body"]["query"] == query
+    assert proxy_server.request_count == 1
+
+
+def test_client_help_and_missing_dependency_without_site_packages(
+    tmp_path, monkeypatch
+) -> None:
+    monkeypatch.delenv("PYTHONPATH", raising=False)
+    help_result = _run(tmp_path, "--help", python_options=("-S",))
+    assert help_result.returncode == 0
+
+    result = _run(tmp_path, "x", python_options=("-S",))
+    assert result.returncode == 1
+    assert json.loads(result.stdout.splitlines()[1])["error_code"] == "client_dependency"
+    assert not result.stderr
+
+
+def test_client_uses_default_hermes_home_and_parses_yaml(tmp_path, monkeypatch) -> None:
+    module = _load_module()
+    hermes_home = tmp_path / ".hermes"
+    hermes_home.mkdir()
+    (hermes_home / "config.yaml").write_text(
+        f'defaults: &proxy {{api_key: "{TOKEN}", base_url: "http://127.0.0.1:8765/v1"}}\n'
+        "model:\n"
+        "  <<: *proxy\n"
+        "  default: 'example:model' # retained Hermes configuration\n",
+        encoding="utf-8",
+    )
+    monkeypatch.delenv("HERMES_HOME", raising=False)
+    monkeypatch.setenv("HOME", str(tmp_path))
+
+    config = module._load_config()
+
+    assert config.token == TOKEN
+    assert config.search_url == "http://127.0.0.1:8765/v1/search"
+
+
+@pytest.mark.parametrize("status", [301, 302, 303, 307, 308])
+def test_client_does_not_follow_redirects(tmp_path, proxy_server, status) -> None:
+    hermes_home = tmp_path / "hermes"
+    port = proxy_server.server_address[1]
+    _write_config(hermes_home, f"http://127.0.0.1:{port}/v1")
+    proxy_server.response_status = status
+    proxy_server.response_headers = {"Location": f"http://127.0.0.1:{port}/redirected"}
+    proxy_server.response_payload = _success_payload()
+
+    result = _run(hermes_home, "x")
+
+    assert result.returncode == 1
+    assert json.loads(result.stdout.splitlines()[1])["error_code"] == "proxy_error"
+    assert proxy_server.request_count == 1
+    assert proxy_server.captured["path"] == "/v1/search"
+    assert TOKEN not in result.stdout
+    assert not result.stderr
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        b"not JSON",
+        b"\xff",
+        b"null",
+        b"{}",
+        b'{"success":true,"results":[null],"meta":{}}',
+        json.dumps(_success_payload("x" * (64 * 1024))).encode(),
+        json.dumps(
+            {**_success_payload(), "meta": {"credits_used": float("nan")}}
+        ).encode(),
+    ],
+    ids=[
+        "invalid-json", "invalid-utf8", "null", "empty", "invalid-result", "oversized", "nan"
+    ],
+)
+def test_client_handles_invalid_responses_without_tracebacks(
+    tmp_path, proxy_server, body
+) -> None:
+    hermes_home = tmp_path / "hermes"
+    port = proxy_server.server_address[1]
+    _write_config(hermes_home, f"http://127.0.0.1:{port}/v1")
+    proxy_server.response_body = body
+
+    result = _run(hermes_home, "x")
+
+    assert result.returncode == 1
+    assert json.loads(result.stdout.splitlines()[1])["error_code"] == "proxy_error"
+    assert not result.stderr
+
+
+@pytest.mark.parametrize("failure", [TimeoutError, ConnectionRefusedError])
+def test_client_reports_network_failure_without_retrying(
+    tmp_path, monkeypatch, capsys, failure
+) -> None:
+    module = _load_module()
+    _write_config(tmp_path / "hermes", "http://127.0.0.1:8765/v1")
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / "hermes"))
+    calls = []
+
+    def fail_request(*args, **kwargs):
+        calls.append(args)
+        raise failure("private network details")
+
+    monkeypatch.setattr(module.HTTPConnection, "request", fail_request)
+
+    assert module.main(["x"]) == 1
+    captured = capsys.readouterr()
+    payload = json.loads(captured.out.splitlines()[1])
+    assert payload["error_code"] == "proxy_unavailable"
+    assert payload["retryable"] is True
+    assert len(calls) == 1
+    assert "private network details" not in captured.out
+    assert not captured.err
+
+
+@pytest.mark.parametrize("timeout", ["nan", "inf", "0", "61", "not-a-number"])
+def test_client_rejects_invalid_timeout(timeout) -> None:
+    module = _load_module()
+    with pytest.raises(SystemExit) as exc:
+        module.build_parser().parse_args(["x", "--timeout", timeout])
+    assert exc.value.code == 2

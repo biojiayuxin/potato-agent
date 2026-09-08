@@ -4,26 +4,25 @@ from __future__ import annotations
 import argparse
 import ipaddress
 import json
-import math
 import os
 import sys
 from dataclasses import dataclass
+from http.client import HTTPConnection, HTTPException, HTTPSConnection
 from pathlib import Path
 from typing import Any, Sequence
 from urllib.parse import urlsplit
 
-import httpx
-import yaml
-
 
 MAX_CONFIG_BYTES = 1024 * 1024
 MAX_PROXY_RESPONSE_BYTES = 64 * 1024
-MIN_TIMEOUT_SECONDS = 1.0
-MAX_TIMEOUT_SECONDS = 60.0
 DEFAULT_TIMEOUT_SECONDS = 30.0
 VALID_TOPICS = ("general", "news", "finance")
 VALID_TIME_RANGES = ("day", "week", "month", "year")
 ERROR_MESSAGES = {
+    "client_config": "Web search client is not configured",
+    "client_dependency": "Run with a Python environment containing PyYAML",
+    "proxy_error": "Web search proxy returned an invalid response",
+    "proxy_unavailable": "Web search proxy is unavailable",
     "unauthorized": "Web search authorization failed",
     "search_forbidden": "This principal cannot use web search",
     "invalid_request": "Invalid web search request",
@@ -41,7 +40,6 @@ ERROR_MESSAGES = {
 @dataclass
 class ClientFailure(Exception):
     error_code: str
-    message: str
     retryable: bool = False
     retry_after_seconds: int | None = None
 
@@ -52,55 +50,35 @@ class ProxyConfig:
     search_url: str
 
 
-def _safe_failure(code: str, *, retry_after_seconds: int | None = None) -> ClientFailure:
-    known_code = code if code in ERROR_MESSAGES else "proxy_error"
-    message = ERROR_MESSAGES.get(known_code, "Web search request failed")
-    retryable = known_code in {
-        "rate_limited",
-        "provider_rate_limited",
-        "provider_timeout",
-        "provider_error",
-    }
-    return ClientFailure(known_code, message, retryable, retry_after_seconds)
-
-
 def _load_config() -> ProxyConfig:
-    raw_home = os.getenv("HERMES_HOME")
-    if not raw_home:
-        raise ClientFailure("client_config", "Web search client is not configured")
-    hermes_home = Path(raw_home)
+    try:
+        import yaml
+    except ImportError as exc:
+        raise ClientFailure("client_dependency") from exc
+
+    hermes_home = Path(os.getenv("HERMES_HOME") or Path.home() / ".hermes")
     if not hermes_home.is_absolute():
-        raise ClientFailure("client_config", "Web search client is not configured")
-    config_path = hermes_home / "config.yaml"
+        raise ClientFailure("client_config")
     try:
-        if config_path.stat().st_size > MAX_CONFIG_BYTES:
-            raise ClientFailure("client_config", "Web search client is not configured")
-        raw_config = config_path.read_bytes()
-    except (OSError, ValueError) as exc:
-        raise ClientFailure(
-            "client_config", "Web search client is not configured"
-        ) from exc
-    if len(raw_config) > MAX_CONFIG_BYTES:
-        raise ClientFailure("client_config", "Web search client is not configured")
-    try:
+        with (hermes_home / "config.yaml").open("rb") as config_file:
+            raw_config = config_file.read(MAX_CONFIG_BYTES + 1)
+        if len(raw_config) > MAX_CONFIG_BYTES:
+            raise ValueError("config too large")
         config = yaml.safe_load(raw_config)
-    except yaml.YAMLError as exc:
-        raise ClientFailure(
-            "client_config", "Web search client is not configured"
-        ) from exc
+    except (OSError, ValueError, yaml.YAMLError) as exc:
+        raise ClientFailure("client_config") from exc
     if not isinstance(config, dict) or not isinstance(config.get("model"), dict):
-        raise ClientFailure("client_config", "Web search client is not configured")
+        raise ClientFailure("client_config")
     model = config["model"]
     token = model.get("api_key")
     base_url = model.get("base_url")
     if (
         not isinstance(token, str)
         or not token.startswith("pmp_")
-        or not token.strip()
         or any(character.isspace() for character in token)
         or not isinstance(base_url, str)
     ):
-        raise ClientFailure("client_config", "Web search client is not configured")
+        raise ClientFailure("client_config")
     return ProxyConfig(token=token, search_url=_search_url(base_url))
 
 
@@ -109,9 +87,7 @@ def _search_url(base_url: str) -> str:
         parsed = urlsplit(base_url)
         port = parsed.port
     except ValueError as exc:
-        raise ClientFailure(
-            "client_config", "Web search client is not configured"
-        ) from exc
+        raise ClientFailure("client_config") from exc
     if (
         parsed.scheme not in {"http", "https"}
         or parsed.username is not None
@@ -123,15 +99,13 @@ def _search_url(base_url: str) -> str:
         or port is None
         or not 1 <= port <= 65535
     ):
-        raise ClientFailure("client_config", "Web search client is not configured")
+        raise ClientFailure("client_config")
     try:
         address = ipaddress.ip_address(parsed.hostname)
     except ValueError as exc:
-        raise ClientFailure(
-            "client_config", "Web search client is not configured"
-        ) from exc
+        raise ClientFailure("client_config") from exc
     if not address.is_loopback:
-        raise ClientFailure("client_config", "Web search client is not configured")
+        raise ClientFailure("client_config")
     host = f"[{address.compressed}]" if address.version == 6 else address.compressed
     return f"{parsed.scheme}://{host}:{port}/v1/search"
 
@@ -141,13 +115,8 @@ def _timeout(value: str) -> float:
         parsed = float(value)
     except ValueError as exc:
         raise argparse.ArgumentTypeError("timeout must be a number") from exc
-    if (
-        not math.isfinite(parsed)
-        or not MIN_TIMEOUT_SECONDS <= parsed <= MAX_TIMEOUT_SECONDS
-    ):
-        raise argparse.ArgumentTypeError(
-            f"timeout must be between {MIN_TIMEOUT_SECONDS:g} and {MAX_TIMEOUT_SECONDS:g} seconds"
-        )
+    if not 1 <= parsed <= 60:
+        raise argparse.ArgumentTypeError("timeout must be between 1 and 60 seconds")
     return parsed
 
 
@@ -176,23 +145,12 @@ def _request_payload(args: argparse.Namespace) -> dict[str, Any]:
     return payload
 
 
-def _read_proxy_response(response: httpx.Response) -> bytes:
-    chunks: list[bytes] = []
-    received = 0
-    for chunk in response.iter_bytes():
-        received += len(chunk)
-        if received > MAX_PROXY_RESPONSE_BYTES:
-            raise ClientFailure("proxy_error", "Web search proxy returned too much data")
-        chunks.append(chunk)
-    return b"".join(chunks)
-
-
 def _proxy_error(payload: Any) -> ClientFailure:
     if not isinstance(payload, dict) or payload.get("success") is not False:
-        return ClientFailure("proxy_error", "Web search proxy returned an invalid response")
+        return ClientFailure("proxy_error")
     code = payload.get("error_code")
     if not isinstance(code, str):
-        return ClientFailure("proxy_error", "Web search proxy returned an invalid response")
+        return ClientFailure("proxy_error")
     retry_after = payload.get("retry_after_seconds")
     if (
         isinstance(retry_after, bool)
@@ -200,10 +158,15 @@ def _proxy_error(payload: Any) -> ClientFailure:
         and (not isinstance(retry_after, int) or not 1 <= retry_after <= 3600)
     ):
         retry_after = None
-    return _safe_failure(code, retry_after_seconds=retry_after)
+    code = code if code in ERROR_MESSAGES else "proxy_error"
+    retryable = code in {
+        "rate_limited", "provider_rate_limited", "provider_timeout", "provider_error"
+    }
+    return ClientFailure(code, retryable, retry_after)
 
 
 def _validated_success(payload: Any) -> dict[str, Any]:
+    # The local proxy validates and normalizes result fields and provider metadata.
     if (
         not isinstance(payload, dict)
         or payload.get("success") is not True
@@ -211,79 +174,42 @@ def _validated_success(payload: Any) -> dict[str, Any]:
         or not isinstance(payload.get("meta"), dict)
         or len(payload["results"]) > 10
     ):
-        raise ClientFailure("proxy_error", "Web search proxy returned an invalid response")
-    expected_fields = {"title", "url", "content", "score", "published_date"}
-    for result in payload["results"]:
-        if not isinstance(result, dict) or set(result) != expected_fields:
-            raise ClientFailure(
-                "proxy_error", "Web search proxy returned an invalid response"
-            )
-        if not isinstance(result["url"], str):
-            raise ClientFailure(
-                "proxy_error", "Web search proxy returned an invalid response"
-            )
-        for field in ("title", "content", "published_date"):
-            if result[field] is not None and not isinstance(result[field], str):
-                raise ClientFailure(
-                    "proxy_error", "Web search proxy returned an invalid response"
-                )
-        score = result["score"]
-        if score is not None and (
-            isinstance(score, bool)
-            or not isinstance(score, (int, float))
-            or not math.isfinite(float(score))
-        ):
-            raise ClientFailure(
-                "proxy_error", "Web search proxy returned an invalid response"
-            )
-    meta = payload["meta"]
-    if (
-        meta.get("provider") != "tavily"
-        or meta.get("search_depth") != "basic"
-        or meta.get("topic") not in VALID_TOPICS
-        or isinstance(meta.get("result_count"), bool)
-        or meta.get("result_count") != len(payload["results"])
-    ):
-        raise ClientFailure("proxy_error", "Web search proxy returned an invalid response")
-    credits = meta.get("credits_used")
-    if credits is not None and (
-        isinstance(credits, bool)
-        or not isinstance(credits, (int, float))
-        or not math.isfinite(float(credits))
-        or credits < 0
-    ):
-        raise ClientFailure("proxy_error", "Web search proxy returned an invalid response")
+        raise ClientFailure("proxy_error")
+    if any(not isinstance(result, dict) for result in payload["results"]):
+        raise ClientFailure("proxy_error")
     return payload
 
 
 def query_proxy(config: ProxyConfig, args: argparse.Namespace) -> dict[str, Any]:
-    timeout = httpx.Timeout(args.timeout, connect=min(5.0, args.timeout))
+    url = urlsplit(config.search_url)
+    connection_type = HTTPSConnection if url.scheme == "https" else HTTPConnection
+    # Connect directly to the validated loopback address, without proxies or redirects.
+    connection = connection_type(url.hostname, url.port, timeout=args.timeout)
     try:
-        with httpx.Client(timeout=timeout, follow_redirects=False) as client:
-            with client.stream(
-                "POST",
-                config.search_url,
-                headers={"Authorization": f"Bearer {config.token}"},
-                json=_request_payload(args),
-            ) as response:
-                raw_body = _read_proxy_response(response)
-    except ClientFailure:
-        raise
-    except (httpx.TimeoutException, httpx.NetworkError) as exc:
-        raise ClientFailure(
-            "proxy_unavailable", "Web search proxy is unavailable", True
-        ) from exc
-    except httpx.HTTPError as exc:
-        raise ClientFailure(
-            "proxy_error", "Web search proxy request failed", True
-        ) from exc
+        connection.request(
+            "POST",
+            url.path,
+            body=json.dumps(_request_payload(args)).encode("utf-8"),
+            headers={
+                "Authorization": f"Bearer {config.token}",
+                "Content-Type": "application/json",
+            },
+        )
+        response = connection.getresponse()
+        raw_body = response.read(MAX_PROXY_RESPONSE_BYTES + 1)
+    except OSError as exc:
+        raise ClientFailure("proxy_unavailable", retryable=True) from exc
+    except HTTPException as exc:
+        raise ClientFailure("proxy_error", retryable=True) from exc
+    finally:
+        connection.close()
+    if len(raw_body) > MAX_PROXY_RESPONSE_BYTES:
+        raise ClientFailure("proxy_error")
     try:
         payload = json.loads(raw_body.decode("utf-8"))
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-        raise ClientFailure(
-            "proxy_error", "Web search proxy returned an invalid response"
-        ) from exc
-    if not 200 <= response.status_code < 300:
+        raise ClientFailure("proxy_error") from exc
+    if not 200 <= response.status < 300:
         raise _proxy_error(payload)
     return _validated_success(payload)
 
@@ -291,7 +217,7 @@ def query_proxy(config: ProxyConfig, args: argparse.Namespace) -> dict[str, Any]
 def _failure_payload(failure: ClientFailure) -> dict[str, Any]:
     payload: dict[str, Any] = {
         "success": False,
-        "error": failure.message,
+        "error": ERROR_MESSAGES[failure.error_code],
         "error_code": failure.error_code,
         "retryable": failure.retryable,
     }
@@ -301,9 +227,12 @@ def _failure_payload(failure: ClientFailure) -> dict[str, Any]:
 
 
 def emit_envelope(payload: dict[str, Any]) -> None:
-    rendered = json.dumps(
-        payload, ensure_ascii=False, allow_nan=False, separators=(",", ":")
-    )
+    try:
+        rendered = json.dumps(
+            payload, ensure_ascii=False, allow_nan=False, separators=(",", ":")
+        )
+    except ValueError as exc:
+        raise ClientFailure("proxy_error") from exc
     rendered = (
         rendered.replace("&", "\\u0026")
         .replace("<", "\\u003c")
@@ -320,11 +249,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     try:
         config = _load_config()
-        result = query_proxy(config, args)
+        emit_envelope(query_proxy(config, args))
     except ClientFailure as failure:
         emit_envelope(_failure_payload(failure))
         return 1
-    emit_envelope(result)
     return 0
 
 

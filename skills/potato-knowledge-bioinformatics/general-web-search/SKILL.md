@@ -7,17 +7,20 @@ license: MIT
 metadata:
   hermes:
     tags: [web-search, current-information, news, finance, Tavily]
-prerequisites:
-  commands: [python3]
+required_commands: [python3]
 ---
 
 # General Web Search
+
+通过 Hermes 的 `terminal` 工具运行下面的命令。`${HERMES_SKILL_DIR}` 由 `skill_view` 加载技能时替换为实际目录；若仍显示占位符，使用 `skill_view` 返回的 `skill_dir`。调用不要求切换工作目录。
 
 先把用户问题改写成不含秘密、个人信息或私人数据的最小必要 query。默认只搜索一次并返回 5 条；只有结果确实不足时，才有针对性地改写 query 再搜索。不要形成自动重试循环。
 
 ```bash
 python3 "${HERMES_SKILL_DIR}/scripts/query_general_web_search.py" "SEARCH QUERY"
 ```
+
+脚本自动读取 `${HERMES_HOME:-$HOME/.hermes}/config.yaml` 中的本地代理配置，不需要传入 Key 或服务地址。HTTP 请求只用 Python 标准库；唯一第三方依赖是 Hermes 已依赖的 `PyYAML`，用于解析配置。若返回 `client_dependency`，改用已安装 Hermes 的 Python 环境运行。
 
 需要时可使用：
 
