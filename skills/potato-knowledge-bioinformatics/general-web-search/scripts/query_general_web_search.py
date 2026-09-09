@@ -15,7 +15,7 @@ from urllib.parse import urlsplit
 
 MAX_CONFIG_BYTES = 1024 * 1024
 MAX_PROXY_RESPONSE_BYTES = 64 * 1024
-DEFAULT_TIMEOUT_SECONDS = 30.0
+DEFAULT_TIMEOUT_SECONDS = 60.0
 VALID_TOPICS = ("general", "news", "finance")
 VALID_TIME_RANGES = ("day", "week", "month", "year")
 ERROR_MESSAGES = {

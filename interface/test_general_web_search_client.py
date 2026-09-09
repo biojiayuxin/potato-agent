@@ -127,6 +127,32 @@ def _success_payload(content: str = "snippet") -> dict:
     }
 
 
+def test_client_default_timeout_leaves_room_for_backend_deadline(
+    proxy_server, monkeypatch
+) -> None:
+    from interface.web_search import SEARCH_TIMEOUT_SECONDS
+
+    module = _load_module()
+    args = module.build_parser().parse_args(["x"])
+    assert SEARCH_TIMEOUT_SECONDS == 50
+    assert args.timeout == 60
+    captured = []
+    connection_type = module.HTTPConnection
+
+    def connection(*args, **kwargs):
+        captured.append(kwargs["timeout"])
+        return connection_type(*args, **kwargs)
+
+    monkeypatch.setattr(module, "HTTPConnection", connection)
+    proxy_server.response_payload = _success_payload()
+    port = proxy_server.server_address[1]
+    config = module.ProxyConfig(TOKEN, f"http://127.0.0.1:{port}/v1/search")
+
+    assert module.query_proxy(config, args) == _success_payload()
+    assert captured == [60]
+    assert proxy_server.request_count == 1
+
+
 def test_client_uses_fixed_search_path_and_token_only_in_header(
     tmp_path, proxy_server
 ) -> None:

@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import ipaddress
 import json
+import logging
 import math
 import re
 import time
@@ -21,13 +22,18 @@ from interface import token_usage_store
 from interface.secret_config import SecretConfigurationError, load_secret
 
 
+logger = logging.getLogger(__name__)
+
 TAVILY_SEARCH_URL = "https://api.tavily.com/search"
 TAVILY_API_KEY_ENVIRONMENT = "TAVILY_API_KEY"
 TAVILY_API_KEY_CREDENTIAL = "tavily-api-key"
 SEARCH_REQUEST_LIMIT_BYTES = 16 * 1024
 TAVILY_RESPONSE_LIMIT_BYTES = 512 * 1024
 SEARCH_RESPONSE_LIMIT_BYTES = 64 * 1024
-SEARCH_TIMEOUT_SECONDS = 30.0
+SEARCH_TIMEOUT_SECONDS = 50.0
+SEARCH_CONNECT_TIMEOUT_SECONDS = 10.0
+SEARCH_CONNECT_RETRIES = 2
+SEARCH_CONNECT_RETRY_DELAY_SECONDS = 0.5
 DEFAULT_RETRY_AFTER_SECONDS = 60
 MAX_RETRY_AFTER_SECONDS = 3600
 TITLE_LIMIT = 1000
@@ -574,7 +580,10 @@ async def _call_tavily(
     *,
     transport: httpx.AsyncBaseTransport | None,
 ) -> SearchOutcome:
-    timeout = httpx.Timeout(20.0, connect=5.0, write=10.0, pool=5.0)
+    started_at = time.monotonic()
+    timeout = httpx.Timeout(
+        20.0, connect=SEARCH_CONNECT_TIMEOUT_SECONDS, write=10.0, pool=5.0
+    )
     try:
         async with asyncio.timeout(SEARCH_TIMEOUT_SECONDS):
             async with httpx.AsyncClient(
@@ -582,12 +591,24 @@ async def _call_tavily(
                 follow_redirects=False,
                 transport=transport,
             ) as client:
-                async with client.stream(
+                request = client.build_request(
                     "POST",
                     TAVILY_SEARCH_URL,
                     headers={"Authorization": f"Bearer {api_key}"},
                     json=_provider_payload(search),
-                ) as response:
+                )
+                # Only retry before a connection is established, not a sent search.
+                for attempt in range(SEARCH_CONNECT_RETRIES + 1):
+                    try:
+                        response = await client.send(request, stream=True)
+                        break
+                    except (httpx.ConnectError, httpx.ConnectTimeout):
+                        if attempt == SEARCH_CONNECT_RETRIES:
+                            raise
+                        await asyncio.sleep(
+                            SEARCH_CONNECT_RETRY_DELAY_SECONDS * 2**attempt
+                        )
+                try:
                     request_id = _safe_request_id(
                         response.headers.get("x-request-id")
                         or response.headers.get("request-id")
@@ -612,13 +633,25 @@ async def _call_tavily(
                         if received > TAVILY_RESPONSE_LIMIT_BYTES:
                             raise _provider_error()
                         chunks.append(chunk)
+                finally:
+                    await response.aclose()
     except SearchFailure:
         raise
     except (TimeoutError, httpx.TimeoutException) as exc:
+        logger.warning(
+            "Web search provider timed out (type=%s, duration_ms=%d)",
+            type(exc).__name__,
+            int((time.monotonic() - started_at) * 1000),
+        )
         raise SearchFailure(
             504, "provider_timeout", "Web search provider timed out", True
         ) from exc
     except httpx.HTTPError as exc:
+        logger.warning(
+            "Web search provider request failed (type=%s, duration_ms=%d)",
+            type(exc).__name__,
+            int((time.monotonic() - started_at) * 1000),
+        )
         raise SearchFailure(
             502,
             "provider_error",

@@ -46,6 +46,153 @@ def _search_client(tmp_path, monkeypatch, handler):
     return client, model_proxy
 
 
+@pytest.mark.parametrize("failure", [httpx.ConnectTimeout, httpx.ConnectError])
+def test_search_recovers_after_two_connection_failures(
+    tmp_path, monkeypatch, failure
+) -> None:
+    calls = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(request)
+        if len(calls) <= 2:
+            raise failure("private connection details", request=request)
+        return httpx.Response(200, json=_success_payload())
+
+    client, model_proxy = _search_client(tmp_path, monkeypatch, handler)
+    monkeypatch.setattr(model_proxy.web_search, "SEARCH_CONNECT_RETRY_DELAY_SECONDS", 0)
+
+    response = client.post("/v1/search", headers=_headers(), json={"query": "x"})
+
+    assert response.status_code == 200
+    assert len(calls) == 3
+    assert all(request.extensions["timeout"]["connect"] == 10 for request in calls)
+    assert model_proxy.app.state.web_search_limiter._active == 0
+    with sqlite3.connect(tmp_path / "usage.db") as conn:
+        rows = conn.execute(
+            "select status_code, credits_used from web_search_usage_requests"
+        ).fetchall()
+    assert rows == [(200, 1)]
+
+
+@pytest.mark.parametrize(
+    ("failure", "status", "error_code"),
+    [
+        (httpx.ConnectTimeout, 504, "provider_timeout"),
+        (httpx.ConnectError, 502, "provider_error"),
+    ],
+)
+def test_search_stops_after_two_connection_retries_and_logs_safely(
+    tmp_path, monkeypatch, caplog, failure, status, error_code
+) -> None:
+    calls = 0
+    query = "private query sentinel"
+    details = f"private connection details {TAVILY_FIXTURE_KEY} {query}"
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        raise failure(details, request=request)
+
+    client, model_proxy = _search_client(tmp_path, monkeypatch, handler)
+    monkeypatch.setattr(model_proxy.web_search, "SEARCH_CONNECT_RETRY_DELAY_SECONDS", 0)
+
+    response = client.post("/v1/search", headers=_headers(), json={"query": query})
+
+    assert response.status_code == status
+    assert response.json()["error_code"] == error_code
+    assert calls == 3
+    assert model_proxy.app.state.web_search_limiter._active == 0
+    assert f"type={failure.__name__}" in caplog.text
+    assert "duration_ms=" in caplog.text
+    for secret in (query, TAVILY_FIXTURE_KEY, USER_TOKEN, details):
+        assert secret not in caplog.text
+        assert secret not in response.text
+    assert all(record.exc_info is None for record in caplog.records)
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [httpx.ReadTimeout, httpx.WriteTimeout, httpx.PoolTimeout, httpx.RemoteProtocolError],
+)
+def test_search_does_not_retry_errors_after_connecting(
+    tmp_path, monkeypatch, failure
+) -> None:
+    calls = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        raise failure("private request details", request=request)
+
+    client, _ = _search_client(tmp_path, monkeypatch, handler)
+
+    response = client.post("/v1/search", headers=_headers(), json={"query": "x"})
+
+    assert response.status_code in {502, 504}
+    assert calls == 1
+    assert "private request details" not in response.text
+
+
+def test_search_body_timeout_closes_response_without_retrying(
+    tmp_path, monkeypatch
+) -> None:
+    class SlowBody(httpx.AsyncByteStream):
+        closed = False
+
+        async def __aiter__(self):
+            yield b'{"results":'
+            raise httpx.ReadTimeout("private body details")
+
+        async def aclose(self):
+            self.closed = True
+
+    body = SlowBody()
+    calls = 0
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        return httpx.Response(200, stream=body)
+
+    client, model_proxy = _search_client(tmp_path, monkeypatch, handler)
+
+    response = client.post("/v1/search", headers=_headers(), json={"query": "x"})
+
+    assert response.status_code == 504
+    assert response.json()["error_code"] == "provider_timeout"
+    assert calls == 1
+    assert body.closed
+    assert model_proxy.app.state.web_search_limiter._active == 0
+
+
+def test_search_total_deadline_includes_connection_retry_backoff(
+    tmp_path, monkeypatch, caplog
+) -> None:
+    calls = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        raise httpx.ConnectTimeout("private connection details", request=request)
+
+    client, model_proxy = _search_client(tmp_path, monkeypatch, handler)
+    monkeypatch.setattr(model_proxy.web_search, "SEARCH_TIMEOUT_SECONDS", 0.05)
+    monkeypatch.setattr(model_proxy.web_search, "SEARCH_CONNECT_RETRY_DELAY_SECONDS", 1)
+
+    response = client.post("/v1/search", headers=_headers(), json={"query": "x"})
+
+    assert response.status_code == 504
+    assert response.json()["error_code"] == "provider_timeout"
+    assert calls == 1
+    assert "type=TimeoutError" in caplog.text
+    assert model_proxy.app.state.web_search_limiter._active == 0
+    with sqlite3.connect(tmp_path / "usage.db") as conn:
+        rows = conn.execute(
+            "select status_code, error_code from web_search_usage_requests"
+        ).fetchall()
+    assert rows == [(504, "provider_timeout")]
+
+
 def test_search_sends_only_fixed_validated_tavily_payload_and_cleans_response(
     tmp_path, monkeypatch
 ) -> None:
@@ -259,8 +406,11 @@ def test_search_maps_provider_status_without_returning_body(
     tmp_path, monkeypatch, provider_status, proxy_status, error_code
 ) -> None:
     sentinel = "provider-secret-body"
+    calls = 0
 
     def handler(_request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
         return httpx.Response(
             provider_status,
             text=sentinel,
@@ -274,6 +424,7 @@ def test_search_maps_provider_status_without_returning_body(
     assert response.status_code == proxy_status
     assert response.json()["error_code"] == error_code
     assert sentinel not in response.text
+    assert calls == 1
     if provider_status == 429:
         assert response.json()["retry_after_seconds"] == 60
 
