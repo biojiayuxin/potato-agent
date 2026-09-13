@@ -84,7 +84,7 @@ def test_about_and_shared_feedback_assets_are_public(tmp_path, monkeypatch) -> N
         assert '<div class="genes-app">' in about_html
         assert '<main class="genes-main about-main">' in about_html
         assert '<article class="about-readme"' in about_html
-        assert "About Potato Agent" in about_html
+        assert "About PotatoOmics and Potato Agent" in about_html
         assert "Source Code" in about_html
         assert "Open APIs" in about_html
         assert "Architecture, Skills, and Databases" in about_html

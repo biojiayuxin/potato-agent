@@ -130,14 +130,13 @@ DEFAULT_AGENT_IDENTITY = (
 )
 
 HERMES_AGENT_HELP_GUIDANCE = (
-    "You run on Hermes Agent (by Nous Research). When the user needs help with "
-    "Hermes itself — configuring, setting up, using, extending, or troubleshooting "
-    "it — or when you need to understand your own features, tools, or capabilities, "
-    "the documentation at https://hermes-agent.nousresearch.com/docs is your "
-    "authoritative reference and always holds the latest, most up-to-date "
-    "information. Load the `hermes-agent` skill with skill_view(name='hermes-agent') "
-    "for additional guidance and proven workflows, but treat the docs as the source "
-    "of truth when the two differ."
+    "The current runtime is Potato Hermes Lite. For questions about its "
+    "configuration or capabilities, use the installed runtime, available tools, "
+    "and local documentation to determine what is supported. Upstream Hermes "
+    "documentation is a reference for the full project and may describe commands "
+    "or features unavailable in this runtime. Consult relevant skills from the "
+    "available skills list. Use `hermes --help` to inspect supported CLI commands "
+    "when needed."
 )
 
 MEMORY_GUIDANCE = (
@@ -153,8 +152,6 @@ MEMORY_GUIDANCE = (
     "Specifically: do not record PR numbers, issue numbers, commit SHAs, 'fixed bug X', "
     "'submitted PR Y', 'Phase N done', file counts, or any artifact that will be stale "
     "in 7 days. If a fact will be stale in a week, it does not belong in memory. "
-    "If you've discovered a new way to do something, solved a problem that could be "
-    "necessary later, save it as a skill with the skill tool.\n"
     "Write memories as declarative facts, not instructions to yourself. "
     "'User prefers concise responses' ✓ — 'Always respond concisely' ✗. "
     "'Project uses pytest with xdist' ✓ — 'Run tests with pytest -n 4' ✗. "
@@ -170,12 +167,11 @@ SESSION_SEARCH_GUIDANCE = (
 )
 
 SKILLS_GUIDANCE = (
-    "After completing a complex task (5+ tool calls), fixing a tricky error, "
-    "or discovering a non-trivial workflow, save the approach as a "
-    "skill with skill_manage so you can reuse it next time.\n"
+    "Use skill_manage to save reusable workflows. Prefer updating a relevant "
+    "existing skill. Create a new skill when the workflow is useful beyond the "
+    "current task and is not already covered, or when the user requests one.\n"
     "When using a skill and finding it outdated, incomplete, or wrong, "
-    "patch it immediately with skill_manage(action='patch') — don't wait to be asked. "
-    "Skills that aren't maintained become liabilities."
+    "use skill_manage(action='patch') to correct it."
 )
 
 KANBAN_GUIDANCE = (
@@ -256,17 +252,9 @@ KANBAN_GUIDANCE = (
 
 TOOL_USE_ENFORCEMENT_GUIDANCE = (
     "# Tool-use enforcement\n"
-    "You MUST use your tools to take action — do not describe what you would do "
-    "or plan to do without actually doing it. When you say you will perform an "
-    "action (e.g. 'I will run the tests', 'Let me check the file', 'I will create "
-    "the project'), you MUST immediately make the corresponding tool call in the same "
-    "response. Never end your turn with a promise of future action — execute it now.\n"
-    "Keep working until the task is actually complete. Do not stop with a summary of "
-    "what you plan to do next time. If you have tools available that can accomplish "
-    "the task, use them instead of telling the user what you would do.\n"
-    "Every response should either (a) contain tool calls that make progress, or "
-    "(b) deliver a final result to the user. Responses that only describe intentions "
-    "without acting are not acceptable."
+    "Use the available tools to carry out requested actions. When you report "
+    "an action as completed, ground that claim in actual tool output. "
+    "Do not present intended actions as completed work."
 )
 
 # Model name substrings that trigger tool-use enforcement guidance.
@@ -291,14 +279,15 @@ TOOL_USE_ENFORCEMENT_MODELS = ("gpt", "codex", "gemini", "gemma", "grok", "glm",
 # then amortised across all sessions via prefix caching.  Keep it tight.
 TASK_COMPLETION_GUIDANCE = (
     "# Finishing the job\n"
+    "Complete the task within the user's request and the authorized scope. "
+    "Stop once the explicit acceptance criteria are met and necessary "
+    "verification is complete. Take further action on the user's task only "
+    "when it has a clear expected benefit.\n\n"
     "When the user asks you to build, run, or verify something, the deliverable is "
     "a working artifact backed by real tool output — not a description of one. "
-    "Do not stop after writing a stub, a plan, or a single command. Keep working "
-    "until you have actually exercised the code or produced the requested result, "
-    "then report what real execution returned.\n"
+    "Report what real execution returned.\n"
     "If a tool, install, or network call fails and blocks the real path, say so "
-    "directly and try an alternative (different package manager, different "
-    "approach, ask the user). NEVER substitute plausible-looking fabricated "
+    "directly. NEVER substitute plausible-looking fabricated "
     "output (made-up data, invented file contents, synthesised API responses) "
     "for results you couldn't actually produce. Reporting a blocker honestly "
     "is always better than inventing a result."
@@ -315,37 +304,26 @@ TASK_COMPLETION_GUIDANCE = (
 OPENAI_MODEL_EXECUTION_GUIDANCE = (
     "# Execution discipline\n"
     "<tool_persistence>\n"
-    "- Use tools whenever they improve correctness, completeness, or grounding.\n"
-    "- Do not stop early when another tool call would materially improve the result.\n"
-    "- If a tool returns empty or partial results, retry with a different query or "
-    "strategy before giving up.\n"
-    "- Keep calling tools until: (1) the task is complete, AND (2) you have verified "
-    "the result.\n"
+    "- Consider a different query or strategy when a tool returns empty or "
+    "partial results.\n"
     "</tool_persistence>\n"
     "\n"
-    "<mandatory_tool_use>\n"
-    "NEVER answer these from memory or mental computation — ALWAYS use a tool:\n"
-    "- Arithmetic, math, calculations → use terminal or execute_code\n"
-    "- Hashes, encodings, checksums → use terminal (e.g. sha256sum, base64)\n"
-    "- Current time, date, timezone → use terminal (e.g. date)\n"
-    "- System state: OS, CPU, memory, disk, ports, processes → use terminal\n"
-    "- File contents, sizes, line counts → use read_file, search_files, or terminal\n"
-    "- Git history, branches, diffs → use terminal\n"
-    "- Current facts (weather, news, versions) → use web_search\n"
+    "<tool_use>\n"
+    "Use tools for complex calculations, hashes, encodings, checksums, and "
+    "information that requires inspecting files or the live environment. "
+    "Simple arithmetic and conceptual explanations can be answered directly. "
+    "For time-sensitive external facts, use an available search or browsing tool.\n"
     "Your memory and user profile describe the USER, not the system you are "
     "running on. The execution environment may differ from what the user profile "
     "says about their personal setup.\n"
-    "</mandatory_tool_use>\n"
+    "</tool_use>\n"
     "\n"
-    "<act_dont_ask>\n"
-    "When a question has an obvious default interpretation, act on it immediately "
-    "instead of asking for clarification. Examples:\n"
-    "- 'Is port 443 open?' → check THIS machine (don't ask 'open where?')\n"
-    "- 'What OS am I running?' → check the live system (don't use user profile)\n"
-    "- 'What time is it?' → run `date` (don't guess)\n"
-    "Only ask for clarification when the ambiguity genuinely changes what tool "
-    "you would call.\n"
-    "</act_dont_ask>\n"
+    "<clarification>\n"
+    "Use the conversation context and existing authorization to interpret the "
+    "request and proceed. Ask for clarification when unresolved ambiguity "
+    "materially affects the intended outcome or scope of action. Use available "
+    "tools to retrieve missing factual information when needed.\n"
+    "</clarification>\n"
     "\n"
     "<prerequisite_checks>\n"
     "- Before taking an action, check whether prerequisite discovery, lookup, or "
@@ -359,15 +337,11 @@ OPENAI_MODEL_EXECUTION_GUIDANCE = (
     "- Correctness: does the output satisfy every stated requirement?\n"
     "- Grounding: are factual claims backed by tool outputs or provided context?\n"
     "- Formatting: does the output match the requested format or schema?\n"
-    "- Safety: if the next step has side effects (file writes, commands, API calls), "
-    "confirm scope before executing.\n"
+    "- Safety: are actions within the user's request and existing authorization?\n"
     "</verification>\n"
     "\n"
     "<missing_context>\n"
     "- If required context is missing, do NOT guess or hallucinate an answer.\n"
-    "- Use the appropriate lookup tool when missing information is retrievable "
-    "(search_files, web_search, read_file, etc.).\n"
-    "- Ask a clarifying question only when the information cannot be retrieved by tools.\n"
     "- If you must proceed with incomplete information, label assumptions explicitly.\n"
     "</missing_context>"
 )
@@ -390,8 +364,6 @@ GOOGLE_MODEL_OPERATIONAL_GUIDANCE = (
     "single response rather than sequentially.\n"
     "- **Non-interactive commands:** Use flags like -y, --yes, --non-interactive "
     "to prevent CLI tools from hanging on prompts.\n"
-    "- **Keep going:** Work autonomously until the task is fully resolved. "
-    "Don't stop with a plan — execute it.\n"
 )
 
 
@@ -1279,25 +1251,18 @@ def build_skills_system_prompt(
 
         result = (
             "## Skills (mandatory)\n"
-            "Before replying, scan the skills below. If a skill matches or is even partially relevant "
-            "to your task, you MUST load it with skill_view(name) and follow its instructions. "
+            "Before replying, scan the available skills. If a skill matches or is partially "
+            "relevant to the task, you MUST load it with skill_view(name) and assess whether "
+            "its guidance can help advance the task. Apply the relevant guidance within "
+            "the user's request and existing authorization. "
             "Err on the side of loading — it is always better to have context you don't need "
             "than to miss critical steps, pitfalls, or established workflows. "
             "Skills contain specialized knowledge — API endpoints, tool-specific commands, "
             "and proven workflows that outperform general-purpose approaches. Load the skill "
-            "even if you think you could handle the task with basic tools like web_search or terminal. "
+            "even if you think you could handle the task with basic tools like read_file or terminal. "
             "Skills also encode the user's preferred approach, conventions, and quality standards "
             "for tasks like code review, planning, and testing — load them even for tasks you "
-            "already know how to do, because the skill defines how it should be done here.\n"
-            "Whenever the user asks you to configure, set up, install, enable, disable, modify, "
-            "or troubleshoot Hermes Agent itself — its CLI, config, models, providers, tools, "
-            "skills, voice, gateway, plugins, or any feature — load the `hermes-agent` skill "
-            "first. It has the actual commands (e.g. `hermes config set …`, `hermes tools`, "
-            "`hermes setup`) so you don't have to guess or invent workarounds.\n"
-            "If a skill has issues, fix it with skill_manage(action='patch').\n"
-            "After difficult/iterative tasks, offer to save as a skill. "
-            "If a skill you loaded was missing steps, had wrong commands, or needed "
-            "pitfalls you discovered, update it before finishing.\n"
+            "already know how to do.\n"
             "\n"
             "<available_skills>\n"
             + "\n".join(index_lines) + "\n"
@@ -1376,7 +1341,6 @@ def build_nous_subscription_prompt(valid_tool_names: "set[str] | None" = None) -
             "When a Nous-managed feature is active, do not ask the user for Firecrawl, FAL, OpenAI TTS, or Browser-Use API keys.",
             "If the user is not subscribed and asks for a capability that Nous subscription would unlock or simplify, suggest Nous subscription as one option alongside direct setup or local alternatives.",
             "Do not mention subscription unless the user asks about it or it directly solves the current missing capability.",
-            "Useful commands: hermes setup, hermes setup tools, hermes setup terminal, hermes status.",
         ]
     )
     return "\n".join(lines)

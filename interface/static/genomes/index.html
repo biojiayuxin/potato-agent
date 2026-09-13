@@ -10,7 +10,9 @@
     <link rel="stylesheet" href="/static/shared/announcement.css?v=20260906-compact">
     <script src="/static/shared/announcement.js?v=20260906" defer></script>
     <link rel="stylesheet" href="/static/shared/navigation.css?v=20260908-navigation-mobile-centered" />
-    <script src="/static/shared/navigation.js?v=20260908-navigation-centered" defer></script>
+    <script src="/static/shared/navigation.js?v=20260912-portal-link" defer></script>
+    <link rel="stylesheet" href="/static/shared/agent-examples.css?v=20260909-simplified-chat" />
+    <script src="/static/shared/agent-examples.js?v=20260910-http-fallback"></script>
   </head>
   <body>
     <div class="genomes-app">
@@ -26,7 +28,10 @@
       <main class="genomes-main">
         <header class="page-toolbar">
           <h2>Genomes</h2>
-          <a class="browser-button" href="/genomes/browser">Genome Browser</a>
+          <div class="agent-example-actions">
+            <button id="ask-potato-agent" type="button" class="browser-button ask-potato-agent">Ask Potato Agent</button>
+            <a class="browser-button" href="/genomes/browser">Genome Browser</a>
+          </div>
         </header>
 
         <section class="figures-grid" aria-label="Pangenome overview">
@@ -96,6 +101,6 @@
     </div>
 
     <script src="/static/shared/feedback.js?v=20260819-feedback" defer></script>
-    <script src="/static/genomes/app.js?v=20260728-shared-browser-route"></script>
+    <script src="/static/genomes/app.js?v=20260909-examples"></script>
   </body>
 </html>

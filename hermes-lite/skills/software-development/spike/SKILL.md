@@ -13,14 +13,14 @@ metadata:
 
 # Spike
 
-Use this skill when the user wants to **feel out an idea** before committing to a real build — validating feasibility, comparing approaches, or surfacing unknowns that no amount of research will answer. Spikes are disposable by design. Throw them away once they've paid their debt.
+Use this skill when the user wants to **feel out an idea** before committing to a real build — validating feasibility, comparing approaches, or resolving unknowns through experiments. Keep implementation focused on the feasibility question; production hardening is separate work.
 
 Load this when the user says things like "let me try this", "I want to see if X works", "spike this out", "before I commit to Y", "quick prototype of Z", "is this even possible?", or "compare A vs B".
 
 ## When NOT to use this
 
 - The answer is knowable from docs or reading code — just do research, don't build
-- The work is production path — use the `plan` skill instead
+- The work is production path — follow the project's implementation workflow
 - The idea is already validated — jump straight to implementation
 
 ## If the user has the full GSD system installed
@@ -29,17 +29,15 @@ If `gsd-spike` shows up as a sibling skill (installed via `npx get-shit-done-cc 
 
 ## Core method
 
-Regardless of scale, every spike follows this loop:
+Use these stages to answer the feasibility question, adapting the work to the actual unknowns:
 
 ```
-decompose  →  research  →  build  →  verdict
-   ↑__________________________________________↓
-                  iterate on findings
+question  →  research  →  experiment  →  verdict
 ```
 
-### 1. Decompose
+### 1. Define the Question
 
-Break the user's idea into **2-5 independent feasibility questions**. Each question is one spike. Present them as a table with Given/When/Then framing:
+Identify the unresolved feasibility question and the observable evidence that would answer it. Split the work when distinct unknowns need separate experiments. For multiple questions, a table can help track their scope and priority:
 
 | # | Spike | Validates (Given/When/Then) | Risk |
 |---|-------|----------------------------|------|
@@ -56,37 +54,37 @@ Break the user's idea into **2-5 independent feasibility questions**. Each quest
 
 **Order by risk.** The spike most likely to kill the idea runs first. No point prototyping the easy parts if the hard part doesn't work.
 
-**Skip decomposition** only if the user already knows exactly what they want to spike and says so. Then take their idea as a single spike.
+One experiment is sufficient when it answers the user's question.
 
-### 2. Align (for multi-spike ideas)
+### 2. Resolve Scope When Needed
 
-Present the spike table. Ask: "Build all in this order, or adjust?" Let the user drop, reorder, or re-frame before you write any code.
+Use the request, conversation context, and existing authorization to choose the experiment. Ask for clarification when unresolved choices materially affect the intended outcome or scope. For multiple experiments, explain their relationship to the user's question.
 
 ### 3. Research (per spike, before building)
 
 Spikes are not research-free — you research enough to pick the right approach, then you build. Per spike:
 
-1. **Brief it.** 2-3 sentences: what this spike is, why it matters, key risk.
+1. **Identify the key unknown.** State what the experiment will establish.
 2. **Surface competing approaches** if there's real choice:
 
    | Approach | Tool/Library | Pros | Cons | Status |
    |----------|-------------|------|------|--------|
    | ... | ... | ... | ... | maintained / abandoned / beta |
 
-3. **Pick one.** State why. If 2+ are credible, build quick variants within the spike.
+3. **Pick an approach.** State why. Build additional variants when comparing them helps answer the user's feasibility question and falls within the authorized scope.
 4. **Skip research** for pure logic with no external dependencies.
 
 Use Hermes tools for the research step:
 
-- `web_search("python websocket streaming libraries 2025")` — find candidates
-- `web_extract(urls=["https://websockets.readthedocs.io/..."])` — read the actual docs (returns markdown)
+- `browser_navigate(url="https://websockets.readthedocs.io/")` — open relevant documentation or search pages
+- `browser_snapshot()` — inspect the current page
 - `terminal("pip show websockets | grep Version")` — check what's installed in the project's venv
 
-For libraries without docs pages, clone and read their `README.md` / `examples/` via `read_file`. Context7 MCP (if the user has it configured) is also a good source — `mcp_*_resolve-library-id` then `mcp_*_query-docs`.
+For libraries without docs pages, clone and read their `README.md` / `examples/` via `read_file`.
 
 ### 4. Build
 
-One directory per spike. Keep it standalone.
+Use the repository's conventions for experiment files. For separate experiments that need their own files, a layout like this can keep them independent:
 
 ```
 spikes/
@@ -101,14 +99,14 @@ spikes/
     └── parse.py
 ```
 
-**Bias toward something the user can interact with.** Spikes fail when the only output is a log line that says "it works." The user wants to *feel* the spike working. Default choices, in order of preference:
+Choose an observable experiment suited to the question. Possible forms include:
 
 1. A runnable CLI that takes input and prints observable output
 2. A minimal HTML page that demonstrates the behavior
 3. A small web server with one endpoint
 4. A unit test that exercises the question with recognizable assertions
 
-**Depth over speed.** Never declare "it works" after one happy-path run. Test edge cases. Follow surprising findings. The verdict is only trustworthy when the investigation was honest.
+Verify the behavior the verdict depends on, including relevant edge cases and unexpected results that could change the conclusion. Once the question is answered and necessary verification is complete, use the task-completion guidance to decide whether further work is warranted.
 
 **Avoid** unless the spike specifically requires it: complex package management, build tools/bundlers, Docker, env files, config systems. Hardcode everything — it's a spike.
 
@@ -122,12 +120,12 @@ terminal("cd spikes/001-websocket-streaming && python3 main.py")
 # Observe output, iterate.
 ```
 
-**Parallel comparison spikes (002a / 002b) — delegate.** When two approaches can run in parallel and both need real engineering (not 10-line prototypes), fan out with `delegate_task`:
+**Parallel comparison spikes (002a / 002b).** When the task calls for comparing independently runnable experiments, `delegate_task` can separate substantial work:
 
 ```
 delegate_task(tasks=[
-    {"goal": "Build 002a-pdf-parse-pdfjs: ...", "toolsets": ["terminal", "file", "web"]},
-    {"goal": "Build 002b-pdf-parse-camelot: ...", "toolsets": ["terminal", "file", "web"]},
+    {"goal": "Build 002a-pdf-parse-pdfjs: ...", "toolsets": ["terminal", "file", "browser"]},
+    {"goal": "Build 002b-pdf-parse-camelot: ...", "toolsets": ["terminal", "file", "browser"]},
 ])
 ```
 
@@ -135,7 +133,7 @@ Each subagent returns its own verdict; you write the head-to-head.
 
 ### 5. Verdict
 
-Each spike's `README.md` closes with:
+Report the question, evidence, conclusion, and remaining uncertainty. When the experiment has a `README.md` or another requested record, a verdict can use this format:
 
 ```markdown
 ## Verdict: VALIDATED | PARTIAL | INVALIDATED
@@ -159,7 +157,7 @@ Each spike's `README.md` closes with:
 
 ## Comparison spikes
 
-When two approaches answer the same question (002a / 002b), build them **back to back**, then do a head-to-head comparison at the end:
+When comparing approaches is part of the task, run the relevant experiments and compare the dimensions that determine the user's choice:
 
 ```markdown
 ## Head-to-head: pdfjs vs camelot
@@ -183,14 +181,13 @@ If spikes already exist and the user says "what should I spike next?", walk the 
 - **Gaps in the vision** — capabilities assumed but unproven
 - **Alternative approaches** — different angles for PARTIAL or INVALIDATED spikes
 
-Propose 2-4 candidates as Given/When/Then. Let the user pick.
+Propose candidates supported by the remaining unknowns, with the question each would answer. Let the user choose which to pursue.
 
 ## Output
 
-- Create `spikes/` (or `.planning/spikes/` if the user is using GSD conventions) in the repo root
-- One dir per spike: `NNN-descriptive-name/`
-- `README.md` per spike captures question, approach, results, verdict
-- Keep the code throwaway — a spike that takes 2 days to "clean up for production" was a bad spike
+- Report the experiment's evidence and verdict
+- Keep any experiment files in the agreed location or the repository's established experiment directory
+- Document results alongside retained code when needed to interpret or rerun it
 
 ## Attribution
 

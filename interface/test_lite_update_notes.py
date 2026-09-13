@@ -73,7 +73,7 @@ def test_update_notes_refresh_after_page_restore() -> None:
 
     assert "loadUpdateNotes().catch(() => {});" in pageshow
     assert "loadUpdateNotes().catch(() => {});" in visibility
-    assert "app.js?v=20260903-message-fork" in index
+    assert "app.js?v=20260910-http-tabs" in index
 
 
 def test_update_notes_more_expands_full_scrollable_history() -> None:
@@ -109,4 +109,4 @@ def test_update_notes_more_expands_full_scrollable_history() -> None:
     assert "overflow-y: auto" in styles
     assert "margin: 18px -18px 0 0" in styles
     assert "padding-right: 18px" in styles
-    assert "styles.css?v=20260903-message-fork" in index
+    assert "styles.css?v=20260910-sidebar-home" in index

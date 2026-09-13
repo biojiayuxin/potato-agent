@@ -30,6 +30,7 @@ from concurrent.futures import (
 )
 from typing import Any, Dict, List, Optional
 
+from runtime_profile import get_runtime_profile
 from toolsets import TOOLSETS
 
 # Sentinel value used by the runtime provider system for providers that are
@@ -120,11 +121,16 @@ def _get_subagent_approval_callback():
 # delegation is role='orchestrator', which re-adds "delegation" in
 # _build_child_agent regardless of this exclusion.
 _EXCLUDED_TOOLSET_NAMES = frozenset({"debugging", "safe", "delegation", "moa", "rl"})
+_profile_for_toolset_hint = get_runtime_profile()
 _SUBAGENT_TOOLSETS = sorted(
     name
     for name, defn in TOOLSETS.items()
     if name not in _EXCLUDED_TOOLSET_NAMES
     and not name.startswith("hermes-")
+    and (
+        _profile_for_toolset_hint is None
+        or name in _profile_for_toolset_hint.enabled_toolsets
+    )
     and not all(t in DELEGATE_BLOCKED_TOOLS for t in defn.get("tools", []))
 )
 _TOOLSET_LIST_STR = ", ".join(f"'{n}'" for n in _SUBAGENT_TOOLSETS)
@@ -2671,9 +2677,9 @@ def _build_top_level_description() -> str:
         "- Mechanical multi-step work with no reasoning needed -> use execute_code\n"
         "- Single tool call -> just call the tool directly\n"
         "- Tasks needing user interaction -> subagents cannot use clarify\n"
-        "- Durable long-running work that must outlive the current turn -> "
-        "use cronjob (action='create') or terminal(background=True, "
-        "notify_on_complete=True) instead. delegate_task runs SYNCHRONOUSLY "
+        "- Terminal commands that need to continue beyond the current turn -> "
+        "use terminal(background=True, notify_on_complete=True). "
+        "delegate_task runs SYNCHRONOUSLY "
         "inside the parent turn: if the parent is interrupted (user sends a "
         "new message, /stop, /new) the child is cancelled with status="
         "'interrupted' and its work is discarded. Children cannot continue "
@@ -2821,8 +2827,8 @@ DELEGATE_TASK_SCHEMA = {
                     "Default: inherits your enabled toolsets. "
                     f"Available toolsets: {_TOOLSET_LIST_STR}. "
                     "Common patterns: ['terminal', 'file'] for code work, "
-                    "['web'] for research, ['browser'] for web interaction, "
-                    "['terminal', 'file', 'web'] for full-stack tasks."
+                    "['browser'] for online research and web interaction, "
+                    "['terminal', 'file', 'browser'] for tasks needing both."
                 ),
             },
             "tasks": {
@@ -2838,7 +2844,7 @@ DELEGATE_TASK_SCHEMA = {
                         "toolsets": {
                             "type": "array",
                             "items": {"type": "string"},
-                            "description": f"Toolsets for this specific task. Available: {_TOOLSET_LIST_STR}. Use 'web' for network access, 'terminal' for shell, 'browser' for web interaction.",
+                            "description": f"Toolsets for this specific task. Available: {_TOOLSET_LIST_STR}. Use 'terminal' for shell, 'file' for local files, 'browser' for online research and web interaction.",
                         },
                         "role": {
                             "type": "string",

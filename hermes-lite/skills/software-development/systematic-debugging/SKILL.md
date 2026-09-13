@@ -1,6 +1,6 @@
 ---
 name: systematic-debugging
-description: "4-phase root cause debugging: understand bugs before fixing."
+description: "Diagnose faults and verify scoped fixes or mitigations."
 version: 1.1.0
 author: Hermes Agent (adapted from obra/superpowers)
 license: MIT
@@ -15,23 +15,19 @@ metadata:
 
 ## Overview
 
-Random fixes waste time and create new bugs. Quick patches mask underlying issues.
+Use evidence to explain failures, choose a scoped response, and verify the result.
 
-**Core principle:** ALWAYS find root cause before attempting fixes. Symptom fixes are failure.
+**Core principle:** The investigation and remedy should serve the user's requested outcome. Base changes on a testable explanation of why they address that outcome.
 
-**Violating the letter of this process is violating the spirit of debugging.**
+## Diagnosis, Repair, and Recovery
 
-## The Iron Law
+For diagnosis or a lasting fix, investigate the cause and test the proposed correction.
 
-```
-NO FIXES WITHOUT ROOT CAUSE INVESTIGATION FIRST
-```
-
-If you haven't completed Phase 1, you cannot propose fixes.
+For an authorized rollback or temporary recovery, establish the evidence and checks needed for that action, perform it, and verify recovery. Report any unresolved cause or remaining limitation. A recovery request can be complete before the full root cause is known.
 
 ## When to Use
 
-Use for ANY technical issue:
+Use when investigating or resolving technical faults such as:
 - Test failures
 - Bugs in production
 - Unexpected behavior
@@ -39,27 +35,20 @@ Use for ANY technical issue:
 - Build failures
 - Integration issues
 
-**Use this ESPECIALLY when:**
-- Under time pressure (emergencies make guessing tempting)
-- "Just one quick fix" seems obvious
-- You've already tried multiple fixes
-- Previous fix didn't work
-- You don't fully understand the issue
-
-**Don't skip when:**
-- Issue seems simple (simple bugs have root causes too)
-- You're in a hurry (rushing guarantees rework)
-- Someone wants it fixed NOW (systematic is faster than thrashing)
+Choose the investigative depth from the requested outcome and the uncertainty that affects the next action. Time pressure may make an authorized recovery the immediate goal while diagnosis remains a separate follow-up.
 
 ## The Four Phases
 
-You MUST complete each phase before proceeding to the next.
+Use the phases to organize diagnosis and lasting fixes. Apply the steps relevant to the
+current fault, and keep diagnostic changes and reference reading within that
+scope. Expand the investigation when evidence points to another component or
+an unresolved dependency.
 
 ---
 
 ## Phase 1: Root Cause Investigation
 
-**BEFORE attempting ANY fix:**
+Gather evidence for a testable root-cause hypothesis.
 
 ### 1. Read Error Messages Carefully
 
@@ -108,19 +97,20 @@ git log -p --follow src/problematic_file.py | head -100
 
 ### 4. Gather Evidence in Multi-Component Systems
 
-**WHEN system has multiple components (API → service → database, CI → build → deploy):**
+**WHEN the failure may cross component boundaries (API → service → database,
+CI → build → deploy):**
 
-**BEFORE proposing fixes, add diagnostic instrumentation:**
+Identify the boundaries involved in the failing path. Inspect logs, state, and
+configuration at those boundaries. When more evidence is needed, add focused
+diagnostic instrumentation to answer a specific question about the failure:
 
-For EACH component boundary:
-- Log what data enters the component
-- Log what data exits the component
-- Verify environment/config propagation
-- Check state at each layer
+- Trace relevant inputs and outputs
+- Check environment/config propagation used by the failing operation
+- Inspect state in the implicated components
 
-Run once to gather evidence showing WHERE it breaks.
-THEN analyze evidence to identify the failing component.
-THEN investigate that specific component.
+Use the results to locate the fault and investigate that component. Add other
+boundaries when the evidence points to them. Remove temporary instrumentation
+introduced for the investigation when it is no longer needed.
 
 ### 5. Trace Data Flow
 
@@ -129,7 +119,7 @@ THEN investigate that specific component.
 - Where does the bad value originate?
 - What called this function with the bad value?
 - Keep tracing upstream until you find the source
-- Fix at the source, not at the symptom
+- For a lasting fix, address the source of the failure
 
 **Action:** Use `search_files` to trace references:
 
@@ -144,13 +134,13 @@ search_files("variable_name\\s*=", path="src/", file_glob="*.py")
 ### Phase 1 Completion Checklist
 
 - [ ] Error messages fully read and understood
-- [ ] Issue reproduced consistently
+- [ ] Failure characterized through reproduction or observed evidence
 - [ ] Recent changes identified and reviewed
 - [ ] Evidence gathered (logs, state, data flow)
 - [ ] Problem isolated to specific component/code
 - [ ] Root cause hypothesis formed
 
-**STOP:** Do not proceed to Phase 2 until you understand WHY it's happening.
+Use the evidence to form and test a hypothesis. Identify gaps that affect the next diagnostic step without treating an untested explanation as an established cause.
 
 ---
 
@@ -171,15 +161,16 @@ search_files("similar_pattern", path="src/", file_glob="*.py")
 
 ### 2. Compare Against References
 
-- If implementing a pattern, read the reference implementation COMPLETELY
-- Don't skim — read every line
-- Understand the pattern fully before applying
+- Read the reference sections that define the relevant behavior, interfaces,
+  and assumptions.
+- Follow dependencies when needed to understand how the pattern applies to the
+  failing code.
 
 ### 3. Identify Differences
 
 - What's different between working and broken?
-- List every difference, however small
-- Don't assume "that can't matter"
+- Identify differences that could explain the observed failure.
+- Test uncertain differences against the hypothesis before dismissing them.
 
 ### 4. Understand Dependencies
 
@@ -213,107 +204,96 @@ search_files("similar_pattern", path="src/", file_glob="*.py")
 
 ### 4. When You Don't Know
 
-- Say "I don't understand X"
-- Don't pretend to know
-- Ask the user for help
-- Research more
+- State what remains uncertain
+- Identify the missing information needed to evaluate the hypothesis
+- Retrieve it with available tools, or ask for information only the user can provide
+- Use the task-completion guidance to decide whether further investigation is warranted
 
 ---
 
 ## Phase 4: Implementation
 
-**Fix the root cause, not the symptom:**
+Implement the remedy supported by the evidence and the requested outcome.
 
-### 1. Create Failing Test Case
+### 1. Choose the Verification
 
-- Simplest possible reproduction
-- Automated test if possible
-- MUST have before fixing
-- Use the `test-driven-development` skill
+- Establish the failing behavior and the result that would demonstrate the remedy worked
+- Use an automated regression test when practical and consistent with repository requirements
+- Otherwise use a focused reproduction, health check, or manual verification suited to the fault
+- Apply the `test-driven-development` skill when the work involves automated test coverage
 
 ### 2. Implement Single Fix
 
-- Address the root cause identified
+- Address the identified cause for a lasting fix, or the recovery condition for an authorized mitigation
 - ONE change at a time
 - No "while I'm here" improvements
 - No bundled refactoring
 
 ### 3. Verify Fix
 
+Run the chosen checks and report the observed result. For a recovery action, distinguish restored service from a verified root-cause fix. Example commands for automated regression tests:
+
 ```bash
 # Run the specific regression test
 pytest tests/test_module.py::test_regression -v
 
-# Run full suite — no regressions
+# Run broader checks when shared behavior or repository requirements call for them
 pytest tests/ -q
 ```
 
-### 4. If Fix Doesn't Work — The Rule of Three
+### 4. If the Fix Does Not Work
 
-- **STOP.**
-- Count: How many fixes have you tried?
-- If < 3: Return to Phase 1, re-analyze with new information
-- **If ≥ 3: STOP and question the architecture (step 5 below)**
-- DON'T attempt Fix #4 without architectural discussion
+- Compare the result with the hypothesis and identify what remains unexplained.
+- Revisit the relevant investigation steps before choosing the next change.
+- Use the task-completion guidance to decide whether further work is warranted.
 
-### 5. If 3+ Fixes Failed: Question Architecture
+### 5. When Evidence Points to an Architectural Problem
 
 **Pattern indicating an architectural problem:**
 - Each fix reveals new shared state/coupling in a different place
 - Fixes require "massive refactoring" to implement
 - Each fix creates new symptoms elsewhere
 
-**STOP and question fundamentals:**
+Consider the implicated design:
 - Is this pattern fundamentally sound?
 - Are we "sticking with it through sheer inertia"?
 - Should we refactor the architecture vs. continue fixing symptoms?
 
-**Discuss with the user before attempting more fixes.**
-
-This is NOT a failed hypothesis — this is a wrong architecture.
+If the needed architectural change exceeds the task's existing authorization,
+explain the evidence and proposed scope to the user. A failed hypothesis or
+number of failed attempts alone does not establish an architectural defect.
 
 ---
 
-## Red Flags — STOP and Follow Process
+## Revisit the Evidence When Needed
 
-If you catch yourself thinking:
-- "Quick fix for now, investigate later"
-- "Just try changing X and see if it works"
-- "Add multiple changes, run tests"
-- "Skip the test, I'll manually verify"
-- "It's probably X, let me fix that"
-- "I don't fully understand but this might work"
-- "Pattern says X but I'll adapt it differently"
-- "Here are the main problems: [lists fixes without investigation]"
-- Proposing solutions before tracing data flow
-- **"One more fix attempt" (when already tried 2+)**
-- **Each fix reveals a new problem in a different place**
+Reconsider the relevant evidence or hypothesis when:
+- A proposed change has no explanation of how it addresses the observed failure
+- Several simultaneous changes make it unclear which one affected the result
+- An unsuccessful change is repeated without a revised hypothesis
+- The observed result contradicts the proposed cause or claimed recovery
 
-**ALL of these mean: STOP. Return to Phase 1.**
+When failures indicate shared-state or coupling problems, evaluate the relevant
+design as described in Phase 4 step 5.
 
-**If 3+ fixes failed:** Question the architecture (Phase 4 step 5).
+## Applying the Workflow
 
-## Common Rationalizations
-
-| Excuse | Reality |
-|--------|---------|
-| "Issue is simple, don't need process" | Simple issues have root causes too. Process is fast for simple bugs. |
-| "Emergency, no time for process" | Systematic debugging is FASTER than guess-and-check thrashing. |
-| "Just try this first, then investigate" | First fix sets the pattern. Do it right from the start. |
-| "I'll write test after confirming fix works" | Untested fixes don't stick. Test first proves it. |
-| "Multiple fixes at once saves time" | Can't isolate what worked. Causes new bugs. |
-| "Reference too long, I'll adapt the pattern" | Partial understanding guarantees bugs. Read it completely. |
-| "I see the problem, let me fix it" | Seeing symptoms ≠ understanding root cause. |
-| "One more fix attempt" (after 2+ failures) | 3+ failures = architectural problem. Question the pattern, don't fix again. |
+| Situation | Approach |
+|-----------|----------|
+| Simple fault with a clear cause | Make the focused correction and verify the affected behavior. |
+| User requests temporary recovery | Perform the authorized recovery, verify it, and report remaining uncertainty. |
+| Automated reproduction is impractical | Use a focused observation or manual check that can establish the requested result. |
+| Reference implementation is large | Read the relevant interfaces, assumptions, and dependencies. |
+| A fix attempt fails | Identify what the next attempt would test; investigate architecture when the evidence points there. |
 
 ## Quick Reference
 
 | Phase | Key Activities | Success Criteria |
 |-------|---------------|------------------|
-| **1. Root Cause** | Read errors, reproduce, check changes, gather evidence, trace data flow | Understand WHAT and WHY |
+| **1. Root Cause** | Read errors, reproduce, check changes, gather evidence, trace data flow | Failure characterized; testable hypothesis formed |
 | **2. Pattern** | Find working examples, compare, identify differences | Know what's different |
 | **3. Hypothesis** | Form theory, test minimally, one variable at a time | Confirmed or new hypothesis |
-| **4. Implementation** | Create regression test, fix root cause, verify | Bug resolved, all tests pass |
+| **4. Implementation** | Apply the scoped remedy and chosen verification | Requested outcome established by relevant checks |
 
 ## Hermes Agent Integration
 
@@ -324,7 +304,7 @@ Use these Hermes tools during Phase 1:
 - **`search_files`** — Find error strings, trace function calls, locate patterns
 - **`read_file`** — Read source code with line numbers for precise analysis
 - **`terminal`** — Run tests, check git history, reproduce bugs
-- **`web_search`/`web_extract`** — Research error messages, library docs
+- **`browser_navigate`/`browser_snapshot`** — Research error messages and read library docs
 
 ### With delegate_task
 
@@ -350,18 +330,14 @@ delegate_task(
 
 ### With test-driven-development
 
-When fixing bugs:
+When implementing a lasting code fix with automated regression coverage:
 1. Write a test that reproduces the bug (RED)
 2. Debug systematically to find root cause
 3. Fix the root cause (GREEN)
 4. The test proves the fix and prevents regression
 
-## Real-World Impact
+Use focused reproduction or manual verification when automated coverage is impractical, and report what was checked.
 
-From debugging sessions:
-- Systematic approach: 15-30 minutes to fix
-- Random fixes approach: 2-3 hours of thrashing
-- First-time fix rate: 95% vs 40%
-- New bugs introduced: Near zero vs common
+## Completion
 
-**No shortcuts. No guessing. Systematic always wins.**
+Finish when the requested diagnosis, fix, or recovery is delivered and necessary verification is complete. Report unresolved causes or limitations accurately. Use the task-completion guidance to decide whether further work is warranted.

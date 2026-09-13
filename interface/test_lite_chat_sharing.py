@@ -103,18 +103,17 @@ def test_share_fragment_is_captured_privately_and_imported_before_default_chat()
     source = LITE_APP_PATH.read_text(encoding="utf-8")
 
     assert "const PENDING_SHARE_TOKEN_KEY = 'lite_pending_chat_share_token';" in source
-    capture = source[source.index("const capturePendingShareIntent =") : source.index("const clearPendingShareIntent =")]
-    assert "window.location.hash" in capture
+    capture = (REPO_ROOT / "interface/static/shared/chat-workspace.js").read_text(encoding="utf-8")
+    assert "location.hash" in capture
     assert "#share=" in capture
-    assert "removeShareFragmentFromAddressBar();" in capture
-    assert "persistPendingShareToken(rawToken, { replaceIntent: true })" in capture
-    assert "window.history.replaceState" in source
+    assert "history.replaceState" in capture
+    assert "persistPendingShareToken(entry.token, { replaceIntent: true })" in source
     assert "sessionStorage.setItem(PENDING_SHARE_TOKEN_KEY" in source
     assert "sessionStorage.removeItem(PENDING_SHARE_TOKEN_KEY)" in source
     assert "normalizedToken !== state.pendingShareToken" in source
     replace_intent = source[
         source.index("const persistPendingShareToken =") : source.index(
-            "const removeShareFragmentFromAddressBar ="
+            "const clearPendingShareIntent ="
         )
     ]
     assert replace_intent.index("clearShareImportRetryTimer();") < replace_intent.index(
@@ -141,7 +140,7 @@ def test_share_fragment_is_captured_privately_and_imported_before_default_chat()
     assert "renderWorkspace();" in pending_branch
     assert "return;" in pending_branch
     assert "window.addEventListener('hashchange'" in source
-    assert source.rindex("capturePendingShareIntent();") < source.rindex("bootstrapSession();")
+    assert source.index("let pendingEntry = readEntry();") < source.rindex("bootstrapSession();")
 
 
 def test_attachment_only_chat_is_not_shareable() -> None:
@@ -158,5 +157,5 @@ def test_attachment_only_chat_is_not_shareable() -> None:
 def test_chat_sharing_assets_are_cache_busted() -> None:
     index = LITE_INDEX_PATH.read_text(encoding="utf-8")
 
-    assert "styles.css?v=20260903-message-fork" in index
-    assert "app.js?v=20260903-message-fork" in index
+    assert "styles.css?v=20260910-sidebar-home" in index
+    assert "app.js?v=20260910-http-tabs" in index

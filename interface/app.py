@@ -4245,6 +4245,7 @@ async def archive_status(
 
 @app.get("/", include_in_schema=False)
 @app.get("/lite", include_in_schema=False)
+@app.get("/chat", include_in_schema=False)
 async def serve_lite_index() -> FileResponse:
     file_path = LITE_DIR / "index.html"
     if not file_path.is_file():

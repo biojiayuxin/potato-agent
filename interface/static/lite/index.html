@@ -6,12 +6,14 @@
     <meta name="referrer" content="no-referrer" />
     <title>Potato Agent</title>
     <link rel="icon" type="image/png" href="./static/favicon.png" />
-    <link rel="stylesheet" href="./static/lite/styles.css?v=20260907-navigation" />
+    <link rel="stylesheet" href="./static/lite/styles.css?v=20260910-sidebar-home" />
     <link rel="stylesheet" href="/static/shared/feedback.css?v=20260819-feedback" />
     <link rel="stylesheet" href="/static/shared/announcement.css?v=20260906-compact">
     <script src="/static/shared/announcement.js?v=20260906" defer></script>
     <link rel="stylesheet" href="/static/shared/navigation.css?v=20260908-navigation-mobile-centered" />
-    <script src="/static/shared/navigation.js?v=20260908-navigation-centered" defer></script>
+    <script src="/static/shared/navigation.js?v=20260912-portal-link" defer></script>
+    <link rel="stylesheet" href="/static/shared/agent-examples.css?v=20260909-simplified-chat" />
+    <script src="/static/shared/agent-examples.js?v=20260910-http-fallback"></script>
   </head>
   <body>
     <div id="app" class="app-shell">
@@ -78,6 +80,13 @@
                 <button id="show-login-button" type="button" class="primary login-home-button">Sign in</button>
                 <button id="show-register-button" type="button" class="ghost login-home-button">Register</button>
                 <a class="auth-legal-link agreement-link" href="/user-agreement" target="_blank" rel="noopener noreferrer">Research Preview Terms &amp; Privacy</a>
+              </div>
+
+              <div id="portal-account-view" class="auth-home-view" hidden>
+                <p id="portal-account-name" class="portal-account-name"></p>
+                <p id="workspace-entry-status" role="status" aria-live="polite" hidden></p>
+                <button id="enter-chat-button" type="button" class="primary login-home-button">Enter chat</button>
+                <button id="portal-sign-out-button" type="button" class="ghost login-home-button">Sign out</button>
               </div>
 
               <div id="auth-panel-header" class="login-card-header" hidden>
@@ -267,6 +276,9 @@
               <div class="sidebar-account">
                 <div class="sidebar-brand-row">
                   <div class="brand small">Potato Agent</div>
+                  <a id="chat-home-button" href="/" target="_blank" rel="noopener noreferrer" class="chat-home-button" aria-label="Home" title="Home">
+                    <span class="chat-home-icon" aria-hidden="true"></span>
+                  </a>
                   <button
                     id="update-notes-button"
                     class="update-notes-button"
@@ -440,6 +452,9 @@
               </div>
               <form id="composer-form" class="composer">
                 <div id="chat-error" class="error chat-error" hidden></div>
+                <div id="composer-example-row" class="composer-example-row" hidden>
+                  <label id="composer-example-label" class="composer-example-label" for="prompt-input">Example:</label>
+                </div>
                 <div class="composer-actions">
                   <div class="composer-input-wrap">
                     <div class="composer-entry-shell">
@@ -453,6 +468,7 @@
                         <textarea
                           id="prompt-input"
                           rows="1"
+                          autocomplete="off"
                           placeholder="Enter to send, Shift+Enter for newline."
                         ></textarea>
                       </div>
@@ -510,6 +526,16 @@
           </div>
         </main>
       </section>
+
+      <dialog id="workspace-entry-dialog" class="share-dialog workspace-entry-dialog" aria-labelledby="workspace-entry-title" aria-describedby="workspace-entry-description">
+        <h2 id="workspace-entry-title">Open incoming request?</h2>
+        <p id="workspace-entry-description" class="share-dialog-copy">The current draft and attachments will be cleared. Running tasks will continue in their chats.</p>
+        <p id="workspace-entry-preview" class="workspace-entry-preview"></p>
+        <form method="dialog" class="share-dialog-actions">
+          <button class="ghost" value="cancel" autofocus>Cancel</button>
+          <button class="primary" value="open">Open request</button>
+        </form>
+      </dialog>
 
       <div id="share-rules-modal" class="share-modal" hidden>
         <div id="share-rules-backdrop" class="share-modal-backdrop"></div>
@@ -673,6 +699,6 @@
 
     <script src="./static/lite/vendor/marked.umd.js"></script>
     <script src="/static/shared/feedback.js?v=20260819-feedback" defer></script>
-    <script type="module" src="./static/lite/app.js?v=20260907-navigation"></script>
+    <script type="module" src="./static/lite/app.js?v=20260910-http-tabs"></script>
   </body>
 </html>

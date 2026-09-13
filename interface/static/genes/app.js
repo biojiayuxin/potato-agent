@@ -95,6 +95,9 @@
   let currentOffset = 0;
   let currentHasMore = false;
   let detailPayload = null;
+  window.PotatoAgentExamples.bind('genes', () => ({
+    genes: detailSection.hidden ? [] : [detailPayload?.gene?.geneId],
+  }));
   let currentAnnotationPage = 0;
   let currentPaperLimit = PAPER_PAGE_SIZE;
   let currentSimilarityLimit = SIMILARITY_PAGE_SIZE;

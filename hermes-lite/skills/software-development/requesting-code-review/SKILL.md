@@ -1,6 +1,6 @@
 ---
 name: requesting-code-review
-description: "Pre-commit review: security scan, quality gates, auto-fix."
+description: "Code review and verification; apply fixes when authorized."
 version: 2.0.0
 author: Hermes Agent (adapted from obra/superpowers + MorAlekss)
 license: MIT
@@ -13,17 +13,17 @@ metadata:
 
 # Pre-Commit Code Verification
 
-Automated verification pipeline before code lands. Static scans, baseline-aware
-quality gates, an independent reviewer subagent, and an auto-fix loop.
+Verification pipeline for code changes. Static scans, baseline-aware quality
+gates, an independent reviewer subagent, and fixes when the task includes them.
 
-**Core principle:** No agent should verify its own work. Fresh context finds what you miss.
+**Core principle:** Independent review can catch problems missed during implementation.
+Keep review, fixes, and commits within the user's request and existing authorization.
 
 ## When to Use
 
-- After implementing a feature or bug fix, before `git commit` or `git push`
-- When user says "commit", "push", "ship", "done", "verify", or "review before merge"
-- After completing a task with 2+ file edits in a git repo
-- After each task in subagent-driven-development (the two-stage review)
+- When reviewing or verifying a specified set of code changes
+- When preparing a commit or push that the user has requested
+- When an implementation task includes an independent review
 
 **Skip for:** documentation-only changes, pure config tweaks, or when user says "skip verification".
 
@@ -32,14 +32,20 @@ quality gates, an independent reviewer subagent, and an auto-fix loop.
 
 ## Step 1 — Get the diff
 
+Identify the files or revision the user wants reviewed and whether the task
+includes fixes or a commit. A review or verification request alone does not
+authorize either. Pass the same scope to any reviewer or fix agent.
+
 ```bash
 git diff --cached
+git diff
 ```
 
-If empty, try `git diff` then `git diff HEAD~1 HEAD`.
-
-If `git diff --cached` is empty but `git diff` shows changes, tell the user to
-`git add <files>` first. If still empty, run `git status` — nothing to verify.
+Select the diff that matches the request, using `-- <paths>` to restrict it to
+the relevant files. Unstaged changes can be reviewed without staging them.
+Use `git diff HEAD~1 HEAD` when the requested scope is the last commit.
+If there is no diff, inspect any files or revision the user explicitly named;
+otherwise report that there are no changes to verify.
 
 If the diff exceeds 15,000 characters, split by file:
 ```bash
@@ -49,7 +55,10 @@ git diff HEAD -- specific_file.py
 
 ## Step 2 — Static security scan
 
-Scan added lines only. Any match is a security concern fed into Step 5.
+Scan added lines in the selected diff. Treat matches as candidates for review,
+then inspect their context before classifying them as security issues. The
+examples below use a staged diff; adapt the diff command and paths to the scope
+selected in Step 1.
 
 ```bash
 # Hardcoded secrets
@@ -70,9 +79,13 @@ git diff --cached | grep "^+" | grep -E "execute\(f\"|\.format\(.*SELECT|\.forma
 
 ## Step 3 — Baseline tests and linting
 
-Detect the project language and run the appropriate tools. Capture the failure
-count BEFORE your changes as **baseline_failures** (stash changes, run, pop).
-Only NEW failures introduced by your changes block the commit.
+Detect the project language and run the checks relevant to the changed behavior
+and repository requirements. When comparison with the base revision is needed,
+run the same checks in an isolated checkout so the working tree stays intact.
+Compare the failing tests and diagnostics, not just failure counts. Report
+pre-existing failures separately from regressions introduced by these changes.
+Choose affected test targets for the commands below; broaden checks when shared
+behavior or repository requirements call for them.
 
 **Test frameworks** (auto-detect by project files):
 ```bash
@@ -106,8 +119,8 @@ cargo clippy -- -D warnings 2>&1 | tail -10
 which go && go vet ./... 2>&1 | tail -10
 ```
 
-**Baseline comparison:** If baseline was clean and your changes introduce failures,
-that's a regression. If baseline already had failures, only count NEW ones.
+**Baseline comparison:** Identify new failures introduced by the changes. If the
+baseline cannot be checked, report that limitation instead of assuming it passed.
 
 ## Step 4 — Self-review checklist
 
@@ -126,13 +139,16 @@ Quick scan before dispatching the reviewer:
 
 Call `delegate_task` directly — it is NOT available inside execute_code or scripts.
 
-The reviewer gets ONLY the diff and static scan results. No shared context with
-the implementer. Fail-closed: unparseable response = fail.
+Give the reviewer the requested scope, repository conventions, diff, and static
+scan results, without leading it with the implementer's conclusions. It reviews
+and reports; it does not modify files. An unparseable response means the review
+is incomplete, not that the code has a confirmed defect.
 
 ```python
 delegate_task(
     goal="""You are an independent code reviewer. You have no context about how
-these changes were made. Review the git diff and return ONLY valid JSON.
+these changes were made. Review the git diff within the supplied task scope and
+return ONLY valid JSON. Do not modify files.
 
 FAIL-CLOSED RULES:
 - security_concerns non-empty -> passed must be false
@@ -168,7 +184,10 @@ Return ONLY this JSON:
   "suggestions": [],
   "summary": "one sentence verdict"
 }""",
-    context="Independent code review. Return only JSON verdict.",
+    context="""Independent code review. Return only JSON verdict.
+    Task scope: [requested files or revision and requirements]
+    Repository conventions: [applicable project instructions]
+    """,
     toolsets=["terminal"]
 )
 ```
@@ -177,9 +196,14 @@ Return ONLY this JSON:
 
 Combine results from Steps 2, 3, and 5.
 
-**All passed:** Proceed to Step 8 (commit).
+**All passed:** Proceed to Step 8 (report results and commit if authorized).
 
-**Any failures:** Report what failed, then proceed to Step 7 (auto-fix).
+**Review incomplete:** Obtain a usable review result or report the limitation.
+An unreadable diff or response does not identify a code issue to fix.
+
+**Any failures:** Report what failed. Proceed to Step 7 only when the task
+includes fixing those issues; for a review or verification request, return the
+findings without applying changes.
 
 ```
 VERIFICATION FAILED
@@ -191,9 +215,11 @@ New lint errors: [details]
 Suggestions (non-blocking): [list]
 ```
 
-## Step 7 — Auto-fix loop
+## Step 7 — Fix issues when authorized
 
-**Maximum 2 fix-and-reverify cycles.**
+Apply fixes within the requested scope. Further repair and verification should
+follow the task-completion guidance. Report unresolved blockers when the task
+cannot be completed within its scope.
 
 Spawn a THIRD agent context — not you (the implementer), not the reviewer.
 It fixes ONLY the reported issues:
@@ -214,26 +240,40 @@ Current diff for context:
 ---
 
 Fix each issue precisely. Describe what you changed and why.""",
-    context="Fix only the reported issues. Do not change anything else.",
+    context="""Fix only the reported issues within the authorized task scope.
+    Task scope: [requested changes, files, and applicable repository conventions]
+    Do not commit changes.
+    """,
     toolsets=["terminal", "file"]
 )
 ```
 
-After the fix agent completes, re-run Steps 1-6 (full verification cycle).
-- Passed: proceed to Step 8
-- Failed and attempts < 2: repeat Step 7
-- Failed after 2 attempts: escalate to user with the remaining issues and
-  suggest `git stash` or `git reset` to undo
+After the fix agent completes, inspect its changes and re-run the affected
+checks. Revisit review findings affected by those changes. When verification
+passes, proceed to Step 8. Otherwise, assess the remaining failures before
+choosing another fix or reporting the blocker.
 
-## Step 8 — Commit
+## Step 8 — Report results and commit if authorized
 
-If verification passed:
+Report the findings, changes applied, checks run, and any remaining limitations.
+Verification passing does not itself authorize a commit.
+
+If the user's existing authorization includes committing these changes, stage
+only this task's changes and inspect the staged diff before committing. Use
+patch staging when a file also contains unrelated changes. If unrelated changes
+are already staged, preserve them and use an isolated index or another scoped
+commit method rather than including them in this commit.
+
+For a working tree where the named files contain only the task's changes and
+the index has no unrelated staged changes:
 
 ```bash
-git add -A && git commit -m "[verified] <description>"
+git add -- path/to/task_file.py
+git diff --cached
+git commit -m "<description>"
 ```
 
-The `[verified]` prefix indicates an independent reviewer approved this change.
+Follow the repository's commit-message convention.
 
 ## Reference: Common Patterns to Flag
 
@@ -260,8 +300,8 @@ element.textContent = userInput;
 
 ## Integration with Other Skills
 
-**subagent-driven-development:** Run this after EACH task as the quality gate.
-The two-stage review (spec compliance + code quality) uses this pipeline.
+**subagent-driven-development:** Use this pipeline for the review stage included
+in the delegated task, carrying over its scope and authorization.
 
 **test-driven-development:** This pipeline verifies TDD discipline was followed —
 tests exist, tests pass, no regressions.
@@ -273,8 +313,8 @@ tests exist, tests pass, no regressions.
 - **Empty diff** — check `git status`, tell user nothing to verify
 - **Not a git repo** — skip and tell user
 - **Large diff (>15k chars)** — split by file, review each separately
-- **delegate_task returns non-JSON** — retry once with stricter prompt, then treat as FAIL
+- **delegate_task returns non-JSON** — request a usable review result or report the review as incomplete; do not invent defects
 - **False positives** — if reviewer flags something intentional, note it in fix prompt
 - **No test framework found** — skip regression check, reviewer verdict still runs
 - **Lint tools not installed** — skip that check silently, don't fail
-- **Auto-fix introduces new issues** — counts as a new failure, cycle continues
+- **A fix introduces new issues** — inspect the new evidence and decide whether a correction is within the task's scope

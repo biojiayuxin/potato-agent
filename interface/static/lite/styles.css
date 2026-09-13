@@ -2956,6 +2956,51 @@ button.stretch {
   letter-spacing: 0;
 }
 
+.portal-account-name,
+#workspace-entry-status,
+.workspace-entry-preview {
+  overflow-wrap: anywhere;
+  margin: 0;
+}
+
+.workspace-entry-dialog {
+  max-width: min(520px, calc(100% - 32px));
+  max-height: calc(100dvh - 32px);
+  overflow: auto;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  color: var(--text);
+  background: var(--panel);
+  letter-spacing: 0;
+}
+
+.workspace-entry-dialog::backdrop {
+  background: rgba(0, 0, 0, 0.4);
+}
+
+.workspace-entry-dialog:not([open]) {
+  display: none;
+}
+
+.workspace-entry-preview {
+  max-height: 160px;
+  overflow: auto;
+  margin-bottom: 20px;
+}
+
+.chat-home-button {
+  text-decoration: none;
+  flex-shrink: 0;
+}
+
+.chat-home-icon {
+  display: block;
+  background: currentColor;
+  mask: url('/static/lite/icons/house.svg') center / contain no-repeat;
+  pointer-events: none;
+}
+
+.chat-home-button,
 .update-notes-button {
   width: 34px;
   height: 34px;
@@ -2972,6 +3017,7 @@ button.stretch {
   transition: background 120ms ease, border-color 120ms ease, color 120ms ease;
 }
 
+.chat-home-button:hover,
 .update-notes-button:hover,
 .update-notes-button[aria-expanded='true'] {
   border-color: rgba(37, 99, 235, 0.28);
@@ -2995,6 +3041,7 @@ button.stretch {
   pointer-events: none;
 }
 
+.chat-home-icon,
 .update-notes-icon {
   width: 19px;
   height: 19px;
@@ -4052,6 +4099,33 @@ button.stretch {
   background: url('./icons/potato-agent-icon.png') center / contain no-repeat;
 }
 
+.workspace-view .messages > .conversation-intro {
+  padding: 16px 0;
+}
+
+.workspace-view .messages > .conversation-intro::before {
+  flex-shrink: 0;
+}
+
+.conversation-intro-copy {
+  max-width: 48ch;
+  margin: 0;
+  font-weight: 500;
+  line-height: 1.6;
+  overflow-wrap: break-word;
+}
+
+@media (max-width: 800px) {
+  .workspace-view .messages > .conversation-intro::before {
+    width: 96px;
+    height: 96px;
+  }
+
+  .conversation-intro-copy {
+    font-size: 14px;
+  }
+}
+
 .workspace-view .message {
   max-width: min(860px, 92%);
   width: fit-content;
@@ -4174,6 +4248,21 @@ button.stretch {
 .workspace-view .composer-entry-shell {
   min-width: 0;
   gap: 8px;
+}
+
+.composer-example-row {
+  width: 100%;
+  max-width: 900px;
+  margin: 0 auto -4px;
+  padding: 0 12px;
+}
+
+.composer-example-label {
+  display: block;
+  color: var(--muted);
+  font: inherit;
+  font-weight: 700;
+  line-height: 24px;
 }
 
 .workspace-view .composer-input-row {

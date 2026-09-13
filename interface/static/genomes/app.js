@@ -167,3 +167,4 @@ els.search.addEventListener('input', renderTable);
 els.ploidy.addEventListener('change', renderTable);
 
 init();
+window.PotatoAgentExamples.bind('genomes');

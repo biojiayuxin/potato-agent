@@ -1,3 +1,16 @@
+import { ChatWorkspace, accountKey, supportsWorkspace, readEntry, saveEntry, handoffRecord } from '/static/shared/chat-workspace.js?v=20260910-http-tabs';
+
+if (location.pathname !== '/chat' && /^#(share|example|entry)=/.test(location.hash)) {
+  history.replaceState(history.state, '', '/chat' + location.search + location.hash);
+}
+let pendingEntry = readEntry();
+let currentPagePath = location.pathname;
+let workspaceStarted = false;
+let workspaceStarting = false;
+let restoringHandoff = null;
+let entryConfirmResolve = null;
+const isChatPage = () => location.pathname === '/chat';
+
 const state = {
   user: null,
   pendingWorkspaceUser: null,
@@ -204,6 +217,7 @@ const dom = {
   modelSelect: document.getElementById('model-select'),
   composerForm: document.getElementById('composer-form'),
   promptInput: document.getElementById('prompt-input'),
+  exampleRow: document.getElementById('composer-example-row'),
   fileInput: document.getElementById('file-input'),
   attachButton: document.getElementById('attach-button'),
   planButton: document.getElementById('plan-button'),
@@ -351,6 +365,7 @@ const THEME_MODE_KEY = 'lite_theme_mode';
 const UPDATE_NOTES_PATH = './static/lite/update-notes.json';
 const UPDATE_NOTES_SEEN_KEY = 'lite_update_notes_seen_version';
 const PENDING_SHARE_TOKEN_KEY = 'lite_pending_chat_share_token';
+const PENDING_SHARE_ACCOUNT_KEY = 'lite_pending_chat_share_account';
 const UPDATE_NOTES_VISIBLE_LIMIT = 5;
 const CHAT_TAB_ID = 'chat';
 const MAX_TOTAL_ATTACHMENT_SIZE_BYTES = 200 * 1024 * 1024;
@@ -2282,6 +2297,7 @@ const handleTuiBridgeMessage = (event) => {
 };
 
 const ensureTuiBridge = async () => {
+  if (!workspace.owned || !workspaceStarted) throw new Error('Open the active chat workspace to continue.');
   if (tuiBridge && tuiBridge.readyState === WebSocket.OPEN) {
     return tuiBridge;
   }
@@ -2337,7 +2353,11 @@ const ensureTuiBridge = async () => {
 };
 
 const tuiBridgeRpc = async (method, params = {}) => {
+  const generation = workspace.generation;
   const socket = await ensureTuiBridge();
+  if (!workspace.owned || generation !== workspace.generation) {
+    throw new DOMException('Workspace ownership changed', 'AbortError');
+  }
   const id = nextTuiBridgeRequestId();
   const payload = { id, method, params };
   const result = await new Promise((resolve, reject) => {
@@ -2574,6 +2594,19 @@ const autoResizePromptInput = () => {
 };
 
 const nowSeconds = () => Math.floor(Date.now() / 1000);
+const clearResearchExample = () => {
+  if (!dom.exampleRow.hidden) dom.promptInput.value = '';
+  dom.exampleRow.hidden = true;
+  autoResizePromptInput();
+};
+
+const applyResearchExample = (example) => {
+  dom.promptInput.value = example.text;
+  dom.exampleRow.hidden = false;
+  autoResizePromptInput();
+  dom.promptInput.focus();
+};
+
 const uuid = () => {
   if (crypto?.randomUUID) return crypto.randomUUID();
   return `id-${Date.now()}-${Math.random().toString(16).slice(2)}`;
@@ -2611,6 +2644,7 @@ const activatePersistedSession = (session, { clearMessages = true } = {}) => {
 };
 
 const showDraftChat = ({ focusPrompt = true } = {}) => {
+  clearResearchExample();
   resetSessionRenameState();
   saveActiveSessionScrollPosition();
   activeTuiSessionId = '';
@@ -2856,7 +2890,7 @@ const invalidateApprovalSubmission = () => {
 
 const renderApprovalModal = () => {
   const approval = state.pendingApproval;
-  if (!approval) {
+  if (!approval || !workspace.owned || !workspaceStarted || !isChatPage()) {
     if (dom.approvalModal) {
       dom.approvalModal.hidden = true;
     }
@@ -3035,11 +3069,17 @@ const stopAuthPolling = () => {
 };
 
 const handleSessionExpired = (message) => {
+  if (workspace.exclusive) handoffRecord('delete', accountKey(state.user)).catch(() => {});
+  leaveWorkspace();
+  pendingEntry = null;
+  saveEntry(null);
+  clearPendingShareIntent();
   stopAuthPolling();
   state.user = null;
   state.pendingWorkspaceUser = null;
   resetWorkspaceState();
   showLogin();
+  setAuthViewMode('signin');
   showError(dom.loginError, message || SESSION_EXPIRED_MESSAGE);
 };
 
@@ -3417,6 +3457,11 @@ const toggleSidebarSettingsMenu = () => {
 };
 
 const performSignOut = async () => {
+  if (workspace.exclusive) await handoffRecord('delete', accountKey(state.user)).catch(() => {});
+  leaveWorkspace();
+  pendingEntry = null;
+  saveEntry(null);
+  clearPendingShareIntent();
   state.pendingAttachments = [];
   stopAuthPolling();
   resetTuiBridgeReconnectState();
@@ -3434,6 +3479,7 @@ const performSignOut = async () => {
   } catch {
     // Ignore logout transport failures and still clear the UI state.
   }
+  workspace.authChanged({ clearReceipts: true });
   state.user = null;
   state.pendingWorkspaceUser = null;
   resetWorkspaceState();
@@ -3837,7 +3883,10 @@ const setAuthViewMode = (mode) => {
     dom.authCardCopy.textContent = 'We are starting the Potato Agent service bound to your account before entering the workspace.';
   }
 
-  dom.authHomeView.hidden = !showHome;
+  dom.authHomeView.hidden = !showHome || Boolean(state.user);
+  document.getElementById('portal-account-view').hidden = !showHome || !state.user;
+  document.getElementById('portal-account-name').textContent = state.user?.name || state.user?.username || '';
+  document.getElementById('portal-sign-out-button').hidden = !state.user;
   dom.authPanelHeader.hidden = showHome;
   dom.loginForm.hidden = !showSignin;
   dom.signinNavActions.hidden = !showSignin;
@@ -3862,6 +3911,8 @@ const setAuthViewMode = (mode) => {
 };
 
 const resetWorkspaceState = () => {
+  clearResearchExample();
+  dom.promptInput.value = '';
   authSessionGeneration += 1;
   workspacePathNavigationGeneration += 1;
   stopAllLiveSessionPolling();
@@ -3954,7 +4005,24 @@ const showRuntimeStartView = ({ title, copy, error = '', canRetry = false, canBa
   setRuntimeStartState({ title, copy, error, canRetry, canBack });
 };
 
-const startWorkspaceRuntime = async (user, { allowRetry = true, source = 'signin' } = {}) => {
+const startWorkspaceRuntime = async (user, { allowRetry = true, source = 'signin', takeover = true } = {}) => {
+  if (workspaceStarting) return;
+  if (!isChatPage()) history.pushState(null, '', '/chat');
+  currentPagePath = location.pathname;
+  state.user = user;
+  startAuthPolling();
+  if (!supportsWorkspace() || !workspace.supported) { showEntryStatus('unsupported'); return; }
+  workspaceStarting = true;
+  const generation = workspace.generation;
+  const acquired = await workspace.acquire(user, { takeover });
+  if (generation !== workspace.generation) return;
+  if (!acquired) {
+    workspaceStarting = false;
+    if (!workspace.supported) { showEntryStatus('unsupported'); return; }
+    if (!takeover) returnToPortal();
+    return;
+  }
+  const resume = workspaceStarted && workspace.canResume;
   state.pendingWorkspaceUser = user || null;
   const isTemporaryUser = Boolean(user?.is_temporary);
   showRuntimeStartView({
@@ -3968,17 +4036,60 @@ const startWorkspaceRuntime = async (user, { allowRetry = true, source = 'signin
   });
 
   try {
+    const auth = await fetch('/api/auth/session', { credentials: 'include' }).then(response => response.json());
+    if (!workspace.owned || generation !== workspace.generation) return;
+    if (!auth.authenticated || accountKey(auth.user) !== accountKey(user)) {
+      handleSessionExpired('The signed-in account changed. Please sign in again.');
+      return;
+    }
+    if (!workspace.owned || generation !== workspace.generation) return;
+    restoringHandoff = workspace.exclusive ? await handoffRecord('get') : null;
+    if (restoringHandoff?.account !== accountKey(user)) {
+      if (restoringHandoff) await handoffRecord('delete', restoringHandoff);
+      restoringHandoff = null;
+    }
+    if (!workspace.owned || generation !== workspace.generation) return;
     const response = await api('/api/runtime/start', { method: 'POST' });
     const json = await response.json();
+    if (!workspace.owned || generation !== workspace.generation) return;
+    if (json?.user && accountKey(json.user) !== accountKey(user)) {
+      handleSessionExpired('The signed-in account changed. Please sign in again.');
+      return;
+    }
     state.user = json?.user || user;
     state.pendingWorkspaceUser = null;
-    resetWorkspaceState();
+    if (!resume || restoringHandoff) {
+      resetWorkspaceState();
+      if (restoringHandoff) {
+        persistPendingShareToken(restoringHandoff.snapshot.pendingShareToken || '');
+      } else if (!pendingEntry) state.pendingShareToken = getStoredPendingShareToken();
+    }
+    workspaceStarted = true;
+    dom.workspaceView.inert = true;
+    dom.workspaceView.setAttribute('aria-busy', 'true');
     showWorkspace();
     renderWorkspace();
-    await initializeWorkspaceData();
+    if (!resume || restoringHandoff) await initializeWorkspaceData();
+    else {
+      for (const sessionId of busySessionIds) startLiveSessionPolling(sessionId);
+      refreshFileTreeAfterFocus();
+      if (state.pendingShareToken) await importPendingSharedChat();
+    }
+    if (!workspace.owned || generation !== workspace.generation) return;
+    if (restoringHandoff) {
+      await restoreHandoffComposer(restoringHandoff.snapshot);
+      await handoffRecord('delete', restoringHandoff);
+      restoringHandoff = null;
+    }
+    if (!workspace.owned || generation !== workspace.generation) return;
+    dom.workspaceView.inert = false;
+    workspace.ready = true;
     startAuthPolling();
+    if (pendingEntry) await workspace.receive({ ...pendingEntry, account: accountKey(state.user) });
+    dom.workspaceView.setAttribute('aria-busy', 'false');
   } catch (error) {
-    state.user = null;
+    if (!workspace.owned || generation !== workspace.generation) return;
+    leaveWorkspace();
     resetWorkspaceState();
     const message = String(error.message || 'Failed to start Potato Agent runtime');
     showRuntimeStartView({
@@ -3992,12 +4103,15 @@ const startWorkspaceRuntime = async (user, { allowRetry = true, source = 'signin
       canRetry: allowRetry,
       canBack: true,
     });
+  } finally {
+    if (generation === workspace.generation) workspaceStarting = false;
   }
 };
 
 const pollAuthSession = async () => {
   stopAuthPolling();
   if (!state.user) return;
+  const generation = authSessionGeneration;
 
   try {
     const response = await fetch('/api/auth/session', {
@@ -4005,10 +4119,15 @@ const pollAuthSession = async () => {
       credentials: 'include',
     });
     const json = await response.json();
+    if (generation !== authSessionGeneration) return;
     if (!json?.authenticated) {
       handleSessionExpired(
         json?.message || SESSION_EXPIRED_MESSAGE
       );
+      return;
+    }
+    if (accountKey(json.user) !== accountKey(state.user)) {
+      handleSessionExpired('The signed-in account changed. Please sign in again.');
       return;
     }
   } catch {
@@ -4083,6 +4202,14 @@ const pollSignupJob = async () => {
 
 const api = async (path, options = {}) => {
   const requestAuthSessionGeneration = authSessionGeneration;
+  const workspaceRequest = /^\/api\/(runtime|sessions|models|files|chat-shares|tui)(\/|$)/.test(path);
+  const requestWorkspaceGeneration = workspace.generation;
+  if (workspaceRequest && !workspace.owned) throw new Error('Open the active chat workspace to continue.');
+  const assertCurrentWorkspace = () => {
+    if (workspaceRequest && (!workspace.owned || requestWorkspaceGeneration !== workspace.generation)) {
+      throw new DOMException('Workspace ownership changed', 'AbortError');
+    }
+  };
   const headers = new Headers(options.headers || {});
   if (!(options.body instanceof FormData) && !headers.has('Content-Type') && options.body) {
     headers.set('Content-Type', 'application/json');
@@ -4093,6 +4220,16 @@ const api = async (path, options = {}) => {
     ...options,
     headers,
   });
+
+  assertCurrentWorkspace();
+  if (workspaceRequest) {
+    const readJson = response.json.bind(response);
+    response.json = async () => {
+      const json = await readJson();
+      assertCurrentWorkspace();
+      return json;
+    };
+  }
 
   if (!response.ok) {
     let detail = `Request failed: ${response.status}`;
@@ -5232,6 +5369,12 @@ const normalizeShareToken = (value) => {
 
 const getStoredPendingShareToken = () => {
   try {
+    const account = sessionStorage.getItem(PENDING_SHARE_ACCOUNT_KEY);
+    if (account && account !== accountKey(state.user)) {
+      sessionStorage.removeItem(PENDING_SHARE_TOKEN_KEY);
+      sessionStorage.removeItem(PENDING_SHARE_ACCOUNT_KEY);
+      return '';
+    }
     return normalizeShareToken(sessionStorage.getItem(PENDING_SHARE_TOKEN_KEY));
   } catch {
     return '';
@@ -5251,50 +5394,16 @@ const persistPendingShareToken = (token, { replaceIntent = false } = {}) => {
   try {
     if (normalizedToken) {
       sessionStorage.setItem(PENDING_SHARE_TOKEN_KEY, normalizedToken);
+      sessionStorage.setItem(PENDING_SHARE_ACCOUNT_KEY, accountKey(state.user));
     } else {
       sessionStorage.removeItem(PENDING_SHARE_TOKEN_KEY);
+      sessionStorage.removeItem(PENDING_SHARE_ACCOUNT_KEY);
     }
   } catch {
     // The in-memory intent still works when tab storage is unavailable.
   }
   renderShareLoginBanner();
   return normalizedToken;
-};
-
-const removeShareFragmentFromAddressBar = () => {
-  try {
-    const cleanPath = `${window.location.pathname}${window.location.search}` || '/';
-    window.history.replaceState(window.history.state, '', cleanPath);
-  } catch {
-    // A fragment is never sent to the server; keep going if History API access fails.
-  }
-};
-
-const capturePendingShareIntent = () => {
-  const hash = String(window.location.hash || '');
-  if (!hash.startsWith('#share=')) {
-    if (!state.pendingShareToken) {
-      state.pendingShareToken = getStoredPendingShareToken();
-    }
-    renderShareLoginBanner();
-    return state.pendingShareToken;
-  }
-
-  let rawToken = '';
-  try {
-    rawToken = decodeURIComponent(hash.slice('#share='.length));
-  } catch {
-    rawToken = '';
-  }
-  removeShareFragmentFromAddressBar();
-  const token = persistPendingShareToken(rawToken, { replaceIntent: true });
-  if (!token && state.user) {
-    setShareImportState(
-      'terminal',
-      'The share link is invalid or incomplete.'
-    );
-  }
-  return token;
 };
 
 const clearPendingShareIntent = () => {
@@ -5305,7 +5414,7 @@ const renderShareLoginBanner = () => {
   if (!dom.shareLoginBanner) return;
   const authMode = String(dom.authCard?.dataset.authMode || 'home');
   const authChoiceVisible = ['home', 'signin', 'register', 'password-reset'].includes(authMode);
-  dom.shareLoginBanner.hidden = !(state.pendingShareToken && !state.user && authChoiceVisible);
+  dom.shareLoginBanner.hidden = !((state.pendingShareToken || pendingEntry?.kind === 'share') && !state.user && authChoiceVisible);
 };
 
 const showShareToast = (message) => {
@@ -5462,7 +5571,7 @@ const createActiveChatShare = async () => {
     if (!token) throw new Error('The server returned an invalid share link.');
     createdResult = {
       token,
-      url: `${window.location.origin}/#share=${encodeURIComponent(token)}`,
+      url: `${window.location.origin}/chat#share=${encodeURIComponent(token)}`,
       expiresAt: json?.expires_at ?? '',
       maxRecipients: Number(json?.max_recipients || 0),
     };
@@ -5519,7 +5628,8 @@ const cancelShareImportRequest = () => {
 const renderShareImportDialog = () => {
   if (!dom.shareImportModal) return;
   const status = state.shareImportStatus;
-  const visible = ['importing', 'waiting', 'retry', 'terminal'].includes(status);
+  const visible = workspace.owned && workspaceStarted && isChatPage()
+    && ['importing', 'waiting', 'retry', 'terminal'].includes(status);
   dom.shareImportModal.hidden = !visible;
   if (!visible) return;
 
@@ -5619,6 +5729,7 @@ const schedulePendingShareImport = (delayMs, message = '') => {
 };
 
 const requestPendingShareImport = async () => {
+  if (!workspace.owned || !workspaceStarted) return null;
   const token = normalizeShareToken(state.pendingShareToken);
   if (!token || !state.user || state.shareImportInFlight) return null;
 
@@ -5821,10 +5932,15 @@ const renderMessages = () => {
   }
 
   if (visibleMessages.length === 0) {
-    const empty = document.createElement('div');
-    empty.className = 'empty-state';
-    empty.textContent = 'Start a new conversation.';
-    dom.messages.append(empty);
+    if (!state.pendingShareToken) {
+      const empty = document.createElement('div');
+      empty.className = 'empty-state conversation-intro';
+      const copy = document.createElement('p');
+      copy.className = 'conversation-intro-copy';
+      copy.textContent = 'Query and analyze PotatoOmics data, or search beyond the database for more information.';
+      empty.append(copy);
+      dom.messages.append(empty);
+    }
     if (chatTabVisible) {
       restorePendingMessageScrollPosition();
     }
@@ -7150,6 +7266,7 @@ const scheduleFileTreeRefresh = (reason = '', { delay = FILE_TREE_REFRESH_DEBOUN
 };
 
 const refreshFileTreeAfterFocus = () => {
+  if (!workspace.owned || !workspaceStarted) return;
   if (document.hidden || !state.user || !state.currentPath) return;
   startFileTreeChangePolling();
   const now = Date.now();
@@ -7635,6 +7752,7 @@ const openSession = async (sessionId, { shouldApply = null } = {}) => {
     return;
   }
 
+  clearResearchExample();
   const matchedSession = state.sessions.find((session) => session.id === sessionId) || null;
   state.draftSession = null;
   state.activeSession = matchedSession
@@ -8513,6 +8631,8 @@ const submitPromptViaTuiBridge = async (prompt) => {
   state.messages = targetMessages;
   state.streamingMessageIds.add(assistantMessage.id);
   state.pendingAttachments = [];
+  dom.promptInput.value = '';
+  clearResearchExample();
   setLiveSessionMessages(currentSessionId, targetMessages);
   setSessionBusy(currentSessionId, true, { transport: 'tui' });
   renderWorkspace();
@@ -8671,6 +8791,7 @@ const submitPromptViaTuiBridge = async (prompt) => {
 };
 
 const showWorkspace = () => {
+  if (!workspace.owned || !workspaceStarted || !isChatPage()) return;
   stopDailyUpdates();
   dom.loginView.hidden = true;
   dom.loginView.style.display = 'none';
@@ -8722,12 +8843,32 @@ const initializeWorkspaceData = async () => {
       }
       return;
     }
-    if (!sessionsLoaded) return;
     if (state.pendingShareToken) {
       state.sessionHistoryLoading = false;
       renderWorkspace();
       return;
     }
+    if (restoringHandoff) {
+      const snapshot = restoringHandoff.snapshot;
+      if (snapshot.activeSession?.isDraft) {
+        state.draftSession = snapshot.activeSession;
+        state.activeSession = state.draftSession;
+        state.activeSessionId = state.draftSession.id;
+        state.messages = snapshot.draftMessages || [];
+        setLiveSessionMessages(state.activeSessionId, state.messages);
+        state.sessionHistoryLoading = false;
+        renderWorkspace();
+      } else if (snapshot.activeSession?.id) {
+        await openSession(snapshot.activeSession.id);
+      } else showDraftChat({ focusPrompt: false });
+      return;
+    }
+    if (pendingEntry && pendingEntry.kind !== 'return') {
+      state.sessionHistoryLoading = false;
+      showDraftChat({ focusPrompt: false });
+      return;
+    }
+    if (!sessionsLoaded) return;
     if (state.sessions.length > 0) {
       await openSession(state.sessions[0].id);
     } else {
@@ -8767,30 +8908,276 @@ const initResizablePanels = () => {
   });
 };
 
-const bootstrapSession = async () => {
+const entryStatusMessages = {
+  waiting: 'Moving your chat to this tab...',
+  uploading: 'Waiting for files to finish uploading in the previous tab...',
+  timeout: 'The previous tab has not responded yet. Keep it open, then retry.',
+  pending: 'Confirm the incoming request to continue.',
+  completed: 'Your request was opened.',
+  importing: 'Your shared chat is being imported.',
+  cancelled: 'Request cancelled. Your existing chat was kept.',
+  busy: 'Another request is in progress. Please retry shortly.',
+  retry: 'The request could not be opened. Please retry.',
+  'account-changed': 'The signed-in account changed. Refresh this page to continue.',
+  unsupported: 'Chat requires browser storage and communication between tabs. Enable these in your browser, then retry. Portal queries are still available.',
+};
+
+const showEntryStatus = status => {
+  showLogin();
+  document.getElementById('portal-account-view').hidden = false;
+  const statusNode = document.getElementById('workspace-entry-status');
+  statusNode.textContent = entryStatusMessages[status] || entryStatusMessages.retry;
+  statusNode.hidden = false;
+  const button = document.getElementById('enter-chat-button');
+  button.textContent = ['busy', 'retry', 'timeout', 'account-changed'].includes(status) ? 'Retry entry' : 'Enter chat';
+  button.disabled = ['unsupported', 'waiting', 'uploading'].includes(status);
+};
+
+const returnToPortal = () => {
+  leaveWorkspace();
+  resetWorkspaceState();
+  clearPendingShareIntent();
+  pendingEntry = null;
+  saveEntry(null);
+  history.replaceState(history.state, '', '/lite');
+  currentPagePath = '/lite';
+  document.getElementById('workspace-entry-status').hidden = true;
+  document.getElementById('enter-chat-button').textContent = 'Enter chat';
+  document.getElementById('enter-chat-button').disabled = false;
+  showLogin();
+  startAuthPolling();
+};
+
+const yieldWorkspace = async request => {
+  if (state.pendingAttachments.some(item => item.status === 'uploading')) return 'uploading';
+  if (composerSubmitPending || state.pendingSessionPromise || state.approvalSubmitting
+    || state.sessionHistoryLoading || state.shareImportInFlight || state.chatSharing
+    || state.passwordChangeSubmitting
+    || state.forkingMessageCursors.size || interruptingSessionIds.size) return 'waiting';
+  const generation = workspace.generation;
+  const canTransfer = () => workspace.owned && generation === workspace.generation && Date.now() < request.expiresAt;
+  const surfaces = [dom.workspaceView, ...document.querySelectorAll('.share-modal, .approval-modal, .password-modal')];
+  surfaces.forEach(node => { node.inert = true; });
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 5000);
+  try {
+    const auth = await fetch('/api/auth/session', { credentials: 'include', signal: controller.signal }).then(response => response.json());
+    if (!canTransfer()) return 'retry';
+    if (!auth.authenticated || accountKey(auth.user) !== accountKey(state.user)) {
+      handleSessionExpired('The signed-in account changed. Please sign in again.');
+      return 'account-changed';
+    }
+    saveActiveSessionScrollPosition();
+    const handoff = {
+      id: request.id,
+      account: accountKey(state.user),
+      snapshot: {
+        activeSession: state.activeSession,
+        draftMessages: state.activeSession?.isDraft ? state.messages : [],
+        prompt: dom.promptInput.value,
+        example: !dom.exampleRow.hidden,
+        attachments: state.pendingAttachments,
+        composerMode: state.composerMode,
+        pendingShareToken: state.pendingShareToken,
+        scrollPositions: [...state.sessionScrollPositions],
+        filePreviewTabs: state.filePreviewTabs.map(({ id, key, path, root, title, filename, size }) => ({ id, key, path, root, title, filename, size })),
+        activeWorkspaceTab: state.activeWorkspaceTab,
+        mobileOverlayPanel: state.mobileOverlayPanel,
+        fileTree: { workspaceRoot: state.workspaceRoot, rootPath: state.rootPath,
+          currentPath: state.currentPath, expandedPaths: [...state.expandedPaths], scrollTop: dom.fileTree.scrollTop },
+      },
+    };
+    await handoffRecord('put', handoff, canTransfer);
+    if (!canTransfer()) {
+      await handoffRecord('delete', handoff);
+      return 'retry';
+    }
+    returnToPortal();
+    return 'released';
+  } finally {
+    clearTimeout(timeout);
+    surfaces.forEach(node => { node.inert = false; });
+  }
+};
+
+const restoreHandoffComposer = async snapshot => {
+  dom.promptInput.value = snapshot.prompt || '';
+  dom.exampleRow.hidden = !snapshot.example;
+  state.pendingAttachments = snapshot.attachments || [];
+  state.composerMode = snapshot.composerMode === 'plan' ? 'plan' : 'chat';
+  state.sessionScrollPositions = new Map(snapshot.scrollPositions || []);
+  state.filePreviewTabs = (snapshot.filePreviewTabs || []).map(tab => ({
+    ...tab, loading: true, previewType: 'loading', content: '', contentUrl: '', error: '', meta: null,
+    downloadUrl: buildFileDownloadUrl(tab.path, tab.root),
+  }));
+  state.activeWorkspaceTab = snapshot.activeWorkspaceTab || CHAT_TAB_ID;
+  state.mobileOverlayPanel = snapshot.mobileOverlayPanel || null;
+  if (snapshot.fileTree?.rootPath) {
+    state.workspaceRoot = snapshot.fileTree.workspaceRoot;
+    state.rootPath = snapshot.fileTree.rootPath;
+    state.currentPath = snapshot.fileTree.currentPath;
+    state.expandedPaths = new Set(snapshot.fileTree.expandedPaths);
+    try { await refreshVisibleFileTree(); }
+    catch (error) { showChatError(error.message || 'Failed to restore the file browser'); }
+    dom.fileTree.scrollTop = snapshot.fileTree.scrollTop || 0;
+  }
+  queueMessageScrollRestore(state.activeSessionId);
+  renderWorkspace();
+  autoResizePromptInput();
+  state.filePreviewTabs.forEach(tab => loadFilePreviewTab(tab.id));
+};
+
+const suspendWorkspace = () => {
+  workspaceStarting = false;
+  bootstrapInFlight = false;
+  dom.workspaceView.hidden = true;
+  dom.workspaceView.style.display = 'none';
+  stopAuthPolling();
+  stopAllLiveSessionPolling();
+  stopFileTreeChangePolling();
+  resetTuiBridgeReconnectState();
+  cancelAllTitleReconciliations();
+  closeTuiBridge();
+  clearShareImportRetryTimer();
+  cancelShareImportRequest();
+  document.getElementById('workspace-entry-dialog').close('cancel');
+  entryConfirmResolve?.(false);
+  entryConfirmResolve = null;
+  document.querySelectorAll('.share-modal, .approval-modal, .password-modal').forEach(node => { node.hidden = true; });
+  workspace.suspend();
+};
+
+const leaveWorkspace = () => {
+  suspendWorkspace();
+  workspaceStarted = false;
+  workspaceStarting = false;
+};
+
+const confirmWorkspaceEntry = entry => new Promise(resolve => {
+  const dialog = document.getElementById('workspace-entry-dialog');
+  document.getElementById('workspace-entry-preview').textContent = entry.kind === 'example'
+    ? entry.example.text : 'Import shared chat';
+  entryConfirmResolve = resolve;
+  dialog.returnValue = 'cancel';
+  dialog.showModal();
+});
+
+const handleWorkspaceEntry = async entry => {
+  const generation = workspace.generation;
+  const auth = await fetch('/api/auth/session', { credentials: 'include' }).then(response => response.json());
+  if (!workspace.owned || generation !== workspace.generation) return 'retry';
+  if (!auth.authenticated || accountKey(auth.user) !== accountKey(state.user)) {
+    handleSessionExpired('The signed-in account changed. Please sign in again.');
+    return 'account-changed';
+  }
+  if (state.chatSharing || state.pendingShareToken || state.sessionHistoryLoading) return 'busy';
+  const hasCurrentWork = Boolean(dom.promptInput.value || state.pendingAttachments.length
+    || state.isSending || busySessionIds.size || state.pendingApproval || pendingApprovalsBySessionId.size);
+  if (hasCurrentWork && !await confirmWorkspaceEntry(entry)) return 'cancelled';
+  if (!workspace.owned || generation !== workspace.generation) return 'retry';
+  clearResearchExample();
+  dom.promptInput.value = '';
+  state.pendingAttachments = [];
+  if (entry.kind === 'example') {
+    showDraftChat();
+    applyResearchExample(entry.example);
+  } else {
+    persistPendingShareToken(entry.token, { replaceIntent: true });
+    const result = await importPendingSharedChat();
+    if (!result) return state.pendingShareToken ? 'importing' : 'cancelled';
+  }
+  return 'completed';
+};
+
+const workspace = new ChatWorkspace({
+  onYield: yieldWorkspace,
+  onTransferStatus: showEntryStatus,
+  onRequest: handleWorkspaceEntry,
+  onStatus: (id, status) => {
+    if (workspace.owned && ['busy', 'retry'].includes(status)) showShareToast(entryStatusMessages[status]);
+    if (pendingEntry?.id !== id) return;
+    if (['returned', 'completed', 'cancelled', 'importing'].includes(status)) {
+      pendingEntry = null;
+      saveEntry(null);
+    }
+    if (!workspace.owned) showEntryStatus(status);
+  },
+  onAuthChange: signedOut => {
+    if (signedOut) handleSessionExpired('Signed out in another tab. Please sign in again.');
+    else if (state.user) pollAuthSession();
+    else if (!isChatPage()) bootstrapSession();
+  },
+});
+
+const finishWorkspaceEntryConfirmation = accepted => {
+  entryConfirmResolve?.(accepted);
+  entryConfirmResolve = null;
+};
+// Resolve on the action; background tabs may defer the native dialog close event.
+document.querySelector('#workspace-entry-dialog form').addEventListener('submit', event => {
+  finishWorkspaceEntryConfirmation(event.submitter?.value === 'open');
+});
+document.getElementById('workspace-entry-dialog').addEventListener('cancel', () => {
+  finishWorkspaceEntryConfirmation(false);
+});
+document.getElementById('workspace-entry-dialog').addEventListener('close', event => {
+  if (!event.target.open) finishWorkspaceEntryConfirmation(event.target.returnValue === 'open');
+});
+document.getElementById('enter-chat-button').addEventListener('click', () => {
+  if (state.user) startWorkspaceRuntime(state.user);
+});
+document.getElementById('portal-sign-out-button').addEventListener('click', performSignOut);
+window.addEventListener('popstate', () => {
+  if (location.pathname === currentPagePath) return;
+  currentPagePath = location.pathname;
+  suspendWorkspace();
+  showLogin();
+  bootstrapSession({ takeover: false });
+});
+
+const bootstrapSession = async ({ takeover = true } = {}) => {
   if (bootstrapInFlight) return;
   bootstrapInFlight = true;
+  const generation = workspace.generation;
   try {
     const response = await fetch('/api/auth/session', {
       method: 'GET',
       credentials: 'include',
     });
     const json = await response.json();
+    if (generation !== workspace.generation) return;
     if (!json?.authenticated || !json?.user) {
       throw new Error('Not authenticated');
     }
-    await startWorkspaceRuntime(json.user, { allowRetry: true, source: 'restore' });
+    if (state.user && accountKey(state.user) !== accountKey(json.user)) {
+      handleSessionExpired('The signed-in account changed. Please sign in again.');
+      return;
+    }
+    state.user = json.user;
+    if (pendingEntry?.account && pendingEntry.account !== accountKey(state.user)) {
+      pendingEntry = null;
+      saveEntry(null);
+    }
+    if (isChatPage()) await startWorkspaceRuntime(json.user, { allowRetry: true, source: 'restore', takeover });
+    else {
+      showLogin();
+      startAuthPolling();
+      if (!supportsWorkspace() || !workspace.supported) showEntryStatus('unsupported');
+    }
     if (state.user) {
       return;
     }
   } catch {
+    if (generation !== workspace.generation) return;
+    leaveWorkspace();
     stopAuthPolling();
     state.user = null;
     state.pendingWorkspaceUser = null;
     resetWorkspaceState();
     showLogin();
+    if (!supportsWorkspace() || !workspace.supported) showEntryStatus('unsupported');
   } finally {
-    bootstrapInFlight = false;
+    if (generation === workspace.generation) bootstrapInFlight = false;
   }
 };
 
@@ -8842,6 +9229,7 @@ dom.loginForm.addEventListener('submit', async (event) => {
     });
     const user = await response.json();
     resetSigninAgreementPrompt();
+    workspace.authChanged();
     await startWorkspaceRuntime(user, { allowRetry: true, source: 'signin' });
   } catch (error) {
     if (error.status === 428 && error.payload?.error === 'agreement_required') {
@@ -8984,6 +9372,7 @@ dom.showTemporaryButton?.addEventListener('click', async () => {
       }),
     });
     const user = await response.json();
+    workspace.authChanged();
     await startWorkspaceRuntime(user, { allowRetry: true, source: 'temporary' });
   } catch (error) {
     setAuthViewMode('signin');
@@ -9168,16 +9557,7 @@ dom.runtimeStartRetryButton.addEventListener('click', async () => {
 });
 
 dom.runtimeStartBackButton.addEventListener('click', async () => {
-  stopAuthPolling();
-  try {
-    await api('/api/auth/signout', { method: 'POST' });
-  } catch {
-    // Ignore logout transport failures and still clear UI state.
-  }
-  state.user = null;
-  state.pendingWorkspaceUser = null;
-  resetWorkspaceState();
-  showLogin();
+  await performSignOut();
   setAuthViewMode('signin');
 });
 
@@ -9234,13 +9614,19 @@ dom.modelSelect?.addEventListener('change', (event) => {
   switchActiveModel(event.target.value).catch((error) => showChatError(error.message));
 });
 
-dom.composerForm.addEventListener('submit', (event) => {
+let composerSubmitPending = false;
+dom.composerForm.addEventListener('submit', async (event) => {
   event.preventDefault();
-  if (state.isSending) return;
+  if (state.isSending || composerSubmitPending) return;
   const prompt = dom.promptInput.value;
-  dom.promptInput.value = '';
-  autoResizePromptInput();
-  submitPromptViaTuiBridge(prompt).catch(() => {});
+  composerSubmitPending = true;
+  try {
+    await submitPromptViaTuiBridge(prompt);
+  } catch {
+    // Turn submission reports errors in the conversation.
+  } finally {
+    composerSubmitPending = false;
+  }
 });
 
 dom.attachButton.addEventListener('click', () => {
@@ -9270,6 +9656,8 @@ dom.promptInput.addEventListener('keydown', (event) => {
 dom.promptInput.addEventListener('input', () => {
   autoResizePromptInput();
 });
+
+window.addEventListener('pagehide', () => suspendWorkspace());
 
 dom.promptInput.addEventListener('paste', async (event) => {
   if (state.isSending) return;
@@ -9356,7 +9744,9 @@ dom.filePathInput?.addEventListener('keydown', async (event) => {
 });
 
 window.addEventListener('focus', refreshFileTreeAfterFocus);
-window.addEventListener('pageshow', () => {
+window.addEventListener('focus', () => { if (state.user) pollAuthSession(); });
+window.addEventListener('pageshow', event => {
+  if (event.persisted) bootstrapSession({ takeover: false });
   loadUpdateNotes().catch(() => {});
 });
 document.addEventListener('visibilitychange', () => {
@@ -9391,11 +9781,17 @@ if (typeof mobilePanelMediaQuery.addEventListener === 'function') {
 }
 
 window.addEventListener('hashchange', () => {
-  const token = capturePendingShareIntent();
-  if (!token) return;
-  if (state.user) {
-    importPendingSharedChat().catch(() => {});
-    return;
+  const entry = readEntry();
+  if (!entry) return;
+  if (!isChatPage()) history.replaceState(history.state, '', '/chat');
+  currentPagePath = location.pathname;
+  if (workspace.owned) {
+    if (!workspace.pending) pendingEntry = entry;
+    else saveEntry(pendingEntry);
+    workspace.receive({ ...entry, account: accountKey(state.user) });
+  } else {
+    pendingEntry = entry;
+    if (state.user) startWorkspaceRuntime(state.user);
   }
   renderShareLoginBanner();
 });
@@ -9407,6 +9803,6 @@ autoResizePromptInput();
 renderMobilePanelState();
 renderEmailVerificationState();
 renderPasswordResetState();
-capturePendingShareIntent();
+if (pendingEntry?.kind === 'share') renderShareLoginBanner();
 ensureAgreementMetadata().catch(() => {});
-bootstrapSession();
+bootstrapSession({ takeover: performance.getEntriesByType('navigation')[0]?.type !== 'back_forward' });

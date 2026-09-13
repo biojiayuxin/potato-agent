@@ -10,7 +10,9 @@
     <link rel="stylesheet" href="/static/shared/announcement.css?v=20260906-compact">
     <script src="/static/shared/announcement.js?v=20260906" defer></script>
     <link rel="stylesheet" href="/static/shared/navigation.css?v=20260908-navigation-mobile-centered" />
-    <script src="/static/shared/navigation.js?v=20260908-navigation-centered" defer></script>
+    <script src="/static/shared/navigation.js?v=20260912-portal-link" defer></script>
+    <link rel="stylesheet" href="/static/shared/agent-examples.css?v=20260909-simplified-chat" />
+    <script src="/static/shared/agent-examples.js?v=20260910-http-fallback"></script>
   </head>
   <body>
     <div class="spatial-app">
@@ -25,8 +27,9 @@
 
       <main class="spatial-main">
         <section class="query-panel" aria-label="Spatial expression controls">
-          <div class="query-heading">
+          <div class="query-heading agent-example-actions">
             <h2>Spatial Expression</h2>
+            <button id="ask-potato-agent" type="button" class="ghost ask-potato-agent">Ask Potato Agent</button>
           </div>
 
           <div class="query-form">
@@ -108,6 +111,6 @@
 
     <script src="/static/shared/feedback.js?v=20260819-feedback" defer></script>
     <script src="/static/spatial/pdf_export.js?v=20260824-vector-pdf-export"></script>
-    <script src="/static/spatial/app.js?v=20260824-vector-pdf-export"></script>
+    <script src="/static/spatial/app.js?v=20260909-examples"></script>
   </body>
 </html>

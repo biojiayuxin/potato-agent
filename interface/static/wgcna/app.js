@@ -552,6 +552,7 @@ const exportTsv = () => {
 };
 
 const init = () => {
+  window.PotatoAgentExamples.bind('wgcna', () => ({ genes: state.lastPayload?.query_genes }));
   setupCytoscape();
   dom.queryForm.addEventListener('submit', (event) => {
     event.preventDefault();

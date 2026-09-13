@@ -10,6 +10,7 @@ from pathlib import Path
 import pytest
 
 from interface.test_dashboard_browser import browser, site  # noqa: F401
+from interface.test_agent_examples import mock_api
 
 pytestmark = pytest.mark.skipif(
     os.getenv('POTATO_NAVIGATION_BROWSER_TESTS') != '1',
@@ -29,6 +30,37 @@ PAGES = {
 }
 LABELS = ['Potato Agent', 'Genomes', 'Genes', 'Gene Expression', 'WGCNA Network',
           'Spatial Expression', 'Dashboard', 'About']
+
+
+@pytest.mark.parametrize('width', [390, 1440])
+@pytest.mark.parametrize('authenticated', [False, True])
+def test_potato_agent_navigation_returns_to_portal(site, browser, width, authenticated):
+    from playwright.sync_api import expect
+
+    with browser.new_context(viewport={'width': width, 'height': 900}) as context:
+        calls = mock_api(context, authenticated=authenticated)
+        page = context.new_page()
+        for route in PAGES:
+            if route == 'lite':
+                continue
+            page.goto(f'{site}/{route}')
+            if width <= 960:
+                page.get_by_role('button', name='Module navigation', exact=True).click()
+            link = page.get_by_role('link', name='Potato Agent', exact=True)
+            expect(link).to_have_attribute('href', '/lite')
+            link.click()
+            expect(page).to_have_url(site + '/lite')
+            expect(page.locator('#workspace-view')).to_be_hidden()
+            if authenticated:
+                expect(page.locator('#portal-account-name')).to_have_text('Research workspace')
+            else:
+                expect(page.locator('#show-login-button')).to_be_visible()
+
+        page.goto(site + '/static/lite/high-resolution-required.html?module=genomes')
+        page.get_by_role('link', name='Back to Potato Agent', exact=True).click()
+        expect(page).to_have_url(site + '/lite')
+        expect(page.locator('#workspace-view')).to_be_hidden()
+        assert not any(path.startswith('/api/runtime') for _, path, _ in calls)
 
 
 def test_public_pages_at_all_breakpoints(site, browser, tmp_path):

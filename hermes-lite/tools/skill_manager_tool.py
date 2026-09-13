@@ -151,8 +151,7 @@ def _pinned_guard(name: str) -> Optional[str]:
         if rec.get("pinned"):
             return (
                 f"Skill '{name}' is pinned and cannot be deleted by "
-                f"skill_manage. Ask the user to run "
-                f"`hermes curator unpin {name}` if they want to delete it. "
+                f"skill_manage. "
                 f"Patches and edits are allowed on pinned skills; only "
                 f"deletion is blocked."
             )
@@ -378,17 +377,16 @@ def _skill_not_found_error(name: str, suffix: str = "") -> str:
             other_profile, other_path = others[0]
             base += (
                 f" A skill by that name exists in profile "
-                f"'{other_profile}' ({other_path}). To edit a skill in "
-                f"another profile, switch profiles (`hermes -p "
-                f"{other_profile}`) or operate via explicit file tools "
-                f"with ``cross_profile=True``."
+                f"'{other_profile}' ({other_path}). File tools support "
+                f"explicit paths with ``cross_profile=True`` for authorized "
+                f"edits in another profile."
             )
         else:
             names = ", ".join(f"'{p}'" for p, _ in others)
             base += (
                 f" Skills by that name exist in other profiles: {names}. "
-                f"Switch profiles (`hermes -p <name>`) to edit there, or "
-                f"operate via explicit file tools with ``cross_profile=True``."
+                f"File tools support explicit paths with ``cross_profile=True`` "
+                f"for authorized edits in another profile."
             )
     else:
         base += " Use skills_list() to see available skills."
@@ -918,25 +916,20 @@ SKILL_MANAGE_SCHEMA = {
         "delete, write_file, remove_file.\n\n"
         "On delete, pass `absorbed_into=<umbrella>` when you're merging this "
         "skill's content into another one, or `absorbed_into=\"\"` when you're "
-        "pruning it with no forwarding target. This lets the curator tell "
-        "consolidation from pruning without guessing, so downstream consumers "
-        "(cron jobs that reference the old skill name, etc.) get updated "
-        "correctly. The target you name in `absorbed_into` must already "
+        "pruning it with no forwarding target. This records the merge target "
+        "or pruning intent. The target you name in `absorbed_into` must already "
         "exist — create/patch the umbrella first, then delete.\n\n"
-        "Create when: complex task succeeded (5+ calls), errors overcome, "
-        "user-corrected approach worked, non-trivial workflow discovered, "
-        "or user asks you to remember a procedure.\n"
+        "Prefer updating a relevant existing skill. Create a new skill when "
+        "a reusable workflow is useful beyond the current task and is not "
+        "already covered, or when the user requests one.\n"
         "Update when: instructions stale/wrong, OS-specific failures, "
-        "missing steps or pitfalls found during use. "
-        "If you used a skill and hit issues not covered by it, patch it immediately.\n\n"
-        "After difficult/iterative tasks, offer to save as a skill. "
-        "Skip for simple one-offs. Confirm with user before creating/deleting.\n\n"
+        "missing steps or pitfalls found during use.\n"
+        "Use the user's existing authorization for skill changes; ask for "
+        "confirmation when creating or deleting a skill is outside it.\n\n"
         "Good skills: trigger conditions, numbered steps with exact commands, "
         "pitfalls section, verification steps. Use skill_view() to see format examples.\n\n"
-        "Pinned skills are protected from deletion only — skill_manage(action='delete') "
-        "will refuse with a message pointing the user to `hermes curator unpin <name>`. "
-        "Patches and edits go through on pinned skills so you can still improve them as "
-        "pitfalls come up; pin only guards against irrecoverable loss."
+        "Pinned skills cannot be deleted with skill_manage. "
+        "Patches and edits are allowed."
     ),
     "parameters": {
         "type": "object",
@@ -1004,15 +997,12 @@ SKILL_MANAGE_SCHEMA = {
             "absorbed_into": {
                 "type": "string",
                 "description": (
-                    "For 'delete' only — declares intent so the curator can "
-                    "tell consolidation from pruning without guessing. "
+                    "For 'delete' only — records the merge target or pruning intent. "
                     "Pass the umbrella skill name when this skill's content "
                     "was merged into another (the target must already exist). "
                     "Pass an empty string when the skill is truly stale and "
                     "being pruned with no forwarding target. Omitting the arg "
-                    "on delete is supported for backward compatibility but "
-                    "downstream tooling (e.g. cron-job skill reference "
-                    "rewriting) will have to guess at intent."
+                    "leaves the intent unspecified."
                 )
             },
         },

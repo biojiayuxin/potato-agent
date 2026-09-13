@@ -1,6 +1,13 @@
 {
   "updates": [
     {
+      "version": "2026-09-12-001",
+      "title": "System prompt improvements",
+      "date": "September 12, 2026",
+      "summary": "Significantly improved the system prompts.",
+      "items": []
+    },
+    {
       "version": "2026-09-04-001",
       "title": "Conversation forking",
       "date": "September 4, 2026",

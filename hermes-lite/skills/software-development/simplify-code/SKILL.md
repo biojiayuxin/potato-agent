@@ -1,6 +1,6 @@
 ---
 name: simplify-code
-description: "Parallel 3-agent cleanup of recent code changes."
+description: "Review recent changes; apply cleanup when requested."
 version: 1.0.0
 author: Hermes Agent (inspired by Claude Code /simplify)
 license: MIT
@@ -14,7 +14,8 @@ metadata:
 # Simplify Code — Parallel Review & Cleanup
 
 Review your recent code changes with three focused reviewers running in
-parallel, aggregate their findings, and apply the fixes worth applying.
+parallel and aggregate their findings. Apply fixes when the task includes
+cleanup or modification; for a review request, report findings.
 
 **Core principle:** Three narrow reviewers beat one broad reviewer. Each one
 deeply searches the codebase for a single class of problem — reuse, quality,
@@ -29,13 +30,20 @@ Trigger this skill when the user says any of:
 - "review my code" / "review my recent changes" / "clean up my changes"
 - "/simplify" (if they're carrying the Claude Code habit over)
 
+Choose the mode from the user's request and existing authorization:
+
+- **Review:** "review my code" or "review my recent changes" asks for findings.
+  Reviewers and the parent report issues without modifying files.
+- **Cleanup:** "simplify", "clean up", or an instruction to apply fixes includes
+  scoped edits and verification.
+
 Optional modifiers the user may add — honor them:
 
 - **Focus:** "simplify focus on efficiency" → run only the efficiency reviewer
   (or weight the aggregation toward it). Recognized focuses: `reuse`,
   `quality`, `efficiency`.
-- **Dry run:** "simplify but don't change anything" / "just report" → run the
-  three reviewers, present findings, apply NOTHING. Ask before applying.
+- **Dry run:** "simplify but don't change anything" / "just report" selects
+  review mode even when the request also mentions cleanup.
 - **Scope:** "simplify the last commit" / "simplify staged" / "simplify
   src/foo.py" → narrow the diff source accordingly (see Phase 1).
 
@@ -82,10 +90,11 @@ default install.
 
 Give **every** reviewer the **complete diff** (not fragments — cross-file
 issues hide in the gaps) plus the absolute repo path so they can search the
-wider codebase. Each reviewer gets `terminal`, `file`, and `search`
+wider codebase. Each reviewer gets `terminal` and `file`
 toolsets (so they can `git`, `read_file`, and `search_files`/grep).
 
 Tell each reviewer to:
+- Review and report only; leave file changes to the parent when authorized.
 - Search the existing codebase for evidence (don't reason from the diff alone).
 - Report findings as a concrete list: `file:line → problem → suggested fix`.
 - Rank each finding `high` / `medium` / `low` confidence.
@@ -125,7 +134,7 @@ Pass these three goals (drop any the user's focus excludes):
 > when a slice would do). For each, give the concrete fix and why it's faster
 > or lighter.
 
-### Phase 3 — Aggregate and apply
+### Phase 3 — Aggregate and report or apply
 
 Wait for all three to return (batch mode returns them together).
 
@@ -138,13 +147,14 @@ Wait for all three to return (batch mode returns them together).
    Don't apply a perf "fix" that hurts clarity unless the path is genuinely
    hot. When two suggestions are mutually exclusive and both defensible, pick
    the one that touches less code and note the alternative.
-4. **Apply** the surviving fixes directly with `patch` / `write_file` — unless
-   the user asked for a dry run, in which case present the list and ask first.
-5. **Verify** you didn't break anything: run the project's targeted tests for
+4. **Review mode:** Report the surviving findings with evidence and suggested
+   fixes. **Cleanup mode:** Apply the surviving fixes within the authorized
+   scope using `patch` / `write_file`.
+5. **Verify applied changes:** Run the project's targeted tests for
    the touched files (not the full suite), and re-run any linter/type check the
    repo uses. If a fix breaks a test, revert that one fix and report it.
-6. **Summarize** what you changed: a short list of applied fixes grouped by
-   reviewer category, plus any findings you deliberately skipped and why.
+6. **Summarize** the findings in review mode. In cleanup mode, report applied
+   fixes, verification results, and any findings you deliberately skipped.
 
 ## Pitfalls
 

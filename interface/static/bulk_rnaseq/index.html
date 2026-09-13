@@ -10,7 +10,9 @@
     <link rel="stylesheet" href="/static/shared/announcement.css?v=20260906-compact">
     <script src="/static/shared/announcement.js?v=20260906" defer></script>
     <link rel="stylesheet" href="/static/shared/navigation.css?v=20260908-navigation-mobile-centered" />
-    <script src="/static/shared/navigation.js?v=20260908-navigation-centered" defer></script>
+    <script src="/static/shared/navigation.js?v=20260912-portal-link" defer></script>
+    <link rel="stylesheet" href="/static/shared/agent-examples.css?v=20260909-simplified-chat" />
+    <script src="/static/shared/agent-examples.js?v=20260910-http-fallback"></script>
   </head>
   <body>
     <div class="bulk-app">
@@ -25,8 +27,9 @@
 
       <main class="bulk-main">
         <section class="query-panel" aria-label="Gene expression query controls">
-          <div class="query-heading">
+          <div class="query-heading agent-example-actions">
             <h2>Gene Expression Across Materials and Tissues</h2>
+            <button id="ask-potato-agent" type="button" class="ghost ask-potato-agent">Ask Potato Agent</button>
           </div>
 
           <form id="query-form" class="query-form">
@@ -94,6 +97,6 @@
 
     <script src="/static/shared/feedback.js?v=20260819-feedback" defer></script>
     <script src="/static/bulk_rnaseq/pdf_export.js?v=20260824-complete-export"></script>
-    <script src="/static/bulk_rnaseq/app.js?v=20260824-complete-export"></script>
+    <script src="/static/bulk_rnaseq/app.js?v=20260909-examples"></script>
   </body>
 </html>

@@ -1,6 +1,6 @@
 ---
 name: test-driven-development
-description: "TDD: enforce RED-GREEN-REFACTOR, tests before code."
+description: "Test-first changes and regression tests for existing code."
 version: 1.1.0
 author: Hermes Agent (adapted from obra/superpowers)
 license: MIT
@@ -15,42 +15,36 @@ metadata:
 
 ## Overview
 
-Write the test first. Watch it fail. Write minimal code to pass.
+For new behavior, write the test first, verify the expected failure, and write
+minimal code to pass. For existing behavior, add tests that check its contract.
 
-**Core principle:** If you didn't watch the test fail, you don't know if it tests the right thing.
-
-**Violating the letter of the rules is violating the spirit of the rules.**
+**Core principle:** Tests should demonstrate the requested behavior and detect
+the failures they are intended to prevent.
 
 ## When to Use
 
-**Always:**
+Use this workflow for:
 - New features
 - Bug fixes
 - Refactoring
 - Behavior changes
+- Regression or characterization tests for existing code
 
-**Exceptions (ask the user first):**
-- Throwaway prototypes
-- Generated code
-- Configuration files
+Adapt verification for prototypes, generated code, and configuration changes
+to the task and repository conventions.
 
-Thinking "skip TDD just this once"? Stop. That's rationalization.
+## New and Existing Implementations
 
-## The Iron Law
+For a new feature or an unfixed bug, establish the expected failing behavior
+before changing the implementation.
 
-```
-NO PRODUCTION CODE WITHOUT A FAILING TEST FIRST
-```
-
-Write code before the test? Delete it. Start over.
-
-**No exceptions:**
-- Don't keep it as "reference"
-- Don't "adapt" it while writing tests
-- Don't look at it
-- Delete means delete
-
-Implement fresh from tests. Period.
+When adding tests to existing code, user-provided code, or an implementation
+already written during this task, inspect the behavior and add focused tests.
+A characterization or regression test can legitimately pass on its first run.
+Check its assertions against the intended behavior. Do not delete or rewrite
+an implementation solely because tests were written afterward or passed
+immediately; change implementation code when the tests reveal a defect or the
+user's task requires a behavior change.
 
 ## Red-Green-Refactor Cycle
 
@@ -94,7 +88,7 @@ Vague name, tests mock not real code.
 
 ### Verify RED — Watch It Fail
 
-**MANDATORY. Never skip.**
+For new behavior or an unfixed bug, run the test before changing the implementation.
 
 ```bash
 # Use terminal tool to run the specific test
@@ -106,7 +100,9 @@ Confirm:
 - Failure message is expected
 - Fails because the feature is missing
 
-**Test passes immediately?** You're testing existing behavior. Fix the test.
+**Test passes immediately?** Determine whether the intended behavior already
+exists. That is valid when adding coverage for existing code. For an unfixed bug
+or missing feature, check that the test exercises the intended case.
 
 **Test errors?** Fix the error, re-run until it fails correctly.
 
@@ -146,22 +142,23 @@ We'll fix it in REFACTOR.
 # Run the specific test
 pytest tests/test_feature.py::test_specific_behavior -v
 
-# Then run ALL tests to check for regressions
+# Broader checks when the change affects shared behavior or the repo requires them
 pytest tests/ -q
 ```
 
 Confirm:
 - Test passes
-- Other tests still pass
-- Output pristine (no errors, warnings)
+- Relevant regression checks pass
+- New failures or warnings introduced by the change are investigated
 
 **Test fails?** Fix the code, not the test.
 
-**Other tests fail?** Fix regressions now.
+**Other tests fail?** Distinguish regressions from pre-existing failures and
+address regressions within the task's scope.
 
 ### REFACTOR — Clean Up
 
-After green only:
+After green, refactor when it improves the implementation needed for this task:
 - Remove duplication
 - Improve names
 - Extract helpers
@@ -169,7 +166,8 @@ After green only:
 
 Keep tests green throughout. Don't add behavior.
 
-**If tests fail during refactor:** Undo immediately. Take smaller steps.
+**If tests fail during refactor:** Identify the responsible change and correct
+or revert that change while preserving unrelated work.
 
 ### Repeat
 
@@ -179,13 +177,10 @@ Next failing test for next behavior. One cycle at a time.
 
 **"I'll write tests after to verify it works"**
 
-Tests written after code pass immediately. Passing immediately proves nothing:
-- Might test the wrong thing
-- Might test implementation, not behavior
-- Might miss edge cases you forgot
-- You never saw it catch the bug
-
-Test-first forces you to see the test fail, proving it actually tests something.
+Tests written after code can mirror the implementation instead of the intended
+behavior. Derive assertions from requirements and observable results. Test-first
+development helps demonstrate a missing behavior before implementing it; tests
+added afterward can still provide regression coverage for existing code.
 
 **"I already manually tested all the edge cases"**
 
@@ -197,94 +192,44 @@ Manual testing is ad-hoc. You think you tested everything but:
 
 Automated tests are systematic. They run the same way every time.
 
-**"Deleting X hours of work is wasteful"**
+## Test Quality Checks
 
-Sunk cost fallacy. The time is already gone. Your choice now:
-- Delete and rewrite with TDD (high confidence)
-- Keep it and add tests after (low confidence, likely bugs)
-
-The "waste" is keeping code you can't trust.
-
-**"TDD is dogmatic, being pragmatic means adapting"**
-
-TDD IS pragmatic:
-- Finds bugs before commit (faster than debugging after)
-- Prevents regressions (tests catch breaks immediately)
-- Documents behavior (tests show how to use code)
-- Enables refactoring (change freely, tests catch breaks)
-
-"Pragmatic" shortcuts = debugging in production = slower.
-
-**"Tests after achieve the same goals — it's spirit not ritual"**
-
-No. Tests-after answer "What does this do?" Tests-first answer "What should this do?"
-
-Tests-after are biased by your implementation. You test what you built, not what's required. Tests-first force edge case discovery before implementing.
-
-## Common Rationalizations
-
-| Excuse | Reality |
-|--------|---------|
-| "Too simple to test" | Simple code breaks. Test takes 30 seconds. |
-| "I'll test after" | Tests passing immediately prove nothing. |
-| "Tests after achieve same goals" | Tests-after = "what does this do?" Tests-first = "what should this do?" |
-| "Already manually tested" | Ad-hoc ≠ systematic. No record, can't re-run. |
-| "Deleting X hours is wasteful" | Sunk cost fallacy. Keeping unverified code is technical debt. |
-| "Keep as reference, write tests first" | You'll adapt it. That's testing after. Delete means delete. |
-| "Need to explore first" | Fine. Throw away exploration, start with TDD. |
-| "Test hard = design unclear" | Listen to the test. Hard to test = hard to use. |
-| "TDD will slow me down" | TDD faster than debugging. Pragmatic = test-first. |
-| "Manual test faster" | Manual doesn't prove edge cases. You'll re-test every change. |
-| "Existing code has no tests" | You're improving it. Add tests for the code you touch. |
-
-## Red Flags — STOP and Start Over
-
-If you catch yourself doing any of these, delete the code and restart with TDD:
-
-- Code before test
-- Test after implementation
-- Test passes immediately on first run
-- Can't explain why test failed
-- Tests added "later"
-- Rationalizing "just this once"
-- "I already manually tested it"
-- "Tests after achieve the same purpose"
-- "Keep as reference" or "adapt existing code"
-- "Already spent X hours, deleting is wasteful"
-- "TDD is dogmatic, I'm being pragmatic"
-- "This is different because..."
-
-**All of these mean: Delete code. Start over with TDD.**
+- If a test fails for an unrelated setup error, correct the setup so it exercises
+  the intended behavior.
+- If a test only repeats implementation details, revise its assertions around
+  observable behavior.
+- If the implementation already exists, add coverage without recreating it.
+- If a test exposes a defect, make the focused correction and verify it.
 
 ## Verification Checklist
 
 Before marking work complete:
 
-- [ ] Every new function/method has a test
-- [ ] Watched each test fail before implementing
-- [ ] Each test failed for expected reason (feature missing, not typo)
-- [ ] Wrote minimal code to pass each test
-- [ ] All tests pass
-- [ ] Output pristine (no errors, warnings)
+- [ ] Tests cover the new or changed behavior and the requested regression cases
+- [ ] For new behavior or unfixed bugs, the test demonstrated the expected failure
+- [ ] For existing behavior, assertions check the intended contract
+- [ ] Implementation changes are limited to what the task requires
+- [ ] Relevant tests pass; unresolved failures or warnings are reported
 - [ ] Tests use real code (mocks only if unavoidable)
 - [ ] Edge cases and errors covered
 
-Can't check all boxes? You skipped TDD. Start over.
+Address applicable gaps in coverage or verification without restarting the
+implementation solely to reproduce a test-first sequence.
 
 ## When Stuck
 
 | Problem | Solution |
 |---------|----------|
 | Don't know how to test | Write the wished-for API. Write the assertion first. Ask the user. |
-| Test too complicated | Design too complicated. Simplify the interface. |
-| Must mock everything | Code too coupled. Use dependency injection. |
-| Test setup huge | Extract helpers. Still complex? Simplify the design. |
+| Test too complicated | Check whether a smaller behavior or an existing test fixture can exercise the case. |
+| Must mock everything | Identify the external interactions the test needs to isolate before changing the design. |
+| Test setup huge | Use relevant fixtures or helpers; change production interfaces only when the task calls for it. |
 
 ## Hermes Agent Integration
 
 ### Running Tests
 
-Use the `terminal` tool to run tests at each step:
+Use the `terminal` tool to run the applicable tests:
 
 ```python
 # RED — verify failure
@@ -293,17 +238,18 @@ terminal("pytest tests/test_feature.py::test_name -v")
 # GREEN — verify pass
 terminal("pytest tests/test_feature.py::test_name -v")
 
-# Full suite — verify no regressions
+# Broader suite when warranted by the change or repository requirements
 terminal("pytest tests/ -q")
 ```
 
 ### With delegate_task
 
-When dispatching subagents for implementation, enforce TDD in the goal:
+When dispatching subagents for implementation, include the relevant TDD steps
+and the task's scope:
 
 ```python
 delegate_task(
-    goal="Implement [feature] using strict TDD",
+    goal="Implement [feature] using test-first development",
     context="""
     Follow test-driven-development skill:
     1. Write failing test FIRST
@@ -311,7 +257,11 @@ delegate_task(
     3. Write minimal code to pass
     4. Run test to verify it passes
     5. Refactor if needed
-    6. Commit
+    6. Report changes and verification results
+
+    Task scope: [requested behavior and files]
+    For existing implementations or test-only tasks, preserve the implementation
+    and add the requested coverage. Passing tests do not authorize a commit.
 
     Project test command: pytest tests/ -q
     Project structure: [describe relevant files]
@@ -324,7 +274,8 @@ delegate_task(
 
 Bug found? Write failing test reproducing it. Follow TDD cycle. The test proves the fix and prevents regression.
 
-Never fix bugs without a test.
+Use an automated regression test when practical; otherwise verify with a focused
+reproduction and report the validation performed.
 
 ## Testing Anti-Patterns
 
@@ -333,11 +284,8 @@ Never fix bugs without a test.
 - **Happy path only** — always test edge cases, errors, and boundaries
 - **Brittle tests** — tests should verify behavior, not structure; refactoring shouldn't break them
 
-## Final Rule
+## Completion
 
-```
-Production code → test exists and failed first
-Otherwise → not TDD
-```
-
-No exceptions without the user's explicit permission.
+Finish when the requested behavior or coverage is implemented and necessary
+verification is complete. Use the task-completion guidance to decide whether
+further work is warranted.

@@ -223,7 +223,7 @@ def test_portal_navigation_uses_consistent_module_order() -> None:
     for relative_path in portal_indexes:
         content = (REPO_ROOT / relative_path).read_text(encoding="utf-8")
         assert 'data-portal-module=' in content, relative_path
-        assert '/static/shared/navigation.js?v=20260908-navigation-centered' in content
+        assert '/static/shared/navigation.js?v=20260912-portal-link' in content
         assert '/static/shared/navigation.css?v=20260908-navigation-mobile-centered' in content
         assert 'class="portal-nav-item' not in content
 

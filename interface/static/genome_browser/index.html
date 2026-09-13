@@ -10,7 +10,9 @@
     <link rel="stylesheet" href="/static/shared/announcement.css?v=20260906-compact">
     <script src="/static/shared/announcement.js?v=20260906" defer></script>
     <link rel="stylesheet" href="/static/shared/navigation.css?v=20260908-navigation-mobile-centered" />
-    <script src="/static/shared/navigation.js?v=20260908-navigation-centered" defer></script>
+    <script src="/static/shared/navigation.js?v=20260912-portal-link" defer></script>
+    <link rel="stylesheet" href="/static/shared/agent-examples.css?v=20260909-simplified-chat" />
+    <script src="/static/shared/agent-examples.js?v=20260910-http-fallback"></script>
   </head>
   <body>
     <div class="genome-browser-app">
@@ -25,11 +27,12 @@
 
       <main class="browser-main">
         <section class="query-panel" aria-label="Genome browser controls">
-          <div class="query-heading">
+          <div class="query-heading agent-example-actions">
             <div>
               <a class="parent-page-link" href="/genomes">&larr; Back to Genomes</a>
               <h2>Genome Browser</h2>
             </div>
+            <button id="ask-potato-agent" type="button" class="ghost ask-potato-agent">Ask Potato Agent</button>
           </div>
 
           <form id="browser-form" class="query-form">
@@ -88,6 +91,6 @@
     <script src="/static/genome_browser/vendor/react-dom.production.min.js"></script>
     <script src="/static/genome_browser/vendor/react-linear-genome-view.umd.production.min.js"></script>
     <script src="/static/shared/feedback.js?v=20260819-feedback" defer></script>
-    <script src="/static/genome_browser/app.js?v=20260712-remove-haplotypes"></script>
+    <script src="/static/genome_browser/app.js?v=20260909-examples"></script>
   </body>
 </html>

@@ -764,6 +764,10 @@ const downloadTsv = () => {
   );
 };
 
+window.PotatoAgentExamples.bind('bulk_rnaseq', () => ({
+  genes: state.payload?.genes?.map((gene) => gene.geneId),
+}));
+
 dom.queryForm.addEventListener('submit', (event) => {
   event.preventDefault();
   runQuery();

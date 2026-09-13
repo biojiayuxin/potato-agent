@@ -366,3 +366,4 @@ els.reset.addEventListener('click', () => {
 });
 
 init();
+window.PotatoAgentExamples.bind('genome_browser');

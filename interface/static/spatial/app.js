@@ -1666,6 +1666,18 @@ function handleLayoutResize() {
   });
 }
 
+window.PotatoAgentExamples.bind('spatial', () => {
+  const dataset = state.currentDataset;
+  const loaded = Boolean(state.currentGene && currentSpatial());
+  const sampleId = loaded ? state.currentSample : dataset?.defaultSample;
+  const sample = dataset?.samples?.find((item) => item.id === sampleId) || dataset?.samples?.[0];
+  return {
+    genes: [loaded ? state.currentGene : dataset?.defaultGene],
+    dataset: dataset ? `${datasetDisplayLabel(dataset)} (${dataset.id})` : '',
+    sample: sample ? sampleDisplayLabel(sample) : '',
+  };
+});
+
 els.form.addEventListener("submit", (event) => {
   event.preventDefault();
   queryGene(els.input.value);
