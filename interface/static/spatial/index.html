@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>Spatial Expression | Potato Research</title>
     <link rel="icon" type="image/png" href="/static/favicon.png">
-    <link rel="stylesheet" href="/static/spatial/style.css?v=20260907-navigation">
+    <link rel="stylesheet" href="/static/spatial/style.css?v=20260914-gene-hint">
     <link rel="stylesheet" href="/static/shared/feedback.css?v=20260819-feedback">
     <link rel="stylesheet" href="/static/shared/announcement.css?v=20260906-compact">
     <script src="/static/shared/announcement.js?v=20260906" defer></script>
@@ -59,9 +59,10 @@
             <form id="geneForm" class="field mode-panel" data-mode-panel="gene">
               <label for="geneInput">Gene ID</label>
               <div class="search-row">
-                <input id="geneInput" name="gene" type="search" value="Soltu.DM.03G024100" autocomplete="off" list="geneList">
+                <input id="geneInput" name="gene" type="search" value="Soltu.DM.03G024100" autocomplete="off" list="geneList" aria-describedby="geneHint">
                 <button type="submit" class="primary">Search</button>
               </div>
+              <small id="geneHint" class="gene-hint">Enter a DMv6.1 or DMv8.2 gene ID.</small>
               <datalist id="geneList"></datalist>
             </form>
 
@@ -79,9 +80,14 @@
               </select>
             </label>
           </div>
+          <p id="queryStatus" class="query-status" role="status" aria-live="polite"></p>
         </section>
 
         <section class="viewer-panel" aria-label="Spatial expression viewer">
+          <div id="geneResult" class="gene-result" hidden>
+            <strong id="resultGene"></strong>
+            <span id="mappedGene"></span>
+          </div>
           <div class="viewer">
             <section class="spatial-stage" aria-label="Spatial expression plot">
               <div class="toolbar">
@@ -110,7 +116,7 @@
     </div>
 
     <script src="/static/shared/feedback.js?v=20260819-feedback" defer></script>
-    <script src="/static/spatial/pdf_export.js?v=20260824-vector-pdf-export"></script>
-    <script src="/static/spatial/app.js?v=20260909-examples"></script>
+    <script src="/static/spatial/pdf_export.js?v=20260914-dmv82"></script>
+    <script src="/static/spatial/app.js?v=20260914-dmv82"></script>
   </body>
 </html>

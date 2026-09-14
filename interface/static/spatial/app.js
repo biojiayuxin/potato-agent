@@ -36,6 +36,10 @@ const state = {
   selectedTissue: "",
   currentSample: "",
   currentGene: "",
+  requestedGene: "",
+  queryError: "",
+  queryVersion: 0,
+  datasetVersion: 0,
   expressionRange: { vmin: 0, vmax: 0 },
   view: { scale: 1, x: 0, y: 0 },
   dragging: false,
@@ -65,6 +69,10 @@ const els = {
   legendMin: document.getElementById("legendMin"),
   scaleText: document.getElementById("scaleText"),
   exportPdf: document.getElementById("exportPdf"),
+  status: document.getElementById("queryStatus"),
+  geneResult: document.getElementById("geneResult"),
+  resultGene: document.getElementById("resultGene"),
+  mappedGene: document.getElementById("mappedGene"),
 };
 
 function datasetDisplayLabel(dataset) {
@@ -118,7 +126,27 @@ const STEM_TISSUE_MENU_ORDER = [
   "unknown",
 ];
 
-function setStatus(_message) {}
+function setStatus(message) {
+  els.status.textContent = state.queryError || message;
+  els.status.classList.toggle("is-error", Boolean(state.queryError));
+}
+
+function clearExpression() {
+  state.currentGene = "";
+  state.requestedGene = "";
+  state.queryError = "";
+  state.expressions = {};
+  state.expressionRange = { vmin: 0, vmax: 0 };
+  state.dotplot = { payload: null, error: "", loading: false };
+  hideDotplotTooltip();
+  updateStats();
+  requestDraw();
+  requestDotplotDraw();
+}
+
+function mappingLabel(gene, requestedGene) {
+  return requestedGene && requestedGene !== gene ? `DMv6.1 data: ${gene}` : "";
+}
 
 function formatNumber(value, digits = 3) {
   if (!Number.isFinite(value)) return "-";
@@ -692,7 +720,7 @@ function draw() {
   ctx.fillStyle = "#eef1f4";
   ctx.fillRect(0, 0, rect.width, rect.height);
 
-  if (!spatial) return;
+  if (!spatial || (state.displayMode === "gene" && !state.currentGene)) return;
 
   const expression = currentExpression();
   const clusterMap = currentClusterMap();
@@ -720,7 +748,7 @@ function draw() {
   } else if (state.displayMode === "tissue") {
     setStatus(`Showing ${selectedTissueLabel()}; ${drawnCells.toLocaleString()} cells drawn in the current view`);
   } else if (state.currentGene) {
-    setStatus(`Loaded ${state.currentGene}; ${drawnCells.toLocaleString()} cells drawn in the current view`);
+    setStatus(`Loaded ${state.requestedGene}; ${drawnCells.toLocaleString()} cells drawn in the current view`);
   }
 }
 
@@ -890,6 +918,11 @@ function drawDotplot() {
   dotCtx.textAlign = "left";
   dotCtx.textBaseline = "middle";
   dotCtx.fillText("Seurat Clusters", left, titleY);
+  const mappedLabel = mappingLabel(payload.gene, payload.requestedGene);
+  if (mappedLabel) {
+    dotCtx.font = "11px Arial, sans-serif";
+    dotCtx.fillText(mappedLabel, left, titleY + 18, rect.width - left - 12);
+  }
 
   dotCtx.strokeStyle = "#d7dde5";
   dotCtx.lineWidth = 1;
@@ -902,7 +935,7 @@ function drawDotplot() {
   dotCtx.textAlign = "right";
   dotCtx.textBaseline = "middle";
   dotCtx.fillStyle = "#253044";
-  dotCtx.fillText(ellipsizeText(dotCtx, payload.gene || state.currentGene || "-", left - 28), left - 14, centerY);
+  dotCtx.fillText(payload.requestedGene || payload.gene || "-", left - 14, centerY, left - 28);
 
   for (const [index, cluster] of clusters.entries()) {
     const x = left + band * (index + 0.5);
@@ -1137,8 +1170,8 @@ function exportPresentation(snapshot) {
   const context = `${snapshot.datasetLabel} | ${snapshot.sampleLabel}`;
   if (snapshot.displayMode === "gene") {
     return {
-      title: `${snapshot.currentGene} spatial expression`,
-      subtitle: context,
+      title: `${snapshot.requestedGene || snapshot.currentGene} spatial expression`,
+      subtitle: [context, mappingLabel(snapshot.currentGene, snapshot.requestedGene)].filter(Boolean).join(" | "),
     };
   }
   if (snapshot.displayMode === "cluster") {
@@ -1166,7 +1199,7 @@ function safeFilenameComponent(value) {
 function exportFilename(snapshot, includeDotplot) {
   const parts = [snapshot.datasetId, snapshot.sampleId];
   if (snapshot.displayMode === "gene") {
-    parts.unshift(snapshot.currentGene);
+    parts.unshift(snapshot.requestedGene || snapshot.currentGene);
     parts.push(includeDotplot ? "spatial_and_dotplot" : "spatial_expression");
   } else if (snapshot.displayMode === "cluster") {
     parts.push("clusters", snapshot.selectedCluster || "all");
@@ -1189,6 +1222,7 @@ function downloadBlob(blob, filename) {
 
 async function exportCurrentPdf() {
   if (state.exportingPdf) return;
+  if (state.displayMode === "gene" && !state.currentGene) return;
   const spatial = currentSpatial();
   const dataset = state.currentDataset;
   const sample = dataset?.samples?.find((item) => item.id === state.currentSample);
@@ -1202,6 +1236,9 @@ async function exportCurrentPdf() {
     sampleLabel: sampleDisplayLabel(sample),
     displayMode: state.displayMode,
     currentGene: state.currentGene,
+    requestedGene: state.requestedGene,
+    queryVersion: state.queryVersion,
+    datasetVersion: state.datasetVersion,
     selectedCluster: state.selectedCluster,
     selectedTissue: state.selectedTissue,
     expressionRange: { ...state.expressionRange },
@@ -1239,6 +1276,11 @@ async function exportCurrentPdf() {
       },
       dotplot: snapshot.dotplot,
     });
+    if (snapshot.datasetVersion !== state.datasetVersion
+        || (snapshot.displayMode === "gene" && snapshot.queryVersion !== state.queryVersion)) {
+      setPdfExportBusy(false);
+      return;
+    }
     downloadBlob(result.blob, exportFilename(snapshot, result.pageCount > 1));
     setPdfExportBusy(false, `Downloaded ${result.pageCount}-page vector PDF`);
   } catch (error) {
@@ -1249,6 +1291,7 @@ async function exportCurrentPdf() {
 }
 
 async function loadSpatial() {
+  const version = state.datasetVersion;
   if (typeof Path2D === "undefined") {
     throw new Error("This browser does not support Path2D, so cell contours cannot be rendered");
   }
@@ -1293,8 +1336,8 @@ async function loadSpatial() {
     clusterNamesRequest,
   ]);
 
+  if (version !== state.datasetVersion) return;
   state.samples = {};
-  state.expressions = {};
   for (const manifest of manifests) {
     const sampleId = manifest.sample;
     const replicatePayload = replicates.samples ? replicates.samples[sampleId] : null;
@@ -1467,15 +1510,15 @@ function setDataset(datasetId, options = {}) {
   if (!dataset) return;
 
   state.currentDataset = dataset;
+  state.datasetVersion += 1;
+  state.queryVersion += 1;
   state.samples = {};
-  state.expressions = {};
+  clearExpression();
+  setStatus("");
   state.clusterMeta = { clusters: [], maps: {}, names: new Map() };
   state.tissueMeta = { tissues: [], maps: {}, error: "" };
   state.selectedCluster = "";
   state.selectedTissue = "";
-  state.currentGene = "";
-  state.expressionRange = { vmin: 0, vmax: 0 };
-  state.dotplot = { payload: null, error: "", loading: false };
   state.currentSample = dataset.defaultSample || ((dataset.samples || [])[0] || {}).id || "";
   els.datasetSelect.value = dataset.id;
   updatePdfExportButton();
@@ -1507,16 +1550,28 @@ function renderSampleButtons() {
 }
 
 async function reloadCurrentDataset() {
+  const version = state.datasetVersion;
+  const queryVersion = state.queryVersion;
   resizeCanvas();
-  await loadSpatial();
-  await loadGenes();
-  await queryGene(els.input.value);
+  try {
+    await loadSpatial();
+    if (version !== state.datasetVersion) return;
+    await loadGenes();
+    if (version !== state.datasetVersion || queryVersion !== state.queryVersion) return;
+    await queryGene(els.input.value);
+  } catch (error) {
+    if (version !== state.datasetVersion) return;
+    state.queryError = error.message || "Dataset unavailable";
+    setStatus("");
+  }
 }
 
 async function loadGenes() {
+  const version = state.datasetVersion;
   const response = await fetch(apiUrl("/api/genes"));
   if (!response.ok) return;
   const payload = await response.json();
+  if (version !== state.datasetVersion) return;
   els.geneList.innerHTML = "";
   for (const gene of payload.genes.slice(0, 2000)) {
     const option = document.createElement("option");
@@ -1548,45 +1603,43 @@ function unpackExpression(samplePayload) {
 
 async function queryGene(gene) {
   gene = gene.trim();
-  if (!gene) return;
-
-  state.dotplot = { payload: null, error: "", loading: true };
+  const version = ++state.queryVersion;
+  clearExpression();
+  state.dotplot.loading = Boolean(gene);
   setDisplayMode("gene");
   setStatus(`Querying ${gene} expression and cluster dotplot...`);
 
-  const [geneResponse, dotplotResponse] = await Promise.all([
-    fetch(apiUrl("/api/gene", { gene })),
-    fetch(apiUrl("/api/dotplot", { gene })),
-  ]);
-  const payload = await geneResponse.json();
-  const dotplotPayload = await dotplotResponse.json();
-
-  state.dotplot.loading = false;
-  if (!geneResponse.ok) {
-    state.dotplot = { payload: null, error: "Waiting for a valid gene", loading: false };
-    requestDotplotDraw();
-    setStatus(payload.error || "Query failed");
-    updatePdfExportButton();
-    return;
-  }
-
-  state.currentGene = gene;
-  state.expressionRange = payload.range || { vmin: 0, vmax: 0 };
-  state.expressions = {};
-  for (const sample of state.currentDataset.samples || []) {
-    const samplePayload = payload.samples ? payload.samples[sample.id] : null;
-    state.expressions[sample.id] = samplePayload
-      ? unpackExpression(samplePayload)
-      : { map: new Map(), min: 0, max: 0, nonzero: 0 };
-  }
-  if (dotplotResponse.ok) {
-    state.dotplot = { payload: dotplotPayload, error: "", loading: false };
-  } else {
-    state.dotplot = {
-      payload: null,
-      error: dotplotPayload.error || "Dotplot data unavailable",
-      loading: false,
+  try {
+    if (!gene) throw new Error("Enter a gene ID");
+    const readResponse = async (url) => {
+      const response = await fetch(url);
+      const payload = await response.json();
+      if (!response.ok) throw new Error(payload.detail || payload.error || "Query failed");
+      return payload;
     };
+    const [payload, dotplotPayload] = await Promise.all([
+      readResponse(apiUrl("/api/gene", { gene })),
+      readResponse(apiUrl("/api/dotplot", { gene })),
+    ]);
+    if (version !== state.queryVersion) return;
+
+    state.currentGene = payload.gene;
+    state.requestedGene = payload.requestedGene || gene;
+    state.expressionRange = payload.range || { vmin: 0, vmax: 0 };
+    for (const sample of state.currentDataset.samples || []) {
+      const samplePayload = payload.samples ? payload.samples[sample.id] : null;
+      state.expressions[sample.id] = samplePayload
+        ? unpackExpression(samplePayload)
+        : { map: new Map(), min: 0, max: 0, nonzero: 0 };
+    }
+    state.dotplot = { payload: dotplotPayload, error: "", loading: false };
+    setStatus(`Loaded ${state.requestedGene}`);
+  } catch (error) {
+    if (version !== state.queryVersion) return;
+    clearExpression();
+    state.queryError = error.message || "Query failed";
+    state.dotplot.error = "Expression query unavailable";
+    setStatus("");
   }
   updateStats();
   requestDraw();
@@ -1594,9 +1647,12 @@ async function queryGene(gene) {
 }
 
 function updateStats() {
+  els.geneResult.hidden = state.displayMode !== "gene" || !state.currentGene;
+  els.resultGene.textContent = state.requestedGene;
+  els.mappedGene.textContent = mappingLabel(state.currentGene, state.requestedGene);
   const { vmin, vmax } = state.expressionRange;
   const highlightMode = activeHighlightMode();
-  els.legend.classList.toggle("is-hidden", highlightMode !== "expression");
+  els.legend.classList.toggle("is-hidden", highlightMode !== "expression" || !state.currentGene);
   els.legendMax.textContent = vmax ? formatNumber(vmax) : "max";
   els.legendMin.textContent = Number.isFinite(vmin) ? formatNumber(vmin) : "0";
   updateScaleText();

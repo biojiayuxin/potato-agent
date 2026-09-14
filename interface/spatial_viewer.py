@@ -1,12 +1,14 @@
 from __future__ import annotations
 
+import csv
 import json
 import math
 import os
 import sqlite3
 from collections.abc import Iterable
+from functools import lru_cache
 from pathlib import Path, PurePosixPath
-from typing import Any
+from typing import Any, TypedDict
 
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import FileResponse
@@ -14,6 +16,7 @@ from fastapi.responses import FileResponse
 
 DEFAULT_DATA_ROOT = Path("/srv/spatial_data/current")
 STATIC_ROOT = Path(__file__).resolve().parent / "static" / "spatial"
+GENE_MAPPING_PATH = Path(__file__).resolve().parent / "data" / "dm6.1_dm8.2.tsv"
 CACHE_VERSION = 2
 DOTPLOT_CLUSTER_COLUMN = "seurat_clusters"
 TISSUE_COLUMN = "celltype"
@@ -26,6 +29,12 @@ CLUSTER_NAME_PATH = Path(
 )
 
 router = APIRouter()
+
+
+class ResolvedGene(TypedDict):
+    gene: str
+    requestedGene: str
+    mappingSource: str | None
 
 
 def get_data_root() -> Path:
@@ -316,6 +325,70 @@ def get_gene_names(dataset: dict[str, Any]) -> list[str]:
         status_code=503,
         detail=f"gene list unavailable for dataset {dataset['id']}; build expression.sqlite first",
     )
+
+
+@lru_cache(maxsize=1)
+def load_gene_mapping(path: Path) -> tuple[dict[str, tuple[str, str | None]], frozenset[str]]:
+    targets: dict[str, dict[str, set[str]]] = {}
+    try:
+        with path.open(encoding="utf-8", newline="") as handle:
+            reader = csv.DictReader(handle, delimiter="\t")
+            if not {"Gene", "MappedGene", "Source"}.issubset(reader.fieldnames or []):
+                raise ValueError("Invalid mapping columns")
+            for row in reader:
+                old_gene = (row["Gene"] or "").strip()
+                new_gene = (row["MappedGene"] or "").strip()
+                if old_gene in {"", "-"} or new_gene in {"", "-"}:
+                    continue
+                sources = targets.setdefault(new_gene, {}).setdefault(old_gene, set())
+                source = (row["Source"] or "").strip()
+                if source not in {"", "-"}:
+                    sources.add(source)
+    except (OSError, UnicodeError, ValueError, csv.Error) as exc:
+        raise HTTPException(status_code=503, detail="DMv8.2 gene mapping unavailable") from exc
+
+    # Count distinct targets before considering evidence, including synteny.
+    ambiguous = frozenset(gene for gene, matches in targets.items() if len(matches) > 1)
+    unique = {}
+    for gene, matches in targets.items():
+        if gene not in ambiguous:
+            old_gene, sources = next(iter(matches.items()))
+            unique[gene] = (old_gene, "; ".join(sorted(sources)) or None)
+    return unique, ambiguous
+
+
+def resolve_gene(dataset: dict[str, Any], requested_gene: str) -> ResolvedGene:
+    requested_gene = requested_gene.strip()
+    if not requested_gene:
+        raise HTTPException(status_code=400, detail="missing gene")
+    gene = requested_gene
+    source = None
+    if requested_gene.startswith("DM8.2_"):
+        unique, ambiguous = load_gene_mapping(GENE_MAPPING_PATH)
+        if requested_gene in ambiguous:
+            raise HTTPException(
+                status_code=404,
+                detail=f"{requested_gene} maps to multiple DMv6.1 genes and is excluded from lookup",
+            )
+        if requested_gene not in unique:
+            raise HTTPException(status_code=404, detail=f"No valid DMv6.1 mapping for {requested_gene}")
+        gene, source = unique[requested_gene]
+
+    try:
+        with connect_db(dataset) as conn:
+            found = conn.execute("SELECT 1 FROM genes WHERE gene = ?", (gene,)).fetchone()
+    except sqlite3.Error as exc:
+        raise HTTPException(status_code=500, detail="Gene lookup failed") from exc
+    if found is None:
+        label = (
+            f"{requested_gene} maps to DMv6.1 gene {gene}, which is"
+            if gene != requested_gene else gene
+        )
+        raise HTTPException(
+            status_code=404,
+            detail=f"{label} not found in dataset {dataset['id']}",
+        )
+    return {"gene": gene, "requestedGene": requested_gene, "mappingSource": source}
 
 
 def load_expression_from_db(dataset: dict[str, Any], sample: str, gene: str) -> dict[str, Any]:
@@ -996,8 +1069,9 @@ async def api_agent_expression(dataset: str = "", gene: str = "") -> dict[str, A
         raise HTTPException(status_code=400, detail="missing gene")
 
     selected = get_dataset(dataset_id)
+    resolved = resolve_gene(selected, gene)
     try:
-        return load_agent_expression_statistics(selected, gene)
+        return {**load_agent_expression_statistics(selected, resolved["gene"]), **resolved}
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
@@ -1005,12 +1079,8 @@ async def api_agent_expression(dataset: str = "", gene: str = "") -> dict[str, A
 @router.get("/api/spatial/gene")
 async def api_gene(dataset: str = "", gene: str = "") -> dict[str, Any]:
     selected = get_dataset(dataset.strip() or None)
-    gene = gene.strip()
-    if not gene:
-        raise HTTPException(status_code=400, detail="missing gene")
-    genes = get_gene_names(selected)
-    if gene not in genes:
-        raise HTTPException(status_code=404, detail=f"{gene} not found")
+    resolved = resolve_gene(selected, gene)
+    gene = resolved["gene"]
 
     try:
         samples = {
@@ -1022,7 +1092,7 @@ async def api_gene(dataset: str = "", gene: str = "") -> dict[str, Any]:
 
     return {
         "dataset": selected["id"],
-        "gene": gene,
+        **resolved,
         "range": {
             "vmin": min(sample_payload["vmin"] for sample_payload in samples.values()),
             "vmax": max(sample_payload["vmax"] for sample_payload in samples.values()),
@@ -1034,11 +1104,9 @@ async def api_gene(dataset: str = "", gene: str = "") -> dict[str, Any]:
 @router.get("/api/spatial/dotplot")
 async def api_dotplot(dataset: str = "", gene: str = "") -> dict[str, Any]:
     selected = get_dataset(dataset.strip() or None)
-    gene = gene.strip()
-    if not gene:
-        raise HTTPException(status_code=400, detail="missing gene")
+    resolved = resolve_gene(selected, gene)
     try:
-        return load_dotplot_from_db(selected, gene)
+        return {**load_dotplot_from_db(selected, resolved["gene"]), **resolved}
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 

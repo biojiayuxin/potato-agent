@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import importlib.util
 import json
 import sqlite3
@@ -7,6 +8,7 @@ import sys
 from pathlib import Path
 
 import pytest
+from fastapi import FastAPI, HTTPException
 from fastapi.testclient import TestClient
 
 
@@ -303,6 +305,125 @@ def test_spatial_viewer_is_public_and_reads_fixture(monkeypatch, tmp_path) -> No
         assert cluster_names.json()["names"] == {"0": "Toy cluster cells", "1": "Outer cells"}
     finally:
         client.close()
+
+
+def _spatial_api_client() -> TestClient:
+    app = FastAPI()
+    app.include_router(spatial_viewer_mod.router)
+    return TestClient(app)
+
+
+def test_spatial_bundled_mapping_matches_supplied_table() -> None:
+    path = spatial_viewer_mod.GENE_MAPPING_PATH
+    assert hashlib.sha256(path.read_bytes()).hexdigest() == (
+        "ba71ed6eac161ac3c008b7391587a32129a012fab918dbdc898879a13fc30f66"
+    )
+    unique, ambiguous = spatial_viewer_mod.load_gene_mapping(path)
+    assert len(unique) == 24161
+    assert len(ambiguous) == 149
+    assert unique["DM8.2_chr03G22620"] == ("Soltu.DM.03G024100", "synteny")
+    assert not unique.keys() & ambiguous
+    for gene in ambiguous:
+        with pytest.raises(HTTPException, match="multiple DMv6.1 genes"):
+            spatial_viewer_mod.resolve_gene({}, gene)
+
+
+def test_spatial_mapping_ignores_empty_ids_and_counts_distinct_targets(tmp_path) -> None:
+    path = tmp_path / "mapping.tsv"
+    path.write_text(
+        "Gene\tMappedGene\tSource\n"
+        "Old1\tDM8.2_unique\t(identity: 90.91%)\n"
+        "Old1\tDM8.2_unique\t(identity: 90.91%)\n"
+        "Old1\tDM8.2_ambiguous\tsynteny\n"
+        "Old2\tDM8.2_ambiguous\t(identity: 100.0%)\n"
+        "\tDM8.2_empty\tsynteny\n"
+        "-\tDM8.2_dash\tsynteny\n"
+        "Old3\t\t-\n"
+        "Old4\t-\t-\n",
+        encoding="utf-8",
+    )
+    unique, ambiguous = spatial_viewer_mod.load_gene_mapping(path)
+    assert unique == {"DM8.2_unique": ("Old1", "(identity: 90.91%)")}
+    assert ambiguous == {"DM8.2_ambiguous"}
+    assert spatial_viewer_mod.load_gene_mapping(path)[0] is unique
+
+
+@pytest.mark.parametrize("endpoint", ["gene", "dotplot", "agent/expression"])
+@pytest.mark.parametrize("evidence", ["synteny", "identity"])
+def test_spatial_mapped_queries_preserve_expression(monkeypatch, tmp_path, endpoint, evidence) -> None:
+    _build_spatial_fixture(tmp_path)
+    monkeypatch.setenv("SPATIAL_VIEWER_DATA_ROOT", str(tmp_path))
+    unique, _ = spatial_viewer_mod.load_gene_mapping(spatial_viewer_mod.GENE_MAPPING_PATH)
+    requested = "DM8.2_chr03G22620" if evidence == "synteny" else next(
+        gene for gene, (_, source) in unique.items() if source and source.startswith("(identity:")
+    )
+    old, source = unique[requested]
+    with sqlite3.connect(tmp_path / "data" / "expression.sqlite") as conn:
+        conn.execute("UPDATE genes SET gene = ? WHERE gene_id = 1", (old,))
+    with _spatial_api_client() as client:
+        original = client.get(f"/api/spatial/{endpoint}", params={"gene": old, "dataset": "toy"})
+        mapped = client.get(
+            f"/api/spatial/{endpoint}", params={"gene": f"  {requested}  ", "dataset": "toy"},
+        )
+    assert original.status_code == mapped.status_code == 200
+    assert original.json()["mappingSource"] is None
+    assert original.json()["requestedGene"] == old
+    assert mapped.json() == {**original.json(), "requestedGene": requested, "mappingSource": source}
+
+
+@pytest.mark.parametrize("endpoint", ["gene", "dotplot", "agent/expression"])
+def test_spatial_mapping_errors_and_original_ambiguous_target(monkeypatch, tmp_path, endpoint) -> None:
+    _build_spatial_fixture(tmp_path)
+    monkeypatch.setenv("SPATIAL_VIEWER_DATA_ROOT", str(tmp_path))
+    with sqlite3.connect(tmp_path / "data" / "expression.sqlite") as conn:
+        conn.execute("UPDATE genes SET gene = 'Soltu.DM.01G004450' WHERE gene_id = 1")
+    with _spatial_api_client() as client:
+        response = client.get(
+            f"/api/spatial/{endpoint}", params={"gene": "Soltu.DM.01G004450", "dataset": "toy"},
+        )
+        assert response.status_code == 200, response.text
+        for gene, message in [
+            ("DM8.2_chr01G03840", "multiple DMv6.1 genes"),
+            ("DM8.2_unknown", "No valid DMv6.1 mapping"),
+            ("DM8.2_chr03G22620.1", "No valid DMv6.1 mapping"),
+            ("DM8.2_chr03G22620", "Soltu.DM.03G024100, which is not found in dataset toy"),
+            ("Soltu.DM.missing", "not found in dataset toy"),
+        ]:
+            response = client.get(f"/api/spatial/{endpoint}", params={"gene": gene, "dataset": "toy"})
+            assert response.status_code == 404, response.text
+            assert message in response.json()["detail"]
+        assert client.get(
+            f"/api/spatial/{endpoint}", params={"gene": "  ", "dataset": "toy"},
+        ).status_code == 400
+
+
+@pytest.mark.parametrize("endpoint", ["gene", "dotplot", "agent/expression"])
+def test_spatial_mapping_checks_each_selected_dataset(monkeypatch, tmp_path, endpoint) -> None:
+    _build_spatial_fixture(tmp_path)
+    _build_spatial_fixture(tmp_path / "second")
+    monkeypatch.setenv("SPATIAL_VIEWER_DATA_ROOT", str(tmp_path))
+    catalog = json.loads((tmp_path / "datasets.json").read_text())
+    catalog["datasets"].append({**catalog["datasets"][0], "id": "second", "dataRoot": "second/data"})
+    _write_json(tmp_path / "datasets.json", catalog)
+    with sqlite3.connect(tmp_path / "data" / "expression.sqlite") as conn:
+        conn.execute("UPDATE genes SET gene = 'Soltu.DM.03G024100' WHERE gene_id = 1")
+    with _spatial_api_client() as client:
+        for dataset, expected in [("toy", 200), ("second", 404), ("toy", 200)]:
+            response = client.get(
+                f"/api/spatial/{endpoint}", params={"gene": "DM8.2_chr03G22620", "dataset": dataset},
+            )
+            assert response.status_code == expected, response.text
+
+
+def test_spatial_missing_mapping_does_not_block_original_ids(monkeypatch, tmp_path) -> None:
+    _build_spatial_fixture(tmp_path)
+    monkeypatch.setenv("SPATIAL_VIEWER_DATA_ROOT", str(tmp_path))
+    monkeypatch.setattr(spatial_viewer_mod, "GENE_MAPPING_PATH", tmp_path / "absent.tsv")
+    with _spatial_api_client() as client:
+        assert client.get("/api/spatial/gene", params={"gene": "GeneA"}).status_code == 200
+        response = client.get("/api/spatial/gene", params={"gene": "DM8.2_chr03G22620"})
+        assert response.status_code == 503
+        assert response.json()["detail"] == "DMv8.2 gene mapping unavailable"
 
 
 def test_spatial_agent_expression_requires_explicit_dataset_and_gene(monkeypatch, tmp_path) -> None:

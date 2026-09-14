@@ -84,8 +84,40 @@ button:disabled {
 }
 
 .viewer-panel {
-  display: grid;
+  display: flex;
+  flex-direction: column;
   overflow: hidden;
+}
+
+.viewer-panel > .viewer {
+  flex: 1;
+}
+
+.gene-result {
+  flex: none;
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--border);
+  font-size: 14px;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+
+.gene-result span {
+  display: block;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.query-status {
+  margin: 14px 0 0;
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+
+.query-status.is-error {
+  color: #b42318;
 }
 
 .query-heading {
@@ -152,6 +184,13 @@ select:disabled {
   display: grid;
   grid-template-columns: minmax(0, 1fr) 82px;
   gap: 8px;
+}
+
+.gene-hint {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 400;
+  line-height: 1.4;
 }
 
 .sample-toggle {

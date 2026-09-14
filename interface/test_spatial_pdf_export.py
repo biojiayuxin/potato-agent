@@ -114,6 +114,26 @@ function contentStreams(bytes) {
   assert.match(streams[1], /\(Seurat Clusters\) Tj/);
   assert.match(streams[1], /\(0 - Toy cluster cells\) Tj/);
 
+  const mapped = await pdf.render({
+    spatial: {
+      ...spatial,
+      title: 'DM8.2_chr03G22620 spatial expression',
+      subtitle: 'Toy Dataset | S1 | DMv6.1 data: Soltu.DM.03G024100',
+    },
+    dotplot: {
+      gene: 'Soltu.DM.03G024100',
+      requestedGene: 'DM8.2_chr03G22620',
+      mappingSource: 'synteny',
+      clusters: [{id: '0', avgExpr: 3.5, avgExprScaled: 0, pctExpr: 100}],
+    },
+  });
+  const mappedStreams = contentStreams(mapped.bytes);
+  assert.equal(mappedStreams.length, 2);
+  for (const stream of mappedStreams) {
+    assert.match(stream, /DM8\.2_chr03G22620/);
+    assert.match(stream, /DMv6\.1 data: Soltu\.DM\.03G024100/);
+  }
+
   const categorical = await pdf.render({
     title: 'Cluster map',
     spatial: {

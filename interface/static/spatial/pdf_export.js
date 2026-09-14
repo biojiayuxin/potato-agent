@@ -497,8 +497,13 @@
 
     page.rect(0, 0, width, height, { fill: [255, 255, 255] });
     page.text("Seurat Clusters", left, titleY, { size: 18, color: [37, 48, 68], bold: true });
+    if (payload.requestedGene && payload.requestedGene !== payload.gene) {
+      page.text(`DMv6.1 data: ${payload.gene}`, left, titleY + 23, {
+        size: 12, color: [102, 112, 133],
+      });
+    }
     page.line(left, centerY, right, centerY, { color: [215, 221, 229], lineWidth: 1 });
-    page.text(payload.gene || "-", left - 14, centerY + 5, {
+    page.text(payload.requestedGene || payload.gene || "-", left - 14, centerY + 5, {
       size: 14,
       color: [37, 48, 68],
       align: "right",
