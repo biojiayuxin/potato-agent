@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import argparse
 import csv
+import fcntl
+import gzip
 import json
 import os
 import re
@@ -11,11 +13,15 @@ import subprocess
 import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Sequence
+from typing import Any, Sequence, TextIO
 
 
 SAMPLE_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
-CATEGORY = "monoploid"
+CATEGORY_HAPLOTYPES = {
+    "monoploid": ("monoploid",),
+    "phased_diploid": ("H1", "H2"),
+    "phased_tetraploid": ("H1", "H2", "H3", "H4"),
+}
 TSV_COLUMNS = (
     "id",
     "category",
@@ -36,7 +42,8 @@ TSV_COLUMNS = (
 
 def atomic_write_text(path: Path, content: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    mode = stat.S_IMODE(path.stat().st_mode) if path.exists() else 0o644
+    previous_stat = path.stat() if path.exists() else None
+    mode = stat.S_IMODE(previous_stat.st_mode) if previous_stat else 0o644
     descriptor, temporary_name = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
     temporary = Path(temporary_name)
     try:
@@ -44,6 +51,12 @@ def atomic_write_text(path: Path, content: str) -> None:
             handle.write(content)
             handle.flush()
             os.fsync(handle.fileno())
+        if previous_stat:
+            temporary_stat = temporary.stat()
+            if (temporary_stat.st_uid, temporary_stat.st_gid) != (
+                previous_stat.st_uid, previous_stat.st_gid
+            ):
+                os.chown(temporary, previous_stat.st_uid, previous_stat.st_gid)
         temporary.chmod(mode)
         os.replace(temporary, path)
     except BaseException:
@@ -75,11 +88,60 @@ def _attribute_values(attributes: str, attribute_name: str) -> set[str]:
     return set()
 
 
+def open_gff3(source: Path) -> TextIO:
+    if source.suffix.lower() in {".gz", ".bgz"}:
+        return gzip.open(source, "rt", encoding="utf-8")
+    return source.open("r", encoding="utf-8")
+
+
+def expand_gene_bounds(
+    data_path: Path,
+    parent_children: dict[tuple[str, str], dict[str, Any]],
+    report_path: Path,
+) -> int:
+    normalized_path = data_path.with_suffix(".normalized")
+    changed = 0
+    try:
+        with data_path.open(encoding="utf-8") as source, normalized_path.open(
+            "w", encoding="utf-8", newline=""
+        ) as output, report_path.open("w", encoding="utf-8", newline="") as report:
+            writer = csv.writer(report, delimiter="\t", lineterminator="\n")
+            writer.writerow(("gene_id", "seqid", "old_start", "old_end", "new_start", "new_end"))
+            for raw in source:
+                fields = raw.rstrip("\n").split("\t")
+                if fields[2].lower() == "gene":
+                    ids = _attribute_values(fields[8], "ID")
+                    if len(ids) != 1:
+                        raise ValueError("gene boundary normalization requires one gene ID")
+                    gene_id = next(iter(ids))
+                    child = parent_children.get((fields[0], gene_id))
+                    if child:
+                        if not child["types"] <= {"mrna", "transcript"}:
+                            raise ValueError(f"gene {gene_id} has non-transcript children")
+                        strands = (child["strands"] | {fields[6]}) - {".", "?"}
+                        if len(strands) > 1:
+                            raise ValueError(f"gene {gene_id} and transcripts disagree on strand")
+                        start, end = int(fields[3]), int(fields[4])
+                        new_start = min(start, child["start"])
+                        new_end = max(end, child["end"])
+                        if (start, end) != (new_start, new_end):
+                            writer.writerow((gene_id, fields[0], start, end, new_start, new_end))
+                            fields[3:5] = [str(new_start), str(new_end)]
+                            changed += 1
+                output.write("\t".join(fields) + "\n")
+        normalized_path.replace(data_path)
+    finally:
+        normalized_path.unlink(missing_ok=True)
+    return changed
+
+
 def validate_and_sort_gff3(
     source: Path,
     sorted_path: Path,
     sequence_lengths: dict[str, int],
     sort_temp_dir: Path,
+    *,
+    gene_bounds_report: Path | None = None,
 ) -> dict[str, int]:
     unsorted_path = sorted_path.with_suffix(".unsorted")
     sorted_data_path = sorted_path.with_suffix(".sorted-data")
@@ -88,11 +150,12 @@ def validate_and_sort_gff3(
     feature_count = 0
     gene_count = 0
     transcript_count = 0
-    declared_ids: set[str] = set()
-    parent_children: dict[str, dict[str, Any]] = {}
+    declared_ids: set[tuple[str, str]] = set()
+    parent_children: dict[tuple[str, str], dict[str, Any]] = {}
+    normalized_gene_count = 0
 
     try:
-        with source.open("r", encoding="utf-8") as source_handle, unsorted_path.open(
+        with open_gff3(source) as source_handle, unsorted_path.open(
             "w", encoding="utf-8", newline=""
         ) as data_handle:
             for line_number, raw in enumerate(source_handle, start=1):
@@ -128,13 +191,14 @@ def validate_and_sort_gff3(
 
                 feature_type = fields[2].lower()
                 feature_count += 1
-                declared_ids.update(_attribute_values(fields[8], "ID"))
+                declared_ids.update(
+                    (ref_name, value) for value in _attribute_values(fields[8], "ID")
+                )
                 for parent_id in _attribute_values(fields[8], "Parent"):
                     child = parent_children.setdefault(
-                        parent_id,
+                        (ref_name, parent_id),
                         {
                             "types": set(),
-                            "refNames": set(),
                             "sources": set(),
                             "strands": set(),
                             "start": start,
@@ -142,7 +206,6 @@ def validate_and_sort_gff3(
                         },
                     )
                     child["types"].add(feature_type)
-                    child["refNames"].add(ref_name)
                     child["sources"].add(fields[1])
                     child["strands"].add(fields[6])
                     child["start"] = min(child["start"], start)
@@ -158,19 +221,17 @@ def validate_and_sort_gff3(
             raise ValueError("GFF3 contains no features")
         missing_parent_ids = set(parent_children) - declared_ids
         with unsorted_path.open("a", encoding="utf-8", newline="") as data_handle:
-            for parent_id in sorted(missing_parent_ids):
-                child = parent_children[parent_id]
+            for parent_key in sorted(missing_parent_ids):
+                ref_name, parent_id = parent_key
+                child = parent_children[parent_key]
                 if not child["types"] <= {"mrna", "transcript"}:
                     child_types = ", ".join(sorted(child["types"]))
                     raise ValueError(
                         f"cannot synthesize missing parent {parent_id}; child types: {child_types}"
                     )
-                if len(child["refNames"]) != 1:
-                    raise ValueError(f"missing gene parent {parent_id} spans multiple sequences")
                 informative_strands = child["strands"] - {"."}
                 if len(informative_strands) > 1:
                     raise ValueError(f"missing gene parent {parent_id} spans multiple strands")
-                ref_name = next(iter(child["refNames"]))
                 source_name = (
                     next(iter(child["sources"]))
                     if len(child["sources"]) == 1
@@ -195,6 +256,10 @@ def validate_and_sort_gff3(
                 )
                 gene_count += 1
                 feature_count += 1
+        if gene_bounds_report is not None:
+            normalized_gene_count = expand_gene_bounds(
+                unsorted_path, parent_children, gene_bounds_report
+            )
         env = dict(os.environ, LC_ALL="C")
         subprocess.run(
             [
@@ -224,11 +289,14 @@ def validate_and_sort_gff3(
         unsorted_path.unlink(missing_ok=True)
         sorted_data_path.unlink(missing_ok=True)
 
-    return {
+    counts = {
         "featureCount": feature_count,
         "geneCount": gene_count,
         "transcriptCount": transcript_count,
     }
+    if gene_bounds_report is not None:
+        counts["normalizedGeneCount"] = normalized_gene_count
+    return counts
 
 
 def build_assembly(
@@ -241,14 +309,17 @@ def build_assembly(
     doi: str,
     sequence_lengths: dict[str, int],
     annotation_counts: dict[str, int],
+    category: str = "monoploid",
 ) -> dict[str, Any]:
-    directory = f"{CATEGORY}/{sample}"
+    haplotypes = CATEGORY_HAPLOTYPES[category]
+    directory = f"{category}/{sample}"
     assembly: dict[str, Any] = {
         "id": directory,
         "sample": sample,
         "displayName": display_name,
-        "category": CATEGORY,
-        "ploidy": CATEGORY,
+        "category": category,
+        "ploidy": category,
+        "haplotypes": list(haplotypes),
         "directory": directory,
         "referenceMode": "bgzip_fasta",
         "reference": f"{directory}/reference/{sample}.fa.bgz",
@@ -319,7 +390,9 @@ def update_assemblies_tsv(content: str, assembly: dict[str, Any]) -> str:
             "ploidy": assembly.get("ploidy", ""),
             "sample": assembly.get("sample", ""),
             "display_name": assembly.get("displayName", ""),
-            "haplotypes": "monoploid",
+            "haplotypes": ",".join(
+                assembly.get("haplotypes") or CATEGORY_HAPLOTYPES[assembly["category"]]
+            ),
             "total_bp": assembly.get("totalBp", ""),
             "ref_name_count": assembly.get("refNameCount", ""),
             "gene_count": assembly.get("geneCount", ""),
@@ -377,10 +450,17 @@ def build_annotation_artifacts(
     tabix: str,
     threads: int,
     sort_temp_dir: Path,
+    normalize_gene_bounds: bool = False,
 ) -> dict[str, int]:
     sorted_gff3 = annotation_dir / f"{sample}.sorted.gff3"
     annotation_counts = validate_and_sort_gff3(
-        source, sorted_gff3, sequence_lengths, sort_temp_dir
+        source,
+        sorted_gff3,
+        sequence_lengths,
+        sort_temp_dir,
+        gene_bounds_report=(
+            annotation_dir / "gene_bounds_changes.tsv" if normalize_gene_bounds else None
+        ),
     )
     compressed_gff3 = annotation_dir / f"{sample}.gff3.bgz"
     with compressed_gff3.open("wb") as output:
@@ -394,14 +474,45 @@ def build_annotation_artifacts(
     return annotation_counts
 
 
+def compress_reference(source: Path, destination: Path, bgzip: str, threads: int) -> None:
+    with destination.open("wb") as output:
+        command = [bgzip, "-@", str(threads), "-c"]
+        if source.suffix.lower() not in {".gz", ".bgz"}:
+            subprocess.run([*command, str(source)], check=True, stdout=output)
+            return
+        # Decode ordinary gzip before BGZF compression; compressing it directly nests gzip streams.
+        with gzip.open(source, "rb") as input_handle, subprocess.Popen(
+            command, stdin=subprocess.PIPE, stdout=output
+        ) as process:
+            try:
+                assert process.stdin is not None
+                shutil.copyfileobj(input_handle, process.stdin, length=1024 * 1024)
+                process.stdin.close()
+                if process.wait():
+                    raise subprocess.CalledProcessError(process.returncode, command)
+            except BaseException:
+                process.kill()
+                process.wait()
+                raise
+
+
 def import_assembly(args: argparse.Namespace) -> dict[str, Any]:
+    with (args.db_root.resolve() / ".assembly-import.lock").open("a") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        return _import_assembly_locked(args)
+
+
+def _import_assembly_locked(args: argparse.Namespace) -> dict[str, Any]:
     db_root = args.db_root.resolve()
     fasta = args.fasta.absolute()
     gff3 = args.gff3.absolute()
     manifest_path = db_root / "assemblies.json"
     tsv_path = db_root / "assemblies.tsv"
     readme_path = db_root / "README.md"
-    target = db_root / CATEGORY / args.sample
+    category = args.category
+    if category not in CATEGORY_HAPLOTYPES:
+        raise ValueError(f"unsupported assembly category: {category}")
+    target = db_root / category / args.sample
 
     if not SAMPLE_RE.fullmatch(args.sample):
         raise ValueError("sample may contain only letters, digits, dots, underscores, and hyphens")
@@ -413,8 +524,8 @@ def import_assembly(args: argparse.Namespace) -> dict[str, Any]:
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     original_tsv = tsv_path.read_text(encoding="utf-8")
     original_readme = readme_path.read_text(encoding="utf-8")
-    if any(item.get("id") == f"{CATEGORY}/{args.sample}" for item in manifest["assemblies"]):
-        raise ValueError(f"assembly already exists: {CATEGORY}/{args.sample}")
+    if any(item.get("id") == f"{category}/{args.sample}" for item in manifest["assemblies"]):
+        raise ValueError(f"assembly already exists: {category}/{args.sample}")
 
     bgzip = shutil.which(args.bgzip)
     tabix = shutil.which(args.tabix)
@@ -423,7 +534,7 @@ def import_assembly(args: argparse.Namespace) -> dict[str, Any]:
         if executable is None:
             raise FileNotFoundError(f"{name} executable not found")
 
-    category_root = db_root / CATEGORY
+    category_root = db_root / category
     category_root.mkdir(parents=True, exist_ok=True)
     staging = Path(tempfile.mkdtemp(prefix=f".{args.sample}.import-", dir=category_root))
     staging.chmod(0o755)
@@ -435,12 +546,7 @@ def import_assembly(args: argparse.Namespace) -> dict[str, Any]:
 
     try:
         compressed_fasta = reference_dir / f"{args.sample}.fa.bgz"
-        with compressed_fasta.open("wb") as output:
-            subprocess.run(
-                [bgzip, "-@", str(args.threads), "-c", str(fasta)],
-                check=True,
-                stdout=output,
-            )
+        compress_reference(fasta, compressed_fasta, bgzip, args.threads)
         subprocess.run([samtools, "faidx", str(compressed_fasta)], check=True)
         sequence_lengths = load_fasta_index(compressed_fasta.with_suffix(".bgz.fai"))
         gzi_path = compressed_fasta.with_suffix(".bgz.gzi")
@@ -461,6 +567,7 @@ def import_assembly(args: argparse.Namespace) -> dict[str, Any]:
             tabix=tabix,
             threads=args.threads,
             sort_temp_dir=staging,
+            normalize_gene_bounds=args.normalize_gene_bounds,
         )
 
         assembly = build_assembly(
@@ -472,9 +579,14 @@ def import_assembly(args: argparse.Namespace) -> dict[str, Any]:
             doi=args.doi,
             sequence_lengths=sequence_lengths,
             annotation_counts=annotation_counts,
+            category=category,
         )
         sample_payload = dict(assembly)
-        sample_payload["haplotypes"] = ["monoploid"]
+        sample_payload["annotationProcessing"] = {
+            **annotation_counts,
+            "geneBoundsExpanded": args.normalize_gene_bounds,
+            "cdsPhase": "preserved from source",
+        }
         (staging / "sample.json").write_text(
             json.dumps(sample_payload, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
         )
@@ -505,15 +617,24 @@ def import_assembly(args: argparse.Namespace) -> dict[str, Any]:
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="Import one monoploid FASTA/GFF3 assembly into Genome_browser_DB"
+        description=(
+            "Import one sample-level FASTA/GFF3 assembly into Genome_browser_DB "
+            "(feature index updated separately)"
+        )
     )
     parser.add_argument("--db-root", type=Path, required=True)
     parser.add_argument("--sample", required=True)
+    parser.add_argument("--category", choices=tuple(CATEGORY_HAPLOTYPES), default="monoploid")
     parser.add_argument("--display-name", default="")
     parser.add_argument("--fasta", type=Path, required=True)
     parser.add_argument("--gff3", type=Path, required=True)
     parser.add_argument("--species", default="Solanum tuberosum")
     parser.add_argument("--doi", default="")
+    parser.add_argument(
+        "--normalize-gene-bounds",
+        action="store_true",
+        help="Expand gene intervals to include their transcripts and write annotation/gene_bounds_changes.tsv.",
+    )
     parser.add_argument("--threads", type=int, default=4)
     parser.add_argument("--bgzip", default="bgzip")
     parser.add_argument("--tabix", default="tabix")

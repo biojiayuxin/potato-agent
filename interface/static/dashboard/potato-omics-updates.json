@@ -1,6 +1,14 @@
 {
   "updates": [
     {
+      "version": "2026-09-14-001",
+      "title": "HS4 genome",
+      "date": "September 14, 2026",
+      "summary": "Added the HS4 tetraploid genome to the genome browser.",
+      "items": [],
+      "source_commits": []
+    },
+    {
       "version": "2026-09-08-001",
       "title": "Dashboard and navigation",
       "date": "September 8, 2026",

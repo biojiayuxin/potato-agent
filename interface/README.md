@@ -99,7 +99,7 @@ Potato Agent 更新直接读取 `static/lite/update-notes.json`；PotatoOmics �
 - `genome_browser.py`
   Genome Browser 的公开 FastAPI router；只读加载 bgzip FASTA/GFF3 及索引文件
 - `import_genome_browser_assembly.py`
-  校验、排序并索引单倍体 FASTA/GFF3，成功后原子更新 Genome Browser manifest 和元数据
+  校验、排序并索引样本级 FASTA/GFF3，支持单倍体和分相二/四倍体、普通 gzip 输入；集中式特征索引单独更新
 - `build_bulk_rnaseq_db.py`
   从整理后的 bulk RNA-Seq TSV 构建只读 SQLite；默认排除非马铃薯材料
 - `requirements.txt`
@@ -277,6 +277,37 @@ Potato Agent 更新直接读取 `static/lite/update-notes.json`；PotatoOmics �
   `/api/v1/gene-catalog` 和 `/api/v1/genes/search`，完整构建、发布及回滚保留命令见根 README
 
 ### Genome Browser 特征索引与序列 API
+
+新增组装先在独立数据库副本中运行导入器，发布前完成特征索引同步和检查。例如输入已经包含四套单倍型时：
+
+```bash
+python -m interface.import_genome_browser_assembly \
+  --db-root /path/to/staging/Genome_browser_DB \
+  --sample HS4 --category phased_tetraploid \
+  --display-name 'HS4 (HuaShu4, 4 haplotypes)' \
+  --fasta /path/to/HS4.genome.hap1234.v1.fa.gz \
+  --gff3 /path/to/HS4.genome.hap1234.v1.gene.gff.gz \
+  --species 'Solanum tuberosum cv. HuaShu4' \
+  --doi 10.1186/s13059-026-03980-9 --normalize-gene-bounds
+python -m interface.build_genome_feature_index \
+  --db-root /path/to/staging/Genome_browser_DB \
+  --output /path/to/staging/Genome_browser_DB/feature_index.sqlite \
+  --sync --assembly phased_tetraploid/HS4
+python -m interface.build_genome_feature_index \
+  --db-root /path/to/staging/Genome_browser_DB \
+  --output /path/to/staging/Genome_browser_DB/feature_index.sqlite --check
+```
+
+`--category` 默认 `monoploid`；分相输入必须已合并为一个 FASTA/GFF，保留唯一序列名。
+`--normalize-gene-bounds` 是显式选项，仅扩展 gene 范围以覆盖所属转录本，逐条记录在
+`annotation/gene_bounds_changes.tsv`，处理计数写入 `sample.json`。原始输入和 CDS phase 不改写；
+缺失 phase 的数据仍需独立验证 CDS 拼接、起止密码子及蛋白翻译。可用 `--bgzip/--tabix/--samtools`
+指定现有工具的绝对路径。
+
+导入器通过数据库根目录 `.assembly-import.lock` 排斥并发导入。生产发布工具也须持有该锁，
+检查准备期间原数据库未变更，并准备元数据及 SQLite 的一致备份。先安装新组装和已校验的候选索引，
+再更新 TSV/README，最后原子替换 JSON 清单；保留文件属主和权限，失败时恢复整组备份。
+导入器自身不更新集中索引，因此不应直接用它向在线清单发布尚未建立特征索引的组装。
 
 - `interface.build_genome_feature_index --full` 从 `assemblies.json` 构建一个集中式 SQLite；
   `--sync --assembly CATEGORY/SAMPLE` 每次事务性替换一个 assembly，`--check` 用于发布前校验。
