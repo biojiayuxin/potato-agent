@@ -1,6 +1,13 @@
 {
   "updates": [
     {
+      "version": "2026-09-22-001",
+      "title": "Bug fixes",
+      "date": "September 22, 2026",
+      "summary": "Fixed several intermittent bugs.",
+      "items": []
+    },
+    {
       "version": "2026-09-12-001",
       "title": "System prompt improvements",
       "date": "September 12, 2026",
