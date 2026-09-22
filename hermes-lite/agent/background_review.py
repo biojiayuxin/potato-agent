@@ -18,7 +18,6 @@ for invariants and PR review criteria.
 
 from __future__ import annotations
 
-import contextlib
 import json
 import logging
 import os
@@ -351,160 +350,158 @@ def _run_review_in_thread(
     review_agent = None
     review_messages: List[Dict] = []
     try:
-        with open(os.devnull, "w", encoding="utf-8") as _devnull, \
-             contextlib.redirect_stdout(_devnull), \
-             contextlib.redirect_stderr(_devnull):
-            # Inherit the parent agent's live runtime (provider, model,
-            # base_url, api_key, api_mode) so the fork uses the exact
-            # same credentials the main turn is using.  Without this,
-            # AIAgent.__init__ re-runs auto-resolution from env vars,
-            # which fails for OAuth-only providers, session-scoped
-            # creds, or credential-pool setups where the resolver can't
-            # reconstruct auth from scratch -- producing the spurious
-            # "No LLM provider configured" warning at end of turn.
-            _parent_runtime = agent._current_main_runtime()
-            _parent_api_mode = _parent_runtime.get("api_mode") or None
-            # The review fork needs to call agent-loop tools (memory,
-            # skill_manage). Those tools require Hermes' own dispatch,
-            # which the codex_app_server runtime bypasses entirely
-            # (it runs the turn inside codex's subprocess). So when
-            # the parent is on codex_app_server, downgrade the review
-            # fork to codex_responses — same auth/credentials, but
-            # talks to the OpenAI Responses API directly so Hermes
-            # owns the loop and the agent-loop tools dispatch.
-            if _parent_api_mode == "codex_app_server":
-                _parent_api_mode = "codex_responses"
-            # skip_memory=True keeps the review fork from
-            # touching external memory plugins (honcho, mem0,
-            # supermemory, etc.).  Without it, the fork's
-            # __init__ rebuilds its own _memory_manager from
-            # config, scoped to the parent's session_id, and
-            # run_conversation() then leaks the harness prompt
-            # into the user's real memory namespace via three
-            # ingestion sites: on_turn_start (cadence + turn
-            # message), prefetch_all (recall query), and
-            # sync_all (harness prompt + review output recorded
-            # as a (user, assistant) turn pair).  Built-in
-            # MEMORY.md / USER.md state is re-bound from the
-            # parent below so memory(action="add") writes from
-            # the review still land on disk; the review just
-            # has zero side effects on external providers.
-            # Match parent's toolset config so ``tools[]`` is byte-identical
-            # in the request body — Anthropic's cache key includes it.
-            # (The runtime whitelist below still restricts dispatch.)
-            review_agent = AIAgent(
-                model=agent.model,
-                max_iterations=16,
+        # Review runs in a thread; process-wide stream redirection is unsafe.
+        # Inherit the parent agent's live runtime (provider, model,
+        # base_url, api_key, api_mode) so the fork uses the exact
+        # same credentials the main turn is using.  Without this,
+        # AIAgent.__init__ re-runs auto-resolution from env vars,
+        # which fails for OAuth-only providers, session-scoped
+        # creds, or credential-pool setups where the resolver can't
+        # reconstruct auth from scratch -- producing the spurious
+        # "No LLM provider configured" warning at end of turn.
+        _parent_runtime = agent._current_main_runtime()
+        _parent_api_mode = _parent_runtime.get("api_mode") or None
+        # The review fork needs to call agent-loop tools (memory,
+        # skill_manage). Those tools require Hermes' own dispatch,
+        # which the codex_app_server runtime bypasses entirely
+        # (it runs the turn inside codex's subprocess). So when
+        # the parent is on codex_app_server, downgrade the review
+        # fork to codex_responses — same auth/credentials, but
+        # talks to the OpenAI Responses API directly so Hermes
+        # owns the loop and the agent-loop tools dispatch.
+        if _parent_api_mode == "codex_app_server":
+            _parent_api_mode = "codex_responses"
+        # skip_memory=True keeps the review fork from
+        # touching external memory plugins (honcho, mem0,
+        # supermemory, etc.).  Without it, the fork's
+        # __init__ rebuilds its own _memory_manager from
+        # config, scoped to the parent's session_id, and
+        # run_conversation() then leaks the harness prompt
+        # into the user's real memory namespace via three
+        # ingestion sites: on_turn_start (cadence + turn
+        # message), prefetch_all (recall query), and
+        # sync_all (harness prompt + review output recorded
+        # as a (user, assistant) turn pair).  Built-in
+        # MEMORY.md / USER.md state is re-bound from the
+        # parent below so memory(action="add") writes from
+        # the review still land on disk; the review just
+        # has zero side effects on external providers.
+        # Match parent's toolset config so ``tools[]`` is byte-identical
+        # in the request body — Anthropic's cache key includes it.
+        # (The runtime whitelist below still restricts dispatch.)
+        review_agent = AIAgent(
+            model=agent.model,
+            max_iterations=16,
+            quiet_mode=True,
+            platform=agent.platform,
+            provider=agent.provider,
+            api_mode=_parent_api_mode,
+            base_url=_parent_runtime.get("base_url") or None,
+            api_key=_parent_runtime.get("api_key") or None,
+            credential_pool=getattr(agent, "_credential_pool", None),
+            parent_session_id=agent.session_id,
+            enabled_toolsets=getattr(agent, "enabled_toolsets", None),
+            disabled_toolsets=getattr(agent, "disabled_toolsets", None),
+            skip_memory=True,
+        )
+        review_agent._memory_write_origin = "background_review"
+        review_agent._memory_write_context = "background_review"
+        review_agent._memory_store = agent._memory_store
+        review_agent._memory_enabled = agent._memory_enabled
+        review_agent._user_profile_enabled = agent._user_profile_enabled
+        review_agent._memory_nudge_interval = 0
+        review_agent._skill_nudge_interval = 0
+        # Suppress all status/warning emits from the fork so the
+        # user only sees the final successful-action summary.
+        # Without this, mid-review "Iteration budget exhausted",
+        # rate-limit retries, compression warnings, and other
+        # lifecycle messages bubble up through _emit_status ->
+        # _vprint and leak past the stdout redirect (they go via
+        # _print_fn/status_callback, which bypass sys.stdout).
+        review_agent.suppress_status_output = True
+        # Inherit the parent's cached system prompt verbatim so
+        # the review fork's outbound HTTP request hits the same
+        # Anthropic/OpenRouter prefix cache the parent warmed.
+        # Without this, the fork rebuilds the system prompt from
+        # scratch (fresh _hermes_now() timestamp, fresh
+        # session_id, narrower toolset → different skills_prompt)
+        # and the byte-exact prefix-cache key misses. See
+        # issue #25322 and PR #17276 for the full analysis +
+        # measured impact (~26% end-to-end cost reduction on
+        # Sonnet 4.5).
+        review_agent._cached_system_prompt = agent._cached_system_prompt
+        # Defensive: pin session_start + session_id to the
+        # parent's so any code path that re-renders parts of
+        # the system prompt (compression, plugin hooks) still
+        # produces byte-identical output. The cached-prompt
+        # assignment above already short-circuits the normal
+        # rebuild path, but these pins guarantee parity even
+        # if a future code path bypasses the cache.
+        review_agent.session_start = agent.session_start
+        review_agent.session_id = agent.session_id
+        # Never let the review fork compress. It shares the parent's
+        # session_id, so if it won a compression race it would rotate the
+        # parent into a NEW child that the gateway never adopts (the fork
+        # is single-lifecycle and dies right after this run_conversation).
+        # The foreground turn would then start from the stale parent and
+        # compress it again, leaving the same parent with two sibling
+        # children (issue #38727). Review also needs full context to
+        # produce a good memory/skill summary — compressing would strip
+        # detail. Both compression triggers in conversation_loop.py gate on
+        # agent.compression_enabled, so this short-circuits both paths.
+        review_agent.compression_enabled = False
+
+        from model_tools import get_tool_definitions
+        from hermes_cli.plugins import (
+            set_thread_tool_whitelist,
+            clear_thread_tool_whitelist,
+        )
+
+        review_whitelist = {
+            t["function"]["name"]
+            for t in get_tool_definitions(
+                enabled_toolsets=["memory", "skills"],
                 quiet_mode=True,
-                platform=agent.platform,
-                provider=agent.provider,
-                api_mode=_parent_api_mode,
-                base_url=_parent_runtime.get("base_url") or None,
-                api_key=_parent_runtime.get("api_key") or None,
-                credential_pool=getattr(agent, "_credential_pool", None),
-                parent_session_id=agent.session_id,
-                enabled_toolsets=getattr(agent, "enabled_toolsets", None),
-                disabled_toolsets=getattr(agent, "disabled_toolsets", None),
-                skip_memory=True,
             )
-            review_agent._memory_write_origin = "background_review"
-            review_agent._memory_write_context = "background_review"
-            review_agent._memory_store = agent._memory_store
-            review_agent._memory_enabled = agent._memory_enabled
-            review_agent._user_profile_enabled = agent._user_profile_enabled
-            review_agent._memory_nudge_interval = 0
-            review_agent._skill_nudge_interval = 0
-            # Suppress all status/warning emits from the fork so the
-            # user only sees the final successful-action summary.
-            # Without this, mid-review "Iteration budget exhausted",
-            # rate-limit retries, compression warnings, and other
-            # lifecycle messages bubble up through _emit_status ->
-            # _vprint and leak past the stdout redirect (they go via
-            # _print_fn/status_callback, which bypass sys.stdout).
-            review_agent.suppress_status_output = True
-            # Inherit the parent's cached system prompt verbatim so
-            # the review fork's outbound HTTP request hits the same
-            # Anthropic/OpenRouter prefix cache the parent warmed.
-            # Without this, the fork rebuilds the system prompt from
-            # scratch (fresh _hermes_now() timestamp, fresh
-            # session_id, narrower toolset → different skills_prompt)
-            # and the byte-exact prefix-cache key misses. See
-            # issue #25322 and PR #17276 for the full analysis +
-            # measured impact (~26% end-to-end cost reduction on
-            # Sonnet 4.5).
-            review_agent._cached_system_prompt = agent._cached_system_prompt
-            # Defensive: pin session_start + session_id to the
-            # parent's so any code path that re-renders parts of
-            # the system prompt (compression, plugin hooks) still
-            # produces byte-identical output. The cached-prompt
-            # assignment above already short-circuits the normal
-            # rebuild path, but these pins guarantee parity even
-            # if a future code path bypasses the cache.
-            review_agent.session_start = agent.session_start
-            review_agent.session_id = agent.session_id
-            # Never let the review fork compress. It shares the parent's
-            # session_id, so if it won a compression race it would rotate the
-            # parent into a NEW child that the gateway never adopts (the fork
-            # is single-lifecycle and dies right after this run_conversation).
-            # The foreground turn would then start from the stale parent and
-            # compress it again, leaving the same parent with two sibling
-            # children (issue #38727). Review also needs full context to
-            # produce a good memory/skill summary — compressing would strip
-            # detail. Both compression triggers in conversation_loop.py gate on
-            # agent.compression_enabled, so this short-circuits both paths.
-            review_agent.compression_enabled = False
-
-            from model_tools import get_tool_definitions
-            from hermes_cli.plugins import (
-                set_thread_tool_whitelist,
-                clear_thread_tool_whitelist,
-            )
-
-            review_whitelist = {
-                t["function"]["name"]
-                for t in get_tool_definitions(
-                    enabled_toolsets=["memory", "skills"],
-                    quiet_mode=True,
-                )
-            }
-            set_thread_tool_whitelist(
-                review_whitelist,
-                deny_msg_fmt=(
-                    "Background review denied non-whitelisted tool: "
-                    "{tool_name}. Only memory/skill tools are allowed."
+        }
+        set_thread_tool_whitelist(
+            review_whitelist,
+            deny_msg_fmt=(
+                "Background review denied non-whitelisted tool: "
+                "{tool_name}. Only memory/skill tools are allowed."
+            ),
+        )
+        try:
+            review_agent.run_conversation(
+                user_message=(
+                    prompt
+                    + "\n\nYou can only call memory and skill "
+                    "management tools. Other tools will be denied "
+                    "at runtime — do not attempt them."
                 ),
+                conversation_history=messages_snapshot,
             )
-            try:
-                review_agent.run_conversation(
-                    user_message=(
-                        prompt
-                        + "\n\nYou can only call memory and skill "
-                        "management tools. Other tools will be denied "
-                        "at runtime — do not attempt them."
-                    ),
-                    conversation_history=messages_snapshot,
-                )
-            finally:
-                clear_thread_tool_whitelist()
+        finally:
+            clear_thread_tool_whitelist()
 
-            # Snapshot review actions before teardown. close() is allowed to
-            # clean per-session state, but the user-visible self-improvement
-            # summary still needs the completed review agent's tool results.
-            review_messages = list(getattr(review_agent, "_session_messages", []))
+        # Snapshot review actions before teardown. close() is allowed to
+        # clean per-session state, but the user-visible self-improvement
+        # summary still needs the completed review agent's tool results.
+        review_messages = list(getattr(review_agent, "_session_messages", []))
 
-            # Tear down memory providers while stdout is still
-            # redirected so background thread teardown (Honcho flush,
-            # Hindsight sync, etc.) stays silent.  The finally block
-            # below is a safety net for the exception path.
-            try:
-                review_agent.shutdown_memory_provider()
-            except Exception:
-                pass
-            try:
-                review_agent.close()
-            except Exception:
-                pass
-            review_agent = None
+        # Tear down memory providers while stdout is still
+        # redirected so background thread teardown (Honcho flush,
+        # Hindsight sync, etc.) stays silent.  The finally block
+        # below is a safety net for the exception path.
+        try:
+            review_agent.shutdown_memory_provider()
+        except Exception:
+            pass
+        try:
+            review_agent.close()
+        except Exception:
+            pass
+        review_agent = None
 
         # Scan the review agent's messages for successful tool actions
         # and surface a compact summary to the user. Tool messages
@@ -535,26 +532,13 @@ def _run_review_in_thread(
         logger.warning("Background memory/skill review failed: %s", e)
         agent._emit_auxiliary_failure("background review", e)
     finally:
-        # Safety-net cleanup for the exception path.  Normal
-        # completion already shut down inside redirect_stdout above.
-        # Re-open devnull here so any teardown output (Honcho flush,
-        # Hindsight sync, background thread joins) stays silent even
-        # on the exception path where redirect_stdout already exited.
+        # Teardown must not replace streams shared with foreground turns.
         if review_agent is not None:
-            try:
-                with open(os.devnull, "w", encoding="utf-8") as _fn, \
-                     contextlib.redirect_stdout(_fn), \
-                     contextlib.redirect_stderr(_fn):
-                    try:
-                        review_agent.shutdown_memory_provider()
-                    except Exception:
-                        pass
-                    try:
-                        review_agent.close()
-                    except Exception:
-                        pass
-            except Exception:
-                pass
+            for cleanup in (review_agent.shutdown_memory_provider, review_agent.close):
+                try:
+                    cleanup()
+                except Exception:
+                    pass
         # Clear the approval callback on this bg-review thread so a
         # recycled thread-id doesn't inherit a stale reference.
         try:

@@ -409,3 +409,69 @@ def test_prompt_auto_title_allows_only_one_worker_per_session(
 
     assert calls == [True]
     assert session["auto_title_task_id"]
+
+
+def test_closed_diagnostic_stream_still_finishes_and_retains_turn(runtime_paths, monkeypatch):
+    import io
+    server = _import_server()
+
+    class Agent:
+        def run_conversation(self, *_args, **_kwargs):
+            raise ValueError('I/O operation on closed file.')
+
+    events = []
+    _patch_prompt_runner(server, monkeypatch, events)
+    monkeypatch.setattr(server, '_CRASH_LOG', str(runtime_paths.home / 'crash.log'))
+    session = _prompt_session(Agent())
+    session['interface_turn_state'] = {'turn_id': 'turn-1', 'running': True, 'outcome': None}
+    monkeypatch.setitem(server._sessions, 'live-1', session)
+    closed = io.StringIO()
+    closed.close()
+    saved_stderr = sys.stderr
+    try:
+        sys.stderr = closed
+        server._run_prompt_submit('req', 'live-1', session, 'question', turn_id='turn-1')
+    finally:
+        sys.stderr = saved_stderr
+    errors = [payload for kind, _, payload in events if kind == 'error']
+    assert errors == [{'message': 'I/O operation on closed file.', 'turn_id': 'turn-1'}]
+    state = _request(server, 'session.turn_state', {'session_id': 'live-1', 'turn_id': 'turn-1'})['result']
+    assert state['state'] == 'finished'
+    assert state['outcome'] == {'type': 'error', 'payload': errors[0]}
+    assert session['running'] is False
+    stale = _request(server, 'session.turn_state', {'session_id': 'live-1', 'turn_id': 'old'})['result']
+    assert stale['state'] == 'superseded'
+    assert 'outcome' not in stale
+
+
+def test_turn_finally_recovers_base_exception(runtime_paths, monkeypatch):
+    import pytest
+    server = _import_server()
+
+    class Agent:
+        def run_conversation(self, *_args, **_kwargs):
+            raise SystemExit('worker stopped')
+
+    events = []
+    _patch_prompt_runner(server, monkeypatch, events)
+    session = _prompt_session(Agent())
+    session['interface_turn_state'] = {'turn_id': 'turn-2', 'running': True, 'outcome': None}
+    with pytest.raises(SystemExit):
+        server._run_prompt_submit('req', 'live-2', session, 'question', turn_id='turn-2')
+    assert session['running'] is False
+    assert session['interface_turn_state']['outcome']['type'] == 'error'
+    assert len([kind for kind, _, _ in events if kind == 'error']) == 1
+
+
+def test_missed_completion_can_be_recovered_without_repeating_the_turn(runtime_paths, monkeypatch):
+    server = _import_server()
+    session = _prompt_session(object())
+    session['interface_turn_state'] = {'turn_id': 'turn-3', 'running': True, 'outcome': None}
+    monkeypatch.setitem(server._sessions, 'live-3', session)
+    monkeypatch.setattr(server, '_emit', lambda *_args: None)
+    server._emit_turn_outcome(session, 'live-3', 'turn-3', 'message.complete', {'text': 'saved answer'})
+    server._finish_interface_turn(session, 'live-3', 'turn-3')
+    state = _request(server, 'session.turn_state', {'session_id': 'live-3', 'turn_id': 'turn-3'})['result']
+    assert state['state'] == 'finished'
+    assert state['outcome']['type'] == 'message.complete'
+    assert state['outcome']['payload']['text'] == 'saved answer'

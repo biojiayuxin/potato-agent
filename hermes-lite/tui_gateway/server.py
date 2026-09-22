@@ -2844,6 +2844,55 @@ def _clear_inflight_turn(session: dict) -> None:
     session["inflight_turn"] = None
 
 
+def _emit_turn_outcome(session: dict, sid: str, turn_id: str, kind: str, payload: dict) -> None:
+    """Retain the terminal event so Interface can recover a missed delivery."""
+    payload = dict(payload)
+    if turn_id:
+        payload["turn_id"] = turn_id
+        with session["history_lock"]:
+            state = session.get("interface_turn_state")
+            if isinstance(state, dict) and state.get("turn_id") == turn_id:
+                if state.get("outcome") is not None:
+                    return
+                state["outcome"] = {"type": kind, "payload": payload}
+    _emit(kind, sid, payload)
+
+
+def _finish_interface_turn(session: dict, sid: str, turn_id: str) -> None:
+    with session["history_lock"]:
+        session["running"] = False
+        session["last_active"] = time.time()
+        _clear_inflight_turn(session)
+        state = session.get("interface_turn_state")
+        missing_outcome = False
+        if turn_id and isinstance(state, dict) and state.get("turn_id") == turn_id:
+            state["running"] = False
+            missing_outcome = state.get("outcome") is None
+    if missing_outcome:
+        _emit_turn_outcome(session, sid, turn_id, "error", {
+            "message": "Agent turn ended without a completion notification."
+        })
+
+
+@method("session.turn_state")
+def _interface_turn_state(rid, params: dict) -> dict:
+    sid = str(params.get("session_id") or "")
+    turn_id = str(params.get("turn_id") or "")
+    with _sessions_lock:
+        session = _sessions.get(sid)
+    if session is None:
+        return _ok(rid, {"turn_id": turn_id, "state": "missing"})
+    with session["history_lock"]:
+        state = session.get("interface_turn_state")
+        if not turn_id or not isinstance(state, dict) or state.get("turn_id") != turn_id:
+            return _ok(rid, {"turn_id": turn_id, "state": "superseded"})
+        return _ok(rid, {
+            "turn_id": turn_id,
+            "state": "running" if state["running"] else "finished",
+            "outcome": state.get("outcome"),
+        })
+
+
 def _inflight_snapshot(session: dict) -> dict | None:
     turn = session.get("inflight_turn")
     if not isinstance(turn, dict):
@@ -4202,6 +4251,7 @@ def _(rid, params: dict) -> dict:
 @method("prompt.submit")
 def _(rid, params: dict) -> dict:
     sid, text = params.get("session_id", ""), params.get("text", "")
+    turn_id = str(params.get("turn_id") or "")
     truncate_user_ordinal = params.get("truncate_before_user_ordinal")
     session, err = _sess_nowait(params, rid)
     if err:
@@ -4233,6 +4283,9 @@ def _(rid, params: dict) -> dict:
                     print(f"[tui_gateway] prompt.submit: replace_messages failed: {exc}", file=sys.stderr)
         session["running"] = True
         session["last_active"] = time.time()
+        session["interface_turn_state"] = {
+            "turn_id": turn_id, "running": True, "outcome": None,
+        }
         _start_inflight_turn(session, text)
 
     # Persist the DB row lazily, now that the user has actually sent a message.
@@ -4240,22 +4293,16 @@ def _(rid, params: dict) -> dict:
     _start_agent_build(sid, session)
 
     def run_after_agent_ready() -> None:
-        err = _wait_agent(session, rid)
-        if err:
-            _emit(
-                "error",
-                sid,
-                {
-                    "message": err.get("error", {}).get(
-                        "message", "agent initialization failed"
-                    )
-                },
-            )
-            with session["history_lock"]:
-                session["running"] = False
-                _clear_inflight_turn(session)
-            return
-        _run_prompt_submit(rid, sid, session, text)
+        try:
+            err = _wait_agent(session, rid)
+            if err:
+                raise RuntimeError(err.get("error", {}).get("message", "agent initialization failed"))
+            _run_prompt_submit(rid, sid, session, text, turn_id=turn_id)
+        except BaseException as exc:
+            try:
+                _emit_turn_outcome(session, sid, turn_id, "error", {"message": str(exc)})
+            finally:
+                _finish_interface_turn(session, sid, turn_id)
 
     threading.Thread(target=run_after_agent_ready, daemon=True).start()
     return _ok(rid, {"status": "streaming"})
@@ -4452,7 +4499,7 @@ def _start_notification_poller(sid: str, session: dict) -> threading.Event:
     return stop
 
 
-def _run_prompt_submit(rid, sid: str, session: dict, text: Any) -> None:
+def _run_prompt_submit(rid, sid: str, session: dict, text: Any, *, turn_id: str = "") -> None:
     with session["history_lock"]:
         history = list(session["history"])
         history_version = int(session.get("history_version", 0))
@@ -4512,9 +4559,8 @@ def _run_prompt_submit(rid, sid: str, session: dict, text: Any) -> None:
                     context_length=ctx_len,
                 )
                 if ctx.blocked:
-                    _emit(
-                        "error",
-                        sid,
+                    _emit_turn_outcome(
+                        session, sid, turn_id, "error",
                         {
                             "message": "\n".join(ctx.warnings)
                             or "Context injection refused."
@@ -4682,7 +4728,7 @@ def _run_prompt_submit(rid, sid: str, session: dict, text: Any) -> None:
                 payload["_fork_raw_boundary"] = raw_boundary
             with session["history_lock"]:
                 _clear_inflight_turn(session)
-            _emit("message.complete", sid, payload)
+            _emit_turn_outcome(session, sid, turn_id, "message.complete", payload)
 
             # ── /goal continuation (Ralph-style loop) ─────────────────
             # After every TUI turn, if a /goal is active, ask the judge
@@ -4884,23 +4930,24 @@ def _run_prompt_submit(rid, sid: str, session: dict, text: Any) -> None:
                     f.write(trace)
             except Exception:
                 pass
-            print(
-                f"[gateway-turn] {type(e).__name__}: {e}", file=sys.stderr, flush=True
-            )
-            _emit("error", sid, {"message": str(e)})
+            # Diagnostics must never prevent the terminal protocol event.
+            try:
+                print(f"[gateway-turn] {type(e).__name__}: {e}", file=sys.stderr, flush=True)
+            except Exception:
+                pass
+            _emit_turn_outcome(session, sid, turn_id, "error", {"message": str(e)})
         finally:
             try:
                 if approval_token is not None:
                     reset_current_session_key(approval_token)
             except Exception:
                 pass
-            if home_token is not None:
-                reset_hermes_home_override(home_token)
-            _clear_session_context(session_tokens)
-            with session["history_lock"]:
-                session["running"] = False
-                session["last_active"] = time.time()
-                _clear_inflight_turn(session)
+            try:
+                if home_token is not None:
+                    reset_hermes_home_override(home_token)
+                _clear_session_context(session_tokens)
+            finally:
+                _finish_interface_turn(session, sid, turn_id)
             _emit("session.info", sid, _session_info(agent, session))
 
         # Chain a goal-continuation turn if the judge said so. We do

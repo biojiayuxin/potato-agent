@@ -782,3 +782,86 @@ async def test_close_for_cleanup_closes_idle_bridge() -> None:
     assert closed is True
     assert bridge.close_calls == 1
     assert registry._bridges.get("alice") is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('state,outcome,expected_type', [
+    ('running', None, None),
+    ('finished', {'type': 'message.complete', 'payload': {'text': 'recovered'}}, 'message.complete'),
+    ('finished', {'type': 'error', 'payload': {'message': 'crashed'}}, 'error'),
+    ('missing', None, 'error'),
+    ('superseded', None, 'error'),
+])
+async def test_turn_reconciliation_recovers_terminal_event_only_for_current_turn(
+    monkeypatch, state, outcome, expected_type
+):
+    bridge = TuiGatewayBridge(user_id='user-1', target=None)
+    generation = SimpleNamespace(state=_GatewayGenerationState.READY)
+    bridge._generation = generation
+    bridge._foreground_turn_ids['live-1'] = 'turn-1'
+    bridge._foreground_submitted.add('turn-1')
+    releases, events = [], []
+
+    async def status(method, params):
+        assert method == 'session.turn_state'
+        assert params == {'session_id': 'live-1', 'turn_id': 'turn-1'}
+        return {'turn_id': 'turn-1', 'state': state, 'outcome': outcome}
+
+    monkeypatch.setattr(bridge, 'rpc', status)
+    monkeypatch.setattr(bridge, '_schedule_foreground_lease_release', lambda sid, gen: releases.append(sid))
+    monkeypatch.setattr(bridge, '_dispatch_event', lambda event, **kw: events.append(event))
+    terminal = await bridge._reconcile_foreground_turn('live-1', 'turn-1', generation)
+    assert terminal is (expected_type is not None)
+    assert releases == (['live-1'] if terminal else [])
+    assert [e['type'] for e in events] == ([expected_type] if terminal else [])
+    if terminal:
+        # Repeated probes and duplicate terminal events cannot finish a later turn.
+        assert await bridge._reconcile_foreground_turn('live-1', 'turn-1', generation)
+        assert len(releases) == 1
+    bridge._foreground_turn_ids['live-1'] = 'turn-2'
+    bridge._dispatch_message(generation, {'method': 'event', 'params': {
+        'type': 'error', 'session_id': 'live-1', 'payload': {'turn_id': 'turn-1', 'message': 'late'},
+    }})
+    assert releases == (['live-1'] if terminal else [])
+    assert 'turn-2' not in bridge._foreground_terminal
+
+
+@pytest.mark.asyncio
+async def test_turn_status_failure_keeps_long_running_lease(monkeypatch):
+    bridge = TuiGatewayBridge(user_id='user-1', target=None)
+    generation = SimpleNamespace(state=_GatewayGenerationState.READY)
+    renewals = []
+    sleeps = 0
+
+    async def sleep(_seconds):
+        nonlocal sleeps
+        sleeps += 1
+        if sleeps > 2:
+            raise asyncio.CancelledError
+
+    async def unavailable(*args):
+        raise TimeoutError('temporary gateway delay')
+
+    async def run_inline(func, *args, **kwargs):
+        return func(*args, **kwargs)
+
+    monkeypatch.setattr(bridge, '_reconcile_foreground_turn', unavailable)
+    monkeypatch.setattr(bridge_mod, '_foreground_lease_sleep', sleep)
+    monkeypatch.setattr(bridge_mod, '_run_in_thread', run_inline)
+    monkeypatch.setattr(bridge_mod, 'heartbeat_runtime_lease', lambda lease_id, **kw: renewals.append(lease_id) or True)
+    with pytest.raises(asyncio.CancelledError):
+        await bridge._foreground_chat_lease_heartbeat('lease-1', ttl_seconds=90, interval_seconds=15,
+                                                     live_session_id='live-1', generation=generation)
+    assert renewals == ['lease-1', 'lease-1']
+
+
+@pytest.mark.asyncio
+async def test_unacknowledged_prompt_is_not_reconciled_as_missing(monkeypatch):
+    bridge = TuiGatewayBridge(user_id='user-1', target=None)
+    generation = SimpleNamespace(state=_GatewayGenerationState.READY)
+    bridge._generation = generation
+    bridge._foreground_turn_ids['live-1'] = 'turn-1'
+    async def unexpected(*args):
+        raise AssertionError('prompt was not acknowledged yet')
+    monkeypatch.setattr(bridge, 'rpc', unexpected)
+    assert not await bridge._reconcile_foreground_turn('live-1', 'turn-1', generation)

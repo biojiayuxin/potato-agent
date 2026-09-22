@@ -82,6 +82,7 @@ _BRIDGE_ALLOWED_METHODS = frozenset(
         "session.interrupt",
         "session.resume",
         "session.title",
+        "session.turn_state",
     }
 )
 _MAX_SUBSCRIBERS_PER_USER = 2
@@ -168,7 +169,11 @@ class TuiGatewayBridge:
         self._started_at = 0.0
         self._last_event_at = 0.0
         self._foreground_leases_lock = threading.Lock()
+        self._foreground_start_lock = asyncio.Lock()
         self._foreground_leases: dict[str, tuple[str, asyncio.Task[None]]] = {}
+        self._foreground_turn_ids: dict[str, str] = {}
+        self._foreground_submitted: set[str] = set()
+        self._foreground_terminal: set[str] = set()
         self._foreground_release_tasks: dict[str, asyncio.Task[None]] = {}
         self._event_listeners_lock = threading.Lock()
         self._event_listeners: dict[str, BridgeEventListener] = {}
@@ -498,7 +503,7 @@ class TuiGatewayBridge:
             return str(self._run_ids_by_live_session_id.get(normalized_live_session_id) or "")
 
     async def rpc(self, method: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
-        rpc_params = params or {}
+        rpc_params = dict(params or {})
         _validate_bridge_rpc(method, rpc_params)
         generation = await self._ensure_ready_generation()
         proc = generation.proc
@@ -506,8 +511,10 @@ class TuiGatewayBridge:
             raise TuiGatewayBridgeError("tui_gateway process is not available")
 
         live_session_id = str(rpc_params.get("session_id") or "").strip()
+        turn_id = ""
         if method == "prompt.submit" and live_session_id:
-            await self._start_foreground_lease(live_session_id)
+            turn_id = await self._start_foreground_lease(live_session_id, generation=generation)
+            rpc_params["turn_id"] = turn_id
 
         request_id = uuid.uuid4().hex
         loop = asyncio.get_running_loop()
@@ -524,7 +531,7 @@ class TuiGatewayBridge:
                 "jsonrpc": "2.0",
                 "id": request_id,
                 "method": method,
-                "params": params or {},
+                "params": rpc_params,
             },
             ensure_ascii=False,
         )
@@ -549,7 +556,12 @@ class TuiGatewayBridge:
             raise TuiGatewayBridgeError("failed to write to tui_gateway") from exc
 
         try:
-            return await asyncio.wait_for(future, timeout=60.0)
+            result = await asyncio.wait_for(future, timeout=60.0)
+            if turn_id:
+                with self._foreground_leases_lock:
+                    if self._foreground_turn_ids.get(live_session_id) == turn_id:
+                        self._foreground_submitted.add(turn_id)
+            return result
         except asyncio.CancelledError:
             with self._pending_lock:
                 self._pending.pop(request_id, None)
@@ -718,6 +730,16 @@ class TuiGatewayBridge:
             event_type = str(params.get("type") or "")
             event_session_id = str(params.get("session_id") or "").strip()
             event_payload = params.get("payload") if isinstance(params.get("payload"), dict) else {}
+            if event_type in {"message.complete", "error"} and event_session_id:
+                turn_id = str(event_payload.get("turn_id") or "")
+                with self._foreground_leases_lock:
+                    expected = self._foreground_turn_ids.get(event_session_id, "")
+                    # Untagged lifecycle errors and late/duplicate terminal events
+                    # cannot complete a different prompt on the same session.
+                    if turn_id or expected:
+                        if not turn_id or turn_id != expected or turn_id in self._foreground_terminal:
+                            return
+                        self._foreground_terminal.add(turn_id)
             if event_type == "gateway.ready":
                 if self._record_generation_ready(generation, event_payload):
                     self._schedule_generation_callback(
@@ -842,13 +864,25 @@ class TuiGatewayBridge:
             self._last_ready_payload = payload
             return True
 
-    async def _start_foreground_lease(self, live_session_id: str) -> None:
+    async def _start_foreground_lease(
+        self, live_session_id: str, *, generation: _GatewayGeneration
+    ) -> str:
+        async with self._foreground_start_lock:
+            return await self._create_foreground_lease(live_session_id, generation=generation)
+
+    async def _create_foreground_lease(
+        self, live_session_id: str, *, generation: _GatewayGeneration
+    ) -> str:
         normalized_session_id = str(live_session_id or "").strip()
         if not normalized_session_id:
-            return
+            return ""
         with self._foreground_leases_lock:
-            if normalized_session_id in self._foreground_leases:
-                return
+            existing = self._foreground_leases.get(normalized_session_id)
+            terminal = existing is not None and existing[0] in self._foreground_terminal
+        if existing is not None:
+            if not terminal:
+                raise TuiGatewayBridgeError("session already has an active prompt")
+            await self._release_foreground_lease(normalized_session_id)
         await asyncio.to_thread(mark_user_message_activity, self.user_id)
         lease_id = await asyncio.to_thread(
             create_runtime_lease,
@@ -862,10 +896,15 @@ class TuiGatewayBridge:
             },
         )
         heartbeat_task = asyncio.create_task(
-            self._foreground_chat_lease_heartbeat(lease_id, ttl_seconds=90, interval_seconds=15)
+            self._foreground_chat_lease_heartbeat(
+                lease_id, ttl_seconds=90, interval_seconds=15,
+                live_session_id=normalized_session_id, generation=generation,
+            )
         )
         with self._foreground_leases_lock:
             self._foreground_leases[normalized_session_id] = (lease_id, heartbeat_task)
+            self._foreground_turn_ids[normalized_session_id] = lease_id
+        return lease_id
 
     async def _release_foreground_lease(self, live_session_id: str) -> None:
         normalized_session_id = str(live_session_id or "").strip()
@@ -915,6 +954,9 @@ class TuiGatewayBridge:
         with self._foreground_leases_lock:
             if self._foreground_leases.get(normalized_session_id) == lease:
                 self._foreground_leases.pop(normalized_session_id, None)
+                self._foreground_turn_ids.pop(normalized_session_id, None)
+                self._foreground_submitted.discard(lease_id)
+                self._foreground_terminal.discard(lease_id)
         heartbeat_task.cancel()
         with contextlib.suppress(asyncio.CancelledError):
             await heartbeat_task
@@ -931,10 +973,20 @@ class TuiGatewayBridge:
         *,
         ttl_seconds: int,
         interval_seconds: int,
+        live_session_id: str = "",
+        generation: _GatewayGeneration | None = None,
     ) -> None:
         try:
             while True:
                 await _foreground_lease_sleep(max(interval_seconds, 1))
+                if live_session_id and generation is not None:
+                    try:
+                        if await self._reconcile_foreground_turn(live_session_id, lease_id, generation):
+                            return
+                    except Exception:
+                        # A failed status query is not evidence that long work or
+                        # an approval wait ended. Keep its lease and retry.
+                        LOGGER.warning("Could not check foreground turn for user %s", self.user_id, exc_info=True)
                 try:
                     renewed = await _run_in_thread(
                         heartbeat_runtime_lease,
@@ -952,6 +1004,39 @@ class TuiGatewayBridge:
                     return
         except asyncio.CancelledError:
             raise
+
+    async def _reconcile_foreground_turn(
+        self, live_session_id: str, turn_id: str, generation: _GatewayGeneration
+    ) -> bool:
+        with self._foreground_leases_lock:
+            if self._foreground_turn_ids.get(live_session_id) != turn_id:
+                return True
+            if turn_id in self._foreground_terminal:
+                return True
+            if turn_id not in self._foreground_submitted:
+                return False
+        if self._generation is not generation or generation.state is _GatewayGenerationState.EXITED:
+            return True
+        state = await asyncio.wait_for(self.rpc("session.turn_state", {
+            "session_id": live_session_id, "turn_id": turn_id,
+        }), timeout=5.0)
+        if state.get("turn_id") != turn_id:
+            raise TuiGatewayBridgeError("Gateway returned a different turn state")
+        outcome = state.get("outcome")
+        if not isinstance(outcome, dict) or outcome.get("type") not in {"message.complete", "error"}:
+            if state.get("state") == "running":
+                return False
+            if state.get("state") not in {"finished", "missing", "superseded"}:
+                raise TuiGatewayBridgeError("Gateway returned an invalid turn state")
+            outcome = {"type": "error", "payload": {
+                "message": "Agent turn ended without a completion notification.",
+            }}
+        payload = dict(outcome.get("payload") or {})
+        payload["turn_id"] = turn_id
+        self._dispatch_message(generation, {"method": "event", "params": {
+            "type": outcome["type"], "session_id": live_session_id, "payload": payload,
+        }})
+        return True
 
     def _schedule_generation_callback(
         self,

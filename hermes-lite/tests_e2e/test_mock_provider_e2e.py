@@ -645,7 +645,7 @@ def test_prompt_submit_and_resume_use_only_lite_runtime(tmp_path: Path) -> None:
             sid = created["session_id"]
 
             submit = gateway.rpc(
-                "prompt.submit", {"session_id": sid, "text": "first prompt"}
+                "prompt.submit", {"session_id": sid, "text": "first prompt", "turn_id": "first-turn"}
             )
             assert submit == {"status": "streaming"}
             complete = _payload(
@@ -653,6 +653,11 @@ def test_prompt_submit_and_resume_use_only_lite_runtime(tmp_path: Path) -> None:
             )
             assert complete["status"] == "complete"
             assert complete["text"] == "Mock reply one"
+            assert complete["turn_id"] == "first-turn"
+            recovered = gateway.rpc("session.turn_state", {
+                "session_id": sid, "turn_id": "first-turn",
+            })
+            assert recovered["outcome"]["payload"] == complete
             assert complete["_fork_raw_boundary"]["physical_session_id"] == created[
                 "stored_session_id"
             ]
@@ -817,7 +822,7 @@ def test_approval_deny_prevents_dangerous_terminal_command(tmp_path: Path) -> No
             sid = _create_session(gateway)["session_id"]
             assert gateway.rpc(
                 "prompt.submit",
-                {"session_id": sid, "text": "try the protected command"},
+                {"session_id": sid, "text": "try the protected command", "turn_id": "approval-turn"},
             ) == {"status": "streaming"}
 
             approval = _payload(
@@ -825,6 +830,11 @@ def test_approval_deny_prevents_dangerous_terminal_command(tmp_path: Path) -> No
             )
             assert approval["command"] == command
             assert approval["approval_id"]
+            waiting = gateway.rpc("session.turn_state", {
+                "session_id": sid, "turn_id": "approval-turn",
+            })
+            assert waiting["state"] == "running"
+            assert waiting["outcome"] is None
             assert marker.read_text(encoding="utf-8") == "preserve me"
             stale = gateway.rpc(
                 "approval.respond",
