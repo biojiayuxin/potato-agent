@@ -268,3 +268,116 @@ def test_web_session_db_proxy_preserves_fork_marker_conflict_from_helper(
             "fork_session",
             target_session_id="fork-target",
         )
+
+
+@pytest.fixture
+def direct_session_db_proxy(monkeypatch, tmp_path):
+    from interface import app as interface_app
+
+    target = HermesTarget(
+        username="alice",
+        email="alice@example.com",
+        display_name="Alice",
+        linux_user="hmx_alice",
+        home_dir=tmp_path,
+        hermes_home=tmp_path / ".hermes",
+        workdir=tmp_path,
+        api_server_host="127.0.0.1",
+        api_port=8655,
+        api_key="sk-user",
+        api_server_model_name="Hermes",
+        systemd_service="hermes-alice.service",
+        extra_env={},
+        config_overrides={},
+    )
+    monkeypatch.setattr(interface_app.os, "geteuid", lambda: 0)
+    monkeypatch.delenv("INTERFACE_FORCE_PRIVILEGED_HELPER", raising=False)
+    return interface_app, interface_app._UserSessionDBProxy(target)
+
+
+@pytest.mark.parametrize(
+    "separator",
+    ["", "\u2028", "\u2029", "\u0085"],
+    ids=["plain", "line-separator", "paragraph-separator", "next-line"],
+)
+@pytest.mark.parametrize(
+    ("prefix", "suffix"),
+    [
+        ("", ""),
+        ("helper diagnostic\n", "\n\n"),
+        ("helper diagnostic\r\n", "\r\n\r\n"),
+    ],
+    ids=["bare", "lf", "crlf"],
+)
+def test_web_session_db_proxy_preserves_unicode_response(
+    monkeypatch, direct_session_db_proxy, separator, prefix, suffix
+) -> None:
+    interface_app, proxy = direct_session_db_proxy
+    expected = {
+        "logical_session_id": "session-1",
+        "logical_session": {"title": f"中文标题{separator}后半段"},
+        "messages": [
+            {"role": "tool", "content": f"中文结果{separator}后半段\n第二行\r\n第三行"}
+        ],
+    }
+    stdout = (
+        prefix + json.dumps({"ok": True, "result": expected}, ensure_ascii=False) + suffix
+    )
+    monkeypatch.setattr(
+        interface_app,
+        "run_process_group",
+        lambda command, **kwargs: subprocess.CompletedProcess(
+            command, 0, stdout=stdout, stderr=""
+        ),
+    )
+
+    assert (
+        proxy.get_logical_session_context("session-1", include_messages=True) == expected
+    )
+
+
+@pytest.mark.parametrize("stdout", ["", " \n\t\r\n"], ids=["empty", "blank"])
+def test_web_session_db_proxy_rejects_empty_response(
+    monkeypatch, direct_session_db_proxy, stdout
+) -> None:
+    interface_app, proxy = direct_session_db_proxy
+    monkeypatch.setattr(
+        interface_app,
+        "run_process_group",
+        lambda command, **kwargs: subprocess.CompletedProcess(
+            command, 1, stdout=stdout, stderr="helper failed"
+        ),
+    )
+
+    with pytest.raises(interface_app.HTTPException) as exc_info:
+        proxy.get_session("session-1")
+
+    assert exc_info.value.status_code == 500
+    assert exc_info.value.detail == (
+        "Failed to access Hermes session DB as hmx_alice: helper failed"
+    )
+
+
+@pytest.mark.parametrize(
+    "stdout",
+    ['{"ok":', '{"ok": true, "result": {}}\nnot-json\n'],
+    ids=["malformed", "invalid-final-line"],
+)
+def test_web_session_db_proxy_rejects_invalid_json_response(
+    monkeypatch, direct_session_db_proxy, stdout
+) -> None:
+    interface_app, proxy = direct_session_db_proxy
+    monkeypatch.setattr(
+        interface_app,
+        "run_process_group",
+        lambda command, **kwargs: subprocess.CompletedProcess(
+            command, 0, stdout=stdout, stderr=""
+        ),
+    )
+
+    with pytest.raises(interface_app.HTTPException) as exc_info:
+        proxy.get_session("session-1")
+
+    assert exc_info.value.status_code == 500
+    assert exc_info.value.detail.startswith("Invalid Hermes session DB helper response")
+    assert isinstance(exc_info.value.__cause__, json.JSONDecodeError)

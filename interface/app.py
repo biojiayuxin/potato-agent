@@ -1367,7 +1367,8 @@ class _UserSessionDBProxy:
                     elapsed,
                 )
 
-        stdout_lines = [line for line in result.stdout.splitlines() if line.strip()]
+        # splitlines() also splits valid Unicode characters inside JSON strings.
+        stdout_lines = [line for line in result.stdout.split("\n") if line.strip()]
         raw_payload = stdout_lines[-1] if stdout_lines else ""
         if not raw_payload:
             detail = (
@@ -1437,6 +1438,12 @@ class _UserSessionDBProxy:
     def get_session(self, session_id: str) -> dict[str, Any] | None:
         result = self._call("get_session", session_id=session_id)
         return result if isinstance(result, dict) else None
+
+    def get_internal_session_ids(self) -> set[str]:
+        return set(self._call("get_internal_session_ids") or [])
+
+    def is_internal_session(self, session_id: str) -> bool:
+        return bool(self._call("is_internal_session", session_id=session_id))
 
     def resolve_session_id(self, session_id_or_prefix: str) -> str | None:
         result = self._call(
@@ -1516,7 +1523,7 @@ class _UserSessionDBProxy:
 
 def _load_direct_session_db(db_path: Path):
     try:
-        from hermes_state import SessionDB  # type: ignore
+        from potato_hermes_lite.session_visibility import SessionDB
     except Exception as exc:
         raise HTTPException(
             status_code=500, detail=f"Failed to import Hermes session DB: {exc}"
@@ -1539,6 +1546,30 @@ def _open_session_db(spec: HermesTarget) -> Iterator[Any]:
         yield db
     finally:
         db.close()
+
+
+def _internal_session_ids(db: Any) -> set[str]:
+    getter = getattr(db, "get_internal_session_ids", None)
+    if callable(getter):
+        return set(getter())
+    from potato_hermes_lite.session_visibility import internal_session_ids
+
+    return internal_session_ids(db)
+
+
+def _session_is_internal(db: Any, session_id: str) -> bool:
+    checker = getattr(db, "is_internal_session", None)
+    if callable(checker):
+        return bool(checker(session_id))
+    from potato_hermes_lite.session_visibility import is_internal_session
+
+    return is_internal_session(db, session_id)
+
+
+def _assert_session_visible_sync(target: HermesTarget, session_id: str) -> None:
+    with _open_session_db(target) as db:
+        if _session_is_internal(db, session_id):
+            raise HTTPException(status_code=404, detail="Session not found")
 
 
 def _load_session_context_sync(
@@ -2684,6 +2715,8 @@ def _resolve_logical_session_context_snapshot(
     get_context = getattr(db, "get_logical_session_context", None)
     if callable(get_context):
         result = get_context(session_id, include_messages=include_messages)
+        if result.get("internal"):
+            raise HTTPException(status_code=404, detail="Session not found")
         return (
             str(result.get("logical_session_id") or "").strip(),
             result.get("logical_session")
@@ -2696,9 +2729,14 @@ def _resolve_logical_session_context_snapshot(
             result.get("messages") if isinstance(result.get("messages"), list) else [],
         )
 
+    if _session_is_internal(db, session_id):
+        raise HTTPException(status_code=404, detail="Session not found")
     resolved = db.resolve_session_id(session_id)
     if not resolved:
         return "", None, "", None, []
+
+    if resolved != session_id and _session_is_internal(db, resolved):
+        raise HTTPException(status_code=404, detail="Session not found")
 
     logical_session_id = _find_logical_session_root_id(db, resolved)
     logical_session = db.get_session(logical_session_id)
@@ -4954,12 +4992,20 @@ def _load_normalized_sessions_sync(
             offset=0,
             order_by_last_active=True,
         )
+        # Check after loading rows so a concurrent repair cannot be undone by
+        # the display-cache fallback below.
+        hidden_session_ids = _internal_session_ids(db)
         normalized_by_id: dict[str, dict[str, Any]] = {}
         seen_session_ids: set[str] = set()
         for item in sessions:
             if not _is_interface_managed_source(item.get("source")):
                 continue
             logical_session_id = _logical_session_id_from_row(item)
+            if (
+                logical_session_id in hidden_session_ids
+                or item.get("id") in hidden_session_ids
+            ):
+                continue
             logical_session = item
             if str(item.get("_lineage_root_id") or "").strip():
                 root_session = db.get_session(logical_session_id)
@@ -4979,6 +5025,8 @@ def _load_normalized_sessions_sync(
             seen_session_ids.add(logical_session_id)
 
         for logical_session_id, display_meta in display_metas.items():
+            if logical_session_id in hidden_session_ids:
+                continue
             if logical_session_id in seen_session_ids:
                 continue
             live_state = live_states.get(logical_session_id)
@@ -5315,6 +5363,7 @@ async def get_session_live_snapshot(
     after_event_seq: int = -1,
     user: CurrentUser = Depends(get_current_user),
 ) -> dict[str, Any]:
+    await asyncio.to_thread(_assert_session_visible_sync, user.target, session_id)
     snapshot = await asyncio.to_thread(
         _get_live_poll_snapshot_sync,
         user.id,
@@ -5388,6 +5437,7 @@ async def _build_submitted_turn_response(
     *,
     expected_run_id: str = "",
 ) -> dict[str, Any] | None:
+    await asyncio.to_thread(_assert_session_visible_sync, user.target, session_id)
     snapshot, display_meta = await asyncio.gather(
         asyncio.to_thread(
             _get_live_poll_snapshot_sync,
@@ -6003,6 +6053,8 @@ async def submit_session_turn(
     payload: SessionTurnSubmitRequest,
     user: CurrentUser = Depends(get_current_user),
 ) -> dict[str, Any]:
+    if session_id != "draft":
+        await asyncio.to_thread(_assert_session_visible_sync, user.target, session_id)
     prompt = str(payload.prompt or "").strip()
     mode = str(payload.mode or "chat").strip().lower()
     if mode not in {"chat", "plan"}:
@@ -6243,6 +6295,7 @@ async def interrupt_session_turn(
     session_id: str,
     user: CurrentUser = Depends(get_current_user),
 ) -> dict[str, Any]:
+    await asyncio.to_thread(_assert_session_visible_sync, user.target, session_id)
     bridge: TuiGatewayBridge | None = None
     try:
         bridge = await _get_tui_bridge_for_user(user)
@@ -6270,6 +6323,7 @@ async def respond_session_approval(
     payload: SessionApprovalRequest,
     user: CurrentUser = Depends(get_current_user),
 ) -> dict[str, Any]:
+    await asyncio.to_thread(_assert_session_visible_sync, user.target, session_id)
     choice = str(payload.choice or "").strip().lower()
     if choice not in {"once", "session", "always", "deny"}:
         raise HTTPException(status_code=400, detail="Invalid approval choice")

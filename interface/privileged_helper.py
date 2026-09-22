@@ -150,7 +150,8 @@ def _session_db_call(target: HermesTarget, method: str, kwargs: dict[str, Any]) 
         timeout_seconds=SESSION_DB_INNER_TIMEOUT_SECONDS,
         input_text=json.dumps(kwargs, ensure_ascii=False),
     )
-    stdout_lines = [line for line in result.stdout.splitlines() if line.strip()]
+    # splitlines() also splits valid Unicode characters inside JSON strings.
+    stdout_lines = [line for line in result.stdout.split("\n") if line.strip()]
     raw_payload = stdout_lines[-1] if stdout_lines else ""
     if not raw_payload:
         detail = (

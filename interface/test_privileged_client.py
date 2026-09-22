@@ -10,6 +10,7 @@ import pytest
 from interface.mapping import HermesTarget
 from interface.privileged_client import (
     PrivilegedClient,
+    PrivilegedClientError,
     PrivilegedMaintenanceError,
     build_direct_tui_gateway_command,
 )
@@ -53,6 +54,69 @@ def test_privileged_client_uses_helper_when_not_root(monkeypatch) -> None:
     assert "--kwargs-json" not in command
     assert all(sentinel not in argument for argument in command)
     assert json.loads(str(call_kwargs["input_text"])) == {"session_id": sentinel}
+
+
+@pytest.mark.parametrize("separator", ["", "\u2028", "\u2029", "\u0085"])
+@pytest.mark.parametrize(
+    ("prefix", "suffix"),
+    [("", ""), ("diagnostic\n", "\n\n"), ("diagnostic\r\n", "\r\n\r\n")],
+    ids=["plain", "lf", "crlf"],
+)
+def test_privileged_client_preserves_unicode_session_content(
+    monkeypatch, separator: str, prefix: str, suffix: str
+) -> None:
+    expected = {
+        "title": f"检索标题{separator}详情",
+        "messages": [
+            {
+                "role": "tool",
+                "tool_name": "terminal",
+                "content": f"检索结果{separator}正文",
+            }
+        ],
+    }
+    stdout = (
+        prefix + json.dumps({"ok": True, "result": expected}, ensure_ascii=False) + suffix
+    )
+    monkeypatch.setattr("interface.privileged_client.os.geteuid", lambda: 1000)
+    monkeypatch.setattr(
+        "interface.privileged_client.run_process_group",
+        lambda *args, **kwargs: subprocess.CompletedProcess(
+            [], 0, stdout=stdout, stderr=""
+        ),
+    )
+
+    assert PrivilegedClient().session_db_call("alice", "get_session", {}) == expected
+
+
+@pytest.mark.parametrize(
+    ("stdout", "stderr", "message"),
+    [
+        ("", "database unavailable", "database unavailable"),
+        (" \r\n\n", "", "exit code 1"),
+        ("{broken", "", "{broken"),
+        (
+            '{"ok": true, "result": []}\ninvalid final line\n\n',
+            "",
+            "invalid final line",
+        ),
+    ],
+    ids=["empty-with-stderr", "blank", "malformed", "invalid-final-line"],
+)
+def test_privileged_client_rejects_missing_or_invalid_final_response(
+    monkeypatch, stdout: str, stderr: str, message: str
+) -> None:
+    monkeypatch.setattr("interface.privileged_client.os.geteuid", lambda: 1000)
+    monkeypatch.setattr(
+        "interface.privileged_client.run_process_group",
+        lambda *args, **kwargs: subprocess.CompletedProcess(
+            [], 1, stdout=stdout, stderr=stderr
+        ),
+    )
+
+    with pytest.raises(PrivilegedClientError) as exc_info:
+        PrivilegedClient().session_db_call("alice", "get_session", {})
+    assert str(exc_info.value) == message
 
 
 def test_privileged_client_preserves_maintenance_error_code(monkeypatch) -> None:

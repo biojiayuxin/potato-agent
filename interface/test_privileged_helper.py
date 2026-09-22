@@ -183,10 +183,73 @@ def test_session_db_rpc_source_is_passed_without_repo_path(monkeypatch) -> None:
 
     assert result == {"id": "session-1"}
     assert captured[1] == "-c"
-    assert "from hermes_state import SessionDB" in captured[2]
+    assert captured[2] == privileged_helper.USER_SESSION_DB_RPC_SOURCE
     assert str(privileged_helper.USER_SESSION_DB_RPC_PATH) not in captured
     assert all(sentinel not in argument for argument in captured)
     assert json.loads(str(captured_input[0])) == {"session_id": sentinel}
+
+
+@pytest.mark.parametrize("separator", ["", "\u2028", "\u2029", "\u0085"])
+@pytest.mark.parametrize(
+    ("prefix", "suffix"),
+    [("", ""), ("diagnostic\n", "\n\n"), ("diagnostic\r\n", "\r\n\r\n")],
+    ids=["plain", "lf", "crlf"],
+)
+def test_session_db_rpc_preserves_unicode_content(
+    monkeypatch, separator: str, prefix: str, suffix: str
+) -> None:
+    expected = {
+        "title": f"检索标题{separator}详情",
+        "messages": [
+            {
+                "role": "tool",
+                "tool_name": "terminal",
+                "content": f"检索结果{separator}正文",
+            }
+        ],
+    }
+    stdout = (
+        prefix + json.dumps({"ok": True, "result": expected}, ensure_ascii=False) + suffix
+    )
+    monkeypatch.setattr(
+        privileged_helper,
+        "_run_as_user",
+        lambda *args, **kwargs: subprocess.CompletedProcess(
+            [], 0, stdout=stdout, stderr=""
+        ),
+    )
+
+    assert privileged_helper._session_db_call(_target(), "get_session", {}) == expected
+
+
+@pytest.mark.parametrize(
+    ("stdout", "stderr", "error_type", "message"),
+    [
+        ("", "database unavailable", RuntimeError, "database unavailable"),
+        (" \r\n\n", "", RuntimeError, "exit code 1"),
+        ("{broken", "", json.JSONDecodeError, "Expecting property name"),
+        (
+            '{"ok": true, "result": []}\ninvalid final line\n\n',
+            "",
+            json.JSONDecodeError,
+            "Expecting value",
+        ),
+    ],
+    ids=["empty-with-stderr", "blank", "malformed", "invalid-final-line"],
+)
+def test_session_db_rpc_rejects_missing_or_invalid_final_response(
+    monkeypatch, stdout: str, stderr: str, error_type: type[Exception], message: str
+) -> None:
+    monkeypatch.setattr(
+        privileged_helper,
+        "_run_as_user",
+        lambda *args, **kwargs: subprocess.CompletedProcess(
+            [], 1, stdout=stdout, stderr=stderr
+        ),
+    )
+
+    with pytest.raises(error_type, match=message):
+        privileged_helper._session_db_call(_target(), "get_session", {})
 
 
 def test_session_db_helper_reads_kwargs_from_stdin(monkeypatch, capsys) -> None:

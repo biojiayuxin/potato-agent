@@ -174,7 +174,8 @@ class PrivilegedClient:
             raise PrivilegedClientError(
                 f"privileged helper timed out after {float(timeout_seconds or 0):.0f} seconds"
             ) from exc
-        stdout_lines = [line for line in result.stdout.splitlines() if line.strip()]
+        # splitlines() also splits valid Unicode characters inside JSON strings.
+        stdout_lines = [line for line in result.stdout.split("\n") if line.strip()]
         raw_payload = stdout_lines[-1] if stdout_lines else ""
         if not raw_payload:
             detail = (

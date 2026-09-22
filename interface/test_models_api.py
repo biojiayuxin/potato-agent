@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import contextlib
 import os
 import sqlite3
 import sys
@@ -389,12 +390,22 @@ def test_live_session_poll_is_lightweight_and_does_not_refresh_activity(
                 user_id, request_id, db_path=db_path
             ),
         )
+        visibility_checks: list[str] = []
+
+        class _VisibilityOnlyDB:
+            def is_internal_session(self, session_id: str) -> bool:
+                visibility_checks.append(session_id)
+                return False
+
+            def __getattr__(self, name: str):
+                raise AssertionError(
+                    f"live polling may only check session visibility, attempted {name}"
+                )
+
         monkeypatch.setattr(
             interface_app_mod,
             "_open_session_db",
-            lambda *_args, **_kwargs: (_ for _ in ()).throw(
-                AssertionError("live polling must not open Hermes SessionDB")
-            ),
+            lambda _target: contextlib.nullcontext(_VisibilityOnlyDB()),
         )
 
         response = client.get("/api/sessions/session-1/live")
@@ -433,6 +444,7 @@ def test_live_session_poll_is_lightweight_and_does_not_refresh_activity(
         )
         assert changed_response.status_code == 200
         assert changed_response.json()["file_tree_refresh"] is True
+        assert visibility_checks == ["session-1"] * 3
 
         class _RevisionManager:
             async def get_workspace_change_revision(self, user_id: str) -> str:

@@ -81,6 +81,36 @@ denial and expiration without contacting a real provider. The expiration case
 also verifies that a late response is rejected and the guarded command is not
 executed.
 
+## Internal Session Visibility
+
+The Lite session storage adapter records user/internal session types in
+`potato_session_visibility` in each user's existing `state.db`. SQLite triggers
+preserve this classification across compression and parent deletion, including
+writes through retained Hermes connections. Linked legacy subagents are marked
+when the adapter first opens the database for writing. Normal branches and user
+compression continuations remain visible. Read-only access infers legacy
+ancestry without migrating the database.
+
+Deploy Interface and Lite together. Internal transcripts remain in storage for
+agent use and audit; Interface blocks their list, detail, export, share, fork,
+resume, and live-state access, including cached transcripts for deleted IDs.
+The marker table intentionally has no cascading foreign key. Do not remove its
+entries as part of session cleanup.
+
+Old orphans cannot be reliably classified from their titles or message contents.
+After confirming exact session IDs, preview a repair using the Lite interpreter
+as the account that owns the database:
+
+```bash
+python -m potato_hermes_lite.session_visibility \
+  --db /path/to/state.db --mark-internal CONFIRMED_SESSION_ID
+```
+
+The command is read-only by default. Add `--apply` only when the database change
+is approved; it records the reviewed IDs and their descendants without deleting
+messages. Production deployment and repairs require owner approval. Rolling
+back to an older Interface/Lite pair also rolls back the visibility checks.
+
 ## Deployment Status
 
 Production runs immutable Lite releases through

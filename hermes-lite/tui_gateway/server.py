@@ -347,7 +347,7 @@ atexit.register(_shutdown_sessions)
 def _get_db():
     global _db, _db_error
     if _db is None:
-        from hermes_state import SessionDB
+        from potato_hermes_lite.session_visibility import SessionDB
 
         try:
             _db = SessionDB()
@@ -595,7 +595,7 @@ def _start_agent_build(sid: str, session: dict) -> None:
             if profile_home:
                 home_token = set_hermes_home_override(profile_home)
                 try:
-                    from hermes_state import SessionDB
+                    from potato_hermes_lite.session_visibility import SessionDB
 
                     session_db = SessionDB(db_path=Path(profile_home) / "state.db")
                 except Exception:
@@ -807,7 +807,7 @@ def _ensure_session_db_row(session: dict) -> None:
     # unified list mis-tags it, and resume 404s ("session not found").
     profile_home = session.get("profile_home")
     if profile_home:
-        from hermes_state import SessionDB
+        from potato_hermes_lite.session_visibility import SessionDB
 
         try:
             db = SessionDB(db_path=Path(profile_home) / "state.db")
@@ -3144,7 +3144,7 @@ def _(rid, params: dict) -> dict:
     # In a profile scope, the agent OWNS a long-lived db handle bound to that
     # profile (do NOT auto-close it here). Otherwise reuse the shared launch db.
     if profile_home is not None:
-        from hermes_state import SessionDB
+        from potato_hermes_lite.session_visibility import SessionDB
 
         db = SessionDB(db_path=profile_home / "state.db")
     else:
@@ -3159,6 +3159,12 @@ def _(rid, params: dict) -> dict:
             target = found["id"]
         else:
             return _err(rid, 4007, "session not found")
+    from potato_hermes_lite.session_visibility import is_internal_session
+
+    if is_internal_session(db, target):
+        if profile_home is not None:
+            db.close()
+        return _err(rid, 4007, "session not found")
     # Fast path: if the session is already live, reuse it under the lock.
     with _session_resume_lock:
         live = _find_live_session_by_key(target)

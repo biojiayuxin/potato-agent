@@ -6,10 +6,17 @@ import sys
 from pathlib import Path
 from typing import Any
 
-from hermes_state import SessionDB
+from potato_hermes_lite.session_visibility import (
+    SessionDB,
+    internal_session_ids,
+    is_internal_session,
+    list_visible_sessions,
+)
 
 
 READ_ONLY_METHODS = {
+    "get_internal_session_ids",
+    "is_internal_session",
     "get_logical_session_context",
     "get_compression_tip",
     "get_messages",
@@ -74,6 +81,8 @@ def _get_logical_session_context(
     if started_transaction:
         connection.execute("BEGIN")
     try:
+        if is_internal_session(db, session_id):
+            return {"internal": True}
         resolved = db.resolve_session_id(str(session_id or "").strip())
         if not resolved:
             return {
@@ -83,6 +92,9 @@ def _get_logical_session_context(
                 "projected_session": None,
                 "messages": [],
             }
+
+        if resolved != session_id and is_internal_session(db, resolved):
+            return {"internal": True}
 
         logical_session_id = _find_logical_root(db, resolved)
         logical_session = db.get_session(logical_session_id)
@@ -194,6 +206,8 @@ def _import_shared_session(db: SessionDB, kwargs: dict[str, Any]) -> dict[str, A
         raise ValueError("Shared chat is too large")
 
     existing = db.get_session(session_id)
+    if is_internal_session(db, session_id):
+        raise ValueError("Imported session id is already in use")
     if existing is not None and str(existing.get("source") or "") != "tui":
         raise ValueError("Imported session id is already in use")
     if existing is None:
@@ -237,6 +251,8 @@ def _import_shared_session(db: SessionDB, kwargs: dict[str, Any]) -> dict[str, A
 def _fork_session(db: SessionDB, kwargs: dict[str, Any]) -> dict[str, Any]:
     target_session_id = str(kwargs.get("target_session_id") or "").strip()
     source_session_id = str(kwargs.get("source_session_id") or "").strip()
+    if is_internal_session(db, source_session_id):
+        raise ValueError("Session not found")
     request_id = str(kwargs.get("request_id") or "").strip()
     fork_cursor = str(kwargs.get("fork_cursor") or "").strip()
     visible_history = kwargs.get("visible_history")
@@ -278,6 +294,10 @@ def _fork_session(db: SessionDB, kwargs: dict[str, Any]) -> dict[str, Any]:
 
 
 def execute(db: SessionDB, method: str, kwargs: dict[str, Any]) -> Any:
+    if method == "get_internal_session_ids":
+        return sorted(internal_session_ids(db))
+    if method == "is_internal_session":
+        return is_internal_session(db, str(kwargs.get("session_id") or "").strip())
     if method == "fork_session":
         return _fork_session(db, kwargs)
     if method == "import_shared_session":
@@ -285,7 +305,9 @@ def execute(db: SessionDB, method: str, kwargs: dict[str, Any]) -> Any:
     if method == "get_logical_session_context":
         return _get_logical_session_context(db, **kwargs)
     if method == "list_sessions_rich":
-        return db.list_sessions_rich(**kwargs)
+        if isinstance(db, SessionDB):
+            return db.list_sessions_rich(**kwargs)
+        return list_visible_sessions(db, db.list_sessions_rich, **kwargs)
     if method == "get_session":
         return db.get_session(str(kwargs.get("session_id") or "").strip())
     if method == "resolve_session_id":
