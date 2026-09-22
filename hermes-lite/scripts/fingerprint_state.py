@@ -16,10 +16,12 @@ from typing import Any, Mapping
 import yaml
 
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 DEFAULT_MAPPING = Path("/var/lib/potato-agent/config/users_mapping.yaml")
 DEFAULT_DATA_DIR = Path("/var/lib/potato-agent/data")
-EXCLUDED_HERMES_SUBTREES = ("home",)
+# Background analyses may keep writing their private TMPDIR during a code release.
+# Neither scratch files nor the user's work tree are deployment-managed state.
+EXCLUDED_HERMES_SUBTREES = ("home", "tmp")
 _STABLE_STAT_FIELDS = (
     "st_dev",
     "st_ino",

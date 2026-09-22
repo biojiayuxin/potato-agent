@@ -74,10 +74,34 @@ legacy_deploy_paths=(
   packaging/hermes
 )
 protected_legacy_state_paths=(
-  interface/data
   users_mapping.yaml
   model_proxy.yaml
 )
+
+validate_interface_reference_data() {
+  local data_root=${1}/interface/data
+  local entry
+  if [[ ! -e ${data_root} && ! -L ${data_root} ]]; then
+    return 0
+  fi
+  if [[ -L ${data_root} || ! -d ${data_root} ]]; then
+    echo "error: Interface reference data must be a real directory" >&2
+    return 2
+  fi
+  while IFS= read -r -d '' entry; do
+    if [[ -L ${entry} || ! -f ${entry} ]]; then
+      echo "error: Interface reference data contains a non-regular file" >&2
+      return 2
+    fi
+    case "${entry##*/}" in
+      README.md|dm6.1_dm8.2.tsv) ;;
+      *)
+        echo "error: Interface reference data contains unexpected runtime state or files" >&2
+        return 2
+        ;;
+    esac
+  done < <(find "${data_root}" -mindepth 1 -maxdepth 1 -print0)
+}
 
 find_forbidden_deploy_artifact() {
   local root=$1
@@ -241,6 +265,7 @@ for relative in "${protected_legacy_state_paths[@]}"; do
     exit 2
   fi
 done
+validate_interface_reference_data "${code_source}"
 for relative in "${legacy_deploy_paths[@]}"; do
   if [[ -e ${code_source}/${relative} || -L ${code_source}/${relative} ]]; then
     echo "error: code source contains excluded legacy path: ${relative}" >&2
@@ -313,6 +338,7 @@ for relative in "${protected_legacy_state_paths[@]}"; do
     exit 2
   fi
 done
+validate_interface_reference_data "${repo}"
 
 if [[ -L ${mapping} ]] || [[ ! -f ${mapping} ]] || \
    [[ $(stat -c '%U:%G:%a' "${mapping}") != 'root:potato-interface:640' ]]; then

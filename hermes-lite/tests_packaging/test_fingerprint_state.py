@@ -4,6 +4,9 @@ import json
 import stat
 from pathlib import Path
 
+import pytest
+
+import fingerprint_state
 from fingerprint_state import (
     capture_state,
     compare_manifests,
@@ -51,15 +54,25 @@ def test_capture_hashes_only_declared_state_and_does_not_follow_links(
     assert str(workdir / "must-not-be-read.txt") not in entries
 
 
-def test_capture_excludes_user_home_subtree_completely(tmp_path: Path) -> None:
+@pytest.mark.parametrize("subtree", ["home", "tmp"])
+def test_capture_excludes_work_and_scratch_subtrees_completely(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, subtree: str
+) -> None:
     mapping, data, hermes_home, _workdir = _fixture(tmp_path)
-    user_home = hermes_home / "home"
+    user_home = hermes_home / subtree
     user_home.mkdir()
     dependency = user_home / "large-package.tar"
     dependency.write_bytes(b"package-cache")
     removed = user_home / "old-small-file"
     removed.write_text("old\n", encoding="utf-8")
 
+    original_entry = fingerprint_state._entry
+
+    def reject_private_entry(path: Path):
+        assert path != user_home and user_home not in path.parents
+        return original_entry(path)
+
+    monkeypatch.setattr(fingerprint_state, "_entry", reject_private_entry)
     before = capture_state(mapping_path=mapping, data_dir=data)
     entries = {item["path"]: item for item in before["entries"]}
 

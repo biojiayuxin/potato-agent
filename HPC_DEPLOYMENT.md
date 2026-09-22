@@ -552,7 +552,6 @@ rsync -a --delete \
   --exclude 'hermes-agent/' \
   --exclude 'packaging/hermes/' \
   --exclude 'hermes-lite/build/' \
-  --exclude 'interface/data/' \
   --exclude 'users_mapping.yaml' \
   --exclude 'model_proxy.yaml' \
   ./ /srv/potato_agent/
@@ -1049,8 +1048,8 @@ executable、skills、browser 和 runtime profile 也必须指向 current releas
 切换前 active 的 Hermes 服务；Interface 停止后，同端口的独立维护服务会返回 HTTP 503 页面。应安排维护窗口
 并确认 `/var/backups/potato-agent/hermes-lite-cutover` 所在文件系统空间充足。cutover 会在所有写入方停止后生成
 本节所列的私有一致性数据备份；异机或离线灾难恢复副本仍是独立运维范围。状态指纹仅用于证明停服后的切换
-期间零变化，不是备份；用户 workdir 和每个 `HERMES_HOME/home` 都被完全排除，既不读取内容，也不遍历目录或
-采集 metadata。
+期间持久状态零变化，不是备份；用户 workdir、`HERMES_HOME/home` 和 `HERMES_HOME/tmp` 都被完全排除，
+既不读取内容，也不遍历目录或采集 metadata。后台分析可继续写私有临时目录；数据库和配置仍完整校验。
 
 维护服务首次安装会覆盖 `/etc/systemd/system/potato-maintenance.service` 并写入 `/usr/local`，必须先取得 owner
 明确批准，不能把下列命令当作普通代码部署的一部分自动执行。批准后在 Interface 仍在线时安装；脚本只执行
@@ -1102,6 +1101,9 @@ staging 中的 symlink 或特殊文件；mapping 必须为 `root:potato-interfac
 不能把 dirty checkout 直接作为 `CODE_SOURCE`。先创建全新的 root-owned staging，排除 legacy 源码、状态、
 缓存和生成文件：
 
+`interface/data/` 中随仓库发布的 `README.md` 和 `dm6.1_dm8.2.tsv` 是公开基因映射资源，必须保留。
+cutover 只允许该目录包含这两个普通文件；旧数据库、journal、额外目录和 symlink 仍会使预检失败。
+
 ```bash
 REPO=$PWD
 CODE_SOURCE=$BUILD_ROOT/code-source
@@ -1144,7 +1146,6 @@ rsync -a \
   --exclude '.env' \
   --exclude '/users_mapping.yaml' \
   --exclude '/model_proxy.yaml' \
-  --exclude '/interface/data/' \
   --exclude '/hermes-agent/' \
   --exclude '/packaging/hermes/' \
   "$REPO/" "$CODE_SOURCE/"
@@ -1155,6 +1156,7 @@ test -f "$CODE_SOURCE/interface/app.py"
 test ! -e "$CODE_SOURCE/hermes-agent"
 test ! -e "$CODE_SOURCE/users_mapping.yaml"
 test ! -e "$CODE_SOURCE/model_proxy.yaml"
+test -f "$CODE_SOURCE/interface/data/dm6.1_dm8.2.tsv"
 test -z "$(find "$CODE_SOURCE" -type l -print -quit)"
 test -z "$(find "$CODE_SOURCE" -type d ! -perm -0050 -print -quit)"
 test -z "$(find "$CODE_SOURCE" -type f ! -perm -0040 -print -quit)"
@@ -1205,7 +1207,7 @@ cutover 会：
   `PRAGMA integrity_check`，稳定复制模型代理配置并校验 SHA-256；全部内容和 manifest 落盘后才创建
   `sensitive-state.complete`；
 - 随后采集 mapping、Interface data 和 mapped `HERMES_HOME` 指纹；该指纹完全跳过
-  `HERMES_HOME/home`，但仍校验 `HERMES_HOME/state.db` 等其他状态；
+  `HERMES_HOME/home` 和 `HERMES_HOME/tmp`，但仍校验 `HERMES_HOME/state.db` 等持久状态；
 - 使用 `rsync -aHAX --checksum --delete-delay` 把部署树精确同步到 `CODE_SOURCE`，删除 staging 中不存在的旧代码
   和构建残留，再以相同 metadata/checksum 规则 dry run 确认零 drift；随后原子切换 `current` 与
   `/usr/local/bin/hermes` 并刷新既有 unit 集；

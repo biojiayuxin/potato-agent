@@ -1,10 +1,69 @@
 from __future__ import annotations
 
 import re
+import subprocess
 from pathlib import Path
+
+import pytest
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
+
+
+@pytest.mark.parametrize(
+    "fixture, accepted",
+    [
+        ("missing", True),
+        ("references", True),
+        ("interface.db", False),
+        ("interface.db-wal", False),
+        (".env", False),
+        ("nested", False),
+        ("file_symlink", False),
+        ("directory_symlink", False),
+    ],
+)
+def test_cutover_reference_data_rejects_runtime_state_and_symlinks(
+    tmp_path: Path, fixture: str, accepted: bool
+) -> None:
+    script = (
+        REPO_ROOT / "hermes-lite" / "scripts" / "cutover_lite_production.sh"
+    ).read_text(encoding="utf-8")
+    function = re.search(
+        r"^validate_interface_reference_data\(\) \{\n.*?^\}",
+        script,
+        flags=re.MULTILINE | re.DOTALL,
+    )
+    assert function is not None
+    assert 'validate_interface_reference_data "${code_source}"' in script
+    assert 'validate_interface_reference_data "${repo}"' in script
+    data = tmp_path / "interface" / "data"
+    if fixture != "missing":
+        data.mkdir(parents=True)
+        (data / "README.md").write_text("Reference data\n")
+        (data / "dm6.1_dm8.2.tsv").write_text("Gene\tMappedGene\tSource\n")
+        if fixture == "nested":
+            (data / "nested").mkdir()
+        elif fixture == "file_symlink":
+            (data / "dm6.1_dm8.2.tsv").unlink()
+            (data / "dm6.1_dm8.2.tsv").symlink_to(tmp_path / "private")
+        elif fixture == "directory_symlink":
+            data.rename(tmp_path / "private")
+            data.symlink_to(tmp_path / "private", target_is_directory=True)
+        elif fixture != "references":
+            (data / fixture).write_text("private runtime state")
+    result = subprocess.run(
+        [
+            "bash", "-c",
+            'set -euo pipefail\n' + function.group(0)
+            + '\nvalidate_interface_reference_data "$1"\n',
+            "reference-data-test", str(tmp_path),
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert (result.returncode == 0) is accepted, result.stderr
 
 
 def test_cutover_rejects_secret_state_and_removes_legacy_configurator() -> None:
