@@ -5,6 +5,7 @@
     { id: 'genomes', label: 'Genomes', href: '/genomes', large: true },
     { id: 'genes', label: 'Genes', href: '/genes' },
     { id: 'bulk_rnaseq', label: 'Gene Expression', href: '/bulk-rnaseq', large: true, group: 'expression' },
+    { id: 'efp', label: 'Tissue Expression Map', href: '/efp', group: 'expression' },
     { id: 'wgcna', label: 'WGCNA Network', href: '/wgcna', large: true, group: 'expression' },
     { id: 'spatial', label: 'Spatial Expression', href: '/spatial', large: true, group: 'expression' },
     { id: 'variants', label: 'Variants', group: 'more' },

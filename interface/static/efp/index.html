@@ -1,0 +1,93 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Tissue Expression Map (eFP) | Potato Research</title>
+    <link rel="icon" type="image/png" href="/static/favicon.png" />
+    <link rel="stylesheet" href="/static/bulk_rnaseq/styles.css?v=20260907-navigation" />
+    <link rel="stylesheet" href="/static/efp/styles.css?v=20260923-layout4" />
+    <link rel="stylesheet" href="/static/shared/navigation.css?v=20260908-navigation-mobile-centered" />
+    <script src="/static/shared/navigation.js?v=20260923-efp" defer></script>
+    <link rel="stylesheet" href="/static/shared/announcement.css?v=20260906-compact" />
+    <script src="/static/shared/announcement.js?v=20260906" defer></script>
+    <link rel="stylesheet" href="/static/shared/feedback.css?v=20260819-feedback" />
+  </head>
+  <body>
+    <div class="bulk-app efp-app">
+      <header class="portal-header">
+        <section class="portal-hero" aria-labelledby="portal-title">
+          <div class="portal-hero-content">
+            <h1 id="portal-title">PotatoOmics: An AI-powered multi-omics database for intelligent Q&amp;A and skills-based informatics analyses</h1>
+          </div>
+        </section>
+        <nav class="portal-nav" aria-label="Portal modules" data-portal-module="efp"></nav>
+      </header>
+      <main class="bulk-main">
+        <section class="query-panel" aria-label="Tissue expression query controls">
+          <div class="query-heading"><h2>Tissue Expression Map <span class="efp-subtitle">(eFP)</span></h2></div>
+          <form id="query-form" class="query-form">
+            <label class="field" for="gene-input">
+              <span>Gene ID</span>
+              <input id="gene-input" value="DM8.2_chr05G25210" maxlength="200" spellcheck="false" autocomplete="off" required />
+            </label>
+            <label class="field" for="transform-select">
+              <span>Scale</span>
+              <select id="transform-select">
+                <option value="log2_tpm">log2(TPM + 1)</option>
+                <option value="tpm">TPM</option>
+                <option value="row_zscore">Z-score</option>
+              </select>
+            </label>
+            <p class="efp-help">Tissue mean across materials, using the same data as Gene Expression.</p>
+            <div class="query-actions"><button id="submit-button" type="submit" class="primary">Search</button></div>
+          </form>
+          <p id="query-error" class="efp-error" role="alert" hidden></p>
+        </section>
+        <section id="viewer-panel" class="viewer-panel efp-viewer" aria-label="Tissue expression map" aria-busy="true">
+          <div class="viewer-toolbar">
+            <div>
+              <div id="graph-title" class="graph-title">Tissue Expression Map</div>
+              <div id="graph-summary" class="graph-summary" role="status">Loading expression.</div>
+            </div>
+            <div class="export-actions"><button id="download-pdf" type="button" class="icon-button" title="Download vector PDF" aria-label="Download vector PDF" disabled>PDF</button></div>
+          </div>
+          <div class="efp-display">
+            <div class="efp-stage">
+              <div id="efp-legend" class="efp-legend" aria-label="Expression color scale" hidden>
+                <div id="legend-unit" class="efp-legend-unit"></div>
+                <div id="legend-bar" class="legend-bar"></div>
+                <div id="legend-ticks" class="efp-legend-ticks"></div>
+                <p class="efp-legend-note"><span class="efp-missing-swatch" aria-hidden="true"></span>NA: no matching tissue or no data.</p>
+              </div>
+              <div id="map-viewport" tabindex="0" role="region" aria-label="Interactive eFP diagram" aria-describedby="zoom-help">
+                <div id="plant" aria-label="Potato tissue expression diagram" hidden></div>
+              </div>
+              <div id="map-empty" class="efp-empty">Loading expression.</div>
+              <span id="zoom-help" class="efp-zoom-help">Scroll to zoom · Drag to pan</span>
+              <div class="efp-zoom" role="group" aria-label="Diagram zoom controls">
+                <button id="zoom-out" type="button" aria-label="Zoom out" title="Zoom out (−)" disabled>−</button>
+                <output id="zoom-level" aria-live="polite">100%</output>
+                <button id="zoom-in" type="button" aria-label="Zoom in" title="Zoom in (+)" disabled>+</button>
+                <button id="zoom-reset" type="button" aria-label="Reset zoom" title="Fit diagram (0)" disabled>Fit</button>
+              </div>
+            </div>
+            <section id="tissue-panel" class="efp-values" aria-label="Transcriptome tissue values">
+              <div id="tissue-table-wrap" class="efp-table-wrap" hidden>
+                <table aria-label="Transcriptome tissue expression values">
+                  <thead><tr><th scope="col">Tissue</th><th scope="col">TPM</th><th id="value-heading" scope="col">Display</th></tr></thead>
+                  <tbody id="tissue-rows"></tbody>
+                </table>
+              </div>
+              <p id="tissue-empty" class="efp-help">No expression loaded.</p>
+              <p id="tissue-note" class="efp-help" hidden>* Tissue not mapped to the diagram.</p>
+            </section>
+          </div>
+        </section>
+      </main>
+    </div>
+    <div id="tissue-tooltip" class="heatmap-tooltip efp-tooltip" role="tooltip" hidden></div>
+    <script type="module" src="/static/efp/app.mjs?v=20260923-pdf1"></script>
+    <script src="/static/shared/feedback.js?v=20260819-feedback" defer></script>
+  </body>
+</html>

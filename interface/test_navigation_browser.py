@@ -23,12 +23,13 @@ PAGES = {
     'genomes': ('genomes', 'Genomes', True),
     'genomes/browser': ('genome_browser', 'Genome Browser', True),
     'bulk-rnaseq': ('bulk_rnaseq', 'Gene Expression', True),
+    'efp': ('efp', 'Tissue Expression Map', False),
     'wgcna': ('wgcna', 'WGCNA Network', True),
     'spatial': ('spatial', 'Spatial Expression', True),
     'dashboard': ('dashboard', 'Dashboard', False),
     'about': ('about', 'About', False),
 }
-LABELS = ['Potato Agent', 'Genomes', 'Genes', 'Gene Expression', 'WGCNA Network',
+LABELS = ['Potato Agent', 'Genomes', 'Genes', 'Gene Expression', 'Tissue Expression Map', 'WGCNA Network',
           'Spatial Expression', 'Dashboard', 'About']
 
 
@@ -114,7 +115,7 @@ def test_public_pages_at_all_breakpoints(site, browser, tmp_path):
                         const bounds = nav.getBoundingClientRect();
                         return Math.abs((first.left + last.right) - (bounds.left + bounds.right)) < 2;
                     }''')
-                    if module in ('bulk_rnaseq', 'wgcna', 'spatial'):
+                    if module in ('bulk_rnaseq', 'efp', 'wgcna', 'spatial'):
                         expression = page.get_by_role('button', name='Expression', exact=True)
                         expect(expression).to_have_class('portal-nav-item active')
                         expression.click()

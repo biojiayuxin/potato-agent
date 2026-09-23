@@ -57,7 +57,7 @@ def preview_app():
     @app.get("/{page:path}")
     def public_page(page: str):
         pages = {"lite": "lite", "about": "about", "genes": "genes", "genomes": "genomes",
-                 "genomes/browser": "genome_browser", "spatial": "spatial", "wgcna": "wgcna", "bulk-rnaseq": "bulk_rnaseq"}
+                 "genomes/browser": "genome_browser", "spatial": "spatial", "wgcna": "wgcna", "bulk-rnaseq": "bulk_rnaseq", "efp": "efp"}
         if page not in pages:
             raise HTTPException(404)
         return FileResponse(STATIC / pages[page] / "index.html")

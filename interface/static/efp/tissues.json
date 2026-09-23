@@ -1,0 +1,78 @@
+{
+  "template_version": "v8",
+  "template_file": "potato-template.svg",
+  "template_sha256": "10cff8ddc59742bada2dc500b20809c9eb017b9d6fe5dae786abcfffc32e3ce2",
+  "tissues": [
+    {
+      "id": "flower",
+      "label": "花"
+    },
+    {
+      "id": "perianth",
+      "label": "花被"
+    },
+    {
+      "id": "flower_bud",
+      "label": "花蕾"
+    },
+    {
+      "id": "fruit",
+      "label": "果实"
+    },
+    {
+      "id": "anther",
+      "label": "花药"
+    },
+    {
+      "id": "stem",
+      "label": "茎"
+    },
+    {
+      "id": "young_leaf",
+      "label": "幼叶"
+    },
+    {
+      "id": "leaf",
+      "label": "叶"
+    },
+    {
+      "id": "mature_leaf",
+      "label": "成熟叶"
+    },
+    {
+      "id": "root",
+      "label": "根"
+    },
+    {
+      "id": "stolon",
+      "label": "匍匐茎"
+    },
+    {
+      "id": "stolon_tip_S1",
+      "label": "stolon_tip (S1)"
+    },
+    {
+      "id": "swelled_stolon_S2",
+      "label": "swelled stolon（S2）"
+    },
+    {
+      "id": "young_tuber_S3",
+      "label": "young tuber (S3)"
+    },
+    {
+      "id": "young_tuber_S4",
+      "label": "young tuber (S4)"
+    },
+    {
+      "id": "mature_tuber",
+      "label": "mature tuber"
+    }
+  ],
+  "legacy_id_aliases": {
+    "stolon_tip": "stolon_tip_S1",
+    "tuber_peach": "swelled_stolon_S2",
+    "tuber_olive": "young_tuber_S3",
+    "tuber_brown": "young_tuber_S4",
+    "tuber_ochre": "mature_tuber"
+  }
+}

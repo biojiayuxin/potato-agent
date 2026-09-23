@@ -18,6 +18,8 @@
 - WGCNA 共表达网络查看器：公开页面 `/wgcna`，运行时通过 `WGCNA_DATABASE_URL` 查询 PostgreSQL
 - Bulk RNA-Seq 表达查看器：公开页面 `/bulk-rnaseq`，数据从
   `/srv/bulk_rnaseq/current/bulk_rnaseq.sqlite` 只读加载
+- Tissue Expression Map (eFP)：公开页面 `/efp`，复用 Gene Expression 的 Tissue mean
+  接口，支持 TPM、log2、Z-score 和矢量 PDF 导出；测试预览见 [`static/efp/README.md`](static/efp/README.md)
 - Gene Catalog：公开页面 `/genes` 及 `/genes/<gene-id>`，数据从
   `/srv/gene_catalog/current/gene_catalog.sqlite` 以 SQLite immutable read-only mode 加载
 - Pan-genome Orthogroups：公开 API `/api/pan-genome/`，数据从

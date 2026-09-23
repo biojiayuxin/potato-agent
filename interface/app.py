@@ -243,6 +243,7 @@ from interface.session_run_manager import (
     build_hermes_user_content,
 )
 from interface.bulk_rnaseq_viewer import router as bulk_rnaseq_viewer_router
+from interface.efp_viewer import router as efp_viewer_router
 from interface.daily_updates import router as daily_updates_router
 from interface.gene_catalog import router as gene_catalog_router
 from interface.dashboard_api import router as dashboard_router
@@ -3804,6 +3805,7 @@ app.mount(
 )
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 app.include_router(bulk_rnaseq_viewer_router)
+app.include_router(efp_viewer_router)
 app.include_router(daily_updates_router)
 app.include_router(gene_catalog_router)
 app.include_router(genome_browser_router)
