@@ -1,6 +1,14 @@
 {
   "updates": [
     {
+      "version": "2026-09-24-001",
+      "title": "Tissue expression map",
+      "date": "September 24, 2026",
+      "summary": "Added an interactive tissue expression map with TPM, log2 and Z-score views and vector PDF export.",
+      "items": [],
+      "source_commits": ["010d212"]
+    },
+    {
       "version": "2026-09-14-001",
       "title": "HS4 genome",
       "date": "September 14, 2026",

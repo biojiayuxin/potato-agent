@@ -296,7 +296,7 @@ async def test_daily_client_validates_transport_and_auth(monkeypatch, payload):
 def test_omics_updates_have_source_history_and_english_content():
     payload = json.loads((dashboard_api.STATIC_DIR / "potato-omics-updates.json").read_text())
     updates = payload["updates"]
-    assert [entry["source_commits"] for entry in updates if entry["source_commits"]] == [["b132ae9"], ["e1f4d15"], ["4c6b802"], ["1e4af19"]]
+    assert [entry["source_commits"] for entry in updates if entry["source_commits"]] == [["010d212"], ["b132ae9"], ["e1f4d15"], ["4c6b802"], ["1e4af19"]]
     assert len({entry["version"] for entry in updates}) == len(updates)
     for entry in updates:
         assert all(key in entry for key in ("version", "title", "date", "summary", "items"))
