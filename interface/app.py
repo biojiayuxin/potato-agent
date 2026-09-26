@@ -3827,6 +3827,8 @@ def _should_refresh_activity_for_request(request: Request) -> bool:
         return False
     if path.startswith("/api/bulk-rnaseq/"):
         return False
+    if path.startswith("/api/efp/"):
+        return False
     if path in {"/api/daily-updates", "/api/announcement", "/api/announcement/"}:
         return False
     if path.startswith("/api/genome-browser/"):

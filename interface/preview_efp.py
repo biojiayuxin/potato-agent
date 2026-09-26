@@ -16,7 +16,6 @@ from interface.efp_viewer import router
 def create_preview_app(api_origin: str = "") -> FastAPI:
     app = FastAPI(title="Tissue Expression Map preview")
     static = Path(__file__).resolve().parent / "static"
-    app.include_router(router)
     app.mount("/static", StaticFiles(directory=static), name="static")
 
     @app.get("/", include_in_schema=False)
@@ -33,18 +32,23 @@ def create_preview_app(api_origin: str = "") -> FastAPI:
             raise ValueError("api_origin must be an HTTP(S) origin without credentials or a path")
 
         @app.get("/api/bulk-rnaseq/{endpoint}")
+        @app.get("/api/efp/{endpoint}")
         async def expression_proxy(endpoint: str, request: Request) -> Response:
-            if endpoint not in {"status", "genes", "expression"}:
+            is_efp = request.url.path.startswith("/api/efp/")
+            allowed = {"source", "genes", "expression", "export.pdf"} if is_efp else {"status", "genes", "expression"}
+            if endpoint not in allowed:
                 raise HTTPException(404)
             try:
                 async with httpx.AsyncClient(trust_env=False, timeout=20) as client:
                     upstream = await client.get(
-                        f"{api_origin.rstrip('/')}/api/bulk-rnaseq/{endpoint}",
+                        f"{api_origin.rstrip('/')}{request.url.path}",
                         params=request.query_params,
                     )
             except httpx.HTTPError as exc:
                 raise HTTPException(503, "Expression API unavailable") from exc
-            return Response(upstream.content, status_code=upstream.status_code, media_type="application/json")
+            headers = {key: upstream.headers[key] for key in ("content-type", "content-disposition", "retry-after")
+                       if key in upstream.headers}
+            return Response(upstream.content, status_code=upstream.status_code, headers=headers)
 
         @app.get("/bulk-rnaseq", include_in_schema=False)
         async def gene_expression() -> FileResponse:
@@ -54,6 +58,8 @@ def create_preview_app(api_origin: str = "") -> FastAPI:
 
         app.include_router(expression_router)
 
+    # Proxy routes precede the local API when an origin is configured.
+    app.include_router(router)
     return app
 
 

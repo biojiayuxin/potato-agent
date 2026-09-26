@@ -27,7 +27,7 @@ prerequisites:
 - 读取与 Bulk RNA-Seq 页面一致的 scale，或导出完整表达表。
 - 输入是 symbol、reported ID 或历史 ID 时，先用 `potato-gene-search` 得到准确 DMv8.2 gene ID。
 
-不要用本技能处理原始 FASTQ、重新比对或定量；这些任务使用 `transcriptome_analysis`。空间转录组的 cluster/tissue dotplot 使用 `potato-spatial-expression`。
+不要用本技能处理原始 FASTQ、重新比对或定量；这些任务使用 `transcriptome_analysis`。空间转录组的 cluster/tissue dotplot 使用 `potato-spatial-expression`。整株组织表达示意图、Tissue Expression Map 或 eFP 图使用 `potato-efp-expression`。
 
 ## 基本原则
 

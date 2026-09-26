@@ -63,9 +63,10 @@ and text with both regular and bold Liberation Sans fonts embedded. It has no
 image objects, SVG references, transparency masks, or runtime font dependencies.
 The fonts are distributed unmodified under the bundled SIL Open Font License.
 
-`export.mjs` builds the complete SVG layout as an internal reference;
-`pdf.mjs` uses that layout and the prepared vector geometry to produce the PDF
-entirely in the browser. `pdf-geometry.json` resolves the SVG's reusable shapes,
+`figure.mjs` builds a DOM-free layout shared by browser and API exports.
+`export.mjs` can turn that layout into an SVG reference; `pdf.mjs` uses the same
+layout and prepared vector geometry to produce the PDF in the browser or Node.
+`pdf-geometry.json` resolves the SVG's reusable shapes,
 leaf clipping, and stem mask through vector Boolean operations, preserving the
 original curve geometry. Regenerate it whenever the source SVG changes. The
 asset regression verifies the SVG and font checksums to catch stale geometry.
@@ -79,9 +80,72 @@ python interface/build_efp_pdf_assets.py
 The builder accepts `--font-directory` and `--font-license` for the unmodified
 Liberation Sans regular/bold TTFs and their redistribution license. Its default
 paths match the Debian `fonts-liberation` package. The deployed server requires
-no additional Python packages. Browser validation optionally uses Poppler's
+no additional Python packages. The API renderer requires Node.js 18+ (`node` on
+the Interface service's PATH, or the executable selected by `POTATO_EFP_NODE`),
+with no npm packages or browser dependencies. Browser validation optionally uses Poppler's
 `pdftotext` and `pdftoppm`, with Pillow, to compare the exported diagram against
 the original SVG, including the masked and clipped regions.
+
+## API for agents and external skills
+
+These public, read-only endpoints require no session or API key and do not
+refresh agent runtime activity:
+
+| Endpoint | Parameters | Response |
+| --- | --- | --- |
+| `GET /api/efp/source` | None | Figure source page, expression source page and tissue-mean explanation |
+| `GET /api/efp/genes` | `q` (optional), `limit` (1–100, default 20) | Matching atlas gene IDs and summaries |
+| `GET /api/efp/expression` | `gene`, `transform` | eFP tissue values, region mapping, colors, legend and NA state |
+| `GET /api/efp/export.pdf` | `gene`, `transform` | `application/pdf` attachment with a safe filename |
+
+`gene` is one exact gene ID (maximum 200 ASCII characters, no whitespace, commas
+or semicolons). `transform` defaults to `log2_tpm`; `tpm` and `row_zscore` are also
+accepted. Scope is always `tissue`. Search uses the same atlas as Gene Expression.
+
+`/api/efp/source` needs no gene ID, database access or renderer. Its `description`
+states that the figure is exported from Tissue Expression Map (eFP), using the
+average tissue expression levels from the Gene Expression page's Tissue mean
+view. The description also explains that gray means the diagram region lacks
+mappable tissue expression data, while white is an uncolored schematic area or
+background and is excluded from color-scale comparisons.
+`figure` supplies the `/efp` page and PDF endpoint; `data` supplies the
+`/bulk-rnaseq` page, expression endpoint, `scope=tissue`, TPM unit and aggregation
+explanation. Page paths are relative to the requested Interface origin. The
+skill's `source` command reads this description and includes it when delivering
+a PDF; `plot` also returns its `source_url`.
+
+The expression JSON includes `geneId`, `dataset`, `scope`, `transform`, `unit`,
+`scale`, `ticks`, `tissueValues`, `regions`, `missingIds`, `unmappedTissues`,
+`rawTpm` and `values`. `tissueValues` contains the displayed table rows
+(`tissue`, `rawTpm`, `value`, `diagramIds`). `regions` describes diagram regions
+(`id`, `label`, `value`, `colour`, `missing`, `clipped`). The PDF's
+`PotatoExpression` metadata carries the values and mapping used for that export.
+Each request reads the current atlas; callers needing an exact export snapshot
+should use the metadata embedded in that PDF.
+
+```bash
+curl --fail --get 'http://127.0.0.1:3000/api/efp/expression' \
+  --data-urlencode 'gene=DM8.2_chr05G25210' --data-urlencode 'transform=log2_tpm'
+curl --fail --get 'http://127.0.0.1:3000/api/efp/export.pdf' \
+  --data-urlencode 'gene=DM8.2_chr05G25210' --data-urlencode 'transform=log2_tpm' \
+  --output DM8.2_chr05G25210_efp_log2_tpm.pdf
+```
+
+Invalid parameters return 400/422, missing genes return 404, and unavailable
+data/rendering assets return 503. Rendering is limited to two subprocesses per
+Interface process; excess requests receive 503 with `Retry-After: 2`. A render
+timeout returns 504 after 20 seconds. The server invokes a fixed Node script
+with JSON on stdin, a restricted environment, and no shell or user-selected
+files. It checks template/font checksums and does not write export files.
+
+The managed skill is
+[`potato-efp-expression`](../../../skills/potato-knowledge-bioinformatics/potato-efp-expression/SKILL.md).
+It uses only Python's standard library to search, query and save PDFs. Deploy
+the Interface changes before refreshing managed skills for existing users.
+An installation may supply `api-base-url.txt` at the skill root to select its
+actual Interface origin without changing the script or system environment.
+CLI and `POTATO_EFP_BASE_URL` overrides take precedence. Verify the public origin
+separately: it may route to a different backend from the local deployment.
 
 Run an isolated preview without starting the chat runtime or changing deployment:
 
@@ -90,7 +154,7 @@ python -m interface.preview_efp --port 3011 --api-origin http://YOUR_INTERFACE_H
 ```
 
 Open `http://127.0.0.1:3011/efp`. The optional origin forwards only public
-expression GET endpoints; authentication headers and cookies are not forwarded.
+Gene Expression and eFP GET endpoints; authentication headers and cookies are not forwarded.
 Without `--api-origin`, the preview reads the database selected by
 `BULK_RNASEQ_DB_PATH`, just like Gene Expression. It does not substitute simulated
 data when the real API is unavailable. Add `--host` to select a preview address.
@@ -102,7 +166,7 @@ full Interface application.
 Validation from the repository root:
 
 ```bash
-python -m pytest interface/test_efp_viewer.py interface/test_bulk_rnaseq_viewer.py
+python -m pytest interface/test_efp_viewer.py interface/test_efp_api.py interface/test_efp_skill.py interface/test_bulk_rnaseq_viewer.py
 POTATO_EFP_BROWSER_TESTS=1 python -m pytest interface/test_efp_browser.py
 POTATO_NAVIGATION_BROWSER_TESTS=1 python -m pytest interface/test_navigation_browser.py
 ```

@@ -88,43 +88,38 @@ async function documentBytes(width, height, commands, geometry, fonts, metadata)
   return new Blob(chunks, {type: 'application/pdf'});
 }
 
-/** Layout comes from the same complete figure used for the SVG reference. */
-export async function vectorPdf(svgText) {
-  const doc = new DOMParser().parseFromString(svgText, 'image/svg+xml');
-  const svg = doc.documentElement;
-  const {geometry, fonts} = await assets();
-  const width = Number(svg.getAttribute('width')), height = Number(svg.getAttribute('height'));
+/** DOM-free PDF writer; Node supplies assets, browsers fetch the same files. */
+export async function vectorPdf(figure, suppliedAssets) {
+  const {geometry, fonts} = suppliedAssets || await assets();
+  const {width, height, metadata} = figure;
   const commands = [`q ${PDF_SCALE} 0 0 ${-PDF_SCALE} 0 ${n(height * PDF_SCALE)} cm`];
   const push = (...parts) => commands.push(...parts);
   const rect = (x, y, w, h, color) => push(`${rgb(color)} rg ${n(x)} ${n(y)} ${n(w)} ${n(h)} re f`);
-  const value = (el, attribute, fallback = 0) => Number(el.getAttribute(attribute) ?? fallback);
+  const value = (el, attribute, fallback = 0) => Number(el.attrs[attribute] ?? fallback);
   function drawing(el) {
-    const box = (el.getAttribute('viewBox') || '').split(/\s+/).map(Number);
-    if (box.join() !== geometry.viewBox.join()) throw new Error('The PDF template does not match the drawing.');
-    const groups = [...el.querySelectorAll('[data-tissue]')];
+    const box = geometry.viewBox;
+    if (figure.viewBox && figure.viewBox.join() !== box.join()) throw new Error('The PDF template does not match the drawing.');
+    const groups = figure.regions;
     if (groups.length !== Object.keys(geometry.regions).length) throw new Error('The PDF tissue regions do not match.');
     push('q', `${n(value(el, 'width') / box[2])} 0 0 ${n(value(el, 'height') / box[3])} ${n(value(el, 'x'))} ${n(value(el, 'y'))} cm`);
     for (const group of groups) {
-      const path = geometry.regions[group.dataset.tissue];
-      if (!path) throw new Error(`Missing PDF region: ${group.dataset.tissue}`);
-      push(`${rgb(group.getAttribute('fill'))} rg`, path, 'f');
+      const path = geometry.regions[group.id];
+      if (!path) throw new Error(`Missing PDF region: ${group.id}`);
+      push(`${rgb(group.colour)} rg`, path, 'f');
     }
     push(`0 0 0 RG ${n(geometry.strokeWidth)} w 0 J 0 j 10 M`);
     for (const path of geometry.linework) push(path, 'S');
     push('Q');
   }
   function render(el) {
-    const color = el.getAttribute('fill') || '#14213d';
-    if (el.localName === 'svg') { drawing(el); return; }
-    if (['metadata', 'desc', 'defs', 'title'].includes(el.localName)) return;
-    if (el.localName === 'g') { [...el.children].forEach(render); return; }
-    if (el.localName === 'rect') {
+    const color = el.attrs.fill || '#14213d';
+    if (el.type === 'plant') { drawing(el); return; }
+    if (el.type === 'rect' || el.type === 'gradient') {
       const x = value(el, 'x'), y = value(el, 'y'), w = value(el, 'width'), h = value(el, 'height');
-      if (color.startsWith('url(#')) {
-        const gradient = doc.getElementById(color.slice(5, -1));
-        const stops = [...gradient.children].map(stop => ({
-          offset: parseFloat(stop.getAttribute('offset')) / 100,
-          rgb: [1, 3, 5].map(i => parseInt(stop.getAttribute('stop-color').slice(i, i + 2), 16)),
+      if (el.type === 'gradient') {
+        const stops = el.attrs.palette.map((color, index, palette) => ({
+          offset: index / (palette.length - 1),
+          rgb: [1, 3, 5].map(i => parseInt(color.slice(i, i + 2), 16)),
         }));
         for (let i = 0; i < 256; i++) {
           const t = i / 255;
@@ -136,26 +131,25 @@ export async function vectorPdf(svgText) {
       } else rect(x, y, w, h, color);
       return;
     }
-    if (el.localName === 'line') {
-      push(`${rgb(el.getAttribute('stroke'))} RG 1 w ${n(value(el, 'x1'))} ${n(value(el, 'y1'))} m ${n(value(el, 'x2'))} ${n(value(el, 'y2'))} l S`);
+    if (el.type === 'line') {
+      push(`${rgb(el.attrs.stroke)} RG 1 w ${n(value(el, 'x1'))} ${n(value(el, 'y1'))} m ${n(value(el, 'x2'))} ${n(value(el, 'y2'))} l S`);
       return;
     }
-    if (el.localName === 'text') {
-      const text = el.textContent;
+    if (el.type === 'text') {
+      const text = el.text;
       if (/[^\x20-\x7e]/.test(text)) throw new Error('PDF export currently supports English tissue labels and gene IDs.');
       const bold = value(el, 'font-weight') >= 600;
       const font = geometry.fonts[bold ? 1 : 0], size = value(el, 'font-size', 13);
       const textWidth = [...text].reduce((sum, character) => sum + font.widths[character.charCodeAt(0) - 32], 0) * size / 1000;
       const outputWidth = value(el, 'textLength', textWidth), scale = textWidth ? outputWidth / textWidth : 1;
-      const anchor = el.getAttribute('text-anchor');
+      const anchor = el.attrs['text-anchor'];
       const x = value(el, 'x') - (anchor === 'end' ? outputWidth : anchor === 'middle' ? outputWidth / 2 : 0);
       push(`${rgb(color)} rg BT /F${bold ? 2 : 1} ${n(size)} Tf ${n(scale)} 0 0 -1 ${n(x)} ${n(value(el, 'y'))} Tm (${literal(text)}) Tj ET`);
       return;
     }
-    throw new Error(`Unsupported PDF figure element: ${el.localName}`);
+    throw new Error(`Unsupported PDF figure element: ${el.type}`);
   }
-  [...svg.children].forEach(render);
+  figure.elements.forEach(render);
   push('Q');
-  const metadata = JSON.parse(svg.querySelector('metadata').textContent);
   return documentBytes(width, height, commands, geometry, fonts, metadata);
 }

@@ -245,6 +245,26 @@ def test_efp_pdf_asset_failure_can_retry(site, browser):
         expect(page.locator('#download-pdf')).to_be_enabled()
 
 
+@pytest.mark.parametrize('transform', ['tpm', 'log2_tpm', 'row_zscore'])
+def test_efp_api_pdf_matches_browser_export(site, browser, tmp_path, transform):
+    import httpx
+    from interface.test_efp_api import drawing_stream, pdf_metadata
+
+    with browser.new_context(accept_downloads=True) as context:
+        page = context.new_page()
+        page.goto(f'{site}/efp?gene=GeneA&transform={transform}')
+        loaded(page, 'GeneA')
+        with page.expect_download() as download:
+            page.locator('#download-pdf').click()
+        output = tmp_path / 'browser.pdf'
+        download.value.save_as(output)
+        browser_pdf = output.read_bytes()
+    response = httpx.get(f'{site}/api/efp/export.pdf', params={'gene': 'GeneA', 'transform': transform}, timeout=30)
+    assert response.status_code == 200
+    assert pdf_metadata(response.content) == pdf_metadata(browser_pdf)
+    assert drawing_stream(response.content) == drawing_stream(browser_pdf)
+
+
 def test_efp_flower_regions_follow_annotation(site, browser):
     from playwright.sync_api import expect
 

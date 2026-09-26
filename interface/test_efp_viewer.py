@@ -25,7 +25,7 @@ def test_efp_page_and_module_assets() -> None:
         assert response.status_code == 200
         assert 'data-portal-module="efp"' in response.text
         assert "Tissue Expression Map" in response.text
-        for module in ("app.mjs", "expression.mjs", "potato-efp.mjs", "export.mjs", "pdf.mjs", "viewport.mjs"):
+        for module in ("app.mjs", "expression.mjs", "potato-efp.mjs", "export.mjs", "figure.mjs", "pdf.mjs", "viewport.mjs"):
             response = client.get(f"/static/efp/{module}")
             assert response.status_code == 200
             assert "javascript" in response.headers["content-type"]
@@ -178,6 +178,9 @@ def test_preview_only_proxies_expression_endpoints() -> None:
         assert client.get("/api/bulk-rnaseq/secrets").status_code == 404
         assert client.post("/api/bulk-rnaseq/expression").status_code == 405
         assert client.get("/api/bulk-rnaseq/status").status_code == 503
+        assert client.get("/api/efp/secrets").status_code == 404
+        assert client.post("/api/efp/export.pdf").status_code == 405
+        assert client.get("/api/efp/expression?gene=GeneA").status_code == 503
 
 
 @pytest.mark.parametrize("origin", ["file:///tmp/example", "https://user:password@example.org", "https://example.org/path"])

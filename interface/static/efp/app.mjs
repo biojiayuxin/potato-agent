@@ -1,6 +1,6 @@
 import {mountPotatoEFP, PALETTES, mixColour} from './potato-efp.mjs?v=20260923-flower';
 import {adaptExpression, formatNumber, formatValue} from './expression.mjs?v=20260923-flower';
-import {downloadPdf} from './export.mjs?v=20260923-pdf1';
+import {downloadPdf} from './export.mjs?v=20260926-api1';
 import {createViewport} from './viewport.mjs?v=20260923-layout2';
 
 const $ = id => document.getElementById(id);
