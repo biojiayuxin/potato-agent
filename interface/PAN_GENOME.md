@@ -8,45 +8,59 @@ Pan-genome Orthogroups 是公开只读 API 数据集。Interface 默认从
 构建输入：
 
 ```text
-/mnt/data/potato_agent/work/pan-genome-260709/02_diamond_reuse/
-  Results_pg_repre_fixed_a20/Orthogroups/Orthogroups.tsv
+/mnt/data/potato_agent/work/pan-genome-diploid-260831/02_orthofinder_run/
+  orthofinder_orthogroups_only/Results_Aug31/Orthogroups/Orthogroups.tsv
 ```
 
 经过完整构建验证的来源及规模：
 
 ```text
-dataset version:   pan-genome-260709-a20
-source bytes:      171069184
-source SHA-256:    50488027d4ecb0b4e9187e9a352e5706432054b6a2d1b2b4bc539fc80f4231eb
+dataset version:   pan-genome-diploid-260831
+source bytes:      241428019
+source SHA-256:    fa74c2102cfafb946774977a6b5624e1210671e137bd2e5740fad59d20294b2a
 genomes:           135
-orthogroups:       203875
-gene memberships: 4570577
-occupied cells:    4254496
-core groups:       2107      (135 accessions)
-soft-core groups:  8510      (122-134 accessions)
-dispensable groups:189934    (2-121 accessions)
-private groups:    3324      (1 accession)
-SQLite bytes:      610062336
+orthogroups:       40236
+gene memberships: 7423576
+occupied cells:    2446201
+core groups:       6596      (135 accessions; 2759097 gene memberships)
+soft-core groups:  8763      (122-134 accessions; 3363272 gene memberships)
+dispensable groups:21301     (2-121 accessions; 1289575 gene memberships)
+private groups:    3576      (1 accession; 11632 gene memberships)
+SQLite bytes:      943120384
 ```
 
-四类按 orthogroup 中至少含一个成员基因的 accession 数量划分，合计 203875。Builder 将分类写入
+四类按 orthogroup 中至少含一个成员基因的 accession 数量划分，合计 40236。135 个输入列包括
+60 个 monoploid 和 75 个 phased-diploid 蛋白组；分类边界与旧版保持一致。Builder 将分类写入
 `orthogroups.category`，并严格校验全部计数。命令行的 `--expected-* 0` 可以关闭单项预期值，但生产发布
 不应关闭当前数据集的校验。
+
+参考统计位于 `/mnt/data/potato_agent/work/pan-genome-diploid-260831/06-potato_pangenome_summary`。
+逐组分类、覆盖基因组数和成员数与 `orthogroup_categories.tsv` 一致；分类汇总与
+`orthogroup_category_summary.tsv` 一致。继续只收录 `Orthogroups.tsv` 中的已分组成员，
+不将另外 56190 个 unassigned singleton 纳入 private。
 
 ## 构建
 
 构建器先在输出目录创建临时数据库，完成 schema、索引、外键和 `quick_check` 后才替换指定输出。它不会修改源 TSV。
+构建器默认参数仍对应旧版数据，因此构建本版本时必须显式传入下列来源、版本和全部预期计数。
 
 ```bash
 cd /srv/potato_agent
-PAN_BUILD_ROOT=/var/tmp/potato-pan-genome-260709-a20
+PAN_BUILD_ROOT=/var/tmp/potato-pan-genome-diploid-260831
 PAN_BUILD_DB=$PAN_BUILD_ROOT/pan_genome.sqlite
 test ! -e "$PAN_BUILD_ROOT"
 install -d -o root -g root -m 0700 "$PAN_BUILD_ROOT"
 
 /opt/interface-env/bin/python -m interface.build_pan_genome_db \
-  --source-tsv /mnt/data/potato_agent/work/pan-genome-260709/02_diamond_reuse/Results_pg_repre_fixed_a20/Orthogroups/Orthogroups.tsv \
-  --dataset-version pan-genome-260709-a20 \
+  --source-tsv /mnt/data/potato_agent/work/pan-genome-diploid-260831/02_orthofinder_run/orthofinder_orthogroups_only/Results_Aug31/Orthogroups/Orthogroups.tsv \
+  --dataset-version pan-genome-diploid-260831 \
+  --expected-genomes 135 \
+  --expected-orthogroups 40236 \
+  --expected-gene-memberships 7423576 \
+  --expected-core-orthogroups 6596 \
+  --expected-soft-core-orthogroups 8763 \
+  --expected-dispensable-orthogroups 21301 \
+  --expected-private-orthogroups 3576 \
   --output-db "$PAN_BUILD_DB"
 ```
 
@@ -70,17 +84,19 @@ with sqlite3.connect(f"file:{path}?mode=ro&immutable=1", uri=True) as conn:
         "from pan_genome_metadata where singleton=1"
     ).fetchone()
     assert row is not None and row[0] == 2
+    assert row[1] == "pan-genome-diploid-260831"
+    assert row[2] == "fa74c2102cfafb946774977a6b5624e1210671e137bd2e5740fad59d20294b2a"
     counts = json.loads(row[3])
     assert counts == {
         "genomes": 135,
-        "orthogroups": 203875,
-        "gene_memberships": 4570577,
-        "occupied_cells": 4254496,
+        "orthogroups": 40236,
+        "gene_memberships": 7423576,
+        "occupied_cells": 2446201,
         "orthogroup_categories": {
-            "core": 2107,
-            "soft-core": 8510,
-            "dispensable": 189934,
-            "private": 3324,
+            "core": 6596,
+            "soft-core": 8763,
+            "dispensable": 21301,
+            "private": 3576,
         },
     }
     print(row[1], row[2], json.dumps(counts, sort_keys=True))
@@ -96,7 +112,7 @@ test ! -e "$PAN_BUILD_DB-journal"
 
 ```bash
 PAN_ROOT=/srv/pan_genome
-PAN_RELEASE=pan-genome-260709-a20-schema2
+PAN_RELEASE=pan-genome-diploid-260831-schema2
 PAN_RELEASE_DIR=$PAN_ROOT/releases/$PAN_RELEASE
 PAN_NEXT_LINK=$PAN_ROOT/.current-$PAN_RELEASE
 test ! -e "$PAN_RELEASE_DIR"
@@ -114,6 +130,11 @@ test "$(stat -c '%U:%G:%a' "$PAN_RELEASE_DIR/pan_genome.sqlite")" = \
   root:potato-interface:640
 sudo -u potato-interface test -r "$PAN_ROOT/current/pan_genome.sqlite"
 ```
+
+2026-09-25 本机发布的活动目录为 `/srv/pan_genome/releases/pan-genome-diploid-260831-schema2`。
+目录中的 `build-report.json`、`validation-report.json` 和 `deployment-report.json` 记录来源校验值、
+逐组核对结果、本机 API 验收及原活动版本。旧版 `pan-genome-260709-a20-schema2` 保留用于回滚。
+本次继续使用 schema 2，通过原子切换 `current` 生效，无需重启 Interface。
 
 默认路径无需设置环境变量。使用其他位置时可配置：
 
