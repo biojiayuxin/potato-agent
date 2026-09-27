@@ -156,18 +156,19 @@ def test_genome_browser_entry_and_static_paths_are_prefixed() -> None:
     lite_index = (REPO_ROOT / "interface/static/lite/index.html").read_text(encoding="utf-8")
     assert 'data-portal-module="lite"' in lite_index
 
-    genomes_index = (REPO_ROOT / "interface/static/genomes/index.html").read_text(
+    pan_genome_index = (REPO_ROOT / "interface/static/pan_genome/index.html").read_text(
         encoding="utf-8"
     )
-    assert 'href="/static/genomes/styles.css' in genomes_index
-    assert 'src="/static/genomes/app.js' in genomes_index
-    assert 'data-portal-module="genomes"' in genomes_index
-    assert 'class="browser-button" href="/genomes/browser"' in genomes_index
-    assert 'src="/static/genomes/assets/pan_core_accumulation_compact.svg"' in genomes_index
-    assert 'src="/static/genomes/assets/pangenome_gene_family_distribution_ybreak.svg"' in genomes_index
-    assert genomes_index.count("Assembly Ploidy") == 2
-    assert "All assembly ploidies" in genomes_index
-    assert "All ploidy levels" not in genomes_index
+    assert 'href="/static/pan_genome/styles.css' in pan_genome_index
+    assert 'src="/static/pan_genome/app.js' in pan_genome_index
+    assert 'data-portal-module="pan_genome"' in pan_genome_index
+    assert '<a class="browser-button"' not in pan_genome_index
+    assert 'src="/static/pan_genome/assets/pan-genome.png"' in pan_genome_index
+    assert "pan_core_accumulation_compact.svg" not in pan_genome_index
+    assert "pangenome_gene_family_distribution_ybreak.svg" not in pan_genome_index
+    assert pan_genome_index.count("Assembly Ploidy") == 2
+    assert "All assembly ploidies" in pan_genome_index
+    assert "All ploidy levels" not in pan_genome_index
 
     genome_index = (REPO_ROOT / "interface/static/genome_browser/index.html").read_text(
         encoding="utf-8"
@@ -178,24 +179,25 @@ def test_genome_browser_entry_and_static_paths_are_prefixed() -> None:
     assert 'src="/static/genome_browser/vendor/react-linear-genome-view.umd.production.min.js"' in genome_index
     assert 'src="/static/genome_browser/app.js' in genome_index
     assert 'data-portal-module="genome_browser"' in genome_index
-    assert 'class="parent-page-link" href="/genomes"' in genome_index
+    assert "parent-page-link" not in genome_index
+    assert "Back to Genomes" not in genome_index
 
     genome_css = (REPO_ROOT / "interface/static/genome_browser/styles.css").read_text(
         encoding="utf-8"
     )
     assert "background: url('../background.png')" in genome_css
 
-    genomes_css = (REPO_ROOT / "interface/static/genomes/styles.css").read_text(
+    pan_genome_css = (REPO_ROOT / "interface/static/pan_genome/styles.css").read_text(
         encoding="utf-8"
     )
-    assert ".genomes-main {\n  width: 100%;\n  max-width: 1120px;" in genomes_css
+    assert ".pan-genome-main {\n  width: 100%;\n  max-width: 1120px;" in pan_genome_css
 
-    genomes_app = (REPO_ROOT / "interface/static/genomes/app.js").read_text(
+    pan_genome_app = (REPO_ROOT / "interface/static/pan_genome/app.js").read_text(
         encoding="utf-8"
     )
-    assert "assembly.sample" in genomes_app
-    assert "new URLSearchParams({ assembly: assemblyId })" in genomes_app
-    assert "`/genomes/browser?${params.toString()}`" in genomes_app
+    assert "assembly.sample" in pan_genome_app
+    assert "new URLSearchParams({ assembly: assemblyId })" in pan_genome_app
+    assert "`/genome-browser?${params.toString()}`" in pan_genome_app
 
     genes_index = (REPO_ROOT / "interface/static/genes/index.html").read_text(
         encoding="utf-8"
@@ -203,8 +205,8 @@ def test_genome_browser_entry_and_static_paths_are_prefixed() -> None:
     genes_app = (REPO_ROOT / "interface/static/genes/app.js").read_text(
         encoding="utf-8"
     )
-    assert 'href="/genomes/browser"' in genes_index
-    assert "`/genomes/browser?${params.toString()}`" in genes_app
+    assert 'href="/genome-browser"' in genes_index
+    assert "`/genome-browser?${params.toString()}`" in genes_app
 
 
 def test_portal_navigation_uses_consistent_module_order() -> None:
@@ -215,7 +217,8 @@ def test_portal_navigation_uses_consistent_module_order() -> None:
         "interface/static/spatial/index.html",
         "interface/static/wgcna/index.html",
         "interface/static/bulk_rnaseq/index.html",
-        "interface/static/genomes/index.html",
+        "interface/static/efp/index.html",
+        "interface/static/pan_genome/index.html",
         "interface/static/genome_browser/index.html",
         "interface/static/about/index.html",
         "interface/static/dashboard/index.html",
@@ -223,7 +226,7 @@ def test_portal_navigation_uses_consistent_module_order() -> None:
     for relative_path in portal_indexes:
         content = (REPO_ROOT / relative_path).read_text(encoding="utf-8")
         assert 'data-portal-module=' in content, relative_path
-        assert '/static/shared/navigation.js?v=20260912-portal-link' in content
+        assert '/static/shared/navigation.js?v=20260927-genomes' in content
         assert '/static/shared/navigation.css?v=20260908-navigation-mobile-centered' in content
         assert 'class="portal-nav-item' not in content
 
@@ -248,60 +251,20 @@ def test_genome_browser_assembly_detail_omits_haplotypes() -> None:
     assert "assembly.haplotypes" not in genome_app
 
 
-def test_genome_browser_page_uses_canonical_genomes_route() -> None:
+@pytest.mark.parametrize("path", ["/genome-browser", "/genomes/browser"])
+@pytest.mark.parametrize("query", ["", "?assembly=monoploid%2FTest&loc=chr1%3A1..10"])
+def test_genome_browser_canonical_and_legacy_routes_serve_page(path, query) -> None:
     client = TestClient(interface_app_mod.app)
     try:
-        response = client.get("/genomes/browser")
+        response = client.get(path + query, follow_redirects=False)
         assert response.status_code == 200
-        assert "Genome Browser" in response.text
-        assert "Genomes - Genome Browser" in response.text
-        head_response = client.head("/genomes/browser")
+        assert "Genome Browser | Potato Research" in response.text
+        assert "location" not in response.headers
+        assert response.url.query.decode() == query.removeprefix("?")
+        head_response = client.head(path + query, follow_redirects=False)
         assert head_response.status_code == 200
-    finally:
-        client.close()
-
-
-def test_legacy_genome_browser_route_redirects_with_query() -> None:
-    client = TestClient(interface_app_mod.app)
-    try:
-        response = client.get(
-            "/genome-browser?assembly=monoploid%2FTest&loc=chr1%3A1..10",
-            follow_redirects=False,
-        )
-        assert response.status_code == 308
-        assert response.headers["location"] == (
-            "/genomes/browser?assembly=monoploid%2FTest&loc=chr1%3A1..10"
-        )
-
-        head_response = client.head("/genome-browser", follow_redirects=False)
-        assert head_response.status_code == 308
-        assert head_response.headers["location"] == "/genomes/browser"
-    finally:
-        client.close()
-
-
-def test_genomes_page_route_serves_static_page() -> None:
-    client = TestClient(interface_app_mod.app)
-    try:
-        response = client.get("/genomes")
-        assert response.status_code == 200
-        assert "Genome accessions" in response.text
-        head_response = client.head("/genomes")
-        assert head_response.status_code == 200
-
-        stylesheet = client.get("/static/genomes/styles.css")
-        assert stylesheet.status_code == 200
-        assert ".genomes-main" in stylesheet.text
-
-        script = client.get("/static/genomes/app.js")
-        assert script.status_code == 200
-        assert "assembly.sample" in script.text
-
-        figure = client.get(
-            "/static/genomes/assets/pan_core_accumulation_compact.svg"
-        )
-        assert figure.status_code == 200
-        assert figure.headers["content-type"].startswith("image/svg+xml")
+        assert not head_response.content
+        assert "location" not in head_response.headers
     finally:
         client.close()
 

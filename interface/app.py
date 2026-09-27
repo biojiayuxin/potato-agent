@@ -3803,6 +3803,11 @@ app.mount(
     StaticFiles(directory=SPATIAL_STATIC_DIR),
     name="spatial-static",
 )
+app.mount(
+    "/static/genomes",
+    StaticFiles(directory=STATIC_DIR / "pan_genome"),
+    name="legacy-genomes-static",
+)
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 app.include_router(bulk_rnaseq_viewer_router)
 app.include_router(efp_viewer_router)

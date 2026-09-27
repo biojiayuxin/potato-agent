@@ -137,7 +137,7 @@ def test_authenticated_portal_only_starts_chat_after_click(context, site, path):
     assert starts(calls) == 1
 
 
-@pytest.mark.parametrize("module", ["genes", "genomes", None])
+@pytest.mark.parametrize("module", ["genes", "pan_genome", None])
 def test_new_tab_takes_over_draft_attachments_and_composer_mode(context, site, module):
     from playwright.sync_api import expect
     calls = mock_api(context)
@@ -158,10 +158,15 @@ def test_new_tab_takes_over_draft_attachments_and_composer_mode(context, site, m
     expect(portal.locator("#portal-account-name")).to_be_visible()
     assert starts(calls) == 1
     if module:
-        portal.locator(f'.portal-nav-desktop a[data-module="{module}"]').click()
+        if module == "pan_genome":
+            portal.get_by_role("button", name="Genomes", exact=True).click()
+            portal.locator('#portal-navigation-panel a[data-module="pan_genome"]').click()
+        else:
+            portal.locator(f'.portal-nav-desktop a[data-module="{module}"]').click()
         portal.locator('.portal-nav-desktop a[data-module="lite"]').click()
-    else:
-        portal.locator("#enter-chat-button").click()
+        expect(portal).to_have_url(site + "/lite")
+        assert starts(calls) == 1
+    portal.locator("#enter-chat-button").click()
     ready(portal)
     retired(owner, site)
     expect(portal.locator("#prompt-input")).to_have_value("Original unsent draft")

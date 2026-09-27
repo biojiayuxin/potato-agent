@@ -43,6 +43,65 @@ def _client(monkeypatch, db_path: Path) -> TestClient:
     return TestClient(interface_app_mod.app)
 
 
+def test_pan_genome_page_serves_canonical_static_page() -> None:
+    client = TestClient(interface_app_mod.app)
+    try:
+        response = client.get("/pan-genome", follow_redirects=False)
+        assert response.status_code == 200
+        assert "Pan-genome | Potato Research" in response.text
+        assert 'data-portal-module="pan_genome"' in response.text
+        assert "Genome accessions" in response.text
+        assert "/static/pan_genome/assets/pan-genome.png" in response.text
+        assert '<a class="browser-button"' not in response.text
+
+        head_response = client.head("/pan-genome", follow_redirects=False)
+        assert head_response.status_code == 200
+        assert not head_response.content
+    finally:
+        client.close()
+
+
+@pytest.mark.parametrize("method", ["GET", "HEAD"])
+@pytest.mark.parametrize("query", ["", "?assembly=monoploid%2FTest&loc=chr1%3A1..10&tag=a&tag=b"])
+def test_legacy_genomes_route_redirects_with_original_query(method, query) -> None:
+    client = TestClient(interface_app_mod.app)
+    try:
+        response = client.request(method, "/genomes" + query, follow_redirects=False)
+        assert response.status_code == 308
+        assert response.headers["location"] == "/pan-genome" + query
+        destination = client.request(method, response.headers["location"], follow_redirects=False)
+        assert destination.status_code == 200
+        assert "location" not in destination.headers
+    finally:
+        client.close()
+
+
+@pytest.mark.parametrize(
+    ("relative_path", "content_type"),
+    [
+        ("index.html", "text/html"),
+        ("styles.css", "text/css"),
+        ("app.js", "text/javascript"),
+        ("assets/pan-genome.png", "image/png"),
+        ("assets/pan_core_accumulation_compact.svg", "image/svg+xml"),
+        ("assets/pangenome_gene_family_distribution_ybreak.svg", "image/svg+xml"),
+    ],
+)
+def test_pan_genome_static_assets_keep_legacy_alias(relative_path, content_type) -> None:
+    client = TestClient(interface_app_mod.app)
+    try:
+        canonical = client.get("/static/pan_genome/" + relative_path)
+        legacy = client.get("/static/genomes/" + relative_path)
+        assert canonical.status_code == legacy.status_code == 200
+        assert canonical.content == legacy.content
+        assert canonical.headers["content-type"].startswith(content_type)
+        assert legacy.headers["content-type"] == canonical.headers["content-type"]
+        if relative_path.endswith(".png"):
+            assert canonical.content.startswith(b"\x89PNG\r\n\x1a\n")
+    finally:
+        client.close()
+
+
 def test_pan_genome_public_metadata_and_genomes(monkeypatch, tmp_path) -> None:
     client = _client(monkeypatch, _write_database(tmp_path))
     try:

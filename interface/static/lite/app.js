@@ -1,4 +1,4 @@
-import { ChatWorkspace, accountKey, supportsWorkspace, readEntry, saveEntry, handoffRecord } from '/static/shared/chat-workspace.js?v=20260910-http-tabs';
+import { ChatWorkspace, accountKey, supportsWorkspace, readEntry, saveEntry, handoffRecord } from '/static/shared/chat-workspace.js?v=20260927-genomes';
 
 if (location.pathname !== '/chat' && /^#(share|example|entry)=/.test(location.hash)) {
   history.replaceState(history.state, '', '/chat' + location.search + location.hash);

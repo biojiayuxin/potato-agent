@@ -2,7 +2,8 @@
   'use strict';
   const modules = [
     { id: 'lite', label: 'Potato Agent', href: '/lite' },
-    { id: 'genomes', label: 'Genomes', href: '/genomes', large: true },
+    { id: 'pan_genome', label: 'Pan-genome', href: '/pan-genome', large: true, group: 'genomes' },
+    { id: 'genome_browser', label: 'Genome Browser', href: '/genome-browser', large: true, group: 'genomes' },
     { id: 'genes', label: 'Genes', href: '/genes' },
     { id: 'bulk_rnaseq', label: 'Gene Expression', href: '/bulk-rnaseq', large: true, group: 'expression' },
     { id: 'efp', label: 'Tissue Expression Map', href: '/efp', group: 'expression' },
@@ -13,20 +14,19 @@
     { id: 'dashboard', label: 'Dashboard', href: '/dashboard' },
     { id: 'about', label: 'About', href: '/about' },
   ];
-  const browser = { id: 'genome_browser', label: 'Genome Browser', large: true };
+  const groups = { genomes: 'Genomes', expression: 'Expression', more: 'Coming soon' };
   const nav = document.querySelector('[data-portal-module]');
   if (!nav) return;
   const compact = matchMedia('(max-width: 960px)');
   const small = matchMedia('(max-width: 800px)');
   const notice = nav.dataset.portalModule === 'notice';
   const source = notice ? new URLSearchParams(location.search).get('module') : nav.dataset.portalModule;
-  const current = [...modules, browser].find(item => item.id === source);
+  const current = modules.find(item => item.id === (source === 'genomes' ? 'pan_genome' : source));
   const noticeURL = id => `/static/lite/high-resolution-required.html?module=${encodeURIComponent(id)}`;
   function checkDevice() {
     if (!notice && current?.large && small.matches) location.replace(noticeURL(current.id));
   }
   checkDevice();
-  const activeId = current === browser ? 'genomes' : current?.id;
   function element(tag, className, text) {
     const node = document.createElement(tag);
     node.className = className;
@@ -47,7 +47,7 @@
       node.type = 'button';
       node.disabled = true;
     }
-    if (item.id === activeId) {
+    if (item.id === current?.id) {
       node.classList.add('active');
       node.setAttribute('aria-current', 'page');
     }
@@ -91,7 +91,7 @@
     let previousGroup;
     for (const item of modules.filter(item => !group || item.group === group)) {
       if (!group && item.group && item.group !== previousGroup) {
-        panel.append(element('div', 'portal-nav-group-label', item.group === 'expression' ? 'Expression' : 'Coming soon'));
+        panel.append(element('div', 'portal-nav-group-label', groups[item.group]));
       }
       previousGroup = item.group;
       panel.append(link(item));
@@ -109,18 +109,20 @@
   toggle.addEventListener('click', () => open(toggle));
   const desktop = element('div', 'portal-nav-desktop');
   nav.append(desktop);
-  modules.filter(item => !item.group).forEach(item => {
-    if (item.id === 'dashboard') {
-      for (const [group, label] of [['expression', 'Expression'], ['more', 'Coming soon']]) {
-        const control = button(label, label);
-        control.append(icon('chevron-down'));
-        if (group === current?.group) control.classList.add('active');
-        desktop.append(control);
-        control.addEventListener('click', () => open(control, group));
-      }
+  const renderedGroups = new Set();
+  for (const item of modules) {
+    if (!item.group) {
+      desktop.append(link(item));
+      continue;
     }
-    desktop.append(link(item));
-  });
+    if (renderedGroups.has(item.group)) continue;
+    renderedGroups.add(item.group);
+    const control = button(groups[item.group], groups[item.group]);
+    control.append(icon('chevron-down'));
+    if (item.group === current?.group) control.classList.add('active');
+    desktop.append(control);
+    control.addEventListener('click', () => open(control, item.group));
+  }
   nav.querySelectorAll('button').forEach(node => node.setAttribute('aria-controls', panel.id));
   document.addEventListener('click', event => {
     if (trigger && !panel.contains(event.target) && !trigger.contains(event.target)) close();

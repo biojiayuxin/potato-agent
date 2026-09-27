@@ -3,6 +3,12 @@
 Pan-genome Orthogroups 是公开只读 API 数据集。Interface 默认从
 `/srv/pan_genome/current/pan_genome.sqlite` 读取一个 SQLite 文件；浏览器和 Hermes 技能只调用 API，不能直接读取数据库。
 
+Genomes 导航下的 Pan-genome 页面使用 `/pan-genome`，由 `pan_genome.py` 提供 GET/HEAD；
+前端位于 `static/pan_genome/`，顶部图谱为 `assets/pan-genome.png`，材料列表继续复用
+`/api/genome-browser/assemblies`，材料链接指向并列页面 `/genome-browser`。
+旧 `/genomes` 保留 308 跳转及原始查询参数，旧 `/static/genomes/` 作为同一静态目录的兼容别名。
+Orthogroups 的 API 命名、参数和数据格式保持不变。
+
 ## 当前数据
 
 构建输入：

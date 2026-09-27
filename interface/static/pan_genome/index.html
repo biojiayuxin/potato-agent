@@ -3,56 +3,47 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>Genomes | Potato Research</title>
+    <title>Pan-genome | Potato Research</title>
     <link rel="icon" type="image/png" href="/static/favicon.png" />
-    <link rel="stylesheet" href="/static/genomes/styles.css?v=20260907-navigation" />
+    <link rel="stylesheet" href="/static/pan_genome/styles.css?v=20260927-genomes" />
     <link rel="stylesheet" href="/static/shared/feedback.css?v=20260819-feedback" />
-    <link rel="stylesheet" href="/static/shared/announcement.css?v=20260906-compact">
+    <link rel="stylesheet" href="/static/shared/announcement.css?v=20260927-genomes">
     <script src="/static/shared/announcement.js?v=20260906" defer></script>
     <link rel="stylesheet" href="/static/shared/navigation.css?v=20260908-navigation-mobile-centered" />
-    <script src="/static/shared/navigation.js?v=20260923-efp" defer></script>
+    <script src="/static/shared/navigation.js?v=20260927-genomes" defer></script>
     <link rel="stylesheet" href="/static/shared/agent-examples.css?v=20260909-simplified-chat" />
-    <script src="/static/shared/agent-examples.js?v=20260910-http-fallback"></script>
+    <script src="/static/shared/agent-examples.js?v=20260927-genomes"></script>
   </head>
   <body>
-    <div class="genomes-app">
+    <div class="pan-genome-app">
       <header class="portal-header">
         <section class="portal-hero" aria-labelledby="portal-title">
           <div class="portal-hero-content">
             <h1 id="portal-title">PotatoOmics: An AI-powered multi-omics database for intelligent Q&amp;A and skills-based informatics analyses</h1>
           </div>
         </section>
-        <nav class="portal-nav" aria-label="Portal modules" data-portal-module="genomes"></nav>
+        <nav class="portal-nav" aria-label="Portal modules" data-portal-module="pan_genome"></nav>
       </header>
 
-      <main class="genomes-main">
+      <main class="pan-genome-main">
         <header class="page-toolbar">
-          <h2>Genomes</h2>
+          <h2>Pan-genome</h2>
           <div class="agent-example-actions">
             <button id="ask-potato-agent" type="button" class="browser-button ask-potato-agent">Ask Potato Agent</button>
-            <a class="browser-button" href="/genomes/browser">Genome Browser</a>
           </div>
         </header>
 
-        <section class="figures-grid" aria-label="Pangenome overview">
-          <figure class="pangenome-figure figure-wide">
+        <section class="pangenome-overview" aria-label="Pan-genome overview">
+          <figure class="pangenome-figure">
             <div class="figure-frame">
               <img
-                src="/static/genomes/assets/pan_core_accumulation_compact.svg"
-                alt="Pan-genome and core-genome accumulation curves"
+                src="/static/pan_genome/assets/pan-genome.png"
+                alt="Pan- and core-genome accumulation curves and orthogroup distribution across 135 potato genomes"
+                width="2385"
+                height="868"
               />
             </div>
-            <figcaption>Pan- and core-genome accumulation</figcaption>
-          </figure>
-
-          <figure class="pangenome-figure figure-tall">
-            <div class="figure-frame">
-              <img
-                src="/static/genomes/assets/pangenome_gene_family_distribution_ybreak.svg"
-                alt="Pangenome gene-family distribution"
-              />
-            </div>
-            <figcaption>Pangenome gene-family distribution</figcaption>
+            <figcaption>Potato pan-genome constructed from 135 diploid accessions.</figcaption>
           </figure>
         </section>
 
@@ -101,6 +92,6 @@
     </div>
 
     <script src="/static/shared/feedback.js?v=20260819-feedback" defer></script>
-    <script src="/static/genomes/app.js?v=20260909-examples"></script>
+    <script src="/static/pan_genome/app.js?v=20260927-genomes"></script>
   </body>
 </html>

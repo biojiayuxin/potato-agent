@@ -23,7 +23,7 @@ DEFAULT_GENE = "DM8.2_chr05G25210"
 INTRO = "Query and analyze PotatoOmics data, or search beyond the database for more information."
 PAGES = {
     "/genes": "genes", "/bulk-rnaseq": "bulk_rnaseq", "/wgcna": "wgcna",
-    "/spatial": "spatial", "/genomes": "genomes", "/genomes/browser": "genome_browser",
+    "/spatial": "spatial", "/pan-genome": "pan_genome", "/genome-browser": "genome_browser",
 }
 browser_test = pytest.mark.skipif(
     os.getenv("POTATO_EXAMPLE_BROWSER_TESTS") != "1",
@@ -44,7 +44,7 @@ const context = { window: {
 } };
 vm.runInNewContext(fs.readFileSync(process.argv[1], 'utf8'), context);
 const e = context.window.PotatoAgentExamples;
-for (const page of ['genes', 'bulk_rnaseq', 'wgcna', 'spatial', 'genomes', 'genome_browser']) {
+for (const page of ['genes', 'bulk_rnaseq', 'wgcna', 'spatial', 'pan_genome', 'genome_browser']) {
   const text = e.build(page);
   assert.ok(!/[{}]/.test(text));
   assert.ok(!/family/i.test(text));
@@ -56,6 +56,24 @@ assert.match(e.build('genes', {genes:[null,'']}), /DM8.2_chr05G25210/);
 assert.match(e.build('spatial'), /Dataset: Stolon and tuber \(s1_s2\); sample: Stolon \(S1\)\./);
 assert.match(e.build('spatial', {genes:['G'],dataset:'D',sample:'S'}), /for G.*Dataset: D; sample: S\./);
 assert.match(e.build('genome_browser', {genes:['OTHER']}), /DM8.2_chr05G25210 from DMv8.2/);
+assert.equal(e.build('genomes'), e.build('pan_genome'));
+let click;
+let target;
+context.crypto = {randomUUID: () => 'navigation-request'};
+context.document = {getElementById: () => ({addEventListener: (_event, handler) => { click = handler; }})};
+context.window.location.assign = url => { target = url; };
+for (const page of ['pan_genome', 'genomes']) {
+  e.bind(page);
+  click();
+  const emitted = JSON.parse(decodeURIComponent(target.split('#example=')[1]));
+  assert.equal(emitted.page, 'pan_genome');
+  assert.equal(emitted.text, e.build('pan_genome'));
+  context.window.location.hash = '#example=' + encodeURIComponent(JSON.stringify({id:'saved-example',page,text:'Pan-genome example'}));
+  const value = e.takeFromLocation();
+  assert.equal(value.page, 'pan_genome');
+  assert.equal(value.id, 'saved-example');
+  assert.equal(value.text, 'Pan-genome example');
+}
 context.window.location.hash = '#example=' + encodeURIComponent(JSON.stringify({page:'genes',text:'Example text'}));
 assert.equal(e.takeFromLocation().text, 'Example text');
 assert.equal(context.window.location.hash, '');
@@ -68,12 +86,71 @@ assert.equal(context.window.location.hash, '#share=share-token');
     subprocess.run(["node", "-e", script, str(STATIC / "shared/agent-examples.js")], check=True)
 
 
+def test_workspace_normalizes_pan_genome_examples_at_entry_boundaries():
+    if not shutil.which("node"):
+        pytest.skip("Node.js is required")
+    script = r"""
+import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import {webcrypto} from 'node:crypto';
+Object.defineProperty(globalThis, 'crypto', {value:webcrypto});
+globalThis.location = {hash:'', pathname:'/chat', search:'?source=portal'};
+globalThis.history = {state:null, replaceState: (_state, _title, path) => {
+  assert.equal(path, '/chat?source=portal');
+  location.hash = '';
+}};
+const values = new Map();
+globalThis.sessionStorage = {
+  getItem: key => values.get(key) ?? null,
+  setItem: (key, value) => values.set(key, value),
+  removeItem: key => values.delete(key),
+};
+const source = fs.readFileSync(process.argv[1], 'utf8');
+const workspace = await import('data:text/javascript;base64,' + Buffer.from(source).toString('base64'));
+const key = 'potato-chat-entry-v1';
+for (const page of ['genomes', 'pan_genome']) {
+  const example = {id:'pan-genome-request', page, text:'List the available assemblies'};
+  const entry = {id:example.id, kind:'example', example};
+  const canonical = {...entry, example:{...example, page:'pan_genome'}};
+  for (const source of ['example', 'entry', 'saved']) {
+    values.clear();
+    location.hash = source === 'saved' ? '' : '#' + source + '=' + encodeURIComponent(JSON.stringify(source === 'entry' ? entry : example));
+    if (source === 'saved') sessionStorage.setItem(key, JSON.stringify(entry));
+    assert.deepEqual(workspace.readEntry(), canonical);
+    assert.equal(location.hash, '');
+    assert.deepEqual(JSON.parse(sessionStorage.getItem(key)), canonical);
+  }
+  assert.deepEqual(workspace.newEntry('example', {id:entry.id, example}), canonical);
+  workspace.saveEntry(entry);
+  assert.deepEqual(JSON.parse(sessionStorage.getItem(key)), canonical);
+  assert.equal(entry.example.page, page, 'Normalization must not mutate the caller input');
+}
+location.hash = '#example=' + encodeURIComponent(JSON.stringify({id:'invalid', page:'unknown', text:'Reject this page'}));
+assert.equal(workspace.readEntry(), null);
+assert.equal(sessionStorage.getItem(key), null);
+"""
+    subprocess.run(
+        ["node", "--input-type=module", "-e", script, str(STATIC / "shared/chat-workspace.js")],
+        check=True,
+    )
+
+
 class StaticHandler(SimpleHTTPRequestHandler):
     def do_GET(self):
-        path = urlsplit(self.path).path
-        if path in PAGES or path in {"/", "/lite", "/chat"} or path.startswith("/genes/"):
+        url = urlsplit(self.path)
+        path = url.path
+        if path == "/genomes":
+            self.send_response(308)
+            self.send_header("Location", "/pan-genome" + (f"?{url.query}" if url.query else ""))
+            self.end_headers()
+            return
+        if path == "/genomes/browser":
+            self.path = "/genome_browser/index.html"
+        elif path in PAGES or path in {"/", "/lite", "/chat"} or path.startswith("/genes/"):
             folder = PAGES.get(path, "genes" if path.startswith("/genes/") else "lite")
             self.path = f"/{folder}/index.html"
+        elif path.startswith("/static/genomes/"):
+            self.path = "/pan_genome/" + self.path.removeprefix("/static/genomes/")
         elif path.startswith("/static/"):
             self.path = self.path.removeprefix("/static")
         super().do_GET()

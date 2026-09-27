@@ -4,14 +4,16 @@ const CLAIM_LOCK_NAME = 'potato-chat-transfer-v2';
 const OWNER_KEY = 'potato-chat-owner-v2';
 const RECEIPTS_KEY = 'potato-chat-receipts-v1';
 const ENTRY_KEY = 'potato-chat-entry-v1';
-const pages = ['genes', 'bulk_rnaseq', 'wgcna', 'spatial', 'genomes', 'genome_browser'];
+const pages = ['genes', 'bulk_rnaseq', 'wgcna', 'spatial', 'pan_genome', 'genome_browser'];
+const normalizeEntry = entry => entry?.kind === 'example' && entry.example?.page === 'genomes'
+  ? { ...entry, example: { ...entry.example, page: 'pan_genome' } } : entry;
 
 export const accountKey = user => String(user?.id || user?.username || '');
 const requestId = () => crypto.randomUUID?.()
   || Array.from(crypto.getRandomValues(new Uint8Array(16)), byte => byte.toString(16).padStart(2, '0')).join('');
 export const supportsWorkspace = () => Boolean(crypto?.getRandomValues
   && (!navigator.locks?.request || (window.BroadcastChannel && window.indexedDB)));
-export const newEntry = (kind = 'return', payload = {}) => ({
+export const newEntry = (kind = 'return', payload = {}) => normalizeEntry({
   id: requestId(), kind, ...payload,
 });
 
@@ -26,7 +28,7 @@ const validEntry = entry => {
 
 export const saveEntry = entry => {
   try {
-    if (entry) sessionStorage.setItem(ENTRY_KEY, JSON.stringify(entry));
+    if (entry) sessionStorage.setItem(ENTRY_KEY, JSON.stringify(normalizeEntry(entry)));
     else sessionStorage.removeItem(ENTRY_KEY);
   } catch { /* Navigation still works without tab storage. */ }
 };
@@ -46,6 +48,7 @@ export const readEntry = () => {
   if (/^#(entry|example|share)=/.test(hash)) {
     history.replaceState(history.state, '', location.pathname + location.search);
   }
+  entry = normalizeEntry(entry);
   entry = validEntry(entry) ? entry : null;
   saveEntry(entry);
   return entry;
@@ -221,6 +224,7 @@ export class ChatWorkspace {
   }
 
   async receive(entry) {
+    entry = normalizeEntry(entry);
     if (!this.owned || !validEntry(entry)) return;
     if (entry.account !== this.account) return this.receipt(entry, 'account-changed');
     if (entry.kind === 'return') return this.receipt(entry, 'returned');

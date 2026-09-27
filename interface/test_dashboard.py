@@ -213,6 +213,7 @@ async def test_resource_adapters_sanitize_and_cache_independent_failures(monkeyp
     items = results[0]["items"]
     assert [item["count"] for item in items] == [2, None, 0]
     assert [item["status"] for item in items] == ["available", "unavailable", "available"]
+    assert items[0]["href"] == "/pan-genome"
     assert all(set(item) == {"id", "label", "href", "count", "status"} for item in items)
     assert "private" not in json.dumps(results)
     clock[0] += 299

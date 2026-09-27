@@ -13,8 +13,8 @@ from datetime import date, timedelta
 from pathlib import Path
 
 import pytest
-from fastapi import FastAPI, HTTPException
-from fastapi.responses import FileResponse
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.responses import FileResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 
 from interface import admin_api, dashboard_api
@@ -55,9 +55,13 @@ def preview_app():
         return {"announcement": None, "server_time": "2026-09-07T00:00:00Z"}
 
     @app.get("/{page:path}")
-    def public_page(page: str):
-        pages = {"lite": "lite", "about": "about", "genes": "genes", "genomes": "genomes",
-                 "genomes/browser": "genome_browser", "spatial": "spatial", "wgcna": "wgcna", "bulk-rnaseq": "bulk_rnaseq", "efp": "efp"}
+    def public_page(page: str, request: Request):
+        if page == "genomes":
+            query = request.url.query
+            return RedirectResponse("/pan-genome" + (f"?{query}" if query else ""), status_code=308)
+        pages = {"lite": "lite", "about": "about", "genes": "genes", "pan-genome": "pan_genome",
+                 "genome-browser": "genome_browser", "genomes/browser": "genome_browser",
+                 "spatial": "spatial", "wgcna": "wgcna", "bulk-rnaseq": "bulk_rnaseq", "efp": "efp"}
         if page not in pages:
             raise HTTPException(404)
         return FileResponse(STATIC / pages[page] / "index.html")
@@ -226,7 +230,7 @@ def test_public_navigation_and_shared_entries(site, browser):
 
     with browser.new_context() as context:
         page = context.new_page()
-        for route in ('dashboard', 'about', 'genes', 'genomes', 'genomes/browser', 'bulk-rnaseq', 'wgcna', 'spatial', 'lite'):
+        for route in ('dashboard', 'about', 'genes', 'pan-genome', 'genome-browser', 'genomes', 'genomes/browser', 'bulk-rnaseq', 'wgcna', 'spatial', 'lite'):
             page.goto(site + '/' + route)
             expect(page.locator('.portal-nav a[href="/dashboard"]')).to_have_text('Dashboard')
             assert page.locator('.portal-nav a[href="/dashboard"]').evaluate("e => e.nextElementSibling.getAttribute('href') === '/about'")

@@ -12,8 +12,8 @@ from functools import lru_cache
 from pathlib import Path, PurePosixPath
 from typing import Any, Literal
 
-from fastapi import APIRouter, HTTPException, Query, Request
-from fastapi.responses import FileResponse, RedirectResponse
+from fastapi import APIRouter, HTTPException, Query
+from fastapi.responses import FileResponse
 from pydantic import BaseModel, ConfigDict, Field
 
 from interface.genome_feature_index import (
@@ -27,7 +27,6 @@ from interface.genome_feature_index import (
 
 
 STATIC_ROOT = Path(__file__).resolve().parent / "static" / "genome_browser"
-GENOMES_STATIC_ROOT = Path(__file__).resolve().parent / "static" / "genomes"
 DEFAULT_DB_ROOT = Path("/mnt/data/public_data/Genome_browser_DB")
 MAX_DEFAULT_REGION_BP = 100_000
 MAX_SEQUENCE_SEGMENTS = 256
@@ -370,28 +369,14 @@ def _consume_background_task_exception(task: asyncio.Task[dict[str, Any]]) -> No
 
 @router.head("/genomes/browser", include_in_schema=False)
 @router.get("/genomes/browser", include_in_schema=False)
+@router.head("/genome-browser", include_in_schema=False)
+@router.get("/genome-browser", include_in_schema=False)
 async def serve_genome_browser_index() -> FileResponse:
+    # Keep the legacy path directly reachable: clients may have cached the old
+    # permanent redirect from /genome-browser to /genomes/browser.
     index_path = STATIC_ROOT / "index.html"
     if not index_path.is_file():
         raise HTTPException(status_code=404, detail="Genome browser frontend not found")
-    return FileResponse(index_path)
-
-
-@router.head("/genome-browser", include_in_schema=False)
-@router.get("/genome-browser", include_in_schema=False)
-async def redirect_legacy_genome_browser(request: Request) -> RedirectResponse:
-    destination = "/genomes/browser"
-    if request.url.query:
-        destination = f"{destination}?{request.url.query}"
-    return RedirectResponse(destination, status_code=308)
-
-
-@router.head("/genomes", include_in_schema=False)
-@router.get("/genomes", include_in_schema=False)
-async def serve_genomes_index() -> FileResponse:
-    index_path = GENOMES_STATIC_ROOT / "index.html"
-    if not index_path.is_file():
-        raise HTTPException(status_code=404, detail="Genomes frontend not found")
     return FileResponse(index_path)
 
 

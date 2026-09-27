@@ -7,9 +7,11 @@
     dataset: 'Stolon and tuber (s1_s2)',
     sample: 'Stolon (S1)',
   };
-  const pages = ['genes', 'bulk_rnaseq', 'wgcna', 'spatial', 'genomes', 'genome_browser'];
+  const pages = ['genes', 'bulk_rnaseq', 'wgcna', 'spatial', 'pan_genome', 'genome_browser'];
+  const normalizePage = page => page === 'genomes' ? 'pan_genome' : page;
 
   const build = (page, context = {}) => {
+    page = normalizePage(page);
     const fallback = page === 'spatial' ? DEFAULT_SPATIAL.genes : [DEFAULT_GENE];
     const loaded = Array.isArray(context.genes)
       ? [...new Set(context.genes.filter((gene) => typeof gene === 'string' && gene.trim()).map((gene) => gene.trim()))]
@@ -26,7 +28,7 @@
         return `Find the top 25 co-expression neighbors of ${genes.length > 1 ? `each of the query genes ${names}` : names} in the tuberization network. Rank them by TOM, add available functional annotations, and generate ${genes.length > 1 ? 'a network plot and candidate table for each query gene' : 'a network plot and candidate table'}.`;
       case 'spatial':
         return `Compare the average expression and percentage of expressing cells for ${subject} across clusters. Generate a dot plot and export the summary table. Dataset: ${context.dataset || DEFAULT_SPATIAL.dataset}; sample: ${context.sample || DEFAULT_SPATIAL.sample}.`;
-      case 'genomes':
+      case 'pan_genome':
         return 'List the potato genome assemblies available in PotatoOmics, including their accessions, ploidy, and available annotation resources. Export the results as a TSV file.';
       case 'genome_browser':
         return `Export the CDS and protein sequences of ${DEFAULT_GENE} from DMv8.2 as FASTA files. Use the database's default transcript and include a gene-to-transcript mapping table.`;
@@ -40,11 +42,13 @@
     window.history.replaceState(null, '', window.location.pathname + window.location.search);
     try {
       const value = JSON.parse(decodeURIComponent(hash.slice('#example='.length)));
-      return value && pages.includes(value.page) && typeof value.text === 'string'
-        && value.text.trim() ? value : null;
+      const page = normalizePage(value?.page);
+      return value && pages.includes(page) && typeof value.text === 'string'
+        && value.text.trim() ? { ...value, page } : null;
     } catch { return null; }
   };
   const bind = (page, getContext = () => ({})) => {
+    page = normalizePage(page);
     const button = document.getElementById('ask-potato-agent');
     button?.addEventListener('click', () => {
       const id = crypto.randomUUID?.()

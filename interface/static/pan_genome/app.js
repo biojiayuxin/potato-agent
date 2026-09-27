@@ -43,7 +43,7 @@ function sortAssemblies(left, right) {
 
 function browserUrl(assemblyId) {
   const params = new URLSearchParams({ assembly: assemblyId });
-  return `/genomes/browser?${params.toString()}`;
+  return `/genome-browser?${params.toString()}`;
 }
 
 function doiUrl(doi) {
@@ -167,4 +167,4 @@ els.search.addEventListener('input', renderTable);
 els.ploidy.addEventListener('change', renderTable);
 
 init();
-window.PotatoAgentExamples.bind('genomes');
+window.PotatoAgentExamples.bind('pan_genome');

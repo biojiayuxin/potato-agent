@@ -23,16 +23,22 @@
   接口说明及测试预览见 [`static/efp/README.md`](static/efp/README.md)
 - Gene Catalog：公开页面 `/genes` 及 `/genes/<gene-id>`，数据从
   `/srv/gene_catalog/current/gene_catalog.sqlite` 以 SQLite immutable read-only mode 加载
-- Pan-genome Orthogroups：公开 API `/api/pan-genome/`，数据从
+- Pan-genome：Genomes 下拉菜单中的公开页面 `/pan-genome`，图谱和材料列表位于
+  `static/pan_genome/`；Orthogroups 公开 API `/api/pan-genome/`，数据从
   `/srv/pan_genome/current/pan_genome.sqlite` 以 SQLite immutable read-only mode 加载；构建和发布见
   [`PAN_GENOME.md`](PAN_GENOME.md)
-- Genome Browser：Genomes 二级页面 `/genomes/browser`（旧 `/genome-browser`
-  地址保留兼容跳转），数据从
+- Genome Browser：Genomes 下拉菜单中的公开页面 `/genome-browser`，数据从
   `/mnt/data/public_data/Genome_browser_DB` 只读加载
 - Daily Updates：未登录页公开展示 PubMed 马铃薯研究，由独立 systemd worker 每日生成双语总结，
   Interface 从 `/srv/daily_updates/data/daily_updates.sqlite` 只读加载；部署和迁移见
   [`DAILY_UPDATES.md`](DAILY_UPDATES.md)
 - Dashboard：公开英文页面 `/dashboard`，展示已记录 Token 用量与两类更新。
+
+Genomes 导航分组包含 Pan-genome 和 Genome Browser。旧 `/genomes` 以 308 跳转到
+`/pan-genome` 并保留查询参数；旧 `/genomes/browser` 与 `/genome-browser` 由同一处理器直接返回页面，
+避免浏览器缓存的旧反向 308 导致重定向循环。所有新链接使用规范地址。旧 `/static/genomes/` 挂载为
+`static/pan_genome/` 的兼容别名，保留旧图谱资源以支持缓存页面；页面模块和 Agent 示例内部统一使用
+`pan_genome`，入口兼容旧 `genomes` 标识。两个模块的数据 API 路径及契约不变。
 
 ## Public Dashboard
 
@@ -96,7 +102,7 @@ Potato Agent 更新直接读取 `static/lite/update-notes.json`；PotatoOmics �
 - `build_gene_catalog_db.py`
   从经过审查的注释、序列、文献、相似性和功能预测来源构建版本化 Gene Catalog SQLite
 - `pan_genome.py`
-  Pan-genome Orthogroups 的公开只读 API router
+  Pan-genome 公开页面、旧 Genomes 地址兼容跳转和 Orthogroups 只读 API router
 - `build_pan_genome_db.py`
   将 OrthoFinder `Orthogroups.tsv` 规范化为带索引的版本化 SQLite
 - `genome_browser.py`
@@ -123,6 +129,8 @@ Potato Agent 更新直接读取 `static/lite/update-notes.json`；PotatoOmics �
   Gene Catalog 搜索、详情和 deep-link 前端页面、样式及脚本
 - `static/genome_browser/`
   Genome Browser 前端页面、样式、脚本和 JBrowse vendor 资源
+- `static/pan_genome/`
+  Pan-genome 图谱、材料列表和筛选页面；顶部图谱为 `assets/pan-genome.png`
 
 ## 依赖的数据源
 

@@ -39,7 +39,9 @@ button {
   cursor: pointer;
 }
 
-.genomes-app {
+/* Keep cached legacy page markup styled through /static/genomes/. */
+.genomes-app,
+.pan-genome-app {
   width: 100%;
   min-width: 0;
   min-height: 100vh;
@@ -50,7 +52,8 @@ button {
   background: url('../background.png') center center / cover fixed no-repeat;
 }
 
-.genomes-main {
+.genomes-main,
+.pan-genome-main {
   width: 100%;
   max-width: 1120px;
   min-width: 0;
@@ -101,11 +104,9 @@ button {
   background: var(--primary-hover);
 }
 
-.figures-grid {
+.figures-grid,
+.pangenome-overview {
   min-width: 0;
-  display: grid;
-  grid-template-columns: minmax(0, 1.45fr) minmax(0, 1fr);
-  gap: 14px;
 }
 
 .pangenome-figure {
@@ -120,9 +121,6 @@ button {
 
 .figure-frame {
   width: 100%;
-  height: 340px;
-  display: grid;
-  place-items: center;
   padding: 12px;
   overflow: hidden;
   background: #ffffff;
@@ -130,7 +128,7 @@ button {
 
 .figure-frame img {
   width: 100%;
-  height: 100%;
+  height: auto;
   display: block;
   object-fit: contain;
 }
@@ -341,29 +339,15 @@ td:nth-child(2) {
 }
 
 @media (max-width: 860px) {
-  .genomes-app {
+  .genomes-app,
+  .pan-genome-app {
     padding: 16px;
-  }
-
-  .figures-grid {
-    grid-template-columns: minmax(0, 1fr);
-  }
-
-  .figure-frame {
-    height: auto;
-  }
-
-  .figure-wide .figure-frame {
-    aspect-ratio: 2.5 / 1;
-  }
-
-  .figure-tall .figure-frame {
-    aspect-ratio: 1.39 / 1;
   }
 }
 
 @media (max-width: 580px) {
-  .genomes-app {
+  .genomes-app,
+  .pan-genome-app {
     gap: 14px;
     padding: 12px;
     background-attachment: scroll;

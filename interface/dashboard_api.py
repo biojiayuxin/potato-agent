@@ -67,7 +67,7 @@ def _public_days(
 def _resource_counts() -> dict[str, Any]:
     sources = (
         (
-            "genome_accessions", "Genome accessions", "/genomes",
+            "genome_accessions", "Genome accessions", "/pan-genome",
             lambda: sum(
                 isinstance(item, dict)
                 for item in genome_browser.load_manifest()["assemblies"]

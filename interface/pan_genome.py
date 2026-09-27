@@ -9,9 +9,11 @@ from contextlib import closing
 from pathlib import Path
 from typing import Any
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Request
+from fastapi.responses import FileResponse, RedirectResponse
 
 
+STATIC_ROOT = Path(__file__).resolve().parent / "static" / "pan_genome"
 DEFAULT_DB_PATH = Path("/srv/pan_genome/current/pan_genome.sqlite")
 EXPECTED_SCHEMA_VERSION = 2
 DEFAULT_MEMBER_LIMIT = 100
@@ -488,6 +490,24 @@ def load_orthogroup_members(
         raise
     except sqlite3.Error as exc:
         raise _query_failed(exc) from exc
+
+
+@router.head("/pan-genome", include_in_schema=False)
+@router.get("/pan-genome", include_in_schema=False)
+async def serve_pan_genome_index() -> FileResponse:
+    index_path = STATIC_ROOT / "index.html"
+    if not index_path.is_file():
+        raise HTTPException(status_code=404, detail="Pan-genome frontend not found")
+    return FileResponse(index_path)
+
+
+@router.head("/genomes", include_in_schema=False)
+@router.get("/genomes", include_in_schema=False)
+async def redirect_legacy_genomes(request: Request) -> RedirectResponse:
+    destination = "/pan-genome"
+    if request.url.query:
+        destination = f"{destination}?{request.url.query}"
+    return RedirectResponse(destination, status_code=308)
 
 
 @router.get("/api/pan-genome/metadata")

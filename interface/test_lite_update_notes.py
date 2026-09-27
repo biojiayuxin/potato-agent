@@ -73,7 +73,7 @@ def test_update_notes_refresh_after_page_restore() -> None:
 
     assert "loadUpdateNotes().catch(() => {});" in pageshow
     assert "loadUpdateNotes().catch(() => {});" in visibility
-    assert "app.js?v=20260910-http-tabs" in index
+    assert "app.js?v=20260927-genomes" in index
 
 
 def test_update_notes_more_expands_full_scrollable_history() -> None:

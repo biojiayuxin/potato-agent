@@ -13,8 +13,8 @@ from pathlib import Path
 from urllib.parse import urlsplit
 
 import pytest
-from fastapi import FastAPI, HTTPException
-from fastapi.responses import FileResponse
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.responses import FileResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 
 from interface import admin_api, announcement_api, announcement_store, auth_db
@@ -35,14 +35,18 @@ def preview_app() -> FastAPI:
     app.include_router(announcement_api.router)
     pages = {
         "": "lite/index.html", "lite": "lite/index.html", "about": "about/index.html",
-        "genes": "genes/index.html", "genomes": "genomes/index.html",
+        "genes": "genes/index.html", "pan-genome": "pan_genome/index.html",
+        "genomes/browser": "genome_browser/index.html",
         "genome-browser": "genome_browser/index.html", "spatial": "spatial/index.html",
         "wgcna": "wgcna/index.html", "bulk-rnaseq": "bulk_rnaseq/index.html",
         "favicon.ico": "favicon.png",
     }
 
     @app.get("/{page:path}")
-    def public_page(page: str):
+    def public_page(page: str, request: Request):
+        if page == "genomes":
+            query = request.url.query
+            return RedirectResponse("/pan-genome" + (f"?{query}" if query else ""), status_code=308)
         if page not in pages:
             raise HTTPException(404)
         return FileResponse(STATIC / pages[page])

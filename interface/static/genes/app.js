@@ -449,7 +449,7 @@
         assembly: browserAssembly,
         loc: `${location.seqid}:${start}..${end}`,
       });
-      genomeBrowserLink.href = `/genomes/browser?${params.toString()}`;
+      genomeBrowserLink.href = `/genome-browser?${params.toString()}`;
       genomeBrowserLink.hidden = false;
     } else {
       genomeBrowserLink.hidden = true;
