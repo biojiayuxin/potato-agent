@@ -4,7 +4,7 @@ const CLAIM_LOCK_NAME = 'potato-chat-transfer-v2';
 const OWNER_KEY = 'potato-chat-owner-v2';
 const RECEIPTS_KEY = 'potato-chat-receipts-v1';
 const ENTRY_KEY = 'potato-chat-entry-v1';
-const pages = ['genes', 'bulk_rnaseq', 'wgcna', 'spatial', 'pan_genome', 'genome_browser', 'synteny'];
+const pages = ['genes', 'bulk_rnaseq', 'wgcna', 'spatial', 'pan_genome', 'genome_browser', 'functional_annotation', 'synteny'];
 const normalizeEntry = entry => entry?.kind === 'example' && entry.example?.page === 'genomes'
   ? { ...entry, example: { ...entry.example, page: 'pan_genome' } } : entry;
 

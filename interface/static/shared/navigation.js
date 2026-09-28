@@ -4,6 +4,7 @@
     { id: 'lite', label: 'Potato Agent', href: '/lite' },
     { id: 'pan_genome', label: 'Pan-genome', href: '/pan-genome', large: true, group: 'genomes' },
     { id: 'genome_browser', label: 'Genome Browser', href: '/genome-browser', large: true, group: 'genomes' },
+    { id: 'functional_annotation', label: 'Domain annotation', href: '/functional-annotation', group: 'genomes' },
     { id: 'synteny', label: 'Synteny', href: '/synteny', group: 'genomes' },
     { id: 'genes', label: 'Genes', href: '/genes' },
     { id: 'bulk_rnaseq', label: 'Gene Expression', href: '/bulk-rnaseq', large: true, group: 'expression' },

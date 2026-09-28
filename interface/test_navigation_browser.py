@@ -22,6 +22,7 @@ PAGES = {
     'genes': ('genes', 'Genes', False),
     'pan-genome': ('pan_genome', 'Pan-genome', True),
     'genome-browser': ('genome_browser', 'Genome Browser', True),
+    'functional-annotation': ('functional_annotation', 'Domain annotation', False),
     'synteny': ('synteny', 'Synteny', False),
     'bulk-rnaseq': ('bulk_rnaseq', 'Gene Expression', True),
     'efp': ('efp', 'Tissue Expression Map', False),
@@ -30,7 +31,7 @@ PAGES = {
     'dashboard': ('dashboard', 'Dashboard', False),
     'about': ('about', 'About', False),
 }
-LABELS = ['Potato Agent', 'Pan-genome', 'Genome Browser', 'Synteny', 'Genes', 'Gene Expression', 'Tissue Expression Map', 'WGCNA Network',
+LABELS = ['Potato Agent', 'Pan-genome', 'Genome Browser', 'Domain annotation', 'Synteny', 'Genes', 'Gene Expression', 'Tissue Expression Map', 'WGCNA Network',
           'Spatial Expression', 'Dashboard', 'About']
 
 
@@ -123,7 +124,7 @@ def test_public_pages_at_all_breakpoints(site, browser, tmp_path):
                         const bounds = nav.getBoundingClientRect();
                         return Math.abs((first.left + last.right) - (bounds.left + bounds.right)) < 2;
                     }''')
-                    group = ('Genomes' if module in ('pan_genome', 'genome_browser', 'synteny') else
+                    group = ('Genomes' if module in ('pan_genome', 'genome_browser', 'functional_annotation', 'synteny') else
                              'Expression' if module in ('bulk_rnaseq', 'efp', 'wgcna', 'spatial') else None)
                     if group:
                         control = page.get_by_role('button', name=group, exact=True)
@@ -151,8 +152,8 @@ def test_dropdown_keyboard_device_links_and_layers(site, browser, tmp_path):
         page = context.new_page()
         page.goto(site + '/genes')
         panel = page.locator('.portal-nav-panel')
-        for group, labels in [('Genomes', ['Pan-genome', 'Genome Browser', 'Synteny']),
-                              ('Expression', LABELS[5:9])]:
+        for group, labels in [('Genomes', ['Pan-genome', 'Genome Browser', 'Domain annotation', 'Synteny']),
+                              ('Expression', LABELS[6:10])]:
             control = page.get_by_role('button', name=group, exact=True)
             control.focus()
             page.keyboard.press('Enter')
@@ -183,7 +184,7 @@ def test_dropdown_keyboard_device_links_and_layers(site, browser, tmp_path):
         expect(panel.locator('a').last).to_have_attribute('href', '/synteny')
         page.get_by_role('button', name='Expression', exact=True).click()
         expect(genomes).to_have_attribute('aria-expanded', 'false')
-        expect(panel.locator('a')).to_have_text(LABELS[5:9])
+        expect(panel.locator('a')).to_have_text(LABELS[6:10])
         page.keyboard.press('Escape')
         upcoming = page.get_by_role('button', name='Coming soon', exact=True)
         expect(upcoming).to_have_text('Coming soon')

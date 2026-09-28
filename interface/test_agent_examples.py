@@ -57,6 +57,8 @@ assert.match(e.build('genes', {genes:[null,'']}), /DM8.2_chr05G25210/);
 assert.match(e.build('spatial'), /Dataset: Stolon and tuber \(s1_s2\); sample: Stolon \(S1\)\./);
 assert.match(e.build('spatial', {genes:['G'],dataset:'D',sample:'S'}), /for G.*Dataset: D; sample: S\./);
 assert.match(e.build('genome_browser', {genes:['OTHER']}), /DM8.2_chr05G25210 from DMv8.2/);
+assert.match(e.build('functional_annotation', {query:{assemblyIds:['monoploid/E4-63'],tfFamilies:['WRKY']},datasetVersion:'v1',selection:[{assemblyId:'monoploid/E4-63',geneId:'gene1'}]}), /monoploid\/E4-63.*WRKY.*gene1.*v1/);
+assert.match(e.build('functional_annotation', {baseUrl:'http://annotation.example:3000'}), /--base-url http:\/\/annotation\.example:3000/);
 assert.equal(e.build('synteny'), 'Use the genome-synteny skill (JCVI/MCScan) to perform gene-based chromosome-level synteny analysis for DH_W99 and E86-69 and generate a synteny ribbon plot. Arrange the haplotypes from top to bottom in this order: DH_W99_hap1, DH_W99_hap2, E86-69_hap1, E86-69_hap2, showing syntenic links between adjacent haplotypes.');
 assert.equal(e.build('genomes'), e.build('pan_genome'));
 let click;
@@ -64,7 +66,7 @@ let target;
 context.crypto = {randomUUID: () => 'navigation-request'};
 context.document = {getElementById: () => ({addEventListener: (_event, handler) => { click = handler; }})};
 context.window.location.assign = url => { target = url; };
-for (const page of ['pan_genome', 'genomes', 'synteny']) {
+for (const page of ['pan_genome', 'genomes', 'synteny', 'functional_annotation']) {
   const canonicalPage = page === 'genomes' ? 'pan_genome' : page;
   const text = e.build(page);
   e.bind(page);
@@ -113,7 +115,7 @@ globalThis.sessionStorage = {
 const source = fs.readFileSync(process.argv[1], 'utf8');
 const workspace = await import('data:text/javascript;base64,' + Buffer.from(source).toString('base64'));
 const key = 'potato-chat-entry-v1';
-for (const page of ['genomes', 'pan_genome', 'synteny']) {
+for (const page of ['genomes', 'pan_genome', 'synteny', 'functional_annotation']) {
   const example = {id:'research-request', page, text:'Analyze the available assemblies'};
   const entry = {id:example.id, kind:'example', example};
   const canonical = {...entry, example:{...example, page:page === 'genomes' ? 'pan_genome' : page}};

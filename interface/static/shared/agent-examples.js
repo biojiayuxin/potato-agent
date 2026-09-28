@@ -7,7 +7,7 @@
     dataset: 'Stolon and tuber (s1_s2)',
     sample: 'Stolon (S1)',
   };
-  const pages = ['genes', 'bulk_rnaseq', 'wgcna', 'spatial', 'pan_genome', 'genome_browser', 'synteny'];
+  const pages = ['genes', 'bulk_rnaseq', 'wgcna', 'spatial', 'pan_genome', 'genome_browser', 'functional_annotation', 'synteny'];
   const normalizePage = page => page === 'genomes' ? 'pan_genome' : page;
 
   const build = (page, context = {}) => {
@@ -32,6 +32,8 @@
         return 'List the potato genome assemblies available in PotatoOmics, including their accessions, ploidy, and available annotation resources. Export the results as a TSV file.';
       case 'genome_browser':
         return `Export the CDS and protein sequences of ${DEFAULT_GENE} from DMv8.2 as FASTA files. Use the database's default transcript and include a gene-to-transcript mapping table.`;
+      case 'functional_annotation':
+        return `Use the genome-annotation-query skill and the public /api/genome-annotations API to query and export the protein domain annotations and TF family names for this Domain annotation selection. Pass --base-url ${context.baseUrl || 'https://potato-agent.ynnu.edu.cn'} to the skill script to query this deployment. Show TF family names without TF decisions, grades, evidence tables or status labels. Current query: ${JSON.stringify(context.query || {assemblyIds:['monoploid/DMv8.2'],view:'genes'})}. Selected records (empty means all query results): ${JSON.stringify(context.selection || [])}. Annotation release: ${context.datasetVersion || 'discover with metadata'}. Export matching gene, transcript and domain annotation tables with metadata.`;
       case 'synteny':
         return 'Use the genome-synteny skill (JCVI/MCScan) to perform gene-based chromosome-level synteny analysis for DH_W99 and E86-69 and generate a synteny ribbon plot. Arrange the haplotypes from top to bottom in this order: DH_W99_hap1, DH_W99_hap2, E86-69_hap1, E86-69_hap2, showing syntenic links between adjacent haplotypes.';
       default:

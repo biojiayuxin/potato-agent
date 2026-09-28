@@ -1,0 +1,73 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Domain annotation | Potato Research</title>
+  <link rel="icon" type="image/png" href="/static/favicon.png">
+  <link rel="stylesheet" href="/static/functional_annotation/styles.css?v=20260928-label-width">
+  <link rel="stylesheet" href="/static/shared/navigation.css?v=20260908-navigation-mobile-centered">
+  <link rel="stylesheet" href="/static/shared/agent-examples.css?v=20260909-simplified-chat">
+  <link rel="stylesheet" href="/static/shared/announcement.css?v=20260927-synteny">
+  <link rel="stylesheet" href="/static/shared/feedback.css?v=20260819-feedback">
+  <script src="/static/shared/announcement.js?v=20260906" defer></script>
+  <script src="/static/shared/navigation.js?v=20260928-domain" defer></script>
+  <script src="/static/shared/agent-examples.js?v=20260928-simple" defer></script>
+  <script src="/static/functional_annotation/app.js?v=20260928-label-width" defer></script>
+  <script src="/static/shared/feedback.js?v=20260819-feedback" defer></script>
+</head>
+<body>
+<div class="annotation-app">
+  <header class="portal-header">
+    <section class="portal-hero" aria-labelledby="portal-title"><div class="portal-hero-content">
+      <h1 id="portal-title">PotatoOmics: An AI-powered multi-omics database for intelligent Q&amp;A and skills-based informatics analyses</h1>
+    </div></section>
+    <nav class="portal-nav" aria-label="Portal modules" data-portal-module="functional_annotation"></nav>
+  </header>
+  <main class="annotation-main">
+    <header class="page-toolbar">
+      <h2>Domain annotation</h2>
+      <button id="ask-potato-agent" type="button" class="ask-potato-agent">Ask Potato Agent</button>
+    </header>
+    <p id="dataset-status" class="dataset-status" role="status" hidden></p>
+    <section id="panel-search" aria-label="Annotation search">
+      <form id="query-form" class="panel" role="search">
+        <fieldset id="query-controls" disabled>
+          <fieldset class="assembly-fieldset"><legend>Genomes</legend><div class="assembly-options" id="assembly-options"></div><button class="text-button" type="button" id="all-assemblies">Select all genomes</button></fieldset>
+          <fieldset id="gene-scope" class="gene-scope"><legend>Gene set</legend><div class="gene-scope-options">
+            <label><input type="radio" name="gene-scope" value="all" checked><span>All genes</span></label>
+            <label><input type="radio" name="gene-scope" value="selected"><span>Transcription factors</span></label>
+          </div></fieldset>
+          <div class="search-fields">
+            <label class="field"><span>Search by</span><select id="search-kind"><option value="ids">Gene / transcript ID</option><option value="q">Annotation keyword</option></select></label>
+            <label class="field grow"><span id="search-label">Exact identifier</span><input id="search-input" aria-labelledby="search-label" type="search" placeholder="e.g. DM8.2_chr05G25210" autocomplete="off" spellcheck="false" maxlength="500"></label>
+            <label class="field"><span>Show</span><select id="result-view"><option value="genes">Genes</option><option value="transcripts">Transcripts</option></select></label>
+            <button class="primary search-button" id="search-button" type="submit">Search</button>
+          </div>
+          <details id="batch-section"><summary>Batch IDs</summary><div class="batch-fields">
+            <label class="field"><span>Paste gene or transcript IDs (up to 5,000; spaces, commas or newlines)</span><textarea id="batch-ids" rows="4" spellcheck="false" placeholder="One or more exact identifiers"></textarea></label>
+            <label class="field"><span>Or read a local TXT file</span><input id="batch-file" type="file" accept=".txt,.tsv,.csv,text/plain,text/tab-separated-values,text/csv"></label>
+            <p class="muted">Search the selected genomes using these IDs. Large ID lists are not included in the page URL.</p>
+          </div></details>
+          <div class="form-footer"><button class="text-button" type="button" id="reset-search">Reset search</button></div>
+        </fieldset>
+      </form>
+      <section class="panel results-panel" aria-label="Annotation results">
+        <div class="results-toolbar"><div><h3>Results</h3><p id="query-status" role="status" aria-live="polite">Preparing annotation search…</p></div><div class="button-row"><button id="export-all" type="button" disabled>Export all results</button><button id="export-selected" type="button" disabled>Export selected (0)</button></div></div>
+        <div id="id-report" class="id-report" hidden></div>
+        <div class="table-shell"><table id="results-table"><thead><tr><th><input id="select-page" type="checkbox" aria-label="Select this page" disabled></th><th id="identifier-heading" scope="col">Gene</th><th scope="col">Genome</th><th id="protein-heading" scope="col">Transcripts</th><th scope="col">Domains / families</th><th scope="col">TF families</th></tr></thead><tbody id="results-body"><tr><td colspan="6" class="empty-message">Loading data…</td></tr></tbody></table></div>
+        <nav class="pagination" aria-label="Annotation result pages"><button id="previous-page" type="button" disabled>Previous</button><span id="page-status"></span><button id="next-page" type="button" disabled>Next</button></nav>
+      </section>
+    </section>
+  </main>
+</div>
+<dialog id="export-dialog" aria-labelledby="export-heading">
+  <form id="export-form"><div class="results-toolbar"><h3 id="export-heading">Export annotations</h3><button type="button" id="close-export" aria-label="Close export">×</button></div>
+    <p id="export-description"></p><fieldset><legend>Include tables</legend><div class="export-tables"><label><input type="checkbox" name="table" value="genes" checked> Gene summary</label><label><input type="checkbox" name="table" value="transcripts" checked> Transcript summary</label><label><input type="checkbox" name="table" value="domains"> Domain annotations</label></div></fieldset>
+    <label class="field"><span>Table format</span><select id="export-format"><option value="tsv">TSV</option><option value="csv">CSV</option></select></label>
+    <p class="muted">ZIP includes the selected tables, dataset version and search query.</p><p id="export-status" role="status" aria-live="polite"></p><button class="primary" id="download-export" type="submit">Download ZIP</button>
+  </form>
+</dialog>
+<div id="domain-tooltip" class="domain-tooltip" role="tooltip" hidden></div>
+</body>
+</html>
