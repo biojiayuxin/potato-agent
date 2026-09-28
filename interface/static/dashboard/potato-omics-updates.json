@@ -1,6 +1,22 @@
 {
   "updates": [
     {
+      "version": "2026-09-28-002",
+      "title": "Domain annotation",
+      "date": "September 28, 2026",
+      "summary": "Added protein domain search, transcription factor family information and annotation export for five potato genomes.",
+      "items": [],
+      "source_commits": ["a42dfd5"]
+    },
+    {
+      "version": "2026-09-28-001",
+      "title": "Synteny",
+      "date": "September 28, 2026",
+      "summary": "Added a synteny page with genome-wide and local examples and Potato Agent support for analysis and plotting.",
+      "items": [],
+      "source_commits": ["66029ef"]
+    },
+    {
       "version": "2026-09-24-001",
       "title": "Tissue expression map",
       "date": "September 24, 2026",
