@@ -70,6 +70,7 @@
 .has-announcements .pan-genome-app,
 .has-announcements .genomes-app,
 .has-announcements .genome-browser-app,
+.has-announcements .synteny-app,
 .has-announcements .bulk-app,
 .has-announcements .wgcna-app,
 .has-announcements .spatial-app { min-height: var(--announcement-viewport-height); }

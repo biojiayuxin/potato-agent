@@ -1,0 +1,57 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Synteny | Potato Research</title>
+    <link rel="icon" type="image/png" href="/static/favicon.png" />
+    <link rel="stylesheet" href="/static/synteny/styles.css?v=20260928-synteny" />
+    <link rel="stylesheet" href="/static/shared/feedback.css?v=20260819-feedback" />
+    <link rel="stylesheet" href="/static/shared/announcement.css?v=20260927-synteny" />
+    <script src="/static/shared/announcement.js?v=20260906" defer></script>
+    <link rel="stylesheet" href="/static/shared/navigation.css?v=20260908-navigation-mobile-centered" />
+    <script src="/static/shared/navigation.js?v=20260927-synteny" defer></script>
+    <link rel="stylesheet" href="/static/shared/agent-examples.css?v=20260909-simplified-chat" />
+    <script src="/static/shared/agent-examples.js?v=20260928-synteny-skill"></script>
+  </head>
+  <body>
+    <div class="synteny-app">
+      <header class="portal-header">
+        <section class="portal-hero" aria-labelledby="portal-title">
+          <div class="portal-hero-content">
+            <h1 id="portal-title">PotatoOmics: An AI-powered multi-omics database for intelligent Q&amp;A and skills-based informatics analyses</h1>
+          </div>
+        </section>
+        <nav class="portal-nav" aria-label="Portal modules" data-portal-module="synteny"></nav>
+      </header>
+
+      <main class="synteny-main">
+        <header class="page-toolbar">
+          <h2>Synteny</h2>
+        </header>
+
+        <section class="agent-callout" aria-label="Analyze synteny with Potato Agent">
+          <p>Use Potato Agent to analyze synteny between two genomes and generate plots using data available in PotatoOmics.</p>
+          <div class="agent-example-actions">
+            <button id="ask-potato-agent" type="button" class="browser-button ask-potato-agent">Ask Potato Agent</button>
+          </div>
+        </section>
+
+        <figure class="synteny-figure">
+          <div class="figure-frame">
+            <img
+              src="/static/synteny/assets/synteny_plot.png?v=20260927-synteny"
+              alt="Synteny examples showing conserved chromosome regions across Solanum species, chromosome-level links between potato genomes, and local gene-region links"
+              width="2481"
+              height="2567"
+            />
+          </div>
+          <figcaption>Examples of genome-wide and local synteny.</figcaption>
+        </figure>
+      </main>
+    </div>
+
+    <script src="/static/shared/feedback.js?v=20260819-feedback" defer></script>
+    <script src="/static/synteny/app.js?v=20260927-synteny"></script>
+  </body>
+</html>

@@ -1,0 +1,180 @@
+:root {
+  color-scheme: light;
+  --page: #eef3f9;
+  --panel: rgba(255, 255, 255, 0.92);
+  --surface: #ffffff;
+  --surface-muted: #f6f8fb;
+  --border: #d6dfeb;
+  --text: #14213d;
+  --muted: #64748b;
+  --primary: #166534;
+  --primary-hover: #18713a;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  min-width: 0;
+  min-height: 100%;
+  margin: 0;
+  overflow-x: hidden;
+  color: var(--text);
+  background: var(--page);
+  font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+}
+
+button {
+  font: inherit;
+  cursor: pointer;
+}
+
+.synteny-app {
+  width: 100%;
+  min-width: 0;
+  min-height: 100vh;
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+  gap: 18px;
+  padding: 24px;
+  background: url('../background.png') center center / cover fixed no-repeat;
+}
+
+.synteny-main {
+  width: 100%;
+  max-width: 1120px;
+  min-width: 0;
+  justify-self: center;
+  align-self: start;
+  display: grid;
+  gap: 14px;
+}
+
+.page-toolbar {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 12px;
+  padding: 3px 0;
+}
+
+.page-toolbar h2 {
+  margin: 0;
+  font-size: 26px;
+  line-height: 1.15;
+}
+
+.agent-callout {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 20px;
+  padding: 18px 20px;
+  border: 1px solid rgba(214, 223, 235, 0.9);
+  border-radius: 8px;
+  background: var(--panel);
+  box-shadow: 0 16px 36px rgba(8, 15, 30, 0.1);
+  backdrop-filter: blur(16px) saturate(140%);
+}
+
+.agent-callout p {
+  min-width: 0;
+  margin: 0;
+  color: #334155;
+  font-size: 14px;
+  line-height: 1.6;
+}
+
+.agent-callout .agent-example-actions {
+  flex-shrink: 0;
+}
+
+.browser-button {
+  min-height: 42px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0 18px;
+  border: 1px solid var(--primary);
+  border-radius: 8px;
+  color: #ffffff;
+  background: var(--primary);
+  font-size: 14px;
+  font-weight: 800;
+  line-height: 1;
+  white-space: nowrap;
+}
+
+button:focus-visible,
+a:focus-visible {
+  outline: 3px solid rgba(22, 101, 52, 0.55);
+  outline-offset: 3px;
+}
+
+.synteny-figure {
+  min-width: 0;
+  margin: 0;
+  overflow: hidden;
+  border: 1px solid rgba(214, 223, 235, 0.9);
+  border-radius: 8px;
+  background: var(--surface);
+  box-shadow: 0 16px 36px rgba(8, 15, 30, 0.09);
+}
+
+.figure-frame {
+  width: 100%;
+  padding: 12px;
+  background: #ffffff;
+}
+
+.figure-frame img {
+  width: 100%;
+  height: auto;
+  display: block;
+  object-fit: contain;
+}
+
+.synteny-figure figcaption {
+  padding: 12px 14px;
+  border-top: 1px solid var(--border);
+  color: #334155;
+  background: var(--surface-muted);
+  font-size: 13px;
+  font-weight: 800;
+  line-height: 1.3;
+}
+
+@media (max-width: 860px) {
+  .synteny-app {
+    padding: 16px;
+  }
+}
+
+@media (max-width: 580px) {
+  .synteny-app {
+    gap: 14px;
+    padding: 12px;
+    background-attachment: scroll;
+  }
+
+  .agent-callout {
+    align-items: stretch;
+    flex-direction: column;
+    gap: 14px;
+    padding: 15px;
+  }
+
+  .browser-button {
+    width: 100%;
+    min-height: 44px;
+  }
+
+  .figure-frame {
+    padding: 6px;
+  }
+}

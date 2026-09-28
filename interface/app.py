@@ -4048,6 +4048,15 @@ async def serve_about() -> FileResponse:
     return FileResponse(file_path)
 
 
+@app.head("/synteny", include_in_schema=False)
+@app.get("/synteny", include_in_schema=False)
+async def serve_synteny() -> FileResponse:
+    file_path = STATIC_DIR / "synteny" / "index.html"
+    if not file_path.is_file():
+        raise HTTPException(status_code=404, detail="Synteny page not found")
+    return FileResponse(file_path)
+
+
 @app.post("/api/feedback")
 async def submit_feedback(payload: FeedbackRequest) -> dict[str, bool]:
     message, contact_email, page_path = _validate_feedback_payload(payload)

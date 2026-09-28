@@ -23,6 +23,7 @@ PUBLIC_HTML_PATHS = (
     STATIC_DIR / "bulk_rnaseq" / "index.html",
     STATIC_DIR / "pan_genome" / "index.html",
     STATIC_DIR / "genome_browser" / "index.html",
+    STATIC_DIR / "synteny" / "index.html",
     STATIC_DIR / "about" / "index.html",
     STATIC_DIR / "dashboard" / "index.html",
 )

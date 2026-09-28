@@ -7,7 +7,7 @@
     dataset: 'Stolon and tuber (s1_s2)',
     sample: 'Stolon (S1)',
   };
-  const pages = ['genes', 'bulk_rnaseq', 'wgcna', 'spatial', 'pan_genome', 'genome_browser'];
+  const pages = ['genes', 'bulk_rnaseq', 'wgcna', 'spatial', 'pan_genome', 'genome_browser', 'synteny'];
   const normalizePage = page => page === 'genomes' ? 'pan_genome' : page;
 
   const build = (page, context = {}) => {
@@ -32,6 +32,8 @@
         return 'List the potato genome assemblies available in PotatoOmics, including their accessions, ploidy, and available annotation resources. Export the results as a TSV file.';
       case 'genome_browser':
         return `Export the CDS and protein sequences of ${DEFAULT_GENE} from DMv8.2 as FASTA files. Use the database's default transcript and include a gene-to-transcript mapping table.`;
+      case 'synteny':
+        return 'Use the genome-synteny skill (JCVI/MCScan) to perform gene-based chromosome-level synteny analysis for DH_W99 and E86-69 and generate a synteny ribbon plot. Arrange the haplotypes from top to bottom in this order: DH_W99_hap1, DH_W99_hap2, E86-69_hap1, E86-69_hap2, showing syntenic links between adjacent haplotypes.';
       default:
         throw new Error('Unknown research example');
     }

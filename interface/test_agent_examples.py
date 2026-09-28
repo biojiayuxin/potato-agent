@@ -24,6 +24,7 @@ INTRO = "Query and analyze PotatoOmics data, or search beyond the database for m
 PAGES = {
     "/genes": "genes", "/bulk-rnaseq": "bulk_rnaseq", "/wgcna": "wgcna",
     "/spatial": "spatial", "/pan-genome": "pan_genome", "/genome-browser": "genome_browser",
+    "/synteny": "synteny",
 }
 browser_test = pytest.mark.skipif(
     os.getenv("POTATO_EXAMPLE_BROWSER_TESTS") != "1",
@@ -44,7 +45,7 @@ const context = { window: {
 } };
 vm.runInNewContext(fs.readFileSync(process.argv[1], 'utf8'), context);
 const e = context.window.PotatoAgentExamples;
-for (const page of ['genes', 'bulk_rnaseq', 'wgcna', 'spatial', 'pan_genome', 'genome_browser']) {
+for (const page of ['genes', 'bulk_rnaseq', 'wgcna', 'spatial', 'pan_genome', 'genome_browser', 'synteny']) {
   const text = e.build(page);
   assert.ok(!/[{}]/.test(text));
   assert.ok(!/family/i.test(text));
@@ -56,23 +57,27 @@ assert.match(e.build('genes', {genes:[null,'']}), /DM8.2_chr05G25210/);
 assert.match(e.build('spatial'), /Dataset: Stolon and tuber \(s1_s2\); sample: Stolon \(S1\)\./);
 assert.match(e.build('spatial', {genes:['G'],dataset:'D',sample:'S'}), /for G.*Dataset: D; sample: S\./);
 assert.match(e.build('genome_browser', {genes:['OTHER']}), /DM8.2_chr05G25210 from DMv8.2/);
+assert.equal(e.build('synteny'), 'Use the genome-synteny skill (JCVI/MCScan) to perform gene-based chromosome-level synteny analysis for DH_W99 and E86-69 and generate a synteny ribbon plot. Arrange the haplotypes from top to bottom in this order: DH_W99_hap1, DH_W99_hap2, E86-69_hap1, E86-69_hap2, showing syntenic links between adjacent haplotypes.');
 assert.equal(e.build('genomes'), e.build('pan_genome'));
 let click;
 let target;
 context.crypto = {randomUUID: () => 'navigation-request'};
 context.document = {getElementById: () => ({addEventListener: (_event, handler) => { click = handler; }})};
 context.window.location.assign = url => { target = url; };
-for (const page of ['pan_genome', 'genomes']) {
+for (const page of ['pan_genome', 'genomes', 'synteny']) {
+  const canonicalPage = page === 'genomes' ? 'pan_genome' : page;
+  const text = e.build(page);
   e.bind(page);
   click();
+  assert.ok(target.startsWith('/chat#example='));
   const emitted = JSON.parse(decodeURIComponent(target.split('#example=')[1]));
-  assert.equal(emitted.page, 'pan_genome');
-  assert.equal(emitted.text, e.build('pan_genome'));
-  context.window.location.hash = '#example=' + encodeURIComponent(JSON.stringify({id:'saved-example',page,text:'Pan-genome example'}));
+  assert.equal(emitted.page, canonicalPage);
+  assert.equal(emitted.text, text);
+  context.window.location.hash = '#example=' + encodeURIComponent(JSON.stringify({id:'saved-example',page,text}));
   const value = e.takeFromLocation();
-  assert.equal(value.page, 'pan_genome');
+  assert.equal(value.page, canonicalPage);
   assert.equal(value.id, 'saved-example');
-  assert.equal(value.text, 'Pan-genome example');
+  assert.equal(value.text, text);
 }
 context.window.location.hash = '#example=' + encodeURIComponent(JSON.stringify({page:'genes',text:'Example text'}));
 assert.equal(e.takeFromLocation().text, 'Example text');
@@ -86,7 +91,7 @@ assert.equal(context.window.location.hash, '#share=share-token');
     subprocess.run(["node", "-e", script, str(STATIC / "shared/agent-examples.js")], check=True)
 
 
-def test_workspace_normalizes_pan_genome_examples_at_entry_boundaries():
+def test_workspace_accepts_examples_and_normalizes_legacy_genomes_at_entry_boundaries():
     if not shutil.which("node"):
         pytest.skip("Node.js is required")
     script = r"""
@@ -108,10 +113,10 @@ globalThis.sessionStorage = {
 const source = fs.readFileSync(process.argv[1], 'utf8');
 const workspace = await import('data:text/javascript;base64,' + Buffer.from(source).toString('base64'));
 const key = 'potato-chat-entry-v1';
-for (const page of ['genomes', 'pan_genome']) {
-  const example = {id:'pan-genome-request', page, text:'List the available assemblies'};
+for (const page of ['genomes', 'pan_genome', 'synteny']) {
+  const example = {id:'research-request', page, text:'Analyze the available assemblies'};
   const entry = {id:example.id, kind:'example', example};
-  const canonical = {...entry, example:{...example, page:'pan_genome'}};
+  const canonical = {...entry, example:{...example, page:page === 'genomes' ? 'pan_genome' : page}};
   for (const source of ['example', 'entry', 'saved']) {
     values.clear();
     location.hash = source === 'saved' ? '' : '#' + source + '=' + encodeURIComponent(JSON.stringify(source === 'entry' ? entry : example));
@@ -340,11 +345,12 @@ def test_loaded_context_ignores_unsubmitted_input(page, site, module):
 @browser_test
 @pytest.mark.parametrize("auth", ["signin", "temporary"])
 @pytest.mark.parametrize("refresh", [False, True])
-def test_initial_login_receives_unacknowledged_example_after_refresh(page, site, auth, refresh):
+@pytest.mark.parametrize("path,module", [("/genes", "genes"), ("/synteny", "synteny")])
+def test_initial_login_receives_example_after_refresh_and_waits_for_send(page, site, auth, refresh, path, module):
     from playwright.sync_api import expect
 
     calls = mock_api(page, authenticated=False)
-    page.goto(site + "/genes")
+    page.goto(site + path)
     page.locator("#ask-potato-agent").click()
     expect(page.locator("#login-view")).to_be_visible()
     expect(page).to_have_url(site + "/chat")
@@ -361,9 +367,15 @@ def test_initial_login_receives_unacknowledged_example_after_refresh(page, site,
         page.locator("#temporary-agreement-checkbox").check()
         page.locator("#temporary-confirm-start").click()
     wait_workspace(page)
-    expect(page.locator("#prompt-input")).to_have_value(page.evaluate("PotatoAgentExamples.build('genes')"))
+    expected = page.evaluate("name => PotatoAgentExamples.build(name)", module)
+    expect(page.locator("#prompt-input")).to_have_value(expected)
     expect(page.locator("#composer-example-label")).to_be_visible()
     assert not any(path.endswith("/turns") for _, path, _ in calls)
+    page.locator("#send-button").click()
+    expect(page.locator("#chat-title")).to_have_text("Sent example")
+    expect(page.locator("#composer-example-label")).to_be_hidden()
+    turns = [json.loads(body) for _, path, body in calls if path.endswith("/turns")]
+    assert len(turns) == 1 and turns[0]["prompt"] == expected
 
 
 @browser_test

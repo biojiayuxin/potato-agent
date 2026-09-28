@@ -61,6 +61,7 @@ def preview_app():
             return RedirectResponse("/pan-genome" + (f"?{query}" if query else ""), status_code=308)
         pages = {"lite": "lite", "about": "about", "genes": "genes", "pan-genome": "pan_genome",
                  "genome-browser": "genome_browser", "genomes/browser": "genome_browser",
+                 "synteny": "synteny",
                  "spatial": "spatial", "wgcna": "wgcna", "bulk-rnaseq": "bulk_rnaseq", "efp": "efp"}
         if page not in pages:
             raise HTTPException(404)

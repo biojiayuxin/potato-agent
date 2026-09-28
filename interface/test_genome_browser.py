@@ -220,13 +220,14 @@ def test_portal_navigation_uses_consistent_module_order() -> None:
         "interface/static/efp/index.html",
         "interface/static/pan_genome/index.html",
         "interface/static/genome_browser/index.html",
+        "interface/static/synteny/index.html",
         "interface/static/about/index.html",
         "interface/static/dashboard/index.html",
     ]
     for relative_path in portal_indexes:
         content = (REPO_ROOT / relative_path).read_text(encoding="utf-8")
         assert 'data-portal-module=' in content, relative_path
-        assert '/static/shared/navigation.js?v=20260927-genomes' in content
+        assert '/static/shared/navigation.js?v=20260927-synteny' in content
         assert '/static/shared/navigation.css?v=20260908-navigation-mobile-centered' in content
         assert 'class="portal-nav-item' not in content
 

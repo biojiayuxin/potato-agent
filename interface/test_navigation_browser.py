@@ -22,6 +22,7 @@ PAGES = {
     'genes': ('genes', 'Genes', False),
     'pan-genome': ('pan_genome', 'Pan-genome', True),
     'genome-browser': ('genome_browser', 'Genome Browser', True),
+    'synteny': ('synteny', 'Synteny', False),
     'bulk-rnaseq': ('bulk_rnaseq', 'Gene Expression', True),
     'efp': ('efp', 'Tissue Expression Map', False),
     'wgcna': ('wgcna', 'WGCNA Network', True),
@@ -29,7 +30,7 @@ PAGES = {
     'dashboard': ('dashboard', 'Dashboard', False),
     'about': ('about', 'About', False),
 }
-LABELS = ['Potato Agent', 'Pan-genome', 'Genome Browser', 'Genes', 'Gene Expression', 'Tissue Expression Map', 'WGCNA Network',
+LABELS = ['Potato Agent', 'Pan-genome', 'Genome Browser', 'Synteny', 'Genes', 'Gene Expression', 'Tissue Expression Map', 'WGCNA Network',
           'Spatial Expression', 'Dashboard', 'About']
 
 
@@ -122,7 +123,7 @@ def test_public_pages_at_all_breakpoints(site, browser, tmp_path):
                         const bounds = nav.getBoundingClientRect();
                         return Math.abs((first.left + last.right) - (bounds.left + bounds.right)) < 2;
                     }''')
-                    group = ('Genomes' if module in ('pan_genome', 'genome_browser') else
+                    group = ('Genomes' if module in ('pan_genome', 'genome_browser', 'synteny') else
                              'Expression' if module in ('bulk_rnaseq', 'efp', 'wgcna', 'spatial') else None)
                     if group:
                         control = page.get_by_role('button', name=group, exact=True)
@@ -150,8 +151,8 @@ def test_dropdown_keyboard_device_links_and_layers(site, browser, tmp_path):
         page = context.new_page()
         page.goto(site + '/genes')
         panel = page.locator('.portal-nav-panel')
-        for group, labels in [('Genomes', ['Pan-genome', 'Genome Browser']),
-                              ('Expression', LABELS[4:8])]:
+        for group, labels in [('Genomes', ['Pan-genome', 'Genome Browser', 'Synteny']),
+                              ('Expression', LABELS[5:9])]:
             control = page.get_by_role('button', name=group, exact=True)
             control.focus()
             page.keyboard.press('Enter')
@@ -178,10 +179,11 @@ def test_dropdown_keyboard_device_links_and_layers(site, browser, tmp_path):
         genomes = page.get_by_role('button', name='Genomes', exact=True)
         genomes.click()
         expect(panel.locator('a').first).to_have_attribute('href', '/pan-genome')
-        expect(panel.locator('a').last).to_have_attribute('href', '/genome-browser')
+        expect(panel.get_by_role('link', name='Genome Browser', exact=True)).to_have_attribute('href', '/genome-browser')
+        expect(panel.locator('a').last).to_have_attribute('href', '/synteny')
         page.get_by_role('button', name='Expression', exact=True).click()
         expect(genomes).to_have_attribute('aria-expanded', 'false')
-        expect(panel.locator('a')).to_have_text(LABELS[4:8])
+        expect(panel.locator('a')).to_have_text(LABELS[5:9])
         page.keyboard.press('Escape')
         upcoming = page.get_by_role('button', name='Coming soon', exact=True)
         expect(upcoming).to_have_text('Coming soon')
@@ -299,3 +301,32 @@ def test_pan_genome_overview_image_and_peer_navigation(site, browser, tmp_path):
         page.get_by_role('button', name='Module navigation', exact=True).click()
         expect(page.locator('.portal-nav-panel [aria-current="page"]')).to_have_text('Genome Browser')
         page.screenshot(path=str(screenshots / 'genomes-compact-menu.png'))
+
+
+@pytest.mark.parametrize('width', [390, 1440])
+def test_synteny_image_and_agent_hint_on_mobile_and_desktop(site, browser, tmp_path, width):
+    from playwright.sync_api import expect
+
+    screenshots = Path(os.getenv('POTATO_NAVIGATION_SCREENSHOTS', str(tmp_path)))
+    screenshots.mkdir(parents=True, exist_ok=True)
+    with browser.new_context(viewport={'width': width, 'height': 1000}) as context:
+        calls = mock_api(context, authenticated=False)
+        page = context.new_page()
+        page.goto(site + '/synteny')
+        expect(page).to_have_url(site + '/synteny')
+        expect(page).to_have_title('Synteny | Potato Research')
+        expect(page.get_by_role('button', name='Ask Potato Agent', exact=True)).to_be_visible()
+        overview = page.locator('.synteny-figure img')
+        expect(overview).to_be_visible()
+        assert overview.evaluate('''image => {
+            const bounds = image.getBoundingClientRect();
+            return image.complete && image.naturalWidth === 2481 && image.naturalHeight === 2567
+                && Math.abs(bounds.width / bounds.height - image.naturalWidth / image.naturalHeight) < 0.01;
+        }''')
+        assert page.evaluate('document.documentElement.scrollWidth <= innerWidth')
+        page.screenshot(path=str(screenshots / f'synteny-full-{width}.png'), full_page=True)
+        expect(page.locator('main a[href*="synteny_plot.png"]')).to_have_count(0)
+        expect(page.locator('.agent-callout p')).to_have_text(
+            'Use Potato Agent to analyze synteny between two genomes and generate plots using data available in PotatoOmics.'
+        )
+        assert not any(path.endswith('/turns') for _, path, _ in calls)
