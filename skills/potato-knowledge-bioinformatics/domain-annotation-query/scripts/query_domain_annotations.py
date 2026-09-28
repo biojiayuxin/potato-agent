@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Query and export the public Potato Agent functional annotation API."""
+"""Query and export protein domain annotations from the current Potato deployment."""
 
 from __future__ import annotations
 
@@ -20,9 +20,28 @@ from pathlib import Path
 from typing import Any, Sequence
 
 
-DEFAULT_BASE_URL = "https://potato-agent.ynnu.edu.cn"
 API_PATH = "/api/genome-annotations"
+INSTALL_BASE_URL_FILE = Path(__file__).resolve().parents[1] / "api-base-url.txt"
 MAX_IDS = 5000
+
+
+def deployment_base_url(override: str | None) -> str:
+    if override is not None:
+        return override
+    for name in ("POTATO_DOMAIN_ANNOTATIONS_BASE_URL", "POTATO_GENOME_ANNOTATIONS_BASE_URL",
+                 "INTERFACE_PUBLIC_BASE_URL"):
+        value = os.getenv(name, "").strip()
+        if value:
+            return value
+    if INSTALL_BASE_URL_FILE.is_file():
+        value = INSTALL_BASE_URL_FILE.read_text(encoding="utf-8").strip()
+        if value:
+            return value
+    raise ValueError(
+        "Deployment URL is not configured. Pass the current site's URL with --base-url, "
+        "set POTATO_DOMAIN_ANNOTATIONS_BASE_URL or INTERFACE_PUBLIC_BASE_URL, "
+        "or configure api-base-url.txt in the skill directory."
+    )
 
 
 def bounded_int(minimum: int, maximum: int):
@@ -44,14 +63,14 @@ def api_root(value: str) -> str:
         raise ValueError("base URL must be an HTTP(S) URL without credentials, query or fragment")
     path = parsed.path.rstrip("/")
     if path not in {"", "/functional-annotation", API_PATH}:
-        raise ValueError("base URL must be the site root, Functional Annotation page or API root")
+        raise ValueError("base URL must be the site root, Domain annotation page or API root")
     return urllib.parse.urlunsplit((parsed.scheme, parsed.netloc, API_PATH, "", ""))
 
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     common = argparse.ArgumentParser(add_help=False)
-    common.add_argument("--base-url", default=os.environ.get("POTATO_GENOME_ANNOTATIONS_BASE_URL", DEFAULT_BASE_URL))
+    common.add_argument("--base-url", help="Current deployment URL; otherwise use deployment environment or api-base-url.txt.")
     common.add_argument("--timeout", type=bounded_int(1, 3600), default=120)
     common.add_argument("--indent", type=bounded_int(0, 8), default=2)
     commands = parser.add_subparsers(dest="command", required=True)
@@ -79,7 +98,7 @@ def build_parser() -> argparse.ArgumentParser:
         sub.add_argument("--go", action="append")
         sub.add_argument("--domain-match", choices=("all", "any"))
         sub.add_argument("--tf-family", action="append")
-        sub.add_argument("--tf-grade", action="append", choices=("A", "B", "C"))
+        sub.add_argument("--tf-grade", action="append", choices=("A", "B", "C", "U"))
         sub.add_argument("--tf-status", choices=("all", "selected", "not_selected", "ambiguous", "unassessable"))
         sub.add_argument("--annotation-status", choices=("all", "hit", "no_match", "no_cds"))
         sub.add_argument("--conflict", choices=("all", "presence", "family", "any"))
@@ -141,10 +160,10 @@ def query_payload(args: argparse.Namespace) -> dict[str, Any]:
 
 def make_request(args: argparse.Namespace, endpoint: str, *, payload: dict[str, Any] | None = None,
                  params: dict[str, Any] | None = None, accept: str = "application/json") -> urllib.request.Request:
-    url = api_root(args.base_url) + "/" + endpoint
+    url = api_root(deployment_base_url(args.base_url)) + "/" + endpoint
     if params:
         url += "?" + urllib.parse.urlencode(params)
-    headers = {"Accept": accept, "User-Agent": "potato-genome-annotation-query/1.0"}
+    headers = {"Accept": accept, "User-Agent": "potato-domain-annotation-query/1.0"}
     body = None
     if payload is not None:
         headers["Content-Type"] = "application/json"
@@ -221,6 +240,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             version = source["data"].get("datasetVersion")
             if not isinstance(version, str) or not version:
                 raise RuntimeError("annotation metadata did not provide a datasetVersion")
+        query["datasetVersion"] = version
         payload = {"query": query, "datasetVersion": version, "format": args.format,
                    "tables": args.table or ["genes"]}
         if args.selected_json:

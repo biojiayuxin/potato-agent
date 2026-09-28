@@ -13,6 +13,7 @@ hermes-agent/.gitattributes
 hermes-agent/.github/
 
 # Sensitive or machine-local deployment files
+skills/potato-knowledge-bioinformatics/domain-annotation-query/api-base-url.txt
 interface/data/interface.db
 interface/data/interface.db-*
 interface/data/archive.db

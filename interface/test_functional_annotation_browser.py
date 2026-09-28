@@ -233,7 +233,7 @@ def test_transcript_load_failure_can_retry_without_hiding_other_isoforms(site, b
         expect(cards.nth(1)).to_contain_text("No domain annotations to display.")
 
 
-def test_cross_page_selection_native_export_and_agent_context(site, browser, tmp_path):
+def test_cross_page_selection_native_export_and_agent_example(site, browser, tmp_path):
     from playwright.sync_api import expect
 
     with browser.new_context(viewport={"width": 1440, "height": 1000}, accept_downloads=True) as context:
@@ -280,10 +280,7 @@ def test_cross_page_selection_native_export_and_agent_context(site, browser, tmp
         from urllib.parse import unquote
         intent = json.loads(unquote(page.url.split("#example=", 1)[1]))
         assert intent["page"] == "functional_annotation"
-        assert '"tfStatus":"selected"' in intent["text"].replace(" ", "")
-        assert "protein domain annotations and TF family names" in intent["text"]
-        assert f"--base-url {site}" in intent["text"]
-        assert all(value in intent["text"] for value in ["test-release", "DM8.2_chr05G00001", "DM8.2_chr05G00021"])
+        assert intent["text"] == "Count the genes annotated as ERF transcription factors in the C88 genome."
 
 
 @pytest.mark.parametrize("legacy_tab", ["tf", "downloads"])

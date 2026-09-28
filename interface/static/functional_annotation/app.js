@@ -114,19 +114,13 @@
     $('search-label').textContent = byId ? 'Exact identifier' : 'Annotation description';
     $('search-input').placeholder = byId ? 'e.g. DM8.2_chr05G25210' : 'e.g. DNA-binding or kinase';
   }
-  function agentContext() {
-    return {baseUrl: location.origin, query: state.query || {}, datasetVersion: state.result?.datasetVersion || state.metadata?.datasetVersion,
-      selection: [...state.selected.values()]};
-  }
   function updateSelection() {
     const selected = state.pageItems.filter(row => state.selected.has(keyFor(row))).length;
     $('select-page').checked = Boolean(selected && selected === state.pageItems.length);
     $('select-page').indeterminate = selected > 0 && selected < state.pageItems.length;
     $('export-selected').textContent = `Export selected (${format(state.selected.size)})`;
     $('export-selected').disabled = !state.result || !state.selected.size;
-    const tooLarge = JSON.stringify(agentContext()).length > 16000;
-    $('ask-potato-agent').disabled = tooLarge || !state.result;
-    $('ask-potato-agent').title = tooLarge ? 'Export this large ID list and attach it in Potato Agent to preserve the full selection.' : '';
+    $('ask-potato-agent').disabled = !state.result;
   }
   function renderReport(report = {}) {
     const node = $('id-report'); node.replaceChildren();
@@ -364,7 +358,7 @@
     $('select-page').addEventListener('change',() => { state.pageItems.forEach(row => { if ($('select-page').checked) state.selected.set(keyFor(row),selectionFor(row)); else state.selected.delete(keyFor(row)); }); renderResults(); });
     $('export-all').addEventListener('click',() => openExport('all')); $('export-selected').addEventListener('click',() => openExport('selected'));
     $('close-export').addEventListener('click',() => $('export-dialog').close()); $('export-form').addEventListener('submit',downloadExport);
-    window.PotatoAgentExamples?.bind('functional_annotation',agentContext);
+    window.PotatoAgentExamples?.bind('functional_annotation');
   }
   async function init() {
     bind(); $('ask-potato-agent').disabled = true;

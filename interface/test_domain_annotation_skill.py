@@ -1,10 +1,16 @@
 from __future__ import annotations
 
+import csv
+import gzip
 import hashlib
 import importlib.util
 import io
 import json
+import shutil
+import subprocess
+import sys
 import threading
+import urllib.error
 import urllib.parse
 import zipfile
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -13,11 +19,19 @@ from pathlib import Path
 import pytest
 
 
-SCRIPT = Path(__file__).resolve().parents[1] / "skills/potato-knowledge-bioinformatics/genome-annotation-query/scripts/query_genome_annotations.py"
-spec = importlib.util.spec_from_file_location("query_genome_annotations", SCRIPT)
+SCRIPT = Path(__file__).resolve().parents[1] / "skills/potato-knowledge-bioinformatics/domain-annotation-query/scripts/query_domain_annotations.py"
+spec = importlib.util.spec_from_file_location("query_domain_annotations", SCRIPT)
 assert spec is not None and spec.loader is not None
 skill = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(skill)
+
+
+@pytest.fixture(autouse=True)
+def isolated_deployment(monkeypatch, tmp_path):
+    for name in ("POTATO_DOMAIN_ANNOTATIONS_BASE_URL", "POTATO_GENOME_ANNOTATIONS_BASE_URL",
+                 "INTERFACE_PUBLIC_BASE_URL"):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setattr(skill, "INSTALL_BASE_URL_FILE", tmp_path / "api-base-url.txt")
 
 
 def export_zip() -> bytes:
@@ -184,9 +198,7 @@ def test_version_error_is_reported_without_creating_output(api_server, tmp_path,
     assert not output.exists()
 
 
-def test_client_base_url_and_input_bounds(monkeypatch):
-    monkeypatch.delenv("POTATO_GENOME_ANNOTATIONS_BASE_URL", raising=False)
-    assert skill.build_parser().parse_args(["metadata"]).base_url == "https://potato-agent.ynnu.edu.cn"
+def test_client_base_url_and_input_bounds():
     for suffix in ("", "/", "/functional-annotation", "/api/genome-annotations"):
         assert skill.api_root("https://example.org" + suffix) == "https://example.org/api/genome-annotations"
     for url in ("file:///tmp/x", "https://user:password@example.org", "https://example.org/?key=x", "https://example.org/other"):
@@ -199,7 +211,54 @@ def test_client_base_url_and_input_bounds(monkeypatch):
         skill.query_payload(args)
 
 
-def test_client_round_trip_against_built_annotation_api(tmp_path, monkeypatch):
+def test_missing_deployment_reports_error_without_network(monkeypatch, capsys):
+    def unexpected_request(*args, **kwargs):
+        pytest.fail("A missing deployment URL must not send an HTTP request")
+
+    monkeypatch.setattr(skill.urllib.request, "urlopen", unexpected_request)
+    assert skill.main(["metadata"]) == 1
+    assert "Deployment URL is not configured" in capsys.readouterr().err
+
+
+def test_deployment_url_precedence_sends_requests_to_selected_site(api_server, monkeypatch):
+    site, requests, _ = api_server
+    skill.INSTALL_BASE_URL_FILE.write_text(site + "/functional-annotation\n")
+    args = skill.build_parser().parse_args(["metadata"])
+    assert skill.run(args)["api_url"] == site + "/api/genome-annotations/metadata"
+
+    # Each higher-priority setting must override the previous, now invalid source.
+    skill.INSTALL_BASE_URL_FILE.write_text("not-a-deployment-url")
+    for name in ("INTERFACE_PUBLIC_BASE_URL", "POTATO_GENOME_ANNOTATIONS_BASE_URL",
+                 "POTATO_DOMAIN_ANNOTATIONS_BASE_URL"):
+        monkeypatch.setenv(name, site)
+        assert skill.run(args)["data"]["datasetVersion"] == "test-release"
+        monkeypatch.setenv(name, "not-a-deployment-url")
+    args = skill.build_parser().parse_args(["metadata", "--base-url", site])
+    assert skill.run(args)["data"]["datasetVersion"] == "test-release"
+    assert len(requests) == 5
+    assert all(request[:2] == ("GET", "/api/genome-annotations/metadata") for request in requests)
+
+
+def test_installed_skill_resolves_config_relative_to_script(api_server, tmp_path):
+    site, requests, _ = api_server
+    installed = tmp_path / "relocated skills/domain-annotation-query"
+    scripts = installed / "scripts"
+    scripts.mkdir(parents=True)
+    script = scripts / SCRIPT.name
+    shutil.copyfile(SCRIPT, script)
+    (installed / "api-base-url.txt").write_text(site + "\n")
+    workdir = tmp_path / "unrelated workdir"
+    workdir.mkdir()
+    (workdir / "api-base-url.txt").write_text("not-a-deployment-url")
+    result = subprocess.run([sys.executable, str(script), "metadata"], cwd=workdir,
+                            capture_output=True, text=True, timeout=10)
+    assert result.returncode == 0, result.stderr
+    assert json.loads(result.stdout)["api_url"] == site + "/api/genome-annotations/metadata"
+    assert requests[0][:2] == ("GET", "/api/genome-annotations/metadata")
+
+
+@pytest.fixture
+def current_annotation_api(tmp_path, monkeypatch):
     from fastapi import FastAPI
     from fastapi.testclient import TestClient
 
@@ -209,8 +268,9 @@ def test_client_round_trip_against_built_annotation_api(tmp_path, monkeypatch):
 
     source = make_source(tmp_path / "source")
     database = tmp_path / "release/annotations.sqlite"
-    build_database(source, database, "test-v1")
+    build_database(source, database, "test-schema3-no-pathways", downloads_dir=database.parent / "downloads")
     monkeypatch.setenv("GENOME_ANNOTATIONS_DB_PATH", str(database))
+    monkeypatch.setenv("INTERFACE_PUBLIC_BASE_URL", "http://testserver")
     app = FastAPI()
     app.include_router(genome_annotations.router)
 
@@ -219,23 +279,93 @@ def test_client_round_trip_against_built_annotation_api(tmp_path, monkeypatch):
             parsed = urllib.parse.urlsplit(request.full_url)
             response = client.request(request.method, parsed.path + ("?" + parsed.query if parsed.query else ""),
                                       content=request.data, headers=dict(request.header_items()))
-            assert response.status_code == 200, response.text
+            if response.status_code >= 400:
+                raise urllib.error.HTTPError(request.full_url, response.status_code, response.reason_phrase,
+                                             response.headers, io.BytesIO(response.content))
             stream = io.BytesIO(response.content)
             stream.headers = response.headers
             return stream
 
         monkeypatch.setattr(skill.urllib.request, "urlopen", open_request)
-        args = skill.build_parser().parse_args(["query", "gene.1", "--signature", "PF03106", "--limit", "1"])
-        response = skill.run(args)["data"]
-        assert response["total"] == 1
-        assert response["items"][0]["matchedTranscriptIds"] == ["gene.1.1"]
-        assert response["items"][0]["isoformPresenceConflict"] is True
-        output = tmp_path / "actual-api.zip"
-        args = skill.build_parser().parse_args(["export", "gene.1", "--signature", "PF03106",
-                                               "--table", "genes", "--table", "domains", "--output", str(output)])
-        result = skill.run(args)
-        assert result["metadata"]["datasetVersion"] == "test-v1"
-        assert result["metadata"]["tableCounts"] == {"genes": 1, "domains": 2}
-        with zipfile.ZipFile(output) as archive:
-            domain_rows = archive.read("domains.tsv").decode().splitlines()
-            assert len(domain_rows) == 3  # Both overlapping source hits are preserved.
+        yield client
+
+
+def run_client(*arguments):
+    return skill.run(skill.build_parser().parse_args(list(arguments)))
+
+
+def test_current_metadata_details_families_and_published_downloads(current_annotation_api):
+    metadata = run_client("metadata")["data"]
+    assert metadata["schemaVersion"] == 3
+    assert metadata["datasetVersion"] == "test-schema3-no-pathways"
+    assembly = metadata["assemblies"][0]["assemblyId"]
+    gene = run_client("gene", "gene.1", "--assembly", assembly)["data"]
+    assert [row["transcriptId"] for row in gene["transcripts"]] == ["gene.1.1", "gene.1.2"]
+    transcript = run_client("transcript", "gene.1.1", "--assembly", assembly)["data"]
+    assert transcript["transcript"]["proteinLength"] == 100
+    assert [hit["start"] for hit in transcript["matches"]] == [10, 25]
+    assert all("pathways" not in hit and "pathway_set_id" not in hit for hit in transcript["matches"])
+    assert transcript["tfEvidence"][0]["signature_accession"] == "PF03106"
+    no_cds = run_client("transcript", "lnc-mRNA-1", "--assembly", assembly)["data"]
+    assert no_cds["transcript"]["annotationStatus"] == "no_cds" and no_cds["matches"] == []
+
+    families = {row["family"]: row for row in run_client("families")["data"]["items"]}
+    assert families["WRKY"]["counts"][0]["genes"] == 1
+    assert families["WOX"]["coverageStatus"] == "requires_unpublished_selfbuilt_hmm"
+    assert families["WOX"]["confidenceGrade"] == "U"
+    query = run_client("query", "--tf-grade", "U")["data"]
+    assert query["query"]["grades"] == ["U"]
+
+    files = run_client("downloads")["data"]["items"]
+    assert len(files) == 7
+    for entry in files:
+        response = current_annotation_api.get(entry["url"])
+        assert response.status_code == 200
+        assert len(response.content) == entry["sizeBytes"]
+        assert hashlib.sha256(response.content).hexdigest() == entry["sha256"]
+        if entry["category"] == "annotations":
+            assert entry["filename"].endswith(".domains.tsv.gz")
+            reader = csv.DictReader(io.StringIO(gzip.decompress(response.content).decode()), delimiter="\t")
+            assert "pathways" not in reader.fieldnames
+            assert next(reader)["signature_accession"] == "PF03106"
+
+
+@pytest.mark.parametrize("format_, delimiter", [("tsv", "\t"), ("csv", ",")])
+def test_client_round_trip_against_built_annotation_api(current_annotation_api, tmp_path, format_, delimiter):
+    response = run_client("query", "gene.1", "--signature", "PF03106", "--database", "Pfam",
+                          "--interpro", "IPR003657", "--go", "GO:0003700", "--tf-family", "WRKY",
+                          "--tf-grade", "A", "--tf-status", "selected", "--conflict", "presence", "--limit", "1")["data"]
+    assert response["total"] == 1
+    assert response["items"][0]["matchedTranscriptIds"] == ["gene.1.1"]
+    assert response["items"][0]["isoformPresenceConflict"] is True
+    output = tmp_path / "actual-api.zip"
+    result = run_client("export", "gene.1", "--signature", "PF03106", "--format", format_,
+                        "--table", "genes", "--table", "transcripts", "--table", "domains",
+                        "--table", "tf_decisions", "--table", "tf_evidence", "--output", str(output))
+    assert result["metadata"]["datasetVersion"] == "test-schema3-no-pathways"
+    assert result["metadata"]["tableCounts"] == {
+        "genes": 1, "transcripts": 1, "domains": 2, "tf_decisions": 1, "tf_evidence": 1,
+    }
+    with zipfile.ZipFile(output) as archive:
+        reader = csv.DictReader(io.StringIO(archive.read(f"domains.{format_}").decode()), delimiter=delimiter)
+        assert "pathways" not in reader.fieldnames and "pathway_set_id" not in reader.fieldnames
+        domain_rows = list(reader)
+        assert [row["start"] for row in domain_rows] == ["10", "25"]
+        assert all(row["go_terms"] == "GO:0003700(Pfam)|GO:0006355" for row in domain_rows)
+
+
+def test_stale_query_requires_explicit_version_override(current_annotation_api, tmp_path, capsys):
+    query = tmp_path / "old-query.json"
+    query.write_text(json.dumps({"ids": ["gene.1"], "datasetVersion": "old-schema2-release"}))
+    output = tmp_path / "updated-export.zip"
+    arguments = ["export", "--query-json", str(query), "--table", "domains", "--output", str(output)]
+    assert skill.main(arguments) == 1
+    assert "HTTP 409" in capsys.readouterr().err
+    assert not output.exists()
+
+    version = run_client("metadata")["data"]["datasetVersion"]
+    result = run_client(*arguments, "--version", version)
+    assert result["metadata"]["datasetVersion"] == version
+    assert result["metadata"]["query"]["datasetVersion"] == version
+    assert result["metadata"]["tableCounts"] == {"domains": 2}
+    assert json.loads(query.read_text())["datasetVersion"] == "old-schema2-release"

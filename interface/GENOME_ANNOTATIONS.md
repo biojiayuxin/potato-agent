@@ -7,7 +7,7 @@ Genomes 菜单中的 **Domain annotation** 页面位于 `/functional-annotation`
 页面提供基因组选择、All genes / Transcription factors 切换、ID/关键词查询和批量 ID。
 选择 Transcription factors 会立即按当前基因组和搜索条件查询（API `tfStatus: selected`），
 切换后从第一页开始并清空旧选择；重置恢复 DMv8.2 的全部基因。每页显示 20 条记录。
-筛选随页面 URL、翻页、导出和智能体交接保留；Export all results 导出全部匹配记录，
+筛选随页面 URL、翻页和导出保留；Export all results 导出全部匹配记录，
 Export selected 导出跨页选中的记录。页面导出选项为基因、转录本和结构域表。
 TF families 和 Downloads & Methods 独立标签页已移除，相关 API 仍供智能体和脚本使用。
 旧标签页链接回到搜索；除 `tfStatus: selected` 外，旧链接中的高级筛选参数不再应用。
@@ -68,7 +68,7 @@ API 详情及结构域导出不再返回 `pathways`；整套注释下载改为 `
 python3 -m interface.build_genome_annotations_db \
   --source-root /mnt/data/potato_agent/work/interproscan-5_genomes-260919 \
   --output-db /tmp/potato-genome-annotation-build/genome_annotations.sqlite \
-  --dataset-version interproscan-5_genomes-260919-v1 \
+  --dataset-version interproscan-5genomes-20260919-tf20260920-no-pathways \
   --downloads-dir /tmp/potato-genome-annotation-build/downloads
 ```
 
@@ -151,7 +151,7 @@ GENOME_ANNOTATIONS_DB_PATH=/tmp/potato-genome-annotation-build/genome_annotation
 ```json
 {
   "query": {"assemblyIds": ["monoploid/DMv8.2"], "view": "genes", "tfFamilies": ["WRKY"]},
-  "datasetVersion": "interproscan-5genomes-20260919-tf20260920",
+  "datasetVersion": "<datasetVersion-from-query>",
   "tables": ["genes", "transcripts", "domains", "tf_decisions", "tf_evidence"],
   "format": "tsv",
   "selection": []
@@ -174,14 +174,16 @@ API 不接受服务器文件路径。版本已变化返回 409，客户端须刷
 
 ## Hermes 客户端与验证
 
-Hermes 托管技能源码位于 `skills/potato-knowledge-bioinformatics/genome-annotation-query/`。
-它只通过 HTTP 访问 API，默认公开 HTTPS 地址；无需凭据、SQLite 访问或专属 Python 包。
+Hermes 托管技能源码位于 `skills/potato-knowledge-bioinformatics/domain-annotation-query/`。
+它只通过 HTTP 访问当前部署的 `/api/genome-annotations`，无需凭据、SQLite 访问或专属 Python 包。
+独立运行以下命令前，先设置 `POTATO_DOMAIN_ANNOTATIONS_BASE_URL` 或 `INTERFACE_PUBLIC_BASE_URL`
+为目标部署的站点根地址；也可在技能根目录提供不纳入版本管理的 `api-base-url.txt`。
 
 ```bash
-python3 skills/potato-knowledge-bioinformatics/genome-annotation-query/scripts/query_genome_annotations.py metadata
-python3 skills/potato-knowledge-bioinformatics/genome-annotation-query/scripts/query_genome_annotations.py \
+python3 skills/potato-knowledge-bioinformatics/domain-annotation-query/scripts/query_domain_annotations.py metadata
+python3 skills/potato-knowledge-bioinformatics/domain-annotation-query/scripts/query_domain_annotations.py \
   query --all-assemblies --tf-family WRKY --tf-status selected --limit 10
-python3 skills/potato-knowledge-bioinformatics/genome-annotation-query/scripts/query_genome_annotations.py \
+python3 skills/potato-knowledge-bioinformatics/domain-annotation-query/scripts/query_domain_annotations.py \
   export --all-assemblies --tf-family WRKY --table genes --table domains \
   --version '<datasetVersion-from-query>' --output ./wrky_annotations.zip
 ```
@@ -189,16 +191,21 @@ python3 skills/potato-knowledge-bioinformatics/genome-annotation-query/scripts/q
 导出在用户自己的工作目录创建 ZIP，不覆盖既有文件；传输失败或收到非 ZIP 响应时清理临时文件。
 成功后输出完整绝对路径、SHA-256、大小和元数据。省略 `--version` 时先读取当前元数据并固定该版本；
 重现先前查询应显式传版本或使用包含 `datasetVersion` 的 `--query-json` 文件。
+确认使用新版数据后，显式 `--version` 同步更新导出请求及其查询对象中的版本；
+未显式改版时保留原查询版本，数据库已更新则返回 409。
 
-开发测试可在命令末尾加 `--base-url http://127.0.0.1:3000`。正常默认保留
-`https://potato-agent.ynnu.edu.cn`；也可临时使用 `POTATO_GENOME_ANNOTATIONS_BASE_URL`，不要持久化测试地址。
-页面的 “Ask Potato Agent” 请求会携带当前站点地址，要求客户端用 `--base-url` 访问相同部署。
-使用内网或 ZeroTier 入口时，可显式传入该入口地址；不同入口可能运行不同数据版本。
+页面的 “Ask Potato Agent” 提供简短示例：统计 C88 基因组中被注释为 ERF 转录因子的基因数量。
+提示词不附带页面筛选、所选记录或版本信息。智能体使用部署配置的 `domain-annotation-query` 技能查询。
+脚本不内置域名或 IP，API 路径相对于提供的站点解析。
+地址优先级为 `--base-url`、`POTATO_DOMAIN_ANNOTATIONS_BASE_URL`（兼容旧变量
+`POTATO_GENOME_ANNOTATIONS_BASE_URL`）、`INTERFACE_PUBLIC_BASE_URL`、技能目录下的 `api-base-url.txt`。
+配置文件按脚本位置解析，切换工作目录不影响读取；完全未配置时明确报错。
+测试或迁移时提供目标部署地址，不将开发服务器地址写入源码；不同入口可能运行不同数据版本。
 
 客户端回归命令：
 
 ```bash
-python -m pytest interface/test_genome_annotation_skill.py -q
+python -m pytest interface/test_domain_annotation_skill.py -q
 ```
 
 测试使用临时本机 HTTP 服务，覆盖精确 ID/筛选传递、版本固定、带空格路径、原子下载、并发文件冲突、

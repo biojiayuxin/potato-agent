@@ -1,7 +1,7 @@
 ---
-name: genome-annotation-query
-description: 通过 Potato Agent 公开 API 查询和导出 DMv8.2、E4-63、A6-26、Des、C88 五个马铃薯基因组的蛋白结构域、InterPro、GO 和转录因子鉴定。支持精确基因/转录本/全局蛋白 ID、批量 ID、结构域组合、TF 家族与等级筛选、完整 ZIP 表格导出；无需登录或本地数据库。
-version: 1.0.0
+name: domain-annotation-query
+description: 查询 Domain annotation 页面的已有蛋白结构域、InterPro/GO 和转录因子注释，支持五个马铃薯基因组的精确或批量 ID 查询、结构域组合筛选及表格导出。通过当前部署的公开 API 访问，无需登录；不用于基因结构预测或重新注释。
+version: 1.1.1
 author: Potato Agent
 license: MIT
 metadata:
@@ -12,12 +12,15 @@ prerequisites:
   commands: [python3]
 ---
 
-# Genome Annotation Query
+# Domain Annotation Query
 
-使用公开只读 API 查询已有的五基因组注释和 TF 鉴定。页面为
-`https://potato-agent.ynnu.edu.cn/functional-annotation`，API 根地址为
-`https://potato-agent.ynnu.edu.cn/api/genome-annotations`。
+使用当前部署的公开只读 API 查询已有的蛋白结构域注释和 TF 鉴定。
+页面路径为 `/functional-annotation`，API 路径为 `/api/genome-annotations`，均相对于当前站点。
 脚本只依赖 Python 标准库。不要抓取网页、直接打开服务器 SQLite、读取用户工作目录或重新运行注释。
+
+页面的 “Ask Potato Agent” 提供简短示例，不附带当前筛选、选择或站点地址。
+运行脚本前，按文末“部署地址”配置当前站点；上下文明确提供站点地址时，
+用 `--base-url` 指定，确保查询和导出来自同一部署。
 
 ## 何时使用
 
@@ -25,7 +28,7 @@ prerequisites:
 - 筛选具有某些结构域或 TF 家族的记录，比较五个基因组中的家族计数。
 - 导出基因汇总、转录本汇总、全部结构域明细、TF 判定或 TF 证据表。
 
-输入新 FASTA、运行 InterProScan、重新鉴定 TF、提取序列和表达分析不属于本技能。
+基因结构预测、输入新 FASTA、运行 InterProScan、重新鉴定 TF、提取序列和表达分析不属于本技能。
 
 ## 数据解读规则
 
@@ -40,13 +43,16 @@ prerequisites:
 9. 查询分页的 `returned` 和 `items` 长度只表示当前页，全部数量读取 `total`。依据 `hasMore` 和 `offset` 继续查询；需要大量结果时用导出，不要把几千行放入对话。
 10. 检查 `idReport.unmatchedIds`、`ambiguousIds`、`filteredIds`；分别报告找不到、跨材料歧义和被筛选排除的输入，不能默默丢弃。
 
+当前数据库接口为 schema 3（`metadata.schemaVersion`）。结构域详情、导出和整套下载
+均已移除 `pathways`，不再查询或补齐该字段；实际数据发布版本读取 `datasetVersion`。
+
 ## 命令
 
 Hermes 将 `${HERMES_SKILL_DIR}` 展开为本技能目录。
 
 ```bash
-python3 "${HERMES_SKILL_DIR}/scripts/query_genome_annotations.py" metadata
-python3 "${HERMES_SKILL_DIR}/scripts/query_genome_annotations.py" --help
+python3 "${HERMES_SKILL_DIR}/scripts/query_domain_annotations.py" metadata
+python3 "${HERMES_SKILL_DIR}/scripts/query_domain_annotations.py" --help
 ```
 
 当前五个规范 assembly ID：`monoploid/DMv8.2`、`monoploid/E4-63`、`monoploid/A6-26`、
@@ -56,36 +62,38 @@ python3 "${HERMES_SKILL_DIR}/scripts/query_genome_annotations.py" --help
 精确 ID 查询、基因详情和转录本详情：
 
 ```bash
-python3 "${HERMES_SKILL_DIR}/scripts/query_genome_annotations.py" query DM8.2_chr01G00010
-python3 "${HERMES_SKILL_DIR}/scripts/query_genome_annotations.py" gene DM8.2_chr01G00010 \
+python3 "${HERMES_SKILL_DIR}/scripts/query_domain_annotations.py" query DM8.2_chr01G00010
+python3 "${HERMES_SKILL_DIR}/scripts/query_domain_annotations.py" gene DM8.2_chr01G00010 \
   --assembly monoploid/DMv8.2
-python3 "${HERMES_SKILL_DIR}/scripts/query_genome_annotations.py" transcript '<exact-transcript-id>' \
+python3 "${HERMES_SKILL_DIR}/scripts/query_domain_annotations.py" transcript '<exact-transcript-id>' \
   --assembly monoploid/DMv8.2
 ```
 
 批量 ID 从本地 UTF-8 TXT 读取，允许换行、空格、逗号或分号分隔，最多 5,000 个去重后的精确 ID：
 
 ```bash
-python3 "${HERMES_SKILL_DIR}/scripts/query_genome_annotations.py" query \
+python3 "${HERMES_SKILL_DIR}/scripts/query_domain_annotations.py" query \
   --ids-file ./genes.txt --all-assemblies --limit 50 --offset 0
 ```
 
 结构域和 TF 筛选：
 
 ```bash
-python3 "${HERMES_SKILL_DIR}/scripts/query_genome_annotations.py" query \
+python3 "${HERMES_SKILL_DIR}/scripts/query_domain_annotations.py" query \
   --all-assemblies --signature PF03106 --database Pfam --view transcripts
-python3 "${HERMES_SKILL_DIR}/scripts/query_genome_annotations.py" query \
+python3 "${HERMES_SKILL_DIR}/scripts/query_domain_annotations.py" query \
   --tf-family WRKY --tf-status selected --tf-grade A --tf-grade B
-python3 "${HERMES_SKILL_DIR}/scripts/query_genome_annotations.py" query \
+python3 "${HERMES_SKILL_DIR}/scripts/query_domain_annotations.py" query \
   --annotation-status no_cds --limit 10
-python3 "${HERMES_SKILL_DIR}/scripts/query_genome_annotations.py" families
+python3 "${HERMES_SKILL_DIR}/scripts/query_domain_annotations.py" families
 ```
 
 其他筛选包括 `--text`、`--interpro`、`--go`、`--domain-match all|any`、
 `--tf-status all|selected|not_selected|ambiguous|unassessable`、
 `--annotation-status all|hit|no_match|no_cds` 和 `--conflict all|presence|family|any`。
 结构域、InterPro、GO、TF 家族和等级参数可重复。
+`--tf-grade` 接受当前 API 的 `A`、`B`、`C`、`U`；`U` 表示规则覆盖不可判定，
+该等级查询无记录不能解释为对应家族不存在，应结合 `families` 的覆盖信息。
 使用 `--database` 指定应用时，结构域、InterPro 和 GO 筛选证据必须来自这些应用。
 
 ## 完整导出
@@ -96,7 +104,7 @@ ZIP 同时包含 `metadata.json`，记录版本、查询条件和统计；批量
 `domains` 包含匹配转录本的全部原始命中，并标记哪些命中满足结构域筛选。
 
 ```bash
-python3 "${HERMES_SKILL_DIR}/scripts/query_genome_annotations.py" export \
+python3 "${HERMES_SKILL_DIR}/scripts/query_domain_annotations.py" export \
   --all-assemblies --tf-family WRKY --tf-status selected \
   --version '<datasetVersion-from-query>' \
   --table genes --table transcripts --table domains --table tf_decisions --table tf_evidence \
@@ -110,14 +118,15 @@ python3 "${HERMES_SKILL_DIR}/scripts/query_genome_annotations.py" export \
 从网页或先前查询保存的**查询对象**重现导出：
 
 ```bash
-python3 "${HERMES_SKILL_DIR}/scripts/query_genome_annotations.py" query --query-json ./query.json
-python3 "${HERMES_SKILL_DIR}/scripts/query_genome_annotations.py" export \
+python3 "${HERMES_SKILL_DIR}/scripts/query_domain_annotations.py" query --query-json ./query.json
+python3 "${HERMES_SKILL_DIR}/scripts/query_domain_annotations.py" export \
   --query-json ./query.json --version '<datasetVersion-from-query>' --output ./annotations.zip
 ```
 
 `query.json` 是 API 的 `query` 对象，不是整份脚本响应。命令行显式筛选覆盖对应字段。
 如果省略 `--version`，优先使用查询对象中的 `datasetVersion`，否则先读取当前元数据，再请求该版本的导出。
 为保证与先前查询一致，始终优先传入查询响应的版本。版本切换返回 HTTP 409 时，重新查询并确认新结果。
+确认使用新版数据后，显式 `--version` 会同时更新导出请求和查询对象中的版本，避免旧 JSON 版本冲突。
 
 只导出勾选记录时加 `--selected-json ./selection.json`，文件内容示例：
 
@@ -127,7 +136,8 @@ python3 "${HERMES_SKILL_DIR}/scripts/query_genome_annotations.py" export \
 
 转录本视图使用 `transcriptId` 代替 `geneId`，并保持与原查询的 `view` 一致。选择的记录仍受查询条件约束。
 
-运行 `downloads` 可查看原始发布文件清单、大小及 SHA-256；只使用 API 返回的下载地址。
+运行 `downloads` 可查看当前发布文件清单、大小及 SHA-256。结构域文件为 `*.domains.tsv.gz`，
+已移除 Pathways；只使用 API 返回的下载地址，不拼接旧版 `*.interproscan.tsv.gz` 文件地址。
 
 ## API 与错误
 
@@ -140,10 +150,23 @@ python3 "${HERMES_SKILL_DIR}/scripts/query_genome_annotations.py" export \
 | `export` | `POST /export` |
 | `downloads` | `GET /downloads` |
 
+网页已移除 TF families 和 Downloads & Methods 独立标签页，但 `/tf-families`、`/downloads`
+及 API 的 TF 判定、证据导出仍有效。脚本的 JSON 导出使用 `/export`；`/export-download` 是网页表单适配器。
+
 普通查询输出 `{"api_url":"实际 URL","data":{…API 响应…}}`；导出输出路径和元数据。
 HTTP 400/422 表示参数不正确，404 表示指定记录不存在，409 表示版本不一致，503 表示数据暂不可用。
 遇到错误报告真实状态；不要猜测注释，也不要回退读取未经发布的本地表格。
 
-只有测试其他部署时使用 `--base-url` 或 `POTATO_GENOME_ANNOTATIONS_BASE_URL`；命令行优先。
-可以传站点根地址、`/functional-annotation` 页面地址或 `/api/genome-annotations` API 根地址。
-默认始终保留公开 HTTPS 地址，不需要 API key 或 Potato Agent 登录凭证。
+## 部署地址
+
+脚本将 `/api/genome-annotations` 拼接到当前部署的站点地址，不内置域名或服务器 IP。
+Python HTTP 客户端没有浏览器的当前站点上下文，地址按以下优先级读取：
+
+1. 命令行 `--base-url`（显式提供目标部署地址）。
+2. `POTATO_DOMAIN_ANNOTATIONS_BASE_URL`；兼容旧变量 `POTATO_GENOME_ANNOTATIONS_BASE_URL`。
+3. 部署环境变量 `INTERFACE_PUBLIC_BASE_URL`。
+4. 技能根目录的 `api-base-url.txt`，只写实际站点根地址；文件位置相对于脚本解析，不依赖工作目录。
+
+支持站点根地址、`/functional-annotation` 页面地址或 `/api/genome-annotations` API 根地址。
+部署配置文件不提交到代码仓库。迁移部署时由目标环境提供地址；未配置时脚本报错，
+不要猜测地址或使用开发服务器地址回退。不需要 API key 或 Potato Agent 登录凭证。
