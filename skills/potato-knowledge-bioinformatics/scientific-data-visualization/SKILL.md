@@ -1,7 +1,7 @@
 ---
 name: scientific-data-visualization
-description: "Use when turning scientific or experimental data into publication-ready vector PDF figures, including boxplots and violin plots with a two-sided Student's t-test, numeric-matrix heatmaps, and 2–4 set Venn diagrams. The final user-facing figure is PDF."
-version: 2.0.0
+description: "Use when turning scientific or experimental data into publication-ready vector PDF figures, including boxplots, violin plots, and mean ± SD barplots with a two-sided Student's t-test, numeric-matrix heatmaps, and 2–4 set Venn diagrams. The final user-facing figure is PDF."
+version: 2.1.0
 author: Potato Agent
 license: MIT
 platforms: [linux]
@@ -9,7 +9,7 @@ prerequisites:
   commands: [python3, Rscript, pdfinfo, pdffonts, pdfimages, pdftoppm]
 metadata:
   hermes:
-    tags: [scientific-plotting, data-visualization, publication-figures, statistics, boxplot, violin-plot, heatmap, venn-diagram]
+    tags: [scientific-plotting, data-visualization, publication-figures, statistics, boxplot, violin-plot, barplot, heatmap, venn-diagram]
     category: potato-knowledge-bioinformatics
 ---
 
@@ -17,7 +17,7 @@ metadata:
 
 ## 目标
 
-将科研数据转换为可复现、适合论文或报告使用的图形。该技能是一个可持续扩展的科研绘图库：当前提供 Excel 箱线图和小提琴图、数值矩阵热图，以及支持 2–4 组数据的韦恩图脚本；后续可继续在 `scripts/` 中加入散点图、柱状图、折线图、火山图及其他绘图脚本。
+将科研数据转换为可复现、适合论文或报告使用的图形。该技能是一个可持续扩展的科研绘图库：当前提供 Excel 箱线图、小提琴图和柱状图、数值矩阵热图，以及支持 2–4 组数据的韦恩图脚本；后续可继续在 `scripts/` 中加入散点图、折线图、火山图及其他绘图脚本。
 
 ## 目录约定
 
@@ -28,7 +28,7 @@ Hermes 加载本文件时会将 `${HERMES_SKILL_DIR}` 展开为当前技能的�
 
 ## 运行依赖
 
-- 箱线图和小提琴图：Python 3，以及 `matplotlib`、`numpy`、`pandas`、`scipy`、`openpyxl`。
+- 箱线图、小提琴图和柱状图：Python 3，以及 `matplotlib`、`numpy`、`pandas`、`scipy`、`openpyxl`。
 - 热图：Python 3，以及 `matplotlib`、`numpy`、`pandas`。
 - 韦恩图：R、R 包 `VennDiagram` 和 `futile.logger`，以及 R 的 Cairo 图形支持。
 - PDF 验证和临时预览：Poppler 命令 `pdfinfo`、`pdffonts`、`pdfimages`、`pdftoppm`。
@@ -123,7 +123,38 @@ python3 "${HERMES_SKILL_DIR}/scripts/violin_from_excel.py" \
   --preview outputs/example_violinplots_preview.png
 ```
 
-### 3. `scripts/venn_from_tsv.R`
+### 3. `scripts/barplot_from_excel.py`
+
+**用途与输入**
+
+从 Excel 工作簿读取一个或多个工作表，绘制均值柱状图面板，并组合为单个正式矢量 PDF。直接复用箱线图的示例数据和 JSON 配置：每个工作表对应一个面板，每列对应一个实验组，每行是一个观测值；不接受仅有均值和误差的汇总表作为原始观测数据。
+
+**主要功能**
+
+- 柱高为组均值，误差线为样本标准差（SD，`ddof=1`），默认叠加固定随机种子的原始数据抖动散点；设置 `show_points: false` 可隐藏散点。
+- 复用箱线图的数据读取、双侧 Student's t-test（`equal_var=True`）、P 值括号和统计摘要函数；同一输入的检验结果与箱线图一致。
+- 自动纵轴范围包含零基线、原始数据和完整误差线，P 值括号位于数据和误差线上方；手动设置 `y_min` / `y_max` 时也必须包含零基线，并检查误差线和标注未被裁切。
+- 默认图注明确标识检验方法和 `mean ± SD`；可通过 `barplot_footer` 自定义图注，并保留统计方法及误差线含义。
+- 自动创建输出目录，输出矢量 PDF、统计 TSV 和可选 PNG 预览。TSV 的 `mean`、`sd` 即柱高与误差线半长，其余字段与箱线图一致。
+
+**统计限制**
+
+每个工作表必须恰好两组，每组至少两个有限数值。检验基于原始观测值，固定为独立样本、等方差、双侧 Student's t-test；不支持配对或多组比较，也不执行跨面板多重检验校正。
+
+**Hermes 用法**
+
+```bash
+mkdir -p outputs
+python3 "${HERMES_SKILL_DIR}/scripts/barplot_from_excel.py" \
+  "${HERMES_SKILL_DIR}/references/example_boxplot_data.xlsx" \
+  outputs/example_barplots.pdf \
+  --config "${HERMES_SKILL_DIR}/references/example_boxplot_config.json" \
+  --stats-file outputs/example_barplots_stats.tsv
+```
+
+省略 `--config` 时绘制全部工作表；省略 `--stats-file` 时输出同名 `.stats.tsv`。如需内部预览，可增加 `--preview outputs/example_barplots_preview.png`。
+
+### 4. `scripts/venn_from_tsv.R`
 
 **用途**
 
@@ -168,7 +199,7 @@ Rscript "${HERMES_SKILL_DIR}/scripts/venn_from_tsv.R" \
 
 2 组和 3 组的示例参数见 `references/example_venn_data_notes.md`。
 
-### 4. `scripts/heatmap_from_tsv.py`
+### 5. `scripts/heatmap_from_tsv.py`
 
 **用途**
 
@@ -216,13 +247,13 @@ python3 "${HERMES_SKILL_DIR}/scripts/heatmap_from_tsv.py" \
 
 ## 示例数据
 
-### 1. 箱线图与小提琴图示例
+### 1. 箱线图、小提琴图与柱状图示例
 
 - 共用数据：`references/example_boxplot_data.xlsx`
 - 共用配置：`references/example_boxplot_config.json`
 - 说明：`references/example_boxplot_data_notes.md`
 
-箱线图和小提琴图复用同一工作簿与配置，以保持面板、组顺序、配色和双侧 Student's t-test 一致。示例材料均为合成、脱敏数据，仅用于演示输入结构、统计流程和绘图命令，不应解释为真实生物学结果。
+箱线图、小提琴图和柱状图复用同一工作簿与配置，以保持面板、组顺序、配色和双侧 Student's t-test 一致。示例材料均为合成、脱敏数据，仅用于演示输入结构、统计流程和绘图命令，不应解释为真实生物学结果。
 
 ### 2. 韦恩图示例
 
@@ -245,10 +276,13 @@ python3 "${HERMES_SKILL_DIR}/scripts/heatmap_from_tsv.py" \
 ```bash
 pdfinfo outputs/example_boxplots.pdf
 pdfinfo outputs/example_violinplots.pdf
+pdfinfo outputs/example_barplots.pdf
 pdfinfo outputs/example_venn_4sets.pdf
 pdfinfo outputs/example_heatmap.pdf
 pdffonts outputs/example_boxplots.pdf
+pdffonts outputs/example_barplots.pdf
 pdfimages -list outputs/example_violinplots.pdf
+pdfimages -list outputs/example_barplots.pdf
 pdfimages -list outputs/example_heatmap.pdf
 ```
 
@@ -264,6 +298,10 @@ pdftoppm -png -singlefile -r 180 \
   outputs/example_violinplots_rendered
 
 pdftoppm -png -singlefile -r 180 \
+  outputs/example_barplots.pdf \
+  outputs/example_barplots_rendered
+
+pdftoppm -png -singlefile -r 180 \
   outputs/example_venn_4sets.pdf \
   outputs/example_venn_4sets_rendered
 
@@ -274,14 +312,14 @@ pdftoppm -png -singlefile -r 180 \
 
 ## 应用于新数据
 
-### 1. 箱线图与小提琴图
+### 1. 箱线图、小提琴图与柱状图
 
 1. 检查 Excel 工作表名、列名、缺失值、样本量和数值类型；小提琴图还要求每组至少两个非恒定数值。
 2. 确认实验单位与重复结构：独立、配对、区组、批次或重复测量。
 3. 以 `${HERMES_SKILL_DIR}/references/example_boxplot_config.json` 为参考，在用户工作目录创建配置，使 `sheet` 与实际工作表名一致，并设置准确的 `title` 和 `y_label`。
 4. 脚本固定使用双侧 Student's t-test（`equal_var=True`）。运行前确认两组独立且等方差假设可接受；不满足时说明本脚本的统计限制，不要静默更换检验。
 5. 使用 `${HERMES_SKILL_DIR}` 定位绘图脚本，并在用户工作目录保留 PDF、统计 TSV 和配置。
-6. 打开或渲染正式 PDF，核对标签、P 值、配色、密度轮廓、裁切、字体和版式。
+6. 打开或渲染正式 PDF，核对标签、P 值、配色、裁切、字体和版式；小提琴图核对密度轮廓，柱状图核对均值、SD 误差线和零基线。
 
 ### 2. 韦恩图
 
@@ -324,7 +362,8 @@ pdftoppm -png -singlefile -r 180 \
 
 - [ ] 技能内脚本和参考数据使用 `${HERMES_SKILL_DIR}` 定位，输出写入用户工作目录
 - [ ] 输入工作表、列和数值数量经过检查
-- [ ] 箱线图与小提琴图复用示例数据、配置和颜色，检验固定为双侧 Student's t-test
+- [ ] 箱线图、小提琴图与柱状图复用示例数据、配置和颜色，检验固定为双侧 Student's t-test
+- [ ] 柱状图的柱高为均值、误差线为样本 SD，纵轴包含零基线，图注注明 `mean ± SD`
 - [ ] 韦恩图限定为 2–4 个非空集合，组内 ID 已去重，并核对集合大小、并集和全部互斥区域计数
 - [ ] 默认配色顺序为柔和的红、绿、蓝、黄；四组图的四个椭圆长短轴完全一致
 - [ ] 热图已按当前数据检查行列数、极值、标签和注释密度；默认最低值为 `#0000FF`、最高值为 `#FF0000`，且未把 8 × 4 示例当作固定模板
