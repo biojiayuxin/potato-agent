@@ -201,6 +201,32 @@ model:
         client.close()
 
 
+def test_new_user_starts_with_fast_and_can_keep_a_different_selection(monkeypatch) -> None:
+    from interface.hermes_service import build_config_data
+
+    client, app_mod, _, hermes_home = _build_client_and_user(monkeypatch)
+    try:
+        config = app_mod.mapping_store.load_config(resolve_env=True)
+        target = app_mod.mapping_store.get_target_by_username("alice")
+        (hermes_home / "config.yaml").write_text(
+            yaml.safe_dump(build_config_data(config, target, for_new_user=True)),
+            encoding="utf-8",
+        )
+
+        response = client.get("/api/models")
+        assert response.status_code == 200, response.text
+        assert response.json()["active_id"] == "fast"
+        assert response.json()["primary_id"] == "primary"
+
+        response = client.put("/api/models/active", json={"id": "primary"})
+        assert response.status_code == 200, response.text
+        response = client.get("/api/models")
+        assert response.status_code == 200, response.text
+        assert response.json()["active_id"] == "primary"
+    finally:
+        client.close()
+
+
 def test_get_models_reads_active_model_through_helper_when_not_root(monkeypatch) -> None:
     client, interface_app_mod, _, _ = _build_client_and_user(monkeypatch)
     calls: list[str] = []

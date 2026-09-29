@@ -1402,6 +1402,7 @@ const MODEL_DISPLAY_NAME_OVERRIDES = {
   'gpt-5.6-sol': 'Deep',
   'deep-backup': 'Deep-backup',
   'gpt-5.6-terra': 'Fast',
+  'gpt-6-sol': 'Fast',
 };
 
 const MODEL_DISPLAY_ORDER = [

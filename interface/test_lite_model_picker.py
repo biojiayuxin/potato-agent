@@ -16,6 +16,7 @@ def test_model_picker_uses_deep_backup_and_fast_display_names() -> None:
     assert "'gpt-5.6-sol': 'Deep'" in display_config
     assert "'deep-backup': 'Deep-backup'" in display_config
     assert "'gpt-5.6-terra': 'Fast'" in display_config
+    assert "'gpt-6-sol': 'Fast'" in display_config
     assert (
         "const MODEL_DISPLAY_ORDER = [\n"
         "  'Deep',\n"

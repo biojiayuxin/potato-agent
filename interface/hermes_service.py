@@ -352,7 +352,9 @@ def build_env_content(user: HermesTarget) -> str:
     return "\n".join(lines).rstrip() + "\n"
 
 
-def build_config_data(config: dict[str, Any], user: HermesTarget) -> dict[str, Any]:
+def build_config_data(
+    config: dict[str, Any], user: HermesTarget, *, for_new_user: bool = False
+) -> dict[str, Any]:
     config = resolve_env_placeholders(deepcopy(config), "interface.hermes_config")
     hermes_cfg = config.get("hermes") or {}
     terminal_cfg = deepcopy(hermes_cfg.get("terminal") or {})
@@ -360,7 +362,10 @@ def build_config_data(config: dict[str, Any], user: HermesTarget) -> dict[str, A
 
     data: dict[str, Any] = {}
     try:
-        active_option = normalize_model_options(config).primary
+        model_options = normalize_model_options(config)
+        active_option = (
+            model_options.new_user_default if for_new_user else model_options.primary
+        )
     except Exception:
         model_cfg = deepcopy(hermes_cfg.get("model") or {})
         active_option = None
@@ -389,6 +394,13 @@ def build_config_data(config: dict[str, Any], user: HermesTarget) -> dict[str, A
     data["approvals"] = {"mode": DEFAULT_APPROVAL_MODE}
 
     deep_merge(data, global_overrides)
+    if for_new_user and active_option is not None:
+        # A new user's Fast option must not inherit the primary model's settings.
+        data["agent"]["reasoning_effort"] = active_option.reasoning_effort
+        if active_option.context_length is not None:
+            auxiliary = data.setdefault("auxiliary", {})
+            compression = auxiliary.setdefault("compression", {})
+            compression["context_length"] = active_option.context_length
     deep_merge(data, deepcopy(user.config_overrides))
 
     model = data.get("model")
@@ -592,7 +604,9 @@ def install_user_runtime_files(config: dict[str, Any], user: HermesTarget) -> No
         user,
         config_path,
         yaml.safe_dump(
-            build_config_data(config, user), sort_keys=False, allow_unicode=False
+            build_config_data(config, user, for_new_user=True),
+            sort_keys=False,
+            allow_unicode=False,
         ),
     )
     install_soul_file(user, password_entry=pw)

@@ -510,8 +510,18 @@ def test_build_systemd_unit_uses_configured_gateway_drain_timeout() -> None:
     assert "TimeoutStopSec=75" in unit
 
 
+@pytest.mark.parametrize(
+    "fast_identity",
+    [
+        None,
+        {"id": "fast", "name": "Quick", "model": "quick-model"},
+        {"id": "optional", "name": "Fast", "model": "quick-model"},
+        {"id": "optional", "model": "gpt-5.6-terra"},
+        {"id": "optional", "model": "gpt-6-sol"},
+    ],
+)
 def test_install_user_runtime_files_writes_only_user_runtime_paths(
-    monkeypatch, tmp_path
+    monkeypatch, tmp_path, fast_identity
 ) -> None:
     user = HermesTarget(
         username="alice",
@@ -560,24 +570,49 @@ def test_install_user_runtime_files_writes_only_user_runtime_paths(
         public_data,
     )
 
-    install_user_runtime_files(
-        {
-            "hermes": {
-                "model": {
-                    "provider": "custom",
-                    "default": "gpt-5.5",
-                    "base_url": "https://primary.example/v1",
-                    "api_key": "sk-user",
-                }
+    config = {
+        "hermes": {
+            "model": {
+                "provider": "custom",
+                "default": "gpt-5.5",
+                "base_url": "https://primary.example/v1",
+                "api_key": "sk-user",
             }
-        },
-        user,
-    )
+        }
+    }
+    expected_model = "gpt-5.5"
+    if fast_identity is not None:
+        config["hermes"]["model_options"] = {
+            "primary": "deep",
+            "options": [
+                {"id": "deep", "name": "Deep", "model": "gpt-5.6-sol"},
+                {
+                    **fast_identity,
+                    "context_length": 500000,
+                    "reasoning_effort": "medium",
+                    "api_mode": "chat_completions",
+                },
+            ],
+        }
+        config["hermes"]["config_overrides"] = {
+            "agent": {"reasoning_effort": "xhigh"},
+            "auxiliary": {"compression": {"context_length": 1000000}},
+        }
+        expected_model = fast_identity.get("name", fast_identity["model"])
+        # Explicit administrator updates still use the configured primary model.
+        assert build_config_data(config, user)["model"]["default"] == "Deep"
+
+    install_user_runtime_files(config, user)
 
     env_body = (user.hermes_home / ".env").read_text(encoding="utf-8")
     config_body = (user.hermes_home / "config.yaml").read_text(encoding="utf-8")
     config_data = yaml.safe_load(config_body)
-    assert config_data["model"]["default"] == "gpt-5.5"
+    assert config_data["model"]["default"] == expected_model
+    if fast_identity is not None:
+        assert config_data["model"]["api_mode"] == "chat_completions"
+        assert config_data["model"]["context_length"] == 500000
+        assert config_data["agent"]["reasoning_effort"] == "medium"
+        assert config_data["auxiliary"]["compression"]["context_length"] == 500000
     assert config_data["agent"]["environment_hint"] == DEFAULT_ENVIRONMENT_HINT
     assert "OPENAI_API_KEY" not in env_body
     assert "sk-user" not in env_body

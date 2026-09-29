@@ -349,6 +349,29 @@ python -m interface.build_genome_feature_index \
 
 - Lite 前端默认已切换到 `tui_gateway` 聊天主链路
 - Lite 前端不再保留浏览器侧 `api_server` 回退开关，聊天固定走 `tui_gateway`
+- 新用户（含临时用户）生成 Hermes 配置时优先使用模型白名单中的 Fast：按 id、name 或 model
+  匹配 `fast`（不区分大小写），同时兼容页面使用的 `gpt-5.6-terra` / `gpt-6-sol` 别名；未配置 Fast 时使用
+  `hermes.model_options.primary`。初始推理强度和压缩上下文长度跟随所选模型，用户级
+  `config_overrides` 仍可显式覆盖。页面读取后端保存的 active model，已有用户登录或新建聊天时
+  继续使用其已保存的选择。管理员使用 `configure_model_proxy.py --apply-to-users` 时仍按配置的
+  primary 更新用户模型。
+
+只将现有 Fast 升级为 `gpt-6-sol` / `xhigh`，使用根目录 `update_fast_model.py`：
+
+```bash
+sudo /opt/interface-env/bin/python update_fast_model.py
+sudo /opt/interface-env/bin/python update_fast_model.py --apply
+```
+
+第一条只输出脱敏预览，第二条保存私有备份后同步修改 mapping、proxy，以及当前选中 Fast 的用户的
+模型名称及推理强度。Fast 路由名和用户 `model.default` 同步为 `gpt-6-sol`，使用户读取配置和
+系统提示词中的模型名称与实际请求一致。Fast 的 id、上下文长度、API 响应模式、压缩配置和上游凭据保留；已有 Deep
+用户的配置不变。若上下文长度未明确配置，或压缩模型未指定 / 指向 Fast，脚本会停止写入，要求先确认
+原值，避免升级主模型时连带改变压缩模型。脚本不重启服务；正在运行的 Fast runtime 应在回复结束后
+重建以加载新的模型名称和推理强度；修改路由名时应先停止使用旧路由的 runtime。
+脚本不会验证上游对新模型的支持。
+若确认要保留压缩跟随 Fast 的策略（压缩也随之使用 `gpt-6-sol`），执行时加
+`--keep-compression-policy`；上下文长度和响应模式仍沿用原配置。
 
 ### 已验证的最小 bridge 探针
 

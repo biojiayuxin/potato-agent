@@ -118,6 +118,15 @@ class ModelOptions:
             raise ModelOptionsError("Primary model option is missing.")
         return option
 
+    @property
+    def new_user_default(self) -> ModelOption:
+        # Match the Fast label and the legacy model alias used by the Lite picker.
+        for option in self.options:
+            keys = {value.casefold() for value in (option.id, option.name, option.model)}
+            if keys & {"fast", "gpt-5.6-terra", "gpt-6-sol"}:
+                return option
+        return self.primary
+
     def get(self, option_id: str) -> ModelOption | None:
         normalized_id = str(option_id or "").strip()
         for option in self.options:
