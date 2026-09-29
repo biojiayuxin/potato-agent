@@ -48,7 +48,7 @@ def test_pan_genome_page_serves_canonical_static_page() -> None:
     try:
         response = client.get("/pan-genome", follow_redirects=False)
         assert response.status_code == 200
-        assert "Pan-genome | Potato Research" in response.text
+        assert "Pan-genome | PotatoOmics" in response.text
         assert 'data-portal-module="pan_genome"' in response.text
         assert "Genome accessions" in response.text
         assert "/static/pan_genome/assets/pan-genome.png" in response.text

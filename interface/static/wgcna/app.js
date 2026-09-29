@@ -40,7 +40,7 @@ const GRAPH_LOADING_MESSAGE = 'Loading networks';
 const DETAIL_TOOLTIPS = {
   Type: 'Selected element type.',
   Gene: 'Original gene identifier.',
-  Network: 'WGCNA network containing this item.',
+  Network: 'Co-expression network containing this item.',
   Variance: 'Expression variance used in WGCNA filtering.',
   Source: 'Source node ID in the displayed graph.',
   Target: 'Target node ID in the displayed graph.',
@@ -387,7 +387,7 @@ const renderGraphLoading = (genes) => {
   dom.graphEmpty.hidden = false;
   dom.graphEmpty.textContent = GRAPH_LOADING_MESSAGE;
   dom.graphTitle.textContent = genes;
-  dom.graphSummary.textContent = 'Searching WGCNA networks.';
+  dom.graphSummary.textContent = 'Searching co-expression networks.';
   renderSelectionEmpty();
 };
 

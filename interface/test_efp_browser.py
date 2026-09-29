@@ -120,7 +120,7 @@ def test_efp_scales_missing_values_export_and_navigation(site, browser, tmp_path
         screenshot(page, tmp_path, "efp-log2")
         page.get_by_role("button", name="Expression", exact=True).click()
         expect(page.locator('.portal-nav-panel a')).to_have_text([
-            "Gene Expression", "Tissue Expression Map", "WGCNA Network", "Spatial Expression",
+            "Gene Expression", "Tissue Expression Map", "Co-expression network", "Spatial Expression",
         ])
         expect(page.locator('.portal-nav-panel [aria-current="page"]')).to_have_text("Tissue Expression Map")
         page.keyboard.press("Escape")

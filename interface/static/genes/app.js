@@ -191,7 +191,7 @@
     detailContent.hidden = true;
     detailLoading.hidden = false;
     detailHeading.textContent = geneId || 'Gene details';
-    document.title = `${geneId || 'Gene details'} | Genes | Potato Research`;
+    document.title = `${geneId || 'Gene details'} | PotatoOmics`;
   }
 
   function renderLoading() {
@@ -351,7 +351,7 @@
     currentQuery = trimmed;
     currentOffset = offset;
     searchInput.value = trimmed;
-    document.title = `${trimmed} | Genes | Potato Research`;
+    document.title = `${trimmed} | PotatoOmics`;
     setStatus('');
     setSearching(true);
     renderLoading();
@@ -1056,7 +1056,7 @@
     detailLoading.hidden = true;
     detailContent.hidden = false;
     const geneId = String(payload.gene?.geneId || 'Gene details');
-    document.title = `${geneId} | Genes | Potato Research`;
+    document.title = `${geneId} | PotatoOmics`;
   }
 
   async function loadGeneDetail(geneId) {
@@ -1153,7 +1153,7 @@
     currentOffset = 0;
     searchInput.value = '';
     resultsSection.hidden = true;
-    document.title = 'Genes | Potato Research';
+    document.title = 'Genes | PotatoOmics';
   }
 
   searchForm.addEventListener('submit', (event) => {

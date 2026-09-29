@@ -35,7 +35,7 @@ def test_wgcna_page_route_serves_static_page() -> None:
     try:
         response = client.get("/wgcna")
         assert response.status_code == 200
-        assert "WGCNA Network" in response.text
+        assert "Co-expression network" in response.text
     finally:
         client.close()
 

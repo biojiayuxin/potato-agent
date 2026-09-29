@@ -228,7 +228,7 @@ def test_portal_navigation_uses_consistent_module_order() -> None:
     for relative_path in portal_indexes:
         content = (REPO_ROOT / relative_path).read_text(encoding="utf-8")
         assert 'data-portal-module=' in content, relative_path
-        assert '/static/shared/navigation.js?v=20260928-domain' in content
+        assert '/static/shared/navigation.js?v=20260929-titles' in content
         assert '/static/shared/navigation.css?v=20260908-navigation-mobile-centered' in content
         assert 'class="portal-nav-item' not in content
 
@@ -260,7 +260,7 @@ def test_genome_browser_canonical_and_legacy_routes_serve_page(path, query) -> N
     try:
         response = client.get(path + query, follow_redirects=False)
         assert response.status_code == 200
-        assert "Genome Browser | Potato Research" in response.text
+        assert "Genome Browser | PotatoOmics" in response.text
         assert "location" not in response.headers
         assert response.url.query.decode() == query.removeprefix("?")
         head_response = client.head(path + query, follow_redirects=False)

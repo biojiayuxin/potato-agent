@@ -26,12 +26,12 @@ PAGES = {
     'synteny': ('synteny', 'Synteny', False),
     'bulk-rnaseq': ('bulk_rnaseq', 'Gene Expression', True),
     'efp': ('efp', 'Tissue Expression Map', False),
-    'wgcna': ('wgcna', 'WGCNA Network', True),
+    'wgcna': ('wgcna', 'Co-expression network', True),
     'spatial': ('spatial', 'Spatial Expression', True),
     'dashboard': ('dashboard', 'Dashboard', False),
     'about': ('about', 'About', False),
 }
-LABELS = ['Potato Agent', 'Pan-genome', 'Genome Browser', 'Domain annotation', 'Synteny', 'Genes', 'Gene Expression', 'Tissue Expression Map', 'WGCNA Network',
+LABELS = ['Potato Agent', 'Pan-genome', 'Genome Browser', 'Domain annotation', 'Synteny', 'Genes', 'Gene Expression', 'Tissue Expression Map', 'Co-expression network',
           'Spatial Expression', 'Dashboard', 'About']
 
 
@@ -259,7 +259,7 @@ def test_pan_genome_overview_image_and_peer_navigation(site, browser, tmp_path):
             ],
         }))
         page.goto(site + '/pan-genome')
-        expect(page).to_have_title('Pan-genome | Potato Research')
+        expect(page).to_have_title('Pan-genome | PotatoOmics')
         expect(page.get_by_role('heading', name='Pan-genome', exact=True)).to_be_visible()
         expect(page.get_by_role('button', name='Ask Potato Agent', exact=True)).to_be_visible()
         expect(page.locator('main').get_by_role('link', name='Genome Browser', exact=True)).to_have_count(0)
@@ -294,7 +294,7 @@ def test_pan_genome_overview_image_and_peer_navigation(site, browser, tmp_path):
             page.get_by_role('button', name='Genomes', exact=True).click()
             page.locator('.portal-nav-panel').get_by_role('link', name=label, exact=True).click()
             expect(page).to_have_url(site + '/' + route)
-            expect(page).to_have_title(label + ' | Potato Research')
+            expect(page).to_have_title(label + ' | PotatoOmics')
         page.goto(site + '/genome-browser')
         expect(page.get_by_role('link', name='Back to Genomes', exact=True)).to_have_count(0)
         page.set_viewport_size({'width': 390, 'height': 900})
@@ -315,7 +315,7 @@ def test_synteny_image_and_agent_hint_on_mobile_and_desktop(site, browser, tmp_p
         page = context.new_page()
         page.goto(site + '/synteny')
         expect(page).to_have_url(site + '/synteny')
-        expect(page).to_have_title('Synteny | Potato Research')
+        expect(page).to_have_title('Synteny | PotatoOmics')
         expect(page.get_by_role('button', name='Ask Potato Agent', exact=True)).to_be_visible()
         overview = page.locator('.synteny-figure img')
         expect(overview).to_be_visible()

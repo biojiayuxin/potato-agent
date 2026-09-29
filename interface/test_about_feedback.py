@@ -107,7 +107,7 @@ def test_about_and_shared_feedback_assets_are_public(tmp_path, monkeypatch) -> N
             "genomic data",
             "gene expression across materials and tissues",
             "spatial transcriptomics",
-            "wgcna networks",
+            "co-expression networks",
             "genome-wide gene function prediction",
         ):
             assert api_domain in normalized_about_html
