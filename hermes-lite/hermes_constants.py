@@ -283,28 +283,17 @@ def secure_parent_dir(path: Path) -> None:
 
 
 def get_subprocess_home() -> str | None:
-    """Return a per-profile HOME directory for subprocesses, or None.
+    """Keep the launcher-provided user HOME in Potato subprocesses.
 
-    When ``{HERMES_HOME}/home/`` exists on disk, subprocesses should use it
-    as ``HOME`` so system tools (git, ssh, gh, npm …) write their configs
-    inside the Hermes data directory instead of the OS-level ``/root`` or
-    ``~/``.  This provides:
+    This compatibility hook is shared by terminal, background, helper, and
+    execute_code launchers. Returning None leaves their inherited HOME intact,
+    matching the main process, file tools, and system prompt. HERMES_HOME is
+    only the runtime data directory; neither a legacy ``home/`` subdirectory
+    nor a context-local profile override should change the user's HOME.
 
-    * **Docker persistence** — tool configs land inside the persistent volume.
-    * **Profile isolation** — each profile gets its own git identity, SSH
-      keys, gh tokens, etc.
-
-    The Python process's own ``os.environ["HOME"]`` and ``Path.home()`` are
-    **never** modified — only subprocess environments should inject this value.
-    Activation is directory-based: if the ``home/`` subdirectory doesn't
-    exist, returns ``None`` and behavior is unchanged.
+    The working directory remains independently controlled by the session
+    and TERMINAL_CWD.
     """
-    hermes_home = get_hermes_home_override() or os.getenv("HERMES_HOME")
-    if not hermes_home:
-        return None
-    profile_home = os.path.join(hermes_home, "home")
-    if os.path.isdir(profile_home):
-        return profile_home
     return None
 
 

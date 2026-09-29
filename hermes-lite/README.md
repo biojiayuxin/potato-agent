@@ -31,6 +31,16 @@ place. Lite does not add a new native-image protocol or image attachment tool.
 It also does not add `clarify`, `sudo`, or `secret` Web interactions. Approval
 and interrupt remain part of the Potato session contract.
 
+Local terminal commands, background tasks, helpers, and `execute_code` inherit
+the user's `HOME` supplied by Interface. `HERMES_HOME` remains the directory for
+configuration, sessions, skills, and memory. An existing `HERMES_HOME/home/`
+directory does not override the subprocess `HOME`, including when resuming a
+different profile. The session working directory and `TERMINAL_CWD` remain
+independent of `HOME`, so a project can start in its own directory while `cd ~`
+returns to the user's home. Existing files under `HERMES_HOME/home/` are retained;
+tool configuration stored there may need to be migrated separately. Activate
+this change with a new gateway process so old shell snapshots are discarded.
+
 ## Build And Verify
 
 The source verifier uses `python -S -B -P` and explicit dependency paths to
