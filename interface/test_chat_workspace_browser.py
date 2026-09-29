@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from pathlib import Path
 from urllib.parse import parse_qs, quote, urlsplit
 
@@ -390,6 +391,121 @@ def test_file_browser_location_and_preview_are_restored(context, site):
     assert current.evaluate("workspaceTest.state.currentPath") == "/results/"
     assert current.evaluate("workspaceTest.state.workspaceRoot") == "/research"
     assert current.evaluate("[...workspaceTest.state.expandedPaths]") == ["/results/"]
+
+
+@pytest.mark.parametrize("prefix", ["sandbox:", "", "SANDBOX:", "file://", "FILE://"])
+def test_markdown_workspace_file_link_opens_preview_and_requests_download(context, site, prefix):
+    from playwright.sync_api import expect
+
+    mock_api(context)
+    directory = "/mnt/data/hmx_temp_1790661935_1606f1a5"
+    filename = "mads_box_tf_comparison.pdf"
+    path = f"{directory}/{filename}"
+    label = "下载柱状图（矢量 PDF）"
+    entry = {"name": filename, "type": "file", "size": 18}
+    context.route("**/api/files/tree**", lambda route: route.fulfill(json={
+        "root": "/mnt/data/workspace", "path": "/", "entries": [],
+    }))
+
+    def open_directory(route):
+        requested = parse_qs(urlsplit(route.request.url).query)["path"][0]
+        if requested == path:
+            route.fulfill(status=400, json={"detail": "Not a directory"})
+        else:
+            assert requested == directory
+            route.fulfill(json={"root": directory, "path": "/", "entries": [entry]})
+
+    def preview_meta(route):
+        query = parse_qs(urlsplit(route.request.url).query)
+        assert query == {"path": [filename], "root": [directory]}
+        route.fulfill(json={"filename": filename, "size": 18, "preview_type": "pdf"})
+
+    context.route("**/api/files/open?**", open_directory)
+    context.route("**/api/files/preview/meta?**", preview_meta)
+    context.route("**/api/files/preview/content?**", lambda route: route.fulfill(
+        body=b"%PDF-1.4\n%%EOF\n", content_type="application/pdf",
+    ))
+    context.route("**/api/files/download?**", lambda route: route.fulfill(
+        body=b"%PDF-1.4\n%%EOF\n", content_type="application/octet-stream",
+    ))
+    page = context.new_page()
+    page.goto(site + "/chat")
+    ready(page)
+    page.evaluate("""content => {
+      workspaceTest.state.messages = [{id:'file-link', role:'assistant', content}];
+      workspaceTest.renderWorkspace();
+    }""", f"[{label}]({prefix}{path})")
+    link = page.locator("#messages .message-content a")
+    expect(link).to_have_text(label)
+    expect(link).to_have_attribute("data-workspace-path", path)
+    expect(link).to_have_attribute("href", "#")
+    if prefix == "sandbox:":
+        screenshot(page, "sandbox-file-link")
+    elif prefix == "file://":
+        screenshot(page, "file-uri-link")
+    link.click()
+    expect(page.locator("#chat-title")).to_have_text(filename)
+    with page.expect_download() as downloaded:
+        page.get_by_role("button", name="Save file", exact=True).click()
+    assert downloaded.value.suggested_filename == filename
+    download_url = urlsplit(downloaded.value.url)
+    assert download_url.path == "/api/files/download"
+    assert parse_qs(download_url.query) == {"path": [filename], "root": [directory]}
+
+
+def test_markdown_workspace_links_preserve_url_safety_and_encoded_names(context, site):
+    from playwright.sync_api import expect
+
+    mock_api(context)
+    page = context.new_page()
+    page.goto(site + "/chat")
+    ready(page)
+    path = "/mnt/data/reports/柱状图 (矢量).pdf"
+    content = "\n\n".join([
+        f"[encoded](sandbox:{quote(path)})",
+        f"[file-encoded](file://{quote(path)})",
+        "<file:///mnt/data/report.pdf>",
+        '<a href="file:///mnt/data/report.pdf">file-html</a>',
+        '[external](https://example.com/report.pdf)',
+        '<a href="javascript:alert(1)">script</a>',
+        '<a href="data:text/html,test">data</a>',
+        '<a href="file:///etc/passwd">file-outside</a>',
+        '<a href="file://example.com/mnt/data/report.pdf">file-authority</a>',
+        '<a href="file:////mnt/data/report.pdf">file-extra-slash</a>',
+        '<a href="file:///%2Fexample.com/mnt/data/report.pdf">file-encoded-authority</a>',
+        '<a href="file:javascript:alert(1)">file-script</a>',
+        '<a href="sandbox:file:///mnt/data/report.pdf">nested-schemes</a>',
+        '<a href="sandbox:/etc/passwd">outside</a>',
+        '<a href="sandbox:https://example.com/report.pdf">remote</a>',
+        '<a href="sandbox://mnt/data/report.pdf">authority</a>',
+        '<a data-workspace-path="/mnt/data/report.pdf" onclick="alert(1)">forged</a>',
+    ])
+    page.evaluate("""content => {
+      workspaceTest.state.messages = [{id:'url-safety', role:'assistant', content}];
+      workspaceTest.renderWorkspace();
+    }""", content)
+    links = page.locator("#messages .message-content a")
+    for label, expected_path in (
+        ("encoded", path),
+        ("file-encoded", path),
+        ("file:///mnt/data/report.pdf", "/mnt/data/report.pdf"),
+        ("file-html", "/mnt/data/report.pdf"),
+    ):
+        link = links.filter(has_text=re.compile(f"^{re.escape(label)}$"))
+        expect(link).to_have_attribute("data-workspace-path", expected_path)
+        expect(link).to_have_attribute("href", "#")
+    expect(links.filter(has_text="external")).to_have_attribute("href", "https://example.com/report.pdf")
+    expect(links.filter(has_text="external")).to_have_attribute("rel", "noopener noreferrer")
+    for label in (
+        "script", "data", "file-outside", "file-authority", "file-extra-slash",
+        "file-encoded-authority", "file-script", "nested-schemes",
+        "outside", "remote", "authority", "forged",
+    ):
+        link = links.filter(has_text=re.compile(f"^{re.escape(label)}$"))
+        expect(link).to_have_count(1)
+        assert link.get_attribute("href") is None
+        assert link.get_attribute("data-workspace-path") is None
+        assert link.get_attribute("onclick") is None
 
 
 def test_storage_failure_keeps_original_draft_and_workspace(context, site):

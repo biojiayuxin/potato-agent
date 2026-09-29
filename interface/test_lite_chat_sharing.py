@@ -158,4 +158,4 @@ def test_chat_sharing_assets_are_cache_busted() -> None:
     index = LITE_INDEX_PATH.read_text(encoding="utf-8")
 
     assert "styles.css?v=20260910-sidebar-home" in index
-    assert "app.js?v=20260928-annotations" in index
+    assert "app.js?v=20260929-file-links" in index

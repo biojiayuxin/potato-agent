@@ -1,6 +1,13 @@
 {
   "updates": [
     {
+      "version": "2026-09-29-001",
+      "title": "Link rendering fix",
+      "date": "September 29, 2026",
+      "summary": "Fixed a bug that made some file links in responses unclickable.",
+      "items": []
+    },
+    {
       "version": "2026-09-22-001",
       "title": "Bug fixes",
       "date": "September 22, 2026",

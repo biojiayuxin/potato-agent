@@ -4379,8 +4379,9 @@ const sanitizeRenderedHtml = (html) => {
       }
 
       if (tag === 'a' && name === 'href') {
-        if (isWorkspaceDataPath(value)) {
-          workspacePath = decodeWorkspacePathHref(value);
+        const path = decodeWorkspacePathHref(value);
+        if (isWorkspaceDataPath(path)) {
+          workspacePath = path;
           element.removeAttribute(attr.name);
         } else if (!/^https?:\/\//i.test(value) && !/^mailto:/i.test(value)) {
           element.removeAttribute(attr.name);
@@ -4411,7 +4412,7 @@ const isWorkspaceDataPath = (value) => (
 );
 
 const decodeWorkspacePathHref = (value) => {
-  const path = String(value || '').trim();
+  const path = String(value || '').trim().replace(/^(?:sandbox:|file:\/\/(?=\/))/i, '');
   try {
     return decodeURIComponent(path);
   } catch {

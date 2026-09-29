@@ -29,7 +29,8 @@ def test_workspace_path_linkifier_marks_supported_message_paths() -> None:
     assert "const isWorkspaceDataPath =" in source
     assert "const WORKSPACE_DATA_PATH_PREFIX = '/mnt/data/';" in source
     assert "WORKSPACE_DATA_PATH_PREFIX" in classifier
-    assert "workspacePath = decodeWorkspacePathHref(value);" in source
+    assert "const path = decodeWorkspacePathHref(value);" in source
+    assert "workspacePath = path;" in source
     assert "decodeURIComponent" in decoder
     assert "data-workspace-path" in source
     assert "['）', '（']" in bare_path_trimmer
