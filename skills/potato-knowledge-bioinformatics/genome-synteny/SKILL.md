@@ -26,7 +26,7 @@ metadata:
 ## 核心说明
 
 1. `jcvi` 的 Python MCScan 可以做**基于基因/蛋白序列相似性的共线性分析**：先用蛋白/CDS 相似性搜索得到同源基因对，再结合 BED 中的基因顺序聚类成 synteny blocks。
-2. **macrosynteny** 使用 `.anchors.simple` 绘制染色体/大片段层面的 karyotype 图；**microsynteny** 使用 `jcvi.compara.synteny mcscan` 生成的 blocks 文件绘制指定基因区间的局部基因顺序图。
+2. **macrosynteny** 使用 `.anchors.simple` 绘制染色体/大片段层面的 karyotype 图；**microsynteny** 必须先完成两个基因组全部基因的比对和共线性分析，再从 `jcvi.compara.synteny mcscan` 生成的完整 blocks 文件中提取用户指定区间，绘制局部基因顺序图。
 3. 这不是全基因组 assembly alignment；若研究问题是大片段结构变异，应考虑 SyRI/plotsr 等全基因组比对流程。
 4. 为保证智能体重复性，优先生成并运行 Snakemake 流程，而不是临时拼接一串 shell 命令。
 
@@ -227,7 +227,12 @@ cd "$WORK"
 
 ## 特定区间 microsynteny 绘图
 
-当用户要求参照 MCScan Python 官方文档绘制某个基因区间的 microsynteny 时，优先复用已经完成的 pairwise MCScan 结果，尤其是 `*.lifted.anchors`、两个物种的 `.bed` 文件。若 pairwise MCScan 结果不存在，先按本技能的 macrosynteny/Snakemake 流程生成 `*.lifted.anchors`。
+当用户要求绘制某个基因区间的 microsynteny 时，必须遵循：**全基因比对 → 全基因共线性 anchors → 完整 blocks → 提取用户指定区间 → 绘图**。
+
+- “全部基因”指两个待比较基因组所有染色体/contig 上的基因，每个基因仍只保留一个最长 CDS 代表转录本，遵守前述输入要求；不表示使用全部 isoform。
+- 用户区间只用于最后的 blocks 筛选和绘图。不得先按目标区间、固定窗口或单条染色体裁剪 GFF3、BED、蛋白/CDS FASTA，再运行相似性搜索、`jcvi.compara.catalog ortholog` 或 `jcvi.compara.synteny mcscan`。提前裁剪会改变同源匹配候选、基因顺序上下文和共线性 block 判定。
+- 优先复用已经完成的全基因 pairwise MCScan 结果，尤其是 `*.lifted.anchors` 和两个物种的完整 `.bed` 文件。复用前须确认比对输入覆盖全部基因，且基因组/注释版本、代表转录本筛选规则及分析参数与本次任务一致；仅有局部区间结果或无法确认来源时，不能将其作为全基因结果使用。
+- 若没有可复用的全基因结果，先使用两个基因组的完整代表转录本 GFF3 和对应蛋白/CDS FASTA，按上述 Snakemake 流程运行 `jcvi.compara.catalog ortholog`，生成全基因 `.anchors` 和 `.lifted.anchors`，再进入下面的区间绘图步骤。可将 `results/<pair>.lifted.anchors` 作为 Snakemake 目标，无需先生成 macrosynteny 图；若缺少完整输入，应先向用户索取，不得用区间比对替代。
 
 智能体执行时应收集/确认：
 
@@ -239,7 +244,7 @@ cd "$WORK"
 
 官方流程要点：
 
-1. 先基于参考 BED 和 lifted anchors 生成局部匹配 block 表：
+1. 先基于完整参考 BED 和全基因 lifted anchors 生成完整 block 表，此步骤不按绘图区间裁剪输入：
 
 ```bash
 python -m jcvi.compara.synteny mcscan ref.bed ref.query.lifted.anchors \
@@ -249,18 +254,18 @@ python -m jcvi.compara.synteny mcscan ref.bed ref.query.lifted.anchors \
 
 `--iter=1` 表示为每个参考区域选取一个最佳匹配区域；如果要展示多倍化或多个匹配区域，可提高 `--iter`。
 
-2. 按用户给定的参考基因起止区间，从 `ref.query.i1.blocks` 中截取目标 rows。例如：
+2. 全部比对和完整 blocks 生成完成后，按用户给定的参考基因起止区间，从 `ref.query.i1.blocks` 中截取目标 rows。下面的 `START_GENE` / `END_GENE` 必须替换为用户指定区间在 BED 第 4 列中对应的代表转录本 ID；若未提供区间，先向用户确认，不得自行套用固定区间。例如：
 
 ```python
 from pathlib import Path
-start = 'DM8.2_chr08G04370.1'
-end = 'DM8.2_chr08G06000.1'
-order = [line.rstrip('\n').split('\t')[3] for line in open('dmv82.bed') if line.strip()]
+start = 'START_GENE'
+end = 'END_GENE'
+order = [line.rstrip('\n').split('\t')[3] for line in open('ref.bed') if line.strip()]
 pos = {g: i for i, g in enumerate(order)}
 lo, hi = sorted([pos[start], pos[end]])
 allowed = set(order[lo:hi + 1])
 selected = []
-with open('dmv82.e463.i1.blocks') as f:
+with open('ref.query.i1.blocks') as f:
     for line in f:
         if line.strip() and line.rstrip('\n').split('\t')[0] in allowed:
             selected.append(line)
