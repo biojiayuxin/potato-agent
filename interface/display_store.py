@@ -52,6 +52,7 @@ CREATE TABLE IF NOT EXISTS session_live_state (
     tip_session_id TEXT NOT NULL DEFAULT '',
     assistant_message_id TEXT NOT NULL DEFAULT '',
     status TEXT NOT NULL DEFAULT '',
+    background_pending INTEGER NOT NULL DEFAULT 0,
     pending_approval_json TEXT NOT NULL DEFAULT '',
     last_error TEXT NOT NULL DEFAULT '',
     last_event_seq INTEGER NOT NULL DEFAULT 0,
@@ -147,6 +148,7 @@ CREATE TABLE IF NOT EXISTS session_live_state (
     tip_session_id TEXT NOT NULL DEFAULT '',
     assistant_message_id TEXT NOT NULL DEFAULT '',
     status TEXT NOT NULL DEFAULT '',
+    background_pending INTEGER NOT NULL DEFAULT 0,
     pending_approval_json TEXT NOT NULL DEFAULT '',
     last_error TEXT NOT NULL DEFAULT '',
     last_event_seq INTEGER NOT NULL DEFAULT 0,
@@ -209,6 +211,10 @@ ON turn_submission_receipts(status, expires_at);
             str(row[1])
             for row in conn.execute("pragma table_info(session_live_state)").fetchall()
         }
+        if "background_pending" not in live_state_columns:
+            conn.execute(
+                "ALTER TABLE session_live_state ADD COLUMN background_pending INTEGER NOT NULL DEFAULT 0"
+            )
         if "tip_session_id" not in live_state_columns:
             conn.execute(
                 "ALTER TABLE session_live_state ADD COLUMN tip_session_id TEXT NOT NULL DEFAULT ''"
@@ -318,7 +324,7 @@ def get_live_poll_snapshot(
             """
             select session_id, run_id, live_session_id, tip_session_id,
                    assistant_message_id, status,
-                   pending_approval_json, last_error, last_event_seq,
+                   background_pending, pending_approval_json, last_error, last_event_seq,
                    last_workspace_event_seq,
                    created_at, updated_at, started_at, finished_at
             from session_live_state
@@ -946,6 +952,7 @@ def _normalize_live_state_row(row: Any) -> dict[str, Any]:
         "tip_session_id": str(row["tip_session_id"] or ""),
         "assistant_message_id": str(row["assistant_message_id"] or ""),
         "status": str(row["status"] or ""),
+        "background_pending": bool(row["background_pending"]),
         "pending_approval": pending_approval,
         "last_error": str(row["last_error"] or ""),
         "last_event_seq": int(row["last_event_seq"] or 0),
@@ -967,7 +974,7 @@ def get_live_session_state(
         row = conn.execute(
             """
             select run_id, live_session_id, tip_session_id, assistant_message_id, status,
-                   pending_approval_json, last_error, last_event_seq,
+                   background_pending, pending_approval_json, last_error, last_event_seq,
                    last_workspace_event_seq,
                    created_at, updated_at, started_at, finished_at
             from session_live_state
@@ -991,7 +998,7 @@ def list_live_session_states(
             """
             select session_id, run_id, live_session_id, tip_session_id,
                    assistant_message_id, status,
-                   pending_approval_json, last_error, last_event_seq,
+                   background_pending, pending_approval_json, last_error, last_event_seq,
                    last_workspace_event_seq,
                    created_at, updated_at, started_at, finished_at
             from session_live_state
@@ -1015,6 +1022,8 @@ def mark_active_live_session_states_failed(
     now = int(time.time())
     placeholders = ",".join("?" for _ in ACTIVE_LIVE_STATE_STATUSES)
     with connect_auth_db(db_path) as conn:
+        # Startup has no surviving gateway workers, including idle parents.
+        conn.execute("update session_live_state set background_pending = 0 where background_pending != 0")
         cursor = conn.execute(
             f"""
             update session_live_state
@@ -1040,6 +1049,7 @@ def save_live_session_state(
     tip_session_id: str | None = None,
     assistant_message_id: str | None = None,
     status: str | None = None,
+    background_pending: bool | None = None,
     pending_approval: dict[str, Any] | None | object = _MISSING,
     last_error: str | None = None,
     last_event_seq: int | None = None,
@@ -1056,7 +1066,7 @@ def save_live_session_state(
         existing = conn.execute(
             """
             select run_id, live_session_id, tip_session_id, assistant_message_id, status,
-                   pending_approval_json, last_error, last_event_seq,
+                   background_pending, pending_approval_json, last_error, last_event_seq,
                    last_workspace_event_seq,
                    created_at, updated_at, started_at, finished_at
             from session_live_state
@@ -1085,6 +1095,10 @@ def save_live_session_state(
                 else (existing_payload or {}).get("assistant_message_id") or ""
             ),
             "status": str(status if status is not None else (existing_payload or {}).get("status") or ""),
+            "background_pending": bool(
+                background_pending if background_pending is not None
+                else (existing_payload or {}).get("background_pending", False)
+            ),
             "pending_approval": (
                 pending_approval
                 if pending_approval is not _MISSING
@@ -1128,10 +1142,10 @@ def save_live_session_state(
                 """
                 insert into session_live_state (
                     user_id, session_id, run_id, live_session_id, tip_session_id,
-                    assistant_message_id, status, pending_approval_json, last_error,
+                    assistant_message_id, status, background_pending, pending_approval_json, last_error,
                     last_event_seq, last_workspace_event_seq,
                     created_at, updated_at, started_at, finished_at
-                ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     user_id,
@@ -1141,6 +1155,7 @@ def save_live_session_state(
                     next_payload["tip_session_id"],
                     next_payload["assistant_message_id"],
                     next_payload["status"],
+                    int(next_payload["background_pending"]),
                     pending_approval_json,
                     next_payload["last_error"],
                     next_payload["last_event_seq"],
@@ -1156,7 +1171,7 @@ def save_live_session_state(
                 """
                 update session_live_state
                 set run_id = ?, live_session_id = ?, tip_session_id = ?,
-                    assistant_message_id = ?, status = ?, pending_approval_json = ?,
+                    assistant_message_id = ?, status = ?, background_pending = ?, pending_approval_json = ?,
                     last_error = ?, last_event_seq = ?, last_workspace_event_seq = ?,
                     updated_at = ?,
                     started_at = ?, finished_at = ?
@@ -1168,6 +1183,7 @@ def save_live_session_state(
                     next_payload["tip_session_id"],
                     next_payload["assistant_message_id"],
                     next_payload["status"],
+                    int(next_payload["background_pending"]),
                     pending_approval_json,
                     next_payload["last_error"],
                     next_payload["last_event_seq"],

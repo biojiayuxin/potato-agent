@@ -139,3 +139,54 @@ of source cleanup or release switching.
 Retained engine files originate from Nous Research Hermes Agent 0.16.0 and
 remain covered by `LICENSE`. Potato-specific boundary code lives under
 `potato_hermes_lite/`.
+
+
+## Background delegation in Potato Web
+
+Lite 10 selectively ports the delegation lifecycle reviewed at Nous Hermes
+`f42f579cf8bac4918ac9599bece71618afadd846`. Ship the matching Interface update
+with this runtime: Interface accepts completed results as managed assistant
+turns, maintains the background runtime lease, and routes child approvals.
+
+Top-level model calls to `delegate_task` return immediately when a gateway result
+consumer is attached. The parent can do independent work and then end its turn;
+results arrive between turns. Ordinary follow-up messages leave children running.
+Python callers and nested orchestrators retain synchronous result collection.
+Capacity exhaustion returns an explicit error. The default concurrent child limit
+remains 3 per parent session, and the default child iteration budget remains 50.
+
+```yaml
+delegation:
+  child_timeout_seconds: 0
+  independent_completions: false
+```
+
+`child_timeout_seconds` no longer caps total runtime: a positive value is a
+renewable inactivity window (minimum 30 seconds); nonpositive values disable
+that optional window. The activity watchdog still stops a child after 450 seconds
+without progress outside a tool or 1200 seconds inside a tool. Streaming text,
+API activity and tool changes renew progress. Provider and tool timeouts remain
+in effect. Existing explicit `600` configurations therefore mean ten minutes
+without progress, not ten minutes since launch.
+
+Use `delegate_task(action="list")` for owned tasks, `action="steer"` with
+`subagent_id` and `message` to adjust an active task, `action="stop"` to request
+its stop, and `action="result"` with its ID to read retained output. Steering is
+applied at the next iteration boundary. Explicit session Stop/close stops the
+background tree and suppresses automatic follow-up; saved results remain readable.
+With `independent_completions: true`, tasks deliver separately, except that tasks
+with the same optional `group` wait for all members of that group.
+
+The private `$HERMES_HOME/potato-delegations.db` ledger saves final results and
+periodic partial snapshots. Timeouts include available assistant text, recent
+tool output, artifact paths and a child session ID instead of discarding all work.
+Snapshots and notifications are bounded; only content already produced can be
+recovered. A stuck thread keeps its capacity slot and resources until it exits.
+Finished delivered/suppressed records are pruned after seven days when a manager
+is opened; pending results are retained. An exited process's unfinished children
+become `unknown`, never automatically re-executed. A crash during a parent delivery
+turn can replay that notification; this is not exactly-once execution of external
+effects or resumption of a stopped child.
+
+The implementation rationale and upstream differences are recorded in
+`../docs/reviews/hermes-delegation-upstream-2026-09-30.md`.

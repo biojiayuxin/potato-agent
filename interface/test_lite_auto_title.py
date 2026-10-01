@@ -20,4 +20,4 @@ def test_auto_title_uses_bounded_canonical_detail_reconciliation() -> None:
 def test_auto_title_cache_buster_matches_updated_frontend() -> None:
     index = LITE_INDEX_PATH.read_text(encoding="utf-8")
 
-    assert "app.js?v=20260929-file-links" in index
+    assert "app.js?v=20260930-deep-test-delegation" in index

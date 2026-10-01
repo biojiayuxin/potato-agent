@@ -222,6 +222,8 @@ def _finalize_session(session: dict | None, end_reason: str = "tui_close") -> No
     if not session or session.get("_finalized"):
         return
     session["_finalized"] = True
+    if manager := session.get("delegation_manager"):
+        manager.stop()
     stop_event = session.get("_notif_stop")
     if stop_event is not None:
         stop_event.set()
@@ -1465,6 +1467,9 @@ def _sync_session_key_after_compress(
         # don't keep targeting the ended row.
         session["session_key"] = new_session_id
 
+    if manager := session.get("delegation_manager"):
+        manager.store.alias(new_session_id, manager.owner)
+        agent._delegation_manager = manager
     if clear_pending_title:
         session["pending_title"] = None
     if restart_slash_worker:
@@ -2529,6 +2534,8 @@ def _init_session(sid: str, key: str, agent, history: list, cols: int = 80):
         # session startup resilient).
         pass
     _wire_callbacks(sid)
+    from potato_hermes_lite.delegation_gateway import bind as bind_delegation
+    bind_delegation(_sessions[sid], sid, _emit)
     with _sessions_lock:
         if sid in _sessions:
             _sessions[sid]["_notif_stop"] = _start_notification_poller(sid, _sessions[sid])
@@ -3970,6 +3977,8 @@ def _(rid, params: dict) -> dict:
     session, err = _sess(params, rid)
     if err:
         return err
+    if manager := session.get("delegation_manager"):
+        manager.stop()
     if hasattr(session["agent"], "interrupt"):
         session["agent"].interrupt()
     # Scope the pending-prompt release to THIS session.  A global
@@ -4252,6 +4261,7 @@ def _(rid, params: dict) -> dict:
 def _(rid, params: dict) -> dict:
     sid, text = params.get("session_id", ""), params.get("text", "")
     turn_id = str(params.get("turn_id") or "")
+    delegation_ids = params.get("delegation_ids")
     truncate_user_ordinal = params.get("truncate_before_user_ordinal")
     session, err = _sess_nowait(params, rid)
     if err:
@@ -4261,9 +4271,27 @@ def _(rid, params: dict) -> dict:
     # or fallback moved the session transport to stdio.
     if (t := current_transport()) is not None:
         session["transport"] = t
+    from potato_hermes_lite import delegation_gateway
+    if params.get("delegation_delivery") is True:
+        session["delegation_consumer"] = True
+    if params.get("interface_session_id"):
+        session["interface_session_id"] = str(params["interface_session_id"])
+        session["delegation_consumer"] = True
+    manager = delegation_gateway.bind(session, sid, _emit)
+    if delegation_ids is not None and truncate_user_ordinal is not None:
+        return _err(rid, 4004, "delegation delivery cannot truncate conversation history")
+    if delegation_ids is not None and (not isinstance(delegation_ids, list) or not delegation_ids
+            or len(delegation_ids) > 50 or any(not isinstance(item, str) for item in delegation_ids)):
+        return _err(rid, 4004, "delegation_ids must be a nonempty list of at most 50 IDs")
     with session["history_lock"]:
         if session.get("running"):
             return _err(rid, 4009, "session busy")
+        if delegation_ids is not None:
+            text = delegation_gateway.claim(session, delegation_ids, turn_id or uuid.uuid4().hex)
+            if text is None:
+                return _ok(rid, {"status": "no_results"})
+        else:
+            manager.stopped = False
         if truncate_user_ordinal is not None:
             try:
                 ordinal = int(truncate_user_ordinal)
@@ -4302,6 +4330,7 @@ def _(rid, params: dict) -> dict:
             try:
                 _emit_turn_outcome(session, sid, turn_id, "error", {"message": str(exc)})
             finally:
+                delegation_gateway.settle(session, accepted=False)
                 _finish_interface_turn(session, sid, turn_id)
 
     threading.Thread(target=run_after_agent_ready, daemon=True).start()
@@ -4388,6 +4417,11 @@ def _notification_poller_loop(
 
     _emitted = set()  # dedup re-queued events so same completion isn't emitted 50 times while session is busy
     while not stop_event.is_set() and not session.get("_finalized"):
+        try:
+            from potato_hermes_lite.delegation_gateway import poll as poll_delegations
+            poll_delegations(session, sid, _emit)
+        except Exception:
+            logger.exception("Delegation completion polling failed")
         try:
             evt = process_registry.completion_queue.get(timeout=0.5)
         except Exception:
@@ -4533,6 +4567,9 @@ def _run_prompt_submit(rid, sid: str, session: dict, text: Any, *, turn_id: str 
             # the sudo.request overlay. (secret capture is a module global, so
             # re-running is a harmless no-op.)
             _wire_callbacks(sid)
+            from potato_hermes_lite import delegation_gateway
+            delegation_gateway.bind(session, sid, _emit)
+            delegation_gateway.account(session)
             cwd = _session_cwd(session)
             _register_session_cwd(session)
             cols = session.get("cols", 80)
@@ -4645,6 +4682,8 @@ def _run_prompt_submit(rid, sid: str, session: dict, text: Any, *, turn_id: str 
                 pass
             fork_boundary_before = _fork_boundary_checkpoint(session, agent)
             result = agent.run_conversation(run_message, **run_kwargs)
+            # A returned turn has accepted the retained completion into its conversation.
+            delegation_gateway.settle(session, accepted=True)
 
             last_reasoning = None
             status_note = None
@@ -4937,6 +4976,8 @@ def _run_prompt_submit(rid, sid: str, session: dict, text: Any, *, turn_id: str 
                 pass
             _emit_turn_outcome(session, sid, turn_id, "error", {"message": str(e)})
         finally:
+            from potato_hermes_lite.delegation_gateway import settle as settle_delegation
+            settle_delegation(session, accepted=False)
             try:
                 if approval_token is not None:
                     reset_current_session_key(approval_token)
@@ -5599,6 +5640,10 @@ def _(rid, params: dict) -> dict:
     try:
         from tools.approval import resolve_gateway_approval
 
+        child_id = str(params.get("subagent_id") or "")
+        if child_id:
+            manager = session.get("delegation_manager")
+            return _ok(rid, {"resolved": manager.resolve_approval(child_id, approval_id, choice) if manager else 0})
         return _ok(
             rid,
             {

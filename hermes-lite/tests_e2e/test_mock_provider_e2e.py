@@ -66,6 +66,7 @@ def _chat_chunk(
 class _MockProviderState:
     def __init__(self, plans: list[dict[str, Any]]) -> None:
         self.plans = plans
+        self.plan_selector = None
         self.streaming_request_count = 0
         self.requests: list[dict[str, Any]] = []
         self.request_paths: list[str] = []
@@ -92,6 +93,8 @@ class _MockProviderState:
         # plan and make the E2E outcome depend on thread scheduling.
         if plan_index is None:
             return {"kind": "text", "text": "Mock session title"}
+        if self.plan_selector is not None:
+            return self.plan_selector(body)
         if plan_index >= len(self.plans):
             return {"kind": "text", "text": f"Mock reply {plan_index + 1}"}
         return self.plans[plan_index]
@@ -220,7 +223,7 @@ class MockProvider(AbstractContextManager["MockProvider"]):
 
                 kind = plan.get("kind", "text")
                 if kind == "tool":
-                    command = str(plan["command"])
+                    arguments = plan.get("arguments", {"command": plan.get("command", "")})
                     chunks = [
                         _chat_chunk(
                             {
@@ -231,7 +234,7 @@ class MockProvider(AbstractContextManager["MockProvider"]):
                                         "id": "call-hermes-lite-e2e",
                                         "type": "function",
                                         "function": {
-                                            "name": "terminal",
+                                            "name": plan.get("name", "terminal"),
                                             "arguments": "",
                                         },
                                     }
@@ -245,7 +248,7 @@ class MockProvider(AbstractContextManager["MockProvider"]):
                                         "index": 0,
                                         "function": {
                                             "arguments": json.dumps(
-                                                {"command": command}
+                                                arguments
                                             )
                                         },
                                     }
@@ -924,3 +927,137 @@ def test_approval_timeout_emits_expiration_and_rejects_late_response(
             assert complete["status"] == "complete"
             assert complete["text"] == "The approval expired."
             assert marker.read_text(encoding="utf-8") == "preserve me"
+
+
+def _wait_turn_idle(gateway, sid, turn_id):
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline:
+        if gateway.rpc("session.turn_state", {"session_id": sid, "turn_id": turn_id}).get("state") == "finished":
+            return
+        time.sleep(0.01)
+    pytest.fail("turn did not finish cleanup: " + gateway.diagnostics())
+
+
+def test_background_delegation_continues_across_parent_turns_and_delivers_once(tmp_path: Path) -> None:
+    def plan(body):
+        messages = body["messages"]
+        last_user = next(m["content"] for m in reversed(messages) if m["role"] == "user")
+        if last_user == "child-research":
+            if messages[-1]["role"] != "tool":
+                return {"kind": "tool", "command": "printf child-tool-evidence"}
+            assert "child-tool-evidence" in messages[-1]["content"]
+            return {"kind": "blocked", "text": "Retained child finding: module A is safe."}
+        if "Subagent results" in str(last_user):
+            assert "Retained child finding" in str(last_user)
+            return {"kind": "text", "text": "Integrated the saved child finding."}
+        if last_user == "follow-up":
+            return {"kind": "text", "text": "Handled another user request while the child runs."}
+        if messages[-1]["role"] == "tool":
+            outcome = json.loads(messages[-1]["content"])
+            assert outcome.get("status") == "dispatched", outcome
+            return {"kind": "text", "text": "Independent parent work finished."}
+        return {"kind": "tool", "name": "delegate_task", "arguments": {"goal": "child-research"}}
+
+    with MockProvider([]) as provider:
+        provider.state.plan_selector = plan
+        with GatewayProcess(tmp_path / "gateway", provider) as gateway:
+            created = _create_session(gateway)
+            sid = created["session_id"]
+            gateway.rpc("prompt.submit", {"session_id": sid, "text": "dispatch", "turn_id": "parent", "delegation_delivery": True})
+            done = _payload(gateway.wait_event("message.complete", session_id=sid))
+            assert done["text"] == "Independent parent work finished.", gateway.diagnostics()
+            # HTTP clients must learn about background work before the first
+            # parent completion; waiting for the periodic gateway poll races it.
+            assert any(
+                item.get("params", {}).get("type") == "delegation.state"
+                and item["params"].get("session_id") == sid
+                and _payload(item).get("active", 0) > 0
+                for item in gateway.all_messages
+            ), gateway.diagnostics()
+            assert provider.state.first_chunk_sent.wait(5), gateway.diagnostics()
+            assert not provider.state.release_stream.is_set()
+            _wait_turn_idle(gateway, sid, "parent")
+            gateway.rpc("prompt.submit", {"session_id": sid, "text": "follow-up", "turn_id": "followup"})
+            assert "another user request" in _payload(gateway.wait_event("message.complete", session_id=sid))["text"]
+            provider.state.release_stream.set()
+            ready = _payload(gateway.wait_event("delegation.ready", session_id=sid))
+            ids = ready["delegation_ids"]
+            other = _create_session(gateway)["session_id"]
+            assert gateway.rpc("prompt.submit", {"session_id": other, "delegation_ids": ids}) == {"status": "no_results"}
+            gateway.rpc("prompt.submit", {"session_id": sid, "delegation_ids": ids, "turn_id": "delivery"})
+            done = _payload(gateway.wait_event("message.complete", session_id=sid))
+            assert done["text"] == "Integrated the saved child finding."
+            assert done["turn_id"] == "delivery"
+            _wait_turn_idle(gateway, sid, "delivery")
+            assert gateway.rpc("prompt.submit", {"session_id": sid, "delegation_ids": ids}) == {"status": "no_results"}
+            import sqlite3
+            with sqlite3.connect(gateway.hermes_home / "potato-delegations.db") as db:
+                assert db.execute("SELECT delivery FROM units").fetchone()[0] == "delivered"
+                saved = json.loads(db.execute("SELECT result FROM children").fetchone()[0])
+                assert saved["status"] == "completed"
+                assert "Retained child finding" in saved["summary"]
+
+
+@pytest.mark.parametrize("expire", [False, True])
+def test_background_child_approval_after_parent_completion(tmp_path: Path, expire: bool) -> None:
+    def plan(body):
+        messages = body["messages"]
+        last_user = next(m["content"] for m in reversed(messages) if m["role"] == "user")
+        if last_user == "child-approval":
+            if messages[-1]["role"] == "tool":
+                return {"kind": "text", "text": "Retained findings after the command was denied."}
+            return {"kind": "tool", "command": "rm -rf ./approval-target"}
+        if "Subagent results" in str(last_user):
+            return {"kind": "text", "text": "Received the child approval outcome."}
+        if messages[-1]["role"] == "tool":
+            return {"kind": "text", "text": "Parent finished independent work."}
+        return {"kind": "tool", "name": "delegate_task", "arguments": {"goal": "child-approval"}}
+
+    with MockProvider([]) as provider:
+        provider.state.plan_selector = plan
+        with GatewayProcess(tmp_path / "gateway", provider, gateway_timeout=2 if expire else 15) as gateway:
+            target = gateway.work / "approval-target"
+            target.mkdir()
+            (target / "keep").write_text("keep")
+            sid = _create_session(gateway)["session_id"]
+            gateway.rpc("prompt.submit", {"session_id": sid, "text": "dispatch", "turn_id": "parent", "delegation_delivery": True})
+            done = _payload(gateway.wait_event("message.complete", session_id=sid))
+            assert done["text"] == "Parent finished independent work.", gateway.diagnostics()
+            approval = _payload(gateway.wait_event("approval.request", session_id=sid))
+            assert approval["subagent_id"]
+            params = {"session_id": sid, "subagent_id": approval["subagent_id"],
+                      "approval_id": approval["approval_id"], "choice": "deny"}
+            assert gateway.rpc("approval.respond", {**params, "approval_id": "wrong-token"})["resolved"] == 0
+            if expire:
+                expired = _payload(gateway.wait_event("approval.expired", session_id=sid))
+                assert expired["approval_id"] == approval["approval_id"]
+                assert expired["subagent_id"] == approval["subagent_id"]
+                assert gateway.rpc("approval.respond", params)["resolved"] == 0
+            else:
+                assert gateway.rpc("approval.respond", params)["resolved"] == 1
+            ready = _payload(gateway.wait_event("delegation.ready", session_id=sid))
+            gateway.rpc("prompt.submit", {"session_id": sid, "delegation_ids": ready["delegation_ids"], "turn_id": "delivery"})
+            assert _payload(gateway.wait_event("message.complete", session_id=sid))["text"] == "Received the child approval outcome."
+            assert (target / "keep").read_text() == "keep"
+
+
+
+def test_gateway_without_background_consumer_keeps_synchronous_results(tmp_path: Path) -> None:
+    def plan(body):
+        messages = body["messages"]
+        last_user = next(m["content"] for m in reversed(messages) if m["role"] == "user")
+        if last_user == "legacy-child":
+            return {"kind": "text", "text": "Synchronous child result."}
+        if messages[-1]["role"] == "tool":
+            result = json.loads(messages[-1]["content"])
+            assert result["results"][0]["summary"] == "Synchronous child result."
+            return {"kind": "text", "text": "Parent received synchronous results."}
+        return {"kind": "tool", "name": "delegate_task", "arguments": {"goal": "legacy-child"}}
+
+    with MockProvider([]) as provider:
+        provider.state.plan_selector = plan
+        with GatewayProcess(tmp_path / "gateway", provider) as gateway:
+            sid = _create_session(gateway)["session_id"]
+            gateway.rpc("prompt.submit", {"session_id": sid, "text": "legacy-client"})
+            done = _payload(gateway.wait_event("message.complete", session_id=sid))
+            assert done["text"] == "Parent received synchronous results.", gateway.diagnostics()

@@ -16,6 +16,7 @@ from interface.display_store import (
     append_session_event,
     get_display_messages,
     get_live_session_state,
+    list_live_session_states,
     save_message_fork_boundary,
     save_display_messages,
     save_live_session_state,
@@ -117,6 +118,7 @@ def _pending_approval_queue(pending_approval: Any) -> list[dict[str, str]]:
         seen_ids.add(approval_id)
         queue.append(
             {
+                **{key: str(candidate[key]) for key in ("subagent_id", "resume_status") if candidate.get(key)},
                 "approval_id": approval_id,
                 "command": str(candidate.get("command") or ""),
                 "description": str(
@@ -213,6 +215,14 @@ class SessionRunContext:
     assistant_message_id: str
 
 
+def _background_approvals(live_state, resume_status: str) -> list[dict[str, str]]:
+    queue = [item for item in _pending_approval_queue((live_state or {}).get("pending_approval"))
+             if item.get("subagent_id")]
+    for item in queue:
+        item["resume_status"] = resume_status
+    return queue
+
+
 class SessionRunManager:
     def __init__(
         self,
@@ -239,6 +249,7 @@ class SessionRunManager:
         ] = weakref.WeakValueDictionary()
         self._bridge_event_locks: dict[str, asyncio.Lock] = {}
         self._workspace_change_revisions: dict[str, str] = {}
+        self._delegation_counts: dict[tuple[str, str], int] = {}
 
     async def get_workspace_change_revision(self, user_id: str) -> str:
         async with self._lock:
@@ -267,6 +278,11 @@ class SessionRunManager:
             session_id,
             db_path=self._db_path,
             **kwargs,
+        )
+
+    async def _list_live_session_states(self, user_id: str) -> dict[str, dict[str, Any]]:
+        return await asyncio.to_thread(
+            list_live_session_states, user_id, db_path=self._db_path
         )
 
     async def _get_display_messages(
@@ -350,7 +366,13 @@ class SessionRunManager:
             run_id=run_id,
         )
 
-    async def submit_turn(
+    async def submit_turn(self, **kwargs) -> dict[str, Any]:
+        key = (kwargs["user_id"], kwargs["session_id"])
+        lock = self._approval_state_locks.setdefault(key, asyncio.Lock())
+        async with lock:
+            return await self._submit_turn(**kwargs)
+
+    async def _submit_turn(
         self,
         *,
         bridge: TuiGatewayBridge,
@@ -364,6 +386,7 @@ class SessionRunManager:
         draft_title: str = "",
         mode: str = "chat",
         request_id: str = "",
+        delegation_ids: list[str] | None = None,
     ) -> dict[str, Any]:
         await self.attach_bridge(bridge)
 
@@ -414,7 +437,7 @@ class SessionRunManager:
             if isinstance(existing_messages, list)
             else _normalize_messages(await self._get_display_messages(user_id, session_id))
         )
-        next_messages = [*base_messages, user_message, assistant_message]
+        next_messages = [*base_messages, *([] if delegation_ids else [user_message]), assistant_message]
         await self._save_display_messages(
             user_id,
             session_id,
@@ -480,6 +503,7 @@ class SessionRunManager:
                 live_session_id=live_session_id,
                 text=submission_text,
                 mode=normalized_mode,
+                delegation_ids=delegation_ids,
             )
         )
         return {
@@ -499,6 +523,7 @@ class SessionRunManager:
         live_session_id: str,
         text: str,
         mode: str = "chat",
+        delegation_ids: list[str] | None = None,
     ) -> None:
         approval_lock = self._approval_state_locks.setdefault(
             (context.user_id, context.session_id), asyncio.Lock()
@@ -509,6 +534,7 @@ class SessionRunManager:
             )
             if live_state is None:
                 return
+            background_approvals = _background_approvals(live_state, "starting")
             await self._save_live_session_state(
                 context.user_id,
                 context.session_id,
@@ -518,8 +544,8 @@ class SessionRunManager:
                 ),
                 tip_session_id=str(live_state.get("tip_session_id") or ""),
                 assistant_message_id=context.assistant_message_id,
-                status="starting",
-                pending_approval=None,
+                status="awaiting_approval" if background_approvals else "starting",
+                pending_approval=_serialize_pending_approval(background_approvals),
                 last_error="",
             )
         try:
@@ -539,13 +565,18 @@ class SessionRunManager:
                 if str(dispatch_result.get("type") or "").strip() != "skill" or not skill_message:
                     raise TuiGatewayBridgeError(PLAN_COMMAND_FAILURE_MESSAGE)
                 submission_text = skill_message
-            await bridge.rpc(
+            submit_result = await bridge.rpc(
                 "prompt.submit",
                 {
                     "session_id": live_session_id,
                     "text": submission_text,
+                    **({"delegation_ids": delegation_ids} if delegation_ids else {}),
                 },
             )
+            if delegation_ids and submit_result.get("status") == "no_results":
+                async with approval_lock:
+                    if await self._get_mutable_live_state(context, live_session_id) is not None:
+                        await self._complete_message(context, {"status": "complete"}, 0, live_session_id, discard_empty=True)
         except Exception as exc:
             async with approval_lock:
                 live_state = await self._get_mutable_live_state(
@@ -575,7 +606,8 @@ class SessionRunManager:
             live_state = await self._get_live_session_state(user_id, session_id)
             if live_state is None:
                 raise TuiGatewayBridgeError("session not found")
-            if str(live_state.get("status") or "").strip() in FINAL_LIVE_STATUSES:
+            if (str(live_state.get("status") or "").strip() in FINAL_LIVE_STATUSES
+                    and not self._delegation_counts.get((user_id, session_id))):
                 raise TuiGatewayBridgeError("session is no longer active")
             live_session_id = str(live_state.get("live_session_id") or "").strip()
             if not live_session_id:
@@ -624,6 +656,36 @@ class SessionRunManager:
             )
             return result
 
+    async def _clear_unavailable_approvals(
+        self, user_id: str, session_id: str, live_state: dict[str, Any]
+    ) -> None:
+        """Clear an absent gateway's approvals while holding the session approval lock."""
+        queue = _pending_approval_queue(live_state.get("pending_approval"))
+        status = str(live_state.get("status") or "")
+        if status not in FINAL_LIVE_STATUSES:
+            status = str(queue[0].get("resume_status") or "") if queue else ""
+        context = SessionRunContext(
+            user_id=user_id, session_id=session_id,
+            run_id=str(live_state.get("run_id") or ""),
+            assistant_message_id=str(live_state.get("assistant_message_id") or ""),
+        )
+        live_session_id = str(live_state.get("live_session_id") or "")
+        self._delegation_counts.pop((user_id, session_id), None)
+        # Preserve the event sequence: an exit has no seq, and lowering it
+        # makes HTTP clients reject this cleanup as an older snapshot.
+        await self._save_live_session_state(
+            user_id, session_id, pending_approval=None, background_pending=False,
+            **({"status": status} if status in FINAL_LIVE_STATUSES else {}),
+        )
+        if status in FINAL_LIVE_STATUSES:
+            await self._close_run_context(context, live_session_id=live_session_id)
+        else:
+            await self._mark_failed(
+                context=context, live_session_id=live_session_id,
+                error_message=STALE_GATEWAY_SESSION_ERROR,
+                seq=int(live_state.get("last_event_seq") or 0),
+            )
+
     async def respond_to_approval(
         self,
         *,
@@ -653,17 +715,25 @@ class SessionRunManager:
 
             live_session_id = str(live_state.get("live_session_id") or "").strip()
             if not live_session_id:
+                await self._clear_unavailable_approvals(user_id, session_id, live_state)
                 raise TuiGatewayBridgeError(
-                    "approval request is no longer attached to a live session"
+                    "approval request is no longer pending"
                 )
-            result = await bridge.rpc(
-                "approval.respond",
-                {
-                    "session_id": live_session_id,
-                    "choice": choice,
-                    "approval_id": normalized_approval_id,
-                },
-            )
+            try:
+                result = await bridge.rpc(
+                    "approval.respond",
+                    {
+                        "session_id": live_session_id,
+                        "choice": choice,
+                        "approval_id": normalized_approval_id,
+                        **({"subagent_id": pending_approval["subagent_id"]} if pending_approval.get("subagent_id") else {}),
+                    },
+                )
+            except TuiGatewayBridgeError as exc:
+                if "session not found" not in str(exc).lower():
+                    raise  # A transient transport error does not cancel consent.
+                await self._clear_unavailable_approvals(user_id, session_id, live_state)
+                raise TuiGatewayBridgeError("approval request is no longer pending") from exc
             try:
                 resolved_count = int(result.get("resolved", 0))
             except (TypeError, ValueError):
@@ -698,7 +768,7 @@ class SessionRunManager:
                             latest_live_state.get("assistant_message_id") or ""
                         ),
                         status=(
-                            "awaiting_approval" if remaining_queue else "running"
+                            "awaiting_approval" if remaining_queue else pending_approval.get("resume_status", "running")
                         ),
                         pending_approval=_serialize_pending_approval(
                             remaining_queue
@@ -741,6 +811,10 @@ class SessionRunManager:
         payload = event.get("payload") if isinstance(event.get("payload"), dict) else {}
 
         if event_type == "gateway.ready":
+            return
+
+        from interface.delegation_events import handle_event as handle_delegation_event
+        if await handle_delegation_event(self, bridge, event):
             return
 
         if event_type == "gateway.exit":
@@ -793,6 +867,7 @@ class SessionRunManager:
                 )
                 if latest_live_state is None:
                     return
+                background_approvals = _background_approvals(latest_live_state, "running")
                 await self._save_live_session_state(
                     context.user_id,
                     context.session_id,
@@ -804,8 +879,8 @@ class SessionRunManager:
                         latest_live_state.get("tip_session_id") or ""
                     ),
                     assistant_message_id=context.assistant_message_id,
-                    status="running",
-                    pending_approval=None,
+                    status="awaiting_approval" if background_approvals else "running",
+                    pending_approval=_serialize_pending_approval(background_approvals),
                     last_error="",
                     last_event_seq=seq,
                     started_at=now_seconds(),
@@ -1223,6 +1298,8 @@ class SessionRunManager:
         payload: dict[str, Any],
         seq: int,
         live_session_id: str,
+        *,
+        discard_empty: bool = False,
     ) -> None:
         live_state = await self._get_live_session_state(context.user_id, context.session_id)
         if str((live_state or {}).get("status") or "").strip() == "interrupted":
@@ -1276,6 +1353,8 @@ class SessionRunManager:
         assistant["timestamp"] = now_seconds()
         assistant["done"] = True
         assistant.pop("_lastDeltaEventSeq", None)
+        if discard_empty and not assistant.get("content"):
+            messages = [m for m in messages if m.get("id") != context.assistant_message_id]
         await self._save_display_messages(context.user_id, context.session_id, messages)
 
         live_status = "completed"
@@ -1284,6 +1363,7 @@ class SessionRunManager:
         elif status == "error":
             live_status = "failed"
 
+        background_approvals = _background_approvals(live_state, live_status)
         await self._save_live_session_state(
             context.user_id,
             context.session_id,
@@ -1291,8 +1371,8 @@ class SessionRunManager:
             live_session_id=live_session_id,
             tip_session_id=str((live_state or {}).get("tip_session_id") or ""),
             assistant_message_id=context.assistant_message_id,
-            status=live_status,
-            pending_approval=None,
+            status="awaiting_approval" if background_approvals else live_status,
+            pending_approval=_serialize_pending_approval(background_approvals),
             last_error="" if live_status == "completed" else error_detail,
             last_event_seq=seq,
             last_workspace_event_seq=seq,
@@ -1322,6 +1402,7 @@ class SessionRunManager:
             tip_session_id=str((live_state or {}).get("tip_session_id") or ""),
             assistant_message_id=context.assistant_message_id,
             status="interrupted",
+            background_pending=False,
             pending_approval=None,
             last_error="",
             last_event_seq=seq,
@@ -1348,6 +1429,7 @@ class SessionRunManager:
         assistant["done"] = True
         await self._save_display_messages(context.user_id, context.session_id, messages)
         live_state = await self._get_live_session_state(context.user_id, context.session_id)
+        background_approvals = _background_approvals(live_state, "failed")
         await self._save_live_session_state(
             context.user_id,
             context.session_id,
@@ -1355,8 +1437,8 @@ class SessionRunManager:
             live_session_id=live_session_id,
             tip_session_id=str((live_state or {}).get("tip_session_id") or ""),
             assistant_message_id=context.assistant_message_id,
-            status="failed",
-            pending_approval=None,
+            status="awaiting_approval" if background_approvals else "failed",
+            pending_approval=_serialize_pending_approval(background_approvals),
             last_error=error_message,
             last_event_seq=seq,
             finished_at=now_seconds(),

@@ -149,6 +149,7 @@ def test_active_live_state_cleanup_marks_stale_rows_failed() -> None:
         live_session_id="live-done",
         assistant_message_id="assistant-done",
         status="completed",
+        background_pending=True,
         db_path=db_path,
     )
 
@@ -163,6 +164,7 @@ def test_active_live_state_cleanup_marks_stale_rows_failed() -> None:
     done = get_live_session_state("user-1", "done-session", db_path=db_path)
     assert done is not None
     assert done["status"] == "completed"
+    assert not done["background_pending"]
 
 
 def test_display_draft_title_is_sticky_after_first_write() -> None:

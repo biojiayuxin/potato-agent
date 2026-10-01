@@ -1559,6 +1559,10 @@ const rememberLiveTuiSession = (persistentSessionId, liveSessionId, { primary = 
 };
 
 const ACTIVE_LIVE_SESSION_STATUSES = new Set(['queued', 'starting', 'running', 'awaiting_approval']);
+const shouldPollLiveSession = (live) => (
+  ACTIVE_LIVE_SESSION_STATUSES.has(String(live?.status || '').trim())
+  || Boolean(live?.background_pending)
+);
 
 const normalizeDisplayMessageId = (messageId) => {
   const normalized = String(messageId || '').trim();
@@ -1664,7 +1668,9 @@ const applyLiveStateToSession = (sessionId, live, { managePolling = true } = {})
   } else if (tipSessionId && ACTIVE_LIVE_SESSION_STATUSES.has(status)) {
     rememberLiveTuiSession(persistentSessionId, tipSessionId);
   } else {
-    forgetLiveTuiSession(persistentSessionId, { stopPolling: managePolling });
+    forgetLiveTuiSession(persistentSessionId, {
+      stopPolling: managePolling && !shouldPollLiveSession(liveState),
+    });
   }
 
   state.sessions = state.sessions.map((chat) => (
@@ -1674,15 +1680,16 @@ const applyLiveStateToSession = (sessionId, live, { managePolling = true } = {})
     state.activeSession = applyLiveSnapshot(state.activeSession);
   }
 
-  if (ACTIVE_LIVE_SESSION_STATUSES.has(status)) {
-    if (managePolling) {
+  if (managePolling) {
+    if (shouldPollLiveSession(liveState)) {
       startLiveSessionPolling(persistentSessionId);
-    }
-    setSessionBusy(persistentSessionId, true, { transport: 'tui' });
-  } else {
-    if (managePolling) {
+    } else {
       stopLiveSessionPolling(persistentSessionId);
     }
+  }
+  if (ACTIVE_LIVE_SESSION_STATUSES.has(status)) {
+    setSessionBusy(persistentSessionId, true, { transport: 'tui' });
+  } else {
     resetTuiBridgeReconnectState(persistentSessionId);
     recoveringTuiSessionIds.delete(persistentSessionId);
     const targetMessages = getSessionMessagesBuffer(persistentSessionId) || [];
@@ -2138,8 +2145,19 @@ const handleTuiBridgeEvent = (message) => {
         });
       }
       setSessionBusy(persistentSessionId, true, { transport: 'tui' });
+      startLiveSessionPolling(persistentSessionId);
     }
     setTuiBridgeStatus('TUI bridge session started');
+    return;
+  }
+
+  if (type === 'delegation.state' || type === 'delegation.ready') {
+    const persistentSessionId = getPersistentSessionIdFromTuiEvent(message);
+    if (persistentSessionId) {
+      // Background work can start a managed assistant turn after the previous
+      // turn stopped polling. The saved live snapshot also restores approvals.
+      fetchLiveSessionSnapshot(persistentSessionId).catch(() => {});
+    }
     return;
   }
 
@@ -2165,7 +2183,8 @@ const handleTuiBridgeEvent = (message) => {
       reasoning: String(message?.payload?.reasoning || ''),
       status,
     });
-    forgetLiveTuiSession(completedSessionId);
+    forgetLiveTuiSession(completedSessionId, { stopPolling: false });
+    startLiveSessionPolling(completedSessionId);
     setSessionBusy(completedSessionId, false);
     clearSessionPendingApproval(completedSessionId);
     if (isViewingSession(completedSessionId)) {
@@ -6135,7 +6154,9 @@ const renderChatList = () => {
     const renameButton = fragment.querySelector('.chat-rename-button');
     const deleteButton = fragment.querySelector('.chat-delete-button');
     const chatSessionId = getPersistentSessionIdForChat(chat) || chat.id;
-    const busyLabel = isSessionBusy(chatSessionId) ? 'Responding…' : '';
+    const busyLabel = isSessionBusy(chatSessionId)
+      ? 'Responding…'
+      : (chat.live?.background_pending ? 'Subagents working' : '');
     const approvalLabel = sessionNeedsApproval(chatSessionId) ? 'Needs approval' : '';
     const isRenaming = !chat.isDraft && state.renamingSessionId === chat.id;
 
@@ -7784,7 +7805,7 @@ const openSession = async (sessionId, { shouldApply = null } = {}) => {
     state.shouldAutoScrollMessages = !state.sessionScrollPositions.has(sessionId);
     queueMessageScrollRestore(sessionId);
     renderWorkspace();
-    if (ACTIVE_LIVE_SESSION_STATUSES.has(String(liveState?.status || ''))) {
+    if (shouldPollLiveSession(liveState)) {
       startLiveSessionPolling(sessionId);
     }
     return;
@@ -7823,7 +7844,7 @@ const openSession = async (sessionId, { shouldApply = null } = {}) => {
     state.messages = normalizedMessages;
     state.shouldAutoScrollMessages = true;
     renderWorkspace();
-    if (ACTIVE_LIVE_SESSION_STATUSES.has(String(liveState?.status || ''))) {
+    if (shouldPollLiveSession(liveState)) {
       startLiveSessionPolling(sessionId);
     }
   } catch (error) {
@@ -8225,6 +8246,7 @@ const applyLiveSessionSnapshot = (
   const liveRenderKey = (value) => JSON.stringify([
     String(value?.run_id || value?.runId || ''),
     String(value?.status || ''),
+    Boolean(value?.background_pending),
     Number(value?.last_event_seq || value?.lastEventSeq || 0),
     String(value?.pending_approval?.approval_id || value?.pendingApproval?.approvalId || ''),
     String(value?.last_error || value?.lastError || ''),
@@ -8257,7 +8279,7 @@ const applyLiveSessionSnapshot = (
         state.messages = mergedMessages;
       }
     }
-  } else if (managePolling && ACTIVE_LIVE_SESSION_STATUSES.has(String(liveState?.status || ''))) {
+  } else if (managePolling && shouldPollLiveSession(liveState)) {
     startLiveSessionPolling(resolvedSessionId);
   }
 
@@ -8349,7 +8371,7 @@ async function pollLiveSessionSnapshot(sessionId, generation = getLiveSessionPol
 
     const liveState = snapshot.live;
     const status = String(liveState?.status || '').trim();
-    if (!ACTIVE_LIVE_SESSION_STATUSES.has(status)) {
+    if (!shouldPollLiveSession(liveState)) {
       scheduleFileTreeRefresh('live.terminal');
       if (status === 'completed') {
         scheduleTitleReconciliation(persistentSessionId);

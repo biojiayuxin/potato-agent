@@ -24,6 +24,7 @@ from interface.redaction import force_redact_text, force_redact_value
 from interface.subprocess_env import interface_subprocess_env
 from interface.runtime_state import (
     FOREGROUND_CHAT_LEASE,
+    BACKGROUND_JOB_LEASE,
     create_runtime_lease,
     finish_runtime_lease,
     heartbeat_runtime_lease,
@@ -168,6 +169,10 @@ class TuiGatewayBridge:
         self._closed = False
         self._started_at = 0.0
         self._last_event_at = 0.0
+        self._delegation_deadlines: dict[str, float] = {}
+        self._delegation_lease = ""
+        self._delegation_lease_refreshed = 0.0
+        self._delegation_lease_lock = asyncio.Lock()
         self._foreground_leases_lock = threading.Lock()
         self._foreground_start_lock = asyncio.Lock()
         self._foreground_leases: dict[str, tuple[str, asyncio.Task[None]]] = {}
@@ -230,8 +235,11 @@ class TuiGatewayBridge:
             )
         )
 
+    def has_active_delegations(self) -> bool:
+        return any(deadline > time.monotonic() for deadline in list(self._delegation_deadlines.values()))
+
     def has_reconfigure_conflict(self) -> bool:
-        return self.startup_in_progress() or self.has_pending_requests()
+        return self.startup_in_progress() or self.has_pending_requests() or self.has_active_delegations()
 
     def has_inflight_activity(self) -> bool:
         return (
@@ -239,6 +247,7 @@ class TuiGatewayBridge:
             or self.has_pending_requests()
             or self.has_active_foreground_leases()
             or self.has_active_title_tasks()
+            or self.has_active_delegations()
         )
 
     async def ensure_started(self) -> None:
@@ -515,6 +524,7 @@ class TuiGatewayBridge:
         if method == "prompt.submit" and live_session_id:
             turn_id = await self._start_foreground_lease(live_session_id, generation=generation)
             rpc_params["turn_id"] = turn_id
+            rpc_params["interface_session_id"] = self.get_persistent_session_id(live_session_id)
 
         request_id = uuid.uuid4().hex
         loop = asyncio.get_running_loop()
@@ -557,6 +567,9 @@ class TuiGatewayBridge:
 
         try:
             result = await asyncio.wait_for(future, timeout=60.0)
+            if turn_id and result.get("status") == "no_results":
+                await self._release_foreground_lease(live_session_id)
+                return result
             if turn_id:
                 with self._foreground_leases_lock:
                     if self._foreground_turn_ids.get(live_session_id) == turn_id:
@@ -769,6 +782,16 @@ class TuiGatewayBridge:
                     persistent_session_id = str(
                         event_payload.get("session_key") or ""
                     ).strip()
+            if event_type.startswith("delegation.") or (
+                event_type in {"approval.request", "approval.expired"} and event_payload.get("subagent_id")
+            ):
+                persistent_session_id = str(event_payload.get("persistent_session_id") or persistent_session_id)
+            if event_type == "delegation.state":
+                if int(event_payload.get("active") or 0) + int(event_payload.get("pending") or 0) > 0:
+                    self._delegation_deadlines[event_session_id] = time.monotonic() + 30
+                else:
+                    self._delegation_deadlines.pop(event_session_id, None)
+                self._schedule_generation_coroutine(generation, lambda: self._refresh_delegation_lease(generation))
             run_id = self.get_run_id(event_session_id)
             if event_type in {"message.complete", "error"} and event_session_id:
                 self._schedule_foreground_lease_release(event_session_id, generation)
@@ -961,11 +984,44 @@ class TuiGatewayBridge:
         with contextlib.suppress(asyncio.CancelledError):
             await heartbeat_task
 
+    async def _refresh_delegation_lease(self, generation) -> None:
+        try:
+            await self._update_delegation_lease(generation)
+        except Exception:
+            # A later state heartbeat retries; keep the in-memory activity
+            # marker so the bridge registry cannot retire a live child.
+            LOGGER.warning("Could not refresh delegation runtime lease", exc_info=True)
+
+    async def _update_delegation_lease(self, generation) -> None:
+        async with self._delegation_lease_lock:
+            if self._generation is not generation or self._closed:
+                return
+            active = any(deadline > time.monotonic() for deadline in list(self._delegation_deadlines.values()))
+            if active:
+                if not self._delegation_lease:
+                    self._delegation_lease = await asyncio.to_thread(
+                        create_runtime_lease, self.user_id, lease_type=BACKGROUND_JOB_LEASE,
+                        ttl_seconds=60, resource_id="tui-delegation",
+                    )
+                    self._delegation_lease_refreshed = time.monotonic()
+                elif time.monotonic() - self._delegation_lease_refreshed >= 15:
+                    await asyncio.to_thread(heartbeat_runtime_lease, self._delegation_lease, ttl_seconds=60)
+                    self._delegation_lease_refreshed = time.monotonic()
+            elif self._delegation_lease:
+                await asyncio.to_thread(finish_runtime_lease, self._delegation_lease, user_id=self.user_id)
+                self._delegation_lease = ""
+
     async def _release_all_foreground_leases(self) -> None:
         with self._foreground_leases_lock:
             live_session_ids = list(self._foreground_leases.keys())
         for live_session_id in live_session_ids:
             await self._release_foreground_lease(live_session_id)
+
+        async with self._delegation_lease_lock:
+            self._delegation_deadlines.clear()
+            if self._delegation_lease:
+                await asyncio.to_thread(finish_runtime_lease, self._delegation_lease, user_id=self.user_id)
+                self._delegation_lease = ""
 
     async def _foreground_chat_lease_heartbeat(
         self,
