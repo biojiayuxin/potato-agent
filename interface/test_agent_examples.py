@@ -51,11 +51,10 @@ for (const page of ['genes', 'bulk_rnaseq', 'wgcna', 'spatial', 'pan_genome', 'g
   assert.ok(!/family/i.test(text));
 }
 assert.match(e.build('wgcna', {genes:['A', 'B', 'A']}), /each of the query genes A, B/);
-assert.match(e.build('wgcna', {genes:['A', 'B']}), /for each query gene/);
-assert.match(e.build('bulk_rnaseq', {genes:['A','B']}), /the genes A, B across tissues/);
+assert.match(e.build('bulk_rnaseq', {genes:['A','B']}), /for the genes A, B using mean expression per tissue, with z-score normalization across tissues for each gene\./);
 assert.match(e.build('genes', {genes:[null,'']}), /DM8.2_chr05G25210/);
-assert.match(e.build('spatial'), /Dataset: Stolon and tuber \(s1_s2\); sample: Stolon \(S1\)\./);
-assert.match(e.build('spatial', {genes:['G'],dataset:'D',sample:'S'}), /for G.*Dataset: D; sample: S\./);
+assert.match(e.build('spatial'), /for Soltu\.DM\.03G024100 in Stolon \(S1\)\./);
+assert.match(e.build('spatial', {genes:['G'],dataset:'D',sample:'S'}), /for G in S\./);
 assert.match(e.build('genome_browser', {genes:['OTHER']}), /DM8.2_chr05G25210 from DMv8.2/);
 const annotationExample = 'Count the genes annotated as ERF transcription factors in the C88 genome.';
 assert.equal(e.build('functional_annotation'), annotationExample);
@@ -342,7 +341,7 @@ def test_loaded_context_ignores_unsubmitted_input(page, site, module):
     assert expected_gene in text
     assert "UNSUBMITTED" not in text and "NEIGHBOR" not in text
     if module == "spatial":
-        assert "Dataset: Loaded dataset (loaded); sample: Early Swelling Tuber (S2)." in text
+        assert "in Early Swelling Tuber (S2)." in text
 
 
 @browser_test

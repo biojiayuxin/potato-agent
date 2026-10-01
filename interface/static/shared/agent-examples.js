@@ -4,7 +4,6 @@
   const DEFAULT_GENE = 'DM8.2_chr05G25210';
   const DEFAULT_SPATIAL = {
     genes: ['Soltu.DM.03G024100'],
-    dataset: 'Stolon and tuber (s1_s2)',
     sample: 'Stolon (S1)',
   };
   const pages = ['genes', 'bulk_rnaseq', 'wgcna', 'spatial', 'pan_genome', 'genome_browser', 'functional_annotation', 'synteny'];
@@ -21,17 +20,17 @@
     const subject = genes.length > 1 ? `the genes ${names}` : names;
     switch (page) {
       case 'genes':
-        return `Summarize the functional annotations, available protein domains, and relevant literature for ${subject}. Create an evidence table with sources, distinguishing reported findings from predictions.`;
+        return `Summarize the functional annotations, available protein domains, and relevant literature for ${subject}.`;
       case 'bulk_rnaseq':
-        return `Compare the expression of ${subject} across tissues. Generate a heatmap and export the underlying expression values as a TSV file.`;
+        return `Generate a heatmap for ${subject} using mean expression per tissue, with z-score normalization across tissues for each gene.`;
       case 'wgcna':
-        return `Find the top 25 co-expression neighbors of ${genes.length > 1 ? `each of the query genes ${names}` : names} in the tuberization network. Rank them by TOM, add available functional annotations, and generate ${genes.length > 1 ? 'a network plot and candidate table for each query gene' : 'a network plot and candidate table'}.`;
+        return `Find the top 25 co-expression neighbors of ${genes.length > 1 ? `each of the query genes ${names}` : names} in the tuberization network and generate a co-expression network plot${genes.length > 1 ? ' for each query gene' : ''}.`;
       case 'spatial':
-        return `Compare the average expression and percentage of expressing cells for ${subject} across clusters. Generate a dot plot and export the summary table. Dataset: ${context.dataset || DEFAULT_SPATIAL.dataset}; sample: ${context.sample || DEFAULT_SPATIAL.sample}.`;
+        return `Generate a spatial expression plot for ${subject} in ${context.sample || DEFAULT_SPATIAL.sample}.`;
       case 'pan_genome':
-        return 'List the potato genome assemblies available in PotatoOmics, including their accessions, ploidy, and available annotation resources. Export the results as a TSV file.';
+        return 'List the potato genome assemblies available in PotatoOmics, including their accessions and ploidy';
       case 'genome_browser':
-        return `Export the CDS and protein sequences of ${DEFAULT_GENE} from DMv8.2 as FASTA files. Use the database's default transcript and include a gene-to-transcript mapping table.`;
+        return `Export the CDS and protein sequences of ${DEFAULT_GENE} from DMv8.2 as FASTA files.`;
       case 'functional_annotation':
         return 'Count the genes annotated as ERF transcription factors in the C88 genome.';
       case 'synteny':
