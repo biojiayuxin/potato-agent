@@ -1,6 +1,13 @@
 {
   "updates": [
     {
+      "version": "2026-10-01-001",
+      "title": "Subagent improvements",
+      "date": "October 1, 2026",
+      "summary": "Improved subagent delegation and result delivery.",
+      "items": []
+    },
+    {
       "version": "2026-09-29-001",
       "title": "Link rendering fix",
       "date": "September 29, 2026",
