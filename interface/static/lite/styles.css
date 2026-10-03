@@ -2089,6 +2089,29 @@ button.stretch {
   background: var(--surface-strong);
 }
 
+.message-content .markdown-math {
+  overflow-wrap: normal;
+  word-break: normal;
+  white-space: normal;
+}
+
+.message-content .markdown-math-display {
+  display: block;
+  max-width: 100%;
+  overflow-x: auto;
+  overflow-y: hidden;
+  padding: 0.2em 0;
+}
+
+.message-content .katex-display {
+  margin: 0.4em 0;
+}
+
+.message-content .katex-display > .katex {
+  width: max-content;
+  min-width: 100%;
+}
+
 .composer {
   border-top: 1px solid var(--border);
   padding: 18px 22px 22px;

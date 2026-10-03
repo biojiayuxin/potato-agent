@@ -1,4 +1,5 @@
 import { ChatWorkspace, accountKey, supportsWorkspace, readEntry, saveEntry, handoffRecord } from '/static/shared/chat-workspace.js?v=20260928-annotations';
+import { createMarkdownRenderer } from './markdown.js?v=20261003-markdown-math';
 
 if (location.pathname !== '/chat' && /^#(share|example|entry)=/.test(location.hash)) {
   history.replaceState(history.state, '', '/chat' + location.search + location.hash);
@@ -4555,7 +4556,7 @@ const linkifyWorkspacePaths = (container) => {
 
   for (const textNode of textNodes) {
     const parent = textNode.parentElement;
-    if (!parent || parent.closest('a')) continue;
+    if (!parent || parent.closest('a, .markdown-math')) continue;
     if (parent.tagName === 'CODE' && replaceInlineCodeWorkspacePath(textNode)) continue;
     if (
       parent.tagName === 'CODE'
@@ -4573,25 +4574,12 @@ const removeWorkspacePathLinks = (container) => {
   }
 };
 
-const renderMarkdown = (text) => {
-  const source = String(text ?? '')
-    .replace(/\r\n/g, '\n')
-    .replace(/\n{3,}/g, '\n\n');
-  const markedApi = globalThis.marked;
-
-  if (!markedApi?.parse) {
-    return escapeHtml(source).replaceAll('\n', '<br>');
-  }
-
-  const rendered = markedApi.parse(source, {
-    gfm: true,
-    breaks: true,
-    headerIds: false,
-    mangle: false,
-  });
-
-  return sanitizeRenderedHtml(rendered);
-};
+const renderMarkdown = createMarkdownRenderer({
+  marked: globalThis.marked,
+  katex: globalThis.katex,
+  sanitize: sanitizeRenderedHtml,
+  escapeHtml,
+});
 
 const formatTimestamp = (ts) => {
   if (!ts) return '';
