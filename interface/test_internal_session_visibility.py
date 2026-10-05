@@ -108,6 +108,7 @@ def test_internal_transcripts_never_reappear_from_raw_or_cached_history(chat, cl
         ("GET", "/live", None),
         ("PUT", "/display", {"messages": []}),
         ("PUT", "/title", {"title": "should not rename"}),
+        ("PUT", "/pin", {"pinned": True}),
         ("POST", "/shares", {}),
         ("POST", "/forks", {"fork_cursor": "old-assistant", "request_id": "test-fork"}),
         ("POST", "/turns", {"prompt": "resume", "request_id": "test-turn"}),

@@ -387,3 +387,20 @@ sudo /opt/interface-env/bin/python update_fast_model.py --apply
   - 能收到 `message.delta`、`reasoning.delta`、`message.complete`
 
 部署方式、systemd 启动、模型配置和根目录用户管理脚本的具体用法，请看仓库根目录 `README.md`。
+
+### 聊天历史置顶
+
+历史操作区的图钉按钮按账号保存置顶状态。排序为：最新置顶优先，其次排队、
+启动、响应和等待审批的会话，然后是新对话草稿和普通历史。置顶组内不受消息、
+标题或运行状态更新影响；取消置顶恢复按运行状态和原活动时间排序。后台子代理
+工作本身不增加优先级。进入聊天页面仍默认打开排序后的第一条持久会话。
+
+`PUT /api/sessions/{session_id}/pin` 接受严格布尔值 `{"pinned": true|false}`。
+会话快照包含 `pinned`、`pin_order` 和 `pin_revision`；重复设置相同状态不改变
+顺序。状态保存在 Interface 数据库的 `session_pin_state` 表中，启动时自动建表，
+无需回填或修改 Hermes 数据库。删除、归档或清理账号会删除对应状态，原归档
+策略保持不变。旧版本可忽略新增表回滚。其他设备重新加载历史时获得最新状态。
+
+置顶回归：`python -m pytest interface/test_session_pinning.py`；浏览器回归：
+`POTATO_WORKSPACE_BROWSER_TESTS=1 python -m pytest interface/test_lite_session_pinning_browser.py`。
+浏览器测试使用 Mock API，可用 `POTATO_WORKSPACE_SCREENSHOTS` 保存评审截图。

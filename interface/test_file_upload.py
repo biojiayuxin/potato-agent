@@ -368,6 +368,13 @@ def test_submit_turn_rejects_invalid_mode(monkeypatch) -> None:
 def test_submit_turn_passes_plan_mode_to_run_manager(monkeypatch) -> None:
     client, home_dir = _build_client_and_user(monkeypatch)
     auth_db = home_dir.parent / "interface.db"
+    monkeypatch.setattr(
+        interface_app_mod,
+        "get_session_pin_state",
+        lambda user_id, session_id: display_store_mod.get_session_pin_state(
+            user_id, session_id, db_path=auth_db,
+        ),
+    )
     run_manager = _TurnRunManager()
     monkeypatch.setattr(
         interface_app_mod.app.state,

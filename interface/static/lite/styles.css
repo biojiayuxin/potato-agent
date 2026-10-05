@@ -1380,6 +1380,7 @@ button.stretch {
 }
 
 .chat-rename-button,
+.chat-pin-button,
 .chat-delete-button {
   display: inline-flex;
   align-items: center;
@@ -3362,7 +3363,7 @@ button.stretch {
   display: flex;
   flex-direction: column;
   gap: 4px;
-  padding: 10px 40px 10px 10px;
+  padding: 10px 100px 10px 10px;
   border: 1px solid transparent;
   border-radius: 12px;
   background: transparent;
@@ -3415,6 +3416,20 @@ button.stretch {
   background: rgba(37, 99, 235, 0.08);
 }
 
+.workspace-view .chat-item-shell.pinned .chat-item-leading-icon {
+  border-color: var(--primary);
+  color: var(--primary);
+  background: rgba(37, 99, 235, 0.1);
+}
+
+.workspace-view .chat-item-shell.pinned .chat-item-leading-icon::before {
+  inset: 2px;
+  height: auto;
+  opacity: 1;
+  box-shadow: none;
+  clip-path: polygon(30% 0, 80% 0, 70% 40%, 100% 65%, 55% 65%, 45% 100%, 35% 65%, 0 65%, 30% 40%);
+}
+
 .workspace-view .chat-item-title {
   min-width: 0;
   display: block;
@@ -3456,6 +3471,7 @@ button.stretch {
 }
 
 .workspace-view .chat-rename-button,
+.workspace-view .chat-pin-button,
 .workspace-view .chat-delete-button {
   width: 26px;
   height: 26px;
@@ -3463,6 +3479,28 @@ button.stretch {
   border-color: var(--border);
   background: var(--panel);
   box-shadow: 0 6px 14px rgba(15, 23, 42, 0.08);
+}
+
+.workspace-view .chat-pin-button[aria-pressed='true'] {
+  color: var(--primary);
+  border-color: var(--primary);
+}
+
+.workspace-view .chat-pin-button:focus-visible {
+  outline: 2px solid var(--primary);
+  outline-offset: 2px;
+}
+
+.workspace-view .chat-pin-button:disabled {
+  opacity: 0.5;
+  cursor: wait;
+}
+
+@media (hover: none), (pointer: coarse) {
+  .workspace-view .chat-item-actions {
+    opacity: 1;
+    pointer-events: auto;
+  }
 }
 
 .workspace-view .chat-item-editing {

@@ -416,6 +416,13 @@ def test_live_session_poll_is_lightweight_and_does_not_refresh_activity(
                 user_id, request_id, db_path=db_path
             ),
         )
+        monkeypatch.setattr(
+            interface_app_mod,
+            "get_session_pin_state",
+            lambda user_id, session_id: display_store_mod.get_session_pin_state(
+                user_id, session_id, db_path=db_path,
+            ),
+        )
         visibility_checks: list[str] = []
 
         class _VisibilityOnlyDB:
@@ -486,9 +493,11 @@ def test_live_session_poll_is_lightweight_and_does_not_refresh_activity(
         revision_response = client.get("/api/files/revision")
         assert revision_response.status_code == 200
         assert revision_response.json() == {"revision": "revision-1"}
+        pinned = display_store_mod.set_session_pinned(user.id, "session-1", True, db_path=db_path)
         recovered_response = client.get("/api/turns/run-1")
         assert recovered_response.status_code == 200
         assert recovered_response.json()["session"]["id"] == "session-1"
+        assert recovered_response.json()["session"]["pin_order"] == pinned["pin_order"]
         assert recovered_response.json()["live"]["run_id"] == "run-1"
         display_store_mod.create_turn_submission_receipt(
             user.id,

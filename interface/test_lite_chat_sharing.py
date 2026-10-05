@@ -132,8 +132,8 @@ def test_share_fragment_is_captured_privately_and_imported_before_default_chat()
     assert initialize.index("importPendingSharedChat({ duringInitialization: true })") < initialize.index(
         "await refreshSessions()"
     )
-    assert initialize.index("await refreshSessions()") < initialize.index("state.sessions[0].id")
-    assert initialize.index("if (state.pendingShareToken)") < initialize.index("state.sessions[0].id")
+    assert initialize.index("await refreshSessions()") < initialize.index("getFirstHistorySession().id")
+    assert initialize.index("if (state.pendingShareToken)") < initialize.index("getFirstHistorySession().id")
     pending_branch = initialize[
         initialize.rindex("if (state.pendingShareToken)") : initialize.index("if (state.sessions.length > 0)")
     ]

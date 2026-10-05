@@ -787,6 +787,7 @@ def test_session_fork_returns_raw_snapshot_and_retry_preserves_follow_up() -> No
             status="running",
         )
 
+        interface_app_mod.set_session_pinned(user.id, "sess_tui_1", True)
         first_response = client.post(
             "/api/sessions/sess_tui_1/forks",
             json={"fork_cursor": "assistant-1", "request_id": "fork-request-1"},
@@ -795,6 +796,7 @@ def test_session_fork_returns_raw_snapshot_and_retry_preserves_follow_up() -> No
         first = first_response.json()
         fork_id = first["session"]["id"]
         assert first["created"] is True
+        assert first["session"]["pinned"] is False
         assert first["context_mode"] == "raw"
         assert first["session"]["title"] == "Files #2"
         assert first["live"] is None
@@ -835,6 +837,7 @@ def test_session_fork_returns_raw_snapshot_and_retry_preserves_follow_up() -> No
         ]
         interface_app_mod.save_display_messages(user.id, fork_id, continued_display)
 
+        pinned_fork = interface_app_mod.set_session_pinned(user.id, fork_id, True)
         retry_response = client.post(
             "/api/sessions/sess_tui_1/forks",
             json={"fork_cursor": "assistant-1", "request_id": "fork-request-1"},
@@ -842,6 +845,7 @@ def test_session_fork_returns_raw_snapshot_and_retry_preserves_follow_up() -> No
         assert retry_response.status_code == 200, retry_response.text
         retry = retry_response.json()
         assert retry["created"] is False
+        assert retry["session"]["pin_order"] == pinned_fork["pin_order"]
         assert retry["session"]["id"] == fork_id
         assert retry["messages"][-1]["content"] == "follow up"
         conn = sqlite3.connect(str(target.state_db_path))

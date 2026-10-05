@@ -1,6 +1,13 @@
 {
   "updates": [
     {
+      "version": "2026-10-05-001",
+      "title": "Chat pinning",
+      "date": "October 5, 2026",
+      "summary": "You can now pin conversations to the top of your chat history.",
+      "items": []
+    },
+    {
       "version": "2026-10-01-001",
       "title": "Subagent improvements",
       "date": "October 1, 2026",

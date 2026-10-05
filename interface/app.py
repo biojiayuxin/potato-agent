@@ -42,7 +42,7 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.responses import Response as FastAPIResponse
 from fastapi.responses import StreamingResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel, ConfigDict, ValidationError
+from pydantic import BaseModel, ConfigDict, StrictBool, ValidationError
 
 from interface.auth_db import (
     EMAIL_VERIFICATION_PURPOSE_PASSWORD_RESET,
@@ -124,11 +124,15 @@ from interface.display_store import (
     delete_display_messages,
     delete_live_session_state,
     delete_session_events,
+    delete_session_pin_state,
     ensure_display_store,
     fail_turn_submission_receipt,
     find_live_session_id_by_run_id,
     finish_turn_submission_receipt,
     get_live_session_state,
+    get_session_pin_state,
+    list_session_pin_states,
+    set_session_pinned,
     list_live_session_states,
     mark_active_live_session_states_failed,
     get_display_session_meta,
@@ -514,6 +518,12 @@ class SessionDisplaySyncRequest(BaseModel):
 
 class SessionTitleUpdateRequest(BaseModel):
     title: str = ""
+
+
+class SessionPinUpdateRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    pinned: StrictBool
 
 
 class SessionForkRequest(BaseModel):
@@ -1437,6 +1447,15 @@ class _UserSessionDBProxy:
         )
         return result if isinstance(result, list) else []
 
+    def get_sidebar_session_candidates(
+        self, *, priority_session_ids: list[str], regular_limit: int
+    ) -> dict[str, Any]:
+        return self._call(
+            "get_sidebar_session_candidates",
+            priority_session_ids=priority_session_ids,
+            regular_limit=regular_limit,
+        )
+
     def get_session(self, session_id: str) -> dict[str, Any] | None:
         result = self._call("get_session", session_id=session_id)
         return result if isinstance(result, dict) else None
@@ -1747,8 +1766,10 @@ def _normalize_logical_session_row(
     display_meta: dict[str, Any] | None,
     live_state: dict[str, Any] | None = None,
     resume_session_id: str | None = None,
+    pin_state: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     normalized = _normalize_session_row(session)
+    normalized.update(pin_state or {"pinned": False, "pin_order": 0, "pin_revision": 0})
     normalized["id"] = logical_session_id
     live_tip_session_id = (
         str(live_state.get("tip_session_id") or "").strip()
@@ -2471,6 +2492,7 @@ def _load_imported_chat_response_sync(
     return {
         "session": _normalize_logical_session_row(
             projected_session or logical_session,
+            pin_state=get_session_pin_state(user.id, logical_session_id),
             logical_session_id=logical_session_id,
             logical_session=logical_session,
             display_meta=display_meta,
@@ -2951,6 +2973,7 @@ def _archive_expired_target_sync(
                         session_id,
                     )
                 delete_display_messages(auth_user.id, session_id)
+                delete_session_pin_state(auth_user.id, session_id)
             archived_count += 1
     return archived_count
 
@@ -5005,39 +5028,36 @@ def _load_normalized_sessions_sync(
     *,
     live_states: dict[str, dict[str, Any]],
     display_metas: dict[str, dict[str, Any]],
+    pin_states: dict[str, dict[str, Any]],
     fetch_limit: int,
 ) -> list[dict[str, Any]]:
     with _open_session_db(target) as db:
-        sessions = db.list_sessions_rich(
-            source="tui",
-            limit=fetch_limit,
-            offset=0,
-            order_by_last_active=True,
-        )
-        # Check after loading rows so a concurrent repair cannot be undone by
-        # the display-cache fallback below.
-        hidden_session_ids = _internal_session_ids(db)
+        priority_ids = {
+            session_id for session_id, pin in pin_states.items() if pin["pinned"]
+        } | {
+            session_id for session_id, live in live_states.items()
+            if live.get("status") in ACTIVE_LIVE_STATUSES
+        }
+        loader = getattr(db, "get_sidebar_session_candidates", None)
+        options = {"priority_session_ids": sorted(priority_ids), "regular_limit": fetch_limit}
+        if callable(loader):
+            candidates = loader(**options)
+        else:
+            from interface.session_db_rpc import execute
+
+            candidates = execute(db, "get_sidebar_session_candidates", options)
+        hidden_session_ids = set(candidates["hidden_session_ids"]) | _internal_session_ids(db)
         normalized_by_id: dict[str, dict[str, Any]] = {}
         seen_session_ids: set[str] = set()
-        for item in sessions:
-            if not _is_interface_managed_source(item.get("source")):
+        for context in candidates["contexts"]:
+            item = context["projected_session"]
+            logical_session = context["logical_session"]
+            logical_session_id = logical_session["id"]
+            if logical_session_id in hidden_session_ids or item["id"] in hidden_session_ids:
                 continue
-            logical_session_id = _logical_session_id_from_row(item)
-            if (
-                logical_session_id in hidden_session_ids
-                or item.get("id") in hidden_session_ids
-            ):
-                continue
-            logical_session = item
-            if str(item.get("_lineage_root_id") or "").strip():
-                root_session = db.get_session(logical_session_id)
-                if not root_session or not _is_interface_managed_source(
-                    root_session.get("source")
-                ):
-                    continue
-                logical_session = root_session
             normalized_by_id[logical_session_id] = _normalize_logical_session_row(
                 item,
+                pin_state=pin_states.get(logical_session_id),
                 logical_session_id=logical_session_id,
                 logical_session=logical_session,
                 display_meta=display_metas.get(logical_session_id),
@@ -5068,6 +5088,7 @@ def _load_normalized_sessions_sync(
                     "message_count": int(display_meta.get("message_count") or 0),
                     "tool_call_count": 0,
                 },
+                pin_state=pin_states.get(logical_session_id),
                 logical_session_id=logical_session_id,
                 logical_session={
                     "id": logical_session_id,
@@ -5080,7 +5101,10 @@ def _load_normalized_sessions_sync(
             )
     return sorted(
         normalized_by_id.values(),
-        key=lambda item: (item["last_active"], item["started_at"]),
+        key=lambda item: (
+            bool(item["pinned"]), item["pin_order"], bool(item["is_running"]),
+            item["last_active"], item["started_at"], item["id"],
+        ),
         reverse=True,
     )
 
@@ -5092,19 +5116,21 @@ async def get_sessions(
     page_limit = max(1, min(int(limit or 50), 200))
     page_offset = max(0, int(offset or 0))
     fetch_limit = page_offset + page_limit + 1
-    live_states, display_metas = await asyncio.gather(
+    live_states, display_metas, pin_states = await asyncio.gather(
         asyncio.to_thread(list_live_session_states, user.id),
         asyncio.to_thread(
             list_display_session_metas,
             user.id,
             include_messages=False,
         ),
+        asyncio.to_thread(list_session_pin_states, user.id),
     )
     normalized = await asyncio.to_thread(
         _load_normalized_sessions_sync,
         user.target,
         live_states=live_states,
         display_metas=display_metas,
+        pin_states=pin_states,
         fetch_limit=fetch_limit,
     )
     page = normalized[page_offset : page_offset + page_limit]
@@ -5115,6 +5141,25 @@ async def get_sessions(
         "next_offset": page_offset + len(page),
         "has_more": len(normalized) > page_offset + page_limit,
     }
+
+
+@app.put("/api/sessions/{session_id}/pin")
+async def update_session_pin(
+    session_id: str,
+    payload: SessionPinUpdateRequest,
+    user: CurrentUser = Depends(get_current_user),
+) -> dict[str, Any]:
+    logical_id, logical_session, _, _, _ = await asyncio.to_thread(
+        _load_session_context_sync, user.target, session_id
+    )
+    if not logical_session or not _is_interface_managed_source(logical_session.get("source")):
+        # Match the history/detail fallback, after checking internal visibility.
+        cached = await asyncio.to_thread(get_display_session_meta, user.id, session_id)
+        if cached is None:
+            raise HTTPException(status_code=404, detail="Session not found")
+        logical_id = session_id
+    pin = await asyncio.to_thread(set_session_pinned, user.id, logical_id, payload.pinned)
+    return {"ok": True, "session_id": logical_id, **pin}
 
 
 @app.post("/api/sessions/{session_id}/shares")
@@ -5488,6 +5533,7 @@ async def _build_submitted_turn_response(
             "message_count": len(messages) if isinstance(messages, list) else 0,
             "tool_call_count": 0,
         },
+        pin_state=await asyncio.to_thread(get_session_pin_state, user.id, session_id),
         logical_session_id=session_id,
         logical_session={"id": session_id, "source": "tui", "title": ""},
         display_meta=display_meta,
@@ -5715,6 +5761,7 @@ def _fork_session_sync(
         "context_mode": str(result.get("context_mode") or "visible"),
         "session": _normalize_logical_session_row(
             projected_target or logical_target or {"id": logical_target_id},
+            pin_state=get_session_pin_state(user_id, logical_target_id),
             logical_session_id=logical_target_id,
             logical_session=logical_target,
             display_meta=current_display_meta,
@@ -5851,6 +5898,7 @@ async def get_session_detail(
     return {
         "session": _normalize_logical_session_row(
             projected_session,
+            pin_state=await asyncio.to_thread(get_session_pin_state, user.id, logical_session_id),
             logical_session_id=logical_session_id,
             logical_session=logical_session,
             display_meta=display_meta,
@@ -6058,6 +6106,7 @@ async def update_session_title(
     return {
         "session": _normalize_logical_session_row(
             projected_session or {"id": logical_session_id, "title": sanitized_title},
+            pin_state=await asyncio.to_thread(get_session_pin_state, user.id, logical_session_id),
             logical_session_id=logical_session_id,
             logical_session=refreshed_logical_session,
             display_meta=display_meta,
@@ -6251,6 +6300,7 @@ async def submit_session_turn(
             projected_session
             or logical_session
             or {"id": logical_session_id, "source": "tui"},
+            pin_state=await asyncio.to_thread(get_session_pin_state, user.id, logical_session_id),
             logical_session_id=logical_session_id,
             logical_session=logical_session
             or projected_session
@@ -6450,6 +6500,7 @@ def _delete_session_sync(
 
 
 def _delete_interface_session_state_sync(user_id: str, session_id: str) -> None:
+    delete_session_pin_state(user_id, session_id)
     delete_display_messages(user_id, session_id)
     delete_live_session_state(user_id, session_id)
     delete_session_events(user_id, session_id)

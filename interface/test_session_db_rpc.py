@@ -381,3 +381,43 @@ def test_web_session_db_proxy_rejects_invalid_json_response(
     assert exc_info.value.status_code == 500
     assert exc_info.value.detail.startswith("Invalid Hermes session DB helper response")
     assert isinstance(exc_info.value.__cause__, json.JSONDecodeError)
+
+
+def test_sidebar_candidates_batch_old_pins_without_messages(tmp_path, monkeypatch):
+    from potato_hermes_lite.session_visibility import SessionDB as VisibleSessionDB
+
+    path = tmp_path / "sidebar.db"
+    db = VisibleSessionDB(path)
+    db.create_session("old", "tui")
+    db.create_session("root", "tui")
+    db.end_session("root", "compression")
+    db.create_session("tip", "tui", parent_session_id="root")
+    for i in range(100):
+        db.create_session(f"recent-{i:03d}", "tui")
+        db._conn.execute(
+            "UPDATE sessions SET started_at = ? WHERE id = ?",
+            (2000000000 + i, f"recent-{i:03d}"),
+        )
+    db._conn.commit()
+    expected = {row.get("_lineage_root_id") or row["id"]: row for row in db.list_sessions_rich(source="tui", limit=200, order_by_last_active=True)}
+    db.close()
+    readonly = VisibleSessionDB(path, read_only=True)
+    calls = []
+    original = readonly.list_sessions_rich
+
+    def list_rows(**kwargs):
+        calls.append(kwargs)
+        return original(**kwargs)
+
+    monkeypatch.setattr(readonly, "list_sessions_rich", list_rows)
+    monkeypatch.setattr(readonly, "get_messages", lambda *args: pytest.fail("sidebar must not read messages"))
+    try:
+        result = execute(readonly, "get_sidebar_session_candidates", {"priority_session_ids": ["old", "root"], "regular_limit": 2})
+    finally:
+        readonly.close()
+    contexts = {c["logical_session"]["id"]: c for c in result["contexts"]}
+    assert contexts["old"]["projected_session"] == expected["old"]
+    assert contexts["root"]["projected_session"] == expected["root"]
+    assert len(calls) == 1
+    assert "id_query" not in calls[0]
+    assert "get_sidebar_session_candidates" in session_db_rpc.READ_ONLY_METHODS

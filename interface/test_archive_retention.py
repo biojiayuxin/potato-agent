@@ -236,6 +236,11 @@ def test_archive_finalize_failure_still_deletes_display_transcript(monkeypatch) 
         ),
     )
 
+    monkeypatch.setattr(
+        app_mod,
+        "delete_session_pin_state",
+        lambda user_id, session_id: events.append(("delete_pin", user_id, session_id)),
+    )
     target = SimpleNamespace(username="alice")
     auth_user = SimpleNamespace(id="auth-alice")
 
@@ -244,6 +249,7 @@ def test_archive_finalize_failure_still_deletes_display_transcript(monkeypatch) 
         ("delete", "expired-session"),
         ("finalize", "expired-session"),
         ("delete_display", "auth-alice", "expired-session"),
+        ("delete_pin", "auth-alice", "expired-session"),
     ]
 
 

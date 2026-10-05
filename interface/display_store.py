@@ -14,6 +14,22 @@ TURN_SUBMISSION_RECEIPT_RETENTION_SECONDS = 7 * 24 * 60 * 60
 _DISPLAY_STORE_INIT_LOCK = threading.Lock()
 _DISPLAY_STORE_IDENTITIES: dict[str, tuple[int, int]] = {}
 
+PIN_SCHEMA_SQL = """
+CREATE TABLE IF NOT EXISTS session_pin_state (
+    pin_revision INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id TEXT NOT NULL,
+    session_id TEXT NOT NULL,
+    pinned INTEGER NOT NULL CHECK (pinned IN (0, 1)),
+    UNIQUE (user_id, session_id)
+);
+
+CREATE TRIGGER IF NOT EXISTS delete_user_session_pins
+AFTER DELETE ON users
+BEGIN
+    DELETE FROM session_pin_state WHERE user_id = OLD.id;
+END;
+"""
+
 
 SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS session_display_transcripts (
@@ -112,6 +128,7 @@ def _display_store_identity(db_path: Path) -> tuple[int, int] | None:
 
 def _initialize_display_store(db_path: Path) -> Path:
     with connect_auth_db(db_path) as conn:
+        conn.executescript(PIN_SCHEMA_SQL)
         conn.executescript(
             """
 CREATE TABLE IF NOT EXISTS session_display_transcripts (
@@ -259,6 +276,80 @@ def ensure_display_store(db_path: Path = DEFAULT_AUTH_DB_PATH) -> Path:
         if identity is not None:
             _DISPLAY_STORE_IDENTITIES[cache_key] = identity
     return db_path
+
+
+def _public_pin_state(row: Any = None) -> dict[str, Any]:
+    revision = int(row["pin_revision"]) if row is not None else 0
+    pinned = bool(row["pinned"]) if row is not None else False
+    return {
+        "pinned": pinned,
+        "pin_order": revision if pinned else 0,
+        "pin_revision": revision,
+    }
+
+
+def get_session_pin_state(
+    user_id: str, session_id: str, db_path: Path = DEFAULT_AUTH_DB_PATH
+) -> dict[str, Any]:
+    ensure_display_store(db_path)
+    with connect_auth_db(db_path) as conn:
+        row = conn.execute(
+            "SELECT pinned, pin_revision FROM session_pin_state WHERE user_id = ? AND session_id = ?",
+            (user_id, session_id),
+        ).fetchone()
+    return _public_pin_state(row)
+
+
+def list_session_pin_states(
+    user_id: str, db_path: Path = DEFAULT_AUTH_DB_PATH
+) -> dict[str, dict[str, Any]]:
+    ensure_display_store(db_path)
+    with connect_auth_db(db_path) as conn:
+        rows = conn.execute(
+            "SELECT session_id, pinned, pin_revision FROM session_pin_state WHERE user_id = ?",
+            (user_id,),
+        ).fetchall()
+    return {row["session_id"]: _public_pin_state(row) for row in rows}
+
+
+def set_session_pinned(
+    user_id: str, session_id: str, pinned: bool, db_path: Path = DEFAULT_AUTH_DB_PATH
+) -> dict[str, Any]:
+    ensure_display_store(db_path)
+    with connect_auth_db(db_path) as conn:
+        # Serialize read/replace so concurrent pins receive a strict order.
+        conn.execute("BEGIN IMMEDIATE")
+        row = conn.execute(
+            "SELECT pinned, pin_revision FROM session_pin_state WHERE user_id = ? AND session_id = ?",
+            (user_id, session_id),
+        ).fetchone()
+        current = _public_pin_state(row)
+        if current["pinned"] == pinned:
+            return current
+        conn.execute(
+            "DELETE FROM session_pin_state WHERE user_id = ? AND session_id = ?",
+            (user_id, session_id),
+        )
+        cursor = conn.execute(
+            "INSERT INTO session_pin_state (user_id, session_id, pinned) VALUES (?, ?, ?)",
+            (user_id, session_id, int(pinned)),
+        )
+        revision = int(cursor.lastrowid)
+        conn.commit()
+    # Keep an unpinned row too: its revision rejects delayed pinned snapshots.
+    return {"pinned": pinned, "pin_order": revision if pinned else 0, "pin_revision": revision}
+
+
+def delete_session_pin_state(
+    user_id: str, session_id: str, db_path: Path = DEFAULT_AUTH_DB_PATH
+) -> None:
+    ensure_display_store(db_path)
+    with connect_auth_db(db_path) as conn:
+        conn.execute(
+            "DELETE FROM session_pin_state WHERE user_id = ? AND session_id = ?",
+            (user_id, session_id),
+        )
+        conn.commit()
 
 
 def get_display_messages(
@@ -1266,6 +1357,9 @@ def delete_display_user_data(
     ensure_display_store(db_path)
     normalized_user_id = user_id.strip()
     with connect_auth_db(db_path) as conn:
+        pin_cursor = conn.execute(
+            "DELETE FROM session_pin_state WHERE user_id = ?", (normalized_user_id,)
+        )
         display_cursor = conn.execute(
             "delete from session_display_transcripts where user_id = ?",
             (normalized_user_id,),
@@ -1288,6 +1382,7 @@ def delete_display_user_data(
         )
         conn.commit()
     return {
+        "session_pins": int(pin_cursor.rowcount or 0),
         "display_messages": int(display_cursor.rowcount or 0),
         "fork_boundaries": int(boundary_cursor.rowcount or 0),
         "live_states": int(live_cursor.rowcount or 0),

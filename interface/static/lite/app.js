@@ -319,6 +319,10 @@ const liveTuiSessionsByPersistentId = new Map();
 const liveTuiSessionAliasesByPersistentId = new Map();
 const persistentIdsByLiveTuiSessionId = new Map();
 const busySessionIds = new Set();
+const sessionPinStatesById = new Map();
+const pinningSessionIds = new Set();
+let sessionsRequestGeneration = 0;
+let sessionsNeedResync = false;
 const sessionRunTransportById = new Map();
 const sessionAbortControllersById = new Map();
 const pendingApprovalsBySessionId = new Map();
@@ -1439,6 +1443,28 @@ const sortModelsForDisplay = (models) => models
   })
   .map(({ model }) => model);
 
+const getSessionPinState = (session, existingSession = null) => {
+  const candidates = [sessionPinStatesById.get(session?.id), existingSession, session];
+  let latest = { pinned: false, pin_order: 0, pin_revision: 0 };
+  for (const candidate of candidates) {
+    if (candidate && Number.isSafeInteger(candidate.pin_revision)
+      && candidate.pin_revision >= latest.pin_revision) {
+      latest = {
+        pinned: Boolean(candidate.pinned),
+        pin_order: candidate.pinned ? Number(candidate.pin_order) || 0 : 0,
+        pin_revision: candidate.pin_revision,
+      };
+    }
+  }
+  return latest;
+};
+
+const rememberSessionPinState = (session) => {
+  if (session?.id && !session.isDraft) {
+    sessionPinStatesById.set(session.id, getSessionPinState(session));
+  }
+};
+
 const normalizeSessionSnapshot = (session) => {
   if (!session?.id) return null;
 
@@ -1451,6 +1477,7 @@ const normalizeSessionSnapshot = (session) => {
   const normalized = {
     ...(existingSession || {}),
     ...session,
+    ...getSessionPinState(session, existingSession),
     id: sessionId,
     persistentSessionId: String(session.persistentSessionId || existingSession?.persistentSessionId || sessionId),
     resume_session_id: String(
@@ -3935,6 +3962,10 @@ const resetWorkspaceState = () => {
   clearResearchExample();
   dom.promptInput.value = '';
   authSessionGeneration += 1;
+  sessionsRequestGeneration += 1;
+  sessionsNeedResync = false;
+  sessionPinStatesById.clear();
+  pinningSessionIds.clear();
   workspacePathNavigationGeneration += 1;
   stopAllLiveSessionPolling();
   resetTuiBridgeReconnectState();
@@ -4874,11 +4905,13 @@ const hasDisplayContent = (message) =>
   );
 
 const getCurrentChatEntries = () => {
-  if (state.draftSession) {
-    return [state.draftSession, ...state.sessions];
-  }
-  return state.sessions;
+  return sortSessionsForSidebar([
+    ...state.sessions,
+    ...(state.draftSession ? [state.draftSession] : []),
+  ]);
 };
+
+const getFirstHistorySession = () => sortSessionsForSidebar(state.sessions)[0];
 
 const getActiveChatTitle = () => {
   return state.activeSession?.title || 'New chat';
@@ -5707,7 +5740,7 @@ const discardPendingShareImport = () => {
   closeShareImportDialog();
   if (state.user && !state.activeSession) {
     if (state.sessions.length > 0) {
-      openSession(state.sessions[0].id).catch((error) => showChatError(String(error?.message || error)));
+      openSession(getFirstHistorySession().id).catch((error) => showChatError(String(error?.message || error)));
     } else {
       showDraftChat();
     }
@@ -6054,9 +6087,26 @@ const getChatDisplayTitle = (chat) => {
 
 const compareSessionsByActivity = (left, right) => (
   (right.last_active || right.started_at || 0) - (left.last_active || left.started_at || 0)
+  || (right.started_at || 0) - (left.started_at || 0)
+  || (left.id === right.id ? 0 : (left.id < right.id ? 1 : -1))
 );
 
 const sortSessionsByActivity = (sessions) => [...sessions].sort(compareSessionsByActivity);
+
+const getSidebarSessionGroup = (session) => {
+  if (session.pinned) return 0;
+  if (isSessionBusy(getPersistentSessionIdForChat(session) || session.id)) return 1;
+  if (session.isDraft) return 2;
+  return 3;
+};
+
+const sortSessionsForSidebar = (sessions) => sessions
+  .map((session) => ({ ...session, ...getSessionPinState(session) }))
+  .sort((left, right) => (
+    getSidebarSessionGroup(left) - getSidebarSessionGroup(right)
+    || (right.pin_order || 0) - (left.pin_order || 0)
+    || compareSessionsByActivity(left, right)
+  ));
 
 const buildSessionsPageUrl = (offset = 0, limit = INITIAL_SESSION_PAGE_SIZE) => {
   const params = new URLSearchParams({
@@ -6078,6 +6128,8 @@ const mergeSessionPage = (sessions, append = false) => {
       persistentSessionId: session.id,
     }))
     .filter(Boolean);
+
+  normalized.forEach(rememberSessionPinState);
 
   if (!append) {
     state.sessions = sortSessionsByActivity(normalized);
@@ -6133,6 +6185,7 @@ const renderChatList = () => {
   }
 
   for (const chat of chats) {
+    rememberSessionPinState(chat);
     const fragment = dom.chatItemTemplate.content.cloneNode(true);
     const shell = fragment.querySelector('.chat-item-shell');
     const button = fragment.querySelector('.chat-item');
@@ -6141,12 +6194,31 @@ const renderChatList = () => {
     const actions = fragment.querySelector('.chat-item-actions');
     const renameButton = fragment.querySelector('.chat-rename-button');
     const deleteButton = fragment.querySelector('.chat-delete-button');
+    const pinButton = fragment.querySelector('.chat-pin-button');
     const chatSessionId = getPersistentSessionIdForChat(chat) || chat.id;
     const busyLabel = isSessionBusy(chatSessionId)
       ? 'Responding…'
       : (chat.live?.background_pending ? 'Subagents working' : '');
     const approvalLabel = sessionNeedsApproval(chatSessionId) ? 'Needs approval' : '';
     const isRenaming = !chat.isDraft && state.renamingSessionId === chat.id;
+
+    shell.dataset.sessionId = chat.id;
+    shell.classList.toggle('pinned', Boolean(chat.pinned));
+    if (pinButton) {
+      const label = chat.pinned ? 'Unpin chat' : 'Pin chat';
+      pinButton.hidden = Boolean(chat.isDraft || isRenaming);
+      pinButton.title = label;
+      pinButton.setAttribute('aria-label', label);
+      pinButton.setAttribute('aria-pressed', String(Boolean(chat.pinned)));
+      pinButton.disabled = pinningSessionIds.has(chat.id);
+      pinButton.setAttribute('aria-busy', String(pinButton.disabled));
+      pinButton.addEventListener('click', (event) => {
+        event.stopPropagation();
+        setChatPinned(chat.id, !chat.pinned);
+      });
+    }
+    deleteButton.disabled = pinningSessionIds.has(chat.id);
+    if (renameButton) renameButton.disabled = pinningSessionIds.has(chat.id);
 
     if (isRenaming) {
       shell?.classList.add('renaming');
@@ -6282,14 +6354,15 @@ const renderChatList = () => {
     dom.chatList.append(fragment);
   }
 
-  if (state.sessionsHasMore || state.sessionsLoadingMore) {
+  if (state.sessionsHasMore || state.sessionsLoadingMore || sessionsNeedResync) {
     const shell = document.createElement('div');
     shell.className = 'chat-load-more-shell';
     const button = document.createElement('button');
     button.type = 'button';
     button.className = 'chat-load-more-button';
     button.disabled = state.sessionsLoadingMore;
-    button.textContent = state.sessionsLoadingMore ? 'Loading sessions...' : 'Load more sessions';
+    button.textContent = state.sessionsLoadingMore ? 'Loading sessions...'
+      : (sessionsNeedResync ? 'Refresh sessions' : 'Load more sessions');
     button.addEventListener('click', () => {
       loadMoreSessions().catch((error) => showChatError(error.message));
     });
@@ -7711,33 +7784,117 @@ const switchActiveModel = async (modelId) => {
   }
 };
 
-const refreshSessions = async () => {
+const refreshSessions = async ({ preserveLoaded = false } = {}) => {
+  const generation = ++sessionsRequestGeneration;
+  const authGeneration = authSessionGeneration;
+  const current = () => generation === sessionsRequestGeneration && authGeneration === authSessionGeneration;
+  const targetCount = preserveLoaded
+    ? Math.max(INITIAL_SESSION_PAGE_SIZE, state.sessionsNextOffset || 0)
+    : INITIAL_SESSION_PAGE_SIZE;
+  const previousScrollTop = dom.chatList?.scrollTop || 0;
   state.sessionsLoadingMore = false;
-  const json = await fetchSessionsPage(0, INITIAL_SESSION_PAGE_SIZE);
-  applySessionsPage(json, { append: false });
+  const sessions = [];
+  let page;
+  let offset = 0;
+  try {
+    do {
+      page = await fetchSessionsPage(offset, Math.min(200, targetCount - offset));
+      if (!current()) return false;
+      const entries = Array.isArray(page?.sessions) ? page.sessions : [];
+      sessions.push(...entries);
+      const nextOffset = Number(page?.next_offset);
+      const next = Number.isFinite(nextOffset) ? nextOffset : offset + entries.length;
+      if (next <= offset) break;
+      offset = next;
+    } while (page?.has_more && offset < targetCount);
+  } catch (error) {
+    if (!current()) return false;
+    sessionsNeedResync = true;
+    throw error;
+  }
+  const retained = preserveLoaded ? state.sessions.filter((session) => (
+    session.id === state.activeSessionId || isSessionBusy(session.id)
+  )) : [];
+  applySessionsPage({ ...page, sessions, next_offset: offset }, { append: false });
+  for (const session of retained) {
+    if (!state.sessions.some((entry) => entry.id === session.id)) state.sessions.push(session);
+  }
+  sessionsNeedResync = false;
   renderChatList();
   renderWorkspaceHeader();
+  if (preserveLoaded && dom.chatList) dom.chatList.scrollTop = previousScrollTop;
+  return true;
 };
 
 const loadMoreSessions = async () => {
-  if (state.sessionsLoadingMore || !state.sessionsHasMore) return;
-
+  if (state.sessionsLoadingMore) return;
+  if (sessionsNeedResync && !await refreshSessions({ preserveLoaded: true })) return;
+  if (!state.sessionsHasMore) return;
+  const generation = sessionsRequestGeneration;
+  const authGeneration = authSessionGeneration;
+  const current = () => generation === sessionsRequestGeneration && authGeneration === authSessionGeneration;
   const previousScrollTop = dom.chatList?.scrollTop || 0;
   state.sessionsLoadingMore = true;
   renderChatList();
-
   try {
     const json = await fetchSessionsPage(state.sessionsNextOffset, SESSION_LOAD_MORE_PAGE_SIZE);
-    applySessionsPage(json, { append: true });
+    if (current()) applySessionsPage(json, { append: true });
+  } catch (error) {
+    if (current()) throw error;
   } finally {
-    state.sessionsLoadingMore = false;
-    renderChatList();
-    renderWorkspaceHeader();
-    window.requestAnimationFrame(() => {
-      if (dom.chatList) {
-        dom.chatList.scrollTop = previousScrollTop;
-      }
+    if (current()) {
+      state.sessionsLoadingMore = false;
+      renderChatList();
+      renderWorkspaceHeader();
+      window.requestAnimationFrame(() => {
+        if (current() && dom.chatList) dom.chatList.scrollTop = previousScrollTop;
+      });
+    }
+  }
+};
+
+const setChatPinned = async (sessionId, pinned) => {
+  if (pinningSessionIds.has(sessionId)) return;
+  const authGeneration = authSessionGeneration;
+  const previousScrollTop = dom.chatList?.scrollTop || 0;
+  const restoreFocus = document.activeElement?.classList.contains('chat-pin-button');
+  pinningSessionIds.add(sessionId);
+  sessionsRequestGeneration += 1;
+  state.sessionsLoadingMore = false;
+  renderChatList();
+  try {
+    const response = await api(`/api/sessions/${encodeURIComponent(sessionId)}/pin`, {
+      method: 'PUT', body: JSON.stringify({ pinned }),
     });
+    const pin = await response.json();
+    if (authGeneration !== authSessionGeneration) return;
+    const id = pin.session_id || sessionId;
+    rememberSessionPinState({ id, ...pin });
+    state.sessions = state.sessions.map(normalizeSessionSnapshot);
+    if (state.activeSession?.id === id) state.activeSession = normalizeSessionSnapshot(state.activeSession);
+    sessionsNeedResync = true;
+    renderChatList();
+    if (dom.chatList) dom.chatList.scrollTop = previousScrollTop;
+    try {
+      await refreshSessions({ preserveLoaded: true });
+    } catch {
+      if (authGeneration === authSessionGeneration) {
+        showChatError('Pin saved, but chat history could not be refreshed. Retry loading sessions.');
+      }
+    }
+  } catch (error) {
+    if (authGeneration === authSessionGeneration) showChatError(error.message || 'Could not update pin.');
+  } finally {
+    if (authGeneration === authSessionGeneration) {
+      pinningSessionIds.delete(sessionId);
+      renderChatList();
+      if (dom.chatList) dom.chatList.scrollTop = previousScrollTop;
+      if (restoreFocus) {
+        Array.from(dom.chatList.querySelectorAll('.chat-item-shell'))
+          .find((shell) => shell.dataset.sessionId === sessionId)
+          ?.querySelector('.chat-pin-button')?.focus({ preventScroll: true });
+      }
+    }
   }
 };
 
@@ -7913,6 +8070,7 @@ const updateSessionSnapshot = async (
   } = {},
 ) => {
   if (!sessionId) return null;
+  const authGeneration = authSessionGeneration;
 
   const backgroundQuery = backgroundRefresh ? '?background=1' : '';
   const response = await api(
@@ -7920,6 +8078,7 @@ const updateSessionSnapshot = async (
     { method: 'GET' },
   );
   const json = await response.json();
+  if (authGeneration !== authSessionGeneration) return null;
   const session = normalizeSessionSnapshot(json?.session || null);
   const serverMessages = Array.isArray(json?.messages)
     ? json.messages.map(normalizeMessageForDisplay)
@@ -7936,6 +8095,7 @@ const updateSessionSnapshot = async (
     return null;
   }
 
+  rememberSessionPinState(session);
   const sessionWithLive = {
     ...session,
     live: liveState,
@@ -8432,7 +8592,7 @@ const deleteChat = async (chatId, isDraft = false) => {
     state.messages = [];
 
     if (state.sessions.length > 0) {
-      await openSession(state.sessions[0].id);
+      await openSession(getFirstHistorySession().id);
       return;
     }
 
@@ -8449,6 +8609,8 @@ const deleteChat = async (chatId, isDraft = false) => {
   clearLiveSessionMessages(chatId);
   forgetSessionScrollPosition(chatId);
   state.sessions = state.sessions.filter((chat) => chat.id !== chatId);
+  sessionPinStatesById.delete(chatId);
+  sessionsNeedResync = true;
 
   if (chatId !== state.activeSessionId) {
     renderChatList();
@@ -8459,7 +8621,7 @@ const deleteChat = async (chatId, isDraft = false) => {
   state.activeSessionId = null;
   state.messages = [];
   if (state.sessions.length > 0) {
-    await openSession(state.sessions[0].id);
+    await openSession(getFirstHistorySession().id);
     return;
   }
   showDraftChat();
@@ -8882,7 +9044,7 @@ const initializeWorkspaceData = async () => {
     }
     if (!sessionsLoaded) return;
     if (state.sessions.length > 0) {
-      await openSession(state.sessions[0].id);
+      await openSession(getFirstHistorySession().id);
     } else {
       state.sessionHistoryLoading = false;
       showDraftChat({ focusPrompt: state.shareImportStatus !== 'terminal' });

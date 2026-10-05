@@ -18,6 +18,7 @@ READ_ONLY_METHODS = {
     "get_internal_session_ids",
     "is_internal_session",
     "get_logical_session_context",
+    "get_sidebar_session_candidates",
     "get_compression_tip",
     "get_messages",
     "get_session",
@@ -129,6 +130,84 @@ def _get_logical_session_context(
     finally:
         if started_transaction:
             connection.rollback()
+
+
+def _get_sidebar_session_candidates(
+    db: SessionDB, *, priority_session_ids: list[str], regular_limit: int
+) -> dict[str, Any]:
+    """Load old priority conversations without one full list/RPC per ID."""
+    hidden = internal_session_ids(db)
+    contexts: dict[str, dict[str, Any]] = {}
+
+    def add_row(row: dict[str, Any]) -> str:
+        root_id = str(row.get("_lineage_root_id") or row["id"])
+        if root_id in hidden or row["id"] in hidden:
+            return ""
+        root = db.get_session(root_id)
+        if not root or root.get("source") != "tui":
+            return ""
+        contexts[root_id] = {"logical_session": root, "projected_session": row}
+        return root_id
+
+    for session_id in dict.fromkeys(priority_session_ids):
+        if session_id in hidden or is_internal_session(db, session_id):
+            continue
+        root_id = _find_logical_root(db, session_id)
+        root = db.get_session(root_id)
+        if not root or root.get("source") != "tui" or root.get("archived"):
+            continue
+        row = db._get_session_rich_row(root_id)
+        if row is None:
+            continue
+        tip_id = db.get_compression_tip(root_id) or root_id
+        if tip_id != root_id:
+            tip = db._get_session_rich_row(tip_id)
+            if tip is not None:
+                for key in (
+                    "id", "ended_at", "end_reason", "message_count", "tool_call_count",
+                    "title", "last_active", "preview", "model", "system_prompt", "cwd",
+                ):
+                    if key in tip:
+                        row[key] = tip[key]
+                row["_lineage_root_id"] = root_id
+        add_row(row)
+
+    priority_roots = set(contexts)
+    regular_ids: set[str] = set()
+    batch_size = max(64, regular_limit + len(priority_roots))
+    offset = 0
+    while True:
+        rows = execute(db, "list_sessions_rich", {
+            "source": "tui", "limit": batch_size, "offset": offset,
+            "order_by_last_active": True,
+        })
+        hidden.update(internal_session_ids(db))
+        for row in rows:
+            root_id = add_row(row)
+            if root_id and root_id not in priority_roots:
+                regular_ids.add(root_id)
+        # Recheck previously collected roots as well as display-cache fallbacks.
+        contexts = {
+            root_id: context for root_id, context in contexts.items()
+            if root_id not in hidden and context["projected_session"]["id"] not in hidden
+        }
+        regular_ids.intersection_update(contexts)
+        if len(rows) < batch_size:
+            break
+        if len(regular_ids) >= regular_limit:
+            # Interface timestamps have second precision. Include the complete
+            # boundary second before applying its stable ID tie-break; otherwise
+            # subsecond DB ordering can repeat/skip rows on the next page.
+            activity_seconds = sorted((
+                int(contexts[root_id]["projected_session"].get("last_active")
+                    or contexts[root_id]["projected_session"].get("started_at") or 0)
+                for root_id in regular_ids
+            ), reverse=True)
+            tail_second = int(rows[-1].get("last_active") or rows[-1].get("started_at") or 0)
+            if tail_second < activity_seconds[regular_limit - 1]:
+                break
+        offset += len(rows)
+    return {"contexts": list(contexts.values()), "hidden_session_ids": sorted(hidden)}
 
 
 def _sanitize_shared_title_base(title: str) -> str:
@@ -304,6 +383,8 @@ def execute(db: SessionDB, method: str, kwargs: dict[str, Any]) -> Any:
         return _import_shared_session(db, kwargs)
     if method == "get_logical_session_context":
         return _get_logical_session_context(db, **kwargs)
+    if method == "get_sidebar_session_candidates":
+        return _get_sidebar_session_candidates(db, **kwargs)
     if method == "list_sessions_rich":
         if isinstance(db, SessionDB):
             return db.list_sessions_rich(**kwargs)
