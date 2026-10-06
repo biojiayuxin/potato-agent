@@ -119,6 +119,70 @@ def test_temporary_cleanup_retires_identity_and_deletes_storage(tmp_path) -> Non
     assert snapshots == 0
 
 
+@pytest.mark.parametrize("cleanup_status", ["cleaning", "failed"])
+def test_auth_initialization_preserves_retired_identity_pending_cleanup(
+    tmp_path, cleanup_status
+) -> None:
+    db_path = tmp_path / "interface.db"
+    formal = _formal_user(db_path)
+    username = "temp_1234567890_0123abcd"
+    temporary = auth_db.create_temporary_user(
+        username=username,
+        email="temp@temporary.example",
+        password="random password",
+        mapping_username=username,
+        db_path=db_path,
+    )
+    auth_db.mark_temporary_user_cleanup_attempt(
+        temporary.id, status=cleanup_status, db_path=db_path
+    )
+    assert auth_db.retire_temporary_user_identity(
+        temporary.id, now=100, db_path=db_path
+    )
+
+    # Every new privileged helper initializes the database while OS account
+    # cleanup may still be pending. This must not reclaim the retired identity.
+    auth_db.ensure_auth_db(db_path)
+    assert auth_db.get_user_by_id(formal.id, db_path=db_path) == formal
+    with sqlite3.connect(str(db_path)) as conn:
+        identity = conn.execute(
+            "select user_id, account_type, retired_at, source "
+            "from user_usage_identities where mapping_username = ?",
+            (username,),
+        ).fetchone()
+    assert identity == (temporary.id, "temporary", 100, "temporary_user")
+
+    assert auth_db.delete_user_by_id(temporary.id, db_path=db_path)
+    with pytest.raises(auth_db.PrincipalReuseError):
+        auth_db.create_temporary_user(
+            username=username,
+            email="replacement@temporary.example",
+            password="random password",
+            mapping_username=username,
+            db_path=db_path,
+        )
+
+
+@pytest.mark.parametrize("mismatch", ["user_id", "account_type"])
+def test_auth_initialization_rejects_mismatched_retired_identity(tmp_path, mismatch):
+    db_path = tmp_path / "interface.db"
+    temporary = auth_db.create_temporary_user(
+        username="temp_1234567890_0123abcd",
+        email="temp@temporary.example",
+        password="random password",
+        mapping_username="temp_1234567890_0123abcd",
+        db_path=db_path,
+    )
+    assert auth_db.retire_temporary_user_identity(temporary.id, db_path=db_path)
+    with sqlite3.connect(str(db_path)) as conn:
+        if mismatch == "user_id":
+            conn.execute("update user_usage_identities set user_id = 'another-user'")
+        else:
+            conn.execute("update user_usage_identities set account_type = 'formal'")
+    with pytest.raises(auth_db.PrincipalReuseError):
+        auth_db.ensure_auth_db(db_path)
+
+
 def test_snapshot_upsert_is_idempotent_and_rechecks_current_user(tmp_path) -> None:
     db_path = tmp_path / "interface.db"
     user = _formal_user(db_path)

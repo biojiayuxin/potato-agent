@@ -42,6 +42,60 @@ def _temp_db_path() -> Path:
     return Path(tempfile.mkdtemp(prefix="potato-runtime-state-test-")) / "interface.db"
 
 
+@pytest.mark.parametrize("failed_kind", ["formal", "temporary"])
+@pytest.mark.parametrize("failure_stage", ["mapping", "operation"])
+def test_idle_check_continues_after_one_candidate_fails(
+    monkeypatch, caplog, failed_kind, failure_stage
+) -> None:
+    import asyncio
+    import interface.app as app_mod
+
+    users = [
+        SimpleNamespace(id=name, username=name, mapping_username=name, email="")
+        for name in ("formal-bad", "formal-good", "temporary-bad", "temporary-good")
+    ]
+    monkeypatch.setattr(app_mod, "cleanup_expired_runtime_leases", lambda: 0)
+    monkeypatch.setattr(app_mod, "cleanup_turn_submission_receipts", lambda: {})
+    monkeypatch.setattr(app_mod, "list_users", lambda: users)
+    monkeypatch.setattr(
+        app_mod, "is_temporary_user", lambda user_id: user_id.startswith("temporary")
+    )
+    monkeypatch.setattr(
+        app_mod, "list_idle_runtime_candidates",
+        lambda **kwargs: [{"user_id": user.id} for user in users[:2]],
+    )
+    monkeypatch.setattr(
+        app_mod, "list_idle_temporary_user_candidates",
+        lambda **kwargs: [{"user_id": user.id} for user in users[2:]],
+    )
+    failed_user = f"{failed_kind}-bad"
+    processed = []
+
+    def resolve_target(**kwargs):
+        username = kwargs["mapping_username"]
+        if username == failed_user and failure_stage == "mapping":
+            raise RuntimeError("candidate mapping failed")
+        return SimpleNamespace(username=username)
+
+    def stop_candidate(user, target):
+        if user.id == failed_user and failure_stage == "operation":
+            raise app_mod.PrivilegedClientError("candidate helper failed")
+        processed.append(user.id)
+        return True
+
+    async def cleanup_candidate(user, target):
+        return stop_candidate(user, target)
+
+    monkeypatch.setattr(app_mod.mapping_store, "resolve_target", resolve_target)
+    monkeypatch.setattr(app_mod, "_stop_idle_runtime_candidate", stop_candidate)
+    monkeypatch.setattr(app_mod, "_cleanup_temporary_user_candidate", cleanup_candidate)
+
+    assert asyncio.run(app_mod._run_runtime_idle_check_once()) == 3
+    assert processed == [user.id for user in users if user.id != failed_user]
+    assert failed_user in caplog.text
+    assert "candidate" in caplog.text
+
+
 def test_active_runtime_user_ids_include_only_enabled_started_users() -> None:
     db_path = _temp_db_path()
     active = auth_db.upsert_user(

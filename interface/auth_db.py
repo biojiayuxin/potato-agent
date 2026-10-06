@@ -355,13 +355,25 @@ def _backfill_current_usage_identities(conn: sqlite3.Connection) -> None:
     rows = conn.execute(
         """
         select u.id, u.mapping_username, u.created_at,
-               case when t.user_id is null then 'formal' else 'temporary' end as account_type
+               case when t.user_id is null then 'formal' else 'temporary' end as account_type,
+               i.user_id, i.account_type, i.retired_at
         from users u
         left join temporary_users t on t.user_id = u.id
+        left join user_usage_identities i on i.mapping_username = u.mapping_username
         order by u.created_at, u.id
         """
     ).fetchall()
     for row in rows:
+        # Temporary cleanup retires usage before removing the OS/auth account.
+        # A new helper (or a restart after failed cleanup) must be able to open
+        # the DB without reclaiming this same identity or clearing retirement.
+        if (
+            str(row[3]) == "temporary"
+            and row[4] == row[0]
+            and str(row[5]) == "temporary"
+            and row[6] is not None
+        ):
+            continue
         _claim_usage_identity(
             conn,
             mapping_username=str(row[1]),

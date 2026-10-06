@@ -87,6 +87,47 @@ def screenshot(page, name):
         page.screenshot(path=str(Path(directory) / f"{mode}-{name}.png"))
 
 
+@pytest.mark.parametrize("temporary", [False, True])
+def test_idle_tab_polls_without_renewing_activity_and_obeys_revocation(context, site, temporary):
+    from playwright.sync_api import expect
+
+    calls = mock_api(context, user_id="idle-audit")
+    user = {"id": "idle-audit", "username": "idle-audit", "name": "Idle audit",
+            "is_temporary": temporary}
+    authenticated = True
+    polls = []
+
+    def auth_response(route):
+        polls.append(route.request.url)
+        route.fulfill(json={"authenticated": authenticated, "user": user})
+
+    context.route("**/api/auth/session", auth_response)
+    context.route("**/api/runtime/start", lambda route: route.fulfill(json={"user": user}))
+    page = context.new_page()
+    page.clock.install()
+    page.goto(site + "/chat")
+    ready(page)
+    page.wait_for_load_state("networkidle")
+    calls.clear()
+    initial_polls = len(polls)
+    for _ in range(31):
+        with page.expect_response("**/api/auth/session"):
+            page.clock.run_for(61_000)
+        page.wait_for_function("workspaceTest.state.authPollTimer !== null")
+    assert len(polls) >= initial_polls + 31
+    passive_paths = {
+        "/api/files/revision", "/api/files/tree", "/api/daily-updates", "/api/announcement",
+    }
+    assert all(method == "GET" and path in passive_paths for method, path, _ in calls), calls
+    ready(page)
+
+    authenticated = False
+    with page.expect_response("**/api/auth/session"):
+        page.clock.run_for(61_000)
+    expect(page.locator("#workspace-view")).to_be_hidden()
+    assert not page.evaluate("workspaceTest.state.user")
+
+
 @pytest.mark.parametrize("auth", ["signin", "temporary"])
 def test_login_and_example_entry_work_with_available_lock_mode(context, site, auth):
     from playwright.sync_api import expect

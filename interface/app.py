@@ -3329,57 +3329,29 @@ async def _run_runtime_idle_check_once() -> int:
         auth_user = users_by_id.get(str(candidate.get("user_id") or ""))
         if auth_user is None:
             continue
-        if await asyncio.to_thread(is_temporary_user, auth_user.id):
-            continue
-        target = await asyncio.to_thread(
-            mapping_store.resolve_target,
-            mapping_username=auth_user.mapping_username,
-            email=auth_user.email,
-            username=auth_user.username,
-        )
-        if target is None:
-            continue
-        if await asyncio.to_thread(_stop_idle_runtime_candidate, auth_user, target):
-            stopped += 1
+        try:
+            if await asyncio.to_thread(is_temporary_user, auth_user.id):
+                continue
+            target = await asyncio.to_thread(
+                mapping_store.resolve_target,
+                mapping_username=auth_user.mapping_username,
+                email=auth_user.email,
+                username=auth_user.username,
+            )
+            if target is None:
+                continue
+            if await asyncio.to_thread(_stop_idle_runtime_candidate, auth_user, target):
+                stopped += 1
+        except Exception:
+            LOGGER.exception("Idle runtime check failed for user %s", auth_user.id)
 
     for candidate in temporary_candidates:
         user_id = str(candidate.get("user_id") or "").strip()
         if not user_id:
             continue
-        auth_user = users_by_id.get(user_id)
-        if auth_user is None:
-            try:
-                await asyncio.to_thread(
-                    invalidate_user_chat_share_data,
-                    user_id,
-                    recipient_user_id=_chat_share_recipient_id_for_user_id(
-                        user_id,
-                        is_temporary=True,
-                    ),
-                )
-                await asyncio.to_thread(delete_temporary_user_record, user_id)
-            except Exception as exc:
-                await _mark_temporary_cleanup_failed(
-                    user_id,
-                    str(exc) or type(exc).__name__,
-                )
-            continue
-        target = await asyncio.to_thread(
-            mapping_store.resolve_target,
-            mapping_username=str(
-                candidate.get("mapping_username") or auth_user.mapping_username
-            ),
-            email=auth_user.email,
-            username=auth_user.username,
-        )
-        if target is None:
-            cleanup_status = str(candidate.get("cleanup_status") or "")
-            if cleanup_status != TEMPORARY_USER_STATUS_ACTIVE:
-                mapping_username = str(
-                    candidate.get("mapping_username")
-                    or auth_user.mapping_username
-                    or ""
-                ).strip()
+        try:
+            auth_user = users_by_id.get(user_id)
+            if auth_user is None:
                 try:
                     await asyncio.to_thread(
                         invalidate_user_chat_share_data,
@@ -3389,29 +3361,63 @@ async def _run_runtime_idle_check_once() -> int:
                             is_temporary=True,
                         ),
                     )
-                    await _delete_temporary_user_local_state(
-                        user_id,
-                        mapping_username,
-                    )
+                    await asyncio.to_thread(delete_temporary_user_record, user_id)
                 except Exception as exc:
                     await _mark_temporary_cleanup_failed(
                         user_id,
                         str(exc) or type(exc).__name__,
                     )
-                    continue
-                LOGGER.info(
-                    "Finished local cleanup for temporary user %s after mapping removal",
-                    mapping_username,
-                )
-                stopped += 1
                 continue
-            await _mark_temporary_cleanup_failed(
-                user_id,
-                "No Hermes runtime is mapped to this temporary user.",
+            target = await asyncio.to_thread(
+                mapping_store.resolve_target,
+                mapping_username=str(
+                    candidate.get("mapping_username") or auth_user.mapping_username
+                ),
+                email=auth_user.email,
+                username=auth_user.username,
             )
-            continue
-        if await _cleanup_temporary_user_candidate(auth_user, target):
-            stopped += 1
+            if target is None:
+                cleanup_status = str(candidate.get("cleanup_status") or "")
+                if cleanup_status != TEMPORARY_USER_STATUS_ACTIVE:
+                    mapping_username = str(
+                        candidate.get("mapping_username")
+                        or auth_user.mapping_username
+                        or ""
+                    ).strip()
+                    try:
+                        await asyncio.to_thread(
+                            invalidate_user_chat_share_data,
+                            user_id,
+                            recipient_user_id=_chat_share_recipient_id_for_user_id(
+                                user_id,
+                                is_temporary=True,
+                            ),
+                        )
+                        await _delete_temporary_user_local_state(
+                            user_id,
+                            mapping_username,
+                        )
+                    except Exception as exc:
+                        await _mark_temporary_cleanup_failed(
+                            user_id,
+                            str(exc) or type(exc).__name__,
+                        )
+                        continue
+                    LOGGER.info(
+                        "Finished local cleanup for temporary user %s after mapping removal",
+                        mapping_username,
+                    )
+                    stopped += 1
+                    continue
+                await _mark_temporary_cleanup_failed(
+                    user_id,
+                    "No Hermes runtime is mapped to this temporary user.",
+                )
+                continue
+            if await _cleanup_temporary_user_candidate(auth_user, target):
+                stopped += 1
+        except Exception:
+            LOGGER.exception("Idle temporary user check failed for user %s", user_id)
     return stopped
 
 
