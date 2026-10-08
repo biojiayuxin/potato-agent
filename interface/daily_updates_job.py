@@ -15,6 +15,7 @@ from datetime import UTC, date, datetime, timedelta
 from email.utils import parsedate_to_datetime
 from pathlib import Path
 from typing import Any, Callable, Iterable, Sequence
+from urllib.parse import quote
 from zoneinfo import ZoneInfo
 
 import httpx
@@ -557,6 +558,8 @@ class ModelProxyLLMClient:
         self.base_url = base_url.rstrip("/")
         self.token = token
         self.model = model
+        self._configured_model = model
+        self.api_mode = "chat_completions"
         self._owns_client = client is None
         self.client = client or httpx.Client(timeout=httpx.Timeout(90.0, connect=10.0))
         self.http = RetryingHTTPClient(self.client, max_attempts=4, sleep=sleep)
@@ -570,16 +573,15 @@ class ModelProxyLLMClient:
         return {"Authorization": f"Bearer {self.token}"}
 
     def resolve_model(self) -> str:
-        if self.model:
-            return self.model
         try:
+            path = f"/models/{quote(self._configured_model, safe='')}" if self._configured_model else "/models"
             response = self.http.request(
-                "GET", f"{self.base_url}/models", headers=self.headers
+                "GET", f"{self.base_url}{path}", headers=self.headers
             )
             payload = response.json()
-            data = payload.get("data")
+            data = [payload] if self._configured_model else payload.get("data")
             models = {
-                str(item.get("id") or "").strip()
+                str(item.get("id") or "").strip(): item
                 for item in data
                 if isinstance(item, dict) and str(item.get("id") or "").strip()
             }
@@ -590,33 +592,43 @@ class ModelProxyLLMClient:
                 "daily updates model proxy principal must expose exactly one model route"
             )
         self.model = next(iter(models))
+        self.api_mode = models[self.model].get("api_mode") or "chat_completions"
+        if self.api_mode not in {"chat_completions", "codex_responses"}:
+            raise ConfigurationError("model proxy returned an unsupported API mode")
         return self.model
 
     def _completion(self, system_prompt: str, value: dict[str, str]) -> dict[str, Any]:
         model = self.resolve_model()
+        messages = [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": json.dumps(value, ensure_ascii=False)},
+        ]
+        if self.api_mode == "codex_responses":
+            endpoint = "responses"
+            body = {"model": model, "instructions": system_prompt, "input": messages[1:], "store": False}
+        else:
+            endpoint = "chat/completions"
+            body = {"model": model, "messages": messages, "temperature": 0.1}
         try:
             response = self.http.request(
                 "POST",
-                f"{self.base_url}/chat/completions",
+                f"{self.base_url}/{endpoint}",
                 headers={**self.headers, "Content-Type": "application/json"},
-                json={
-                    "model": model,
-                    "messages": [
-                        {"role": "system", "content": system_prompt},
-                        {
-                            "role": "user",
-                            "content": json.dumps(value, ensure_ascii=False),
-                        },
-                    ],
-                    "temperature": 0.1,
-                },
+                json=body,
             )
             payload = response.json()
-            content = payload["choices"][0]["message"]["content"]
+            if self.api_mode == "codex_responses":
+                content = "".join(
+                    part["text"] for item in payload.get("output", [])
+                    if item.get("type") == "message"
+                    for part in item.get("content", []) if part.get("type") == "output_text"
+                )
+            else:
+                content = payload["choices"][0]["message"]["content"]
             if not isinstance(content, str):
                 raise TypeError("completion content is not text")
             decoded = json.loads(content.strip())
-        except (httpx.HTTPError, KeyError, IndexError, TypeError, ValueError) as exc:
+        except (httpx.HTTPError, KeyError, IndexError, TypeError, ValueError, AttributeError) as exc:
             if isinstance(exc, json.JSONDecodeError):
                 raise LLMOutputError("model returned invalid JSON") from exc
             raise LLMError("model proxy completion failed") from exc

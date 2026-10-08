@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import contextlib
 import fcntl
-import json
 import os
 import pwd
 import re
@@ -13,8 +12,6 @@ import time
 from copy import deepcopy
 from pathlib import Path
 from typing import Any
-from urllib import error as urllib_error
-from urllib import request as urllib_request
 
 import yaml
 
@@ -28,7 +25,6 @@ from interface.hermes_profile import (
 )
 from interface.mapping import HermesTarget, resolve_env_placeholders
 from interface.model_options import (
-    DEFAULT_REASONING_EFFORT,
     normalize_model_options,
     strip_openai_api_key_env,
 )
@@ -360,53 +356,27 @@ def build_config_data(
     terminal_cfg = deepcopy(hermes_cfg.get("terminal") or {})
     global_overrides = deepcopy(hermes_cfg.get("config_overrides") or {})
 
-    data: dict[str, Any] = {}
-    try:
-        model_options = normalize_model_options(config)
-        active_option = (
-            model_options.new_user_default if for_new_user else model_options.primary
-        )
-    except Exception:
-        model_cfg = deepcopy(hermes_cfg.get("model") or {})
-        active_option = None
-    if active_option is not None:
-        data["model"] = {
-            "default": active_option.name,
-            "provider": active_option.provider,
-            "base_url": get_model_proxy_base_url(config),
-            "api_key": local_model_proxy_token(user.username, user.model_proxy_token),
-        }
-        if active_option.api_mode:
-            data["model"]["api_mode"] = active_option.api_mode
-        if active_option.context_length is not None:
-            data["model"]["context_length"] = active_option.context_length
-    elif model_cfg:
-        data["model"] = {
-            **model_cfg,
-            "base_url": get_model_proxy_base_url(config),
-            "api_key": local_model_proxy_token(user.username, user.model_proxy_token),
-        }
-    data["terminal"] = terminal_cfg
-    data["agent"] = {
-        "reasoning_effort": DEFAULT_REASONING_EFFORT,
-        "environment_hint": DEFAULT_ENVIRONMENT_HINT,
+    model_options = normalize_model_options(config)
+    option = model_options.new_user_default if for_new_user else model_options.primary
+    data: dict[str, Any] = {
+        "terminal": terminal_cfg,
+        "agent": {"environment_hint": DEFAULT_ENVIRONMENT_HINT},
+        "approvals": {"mode": DEFAULT_APPROVAL_MODE},
     }
-    data["approvals"] = {"mode": DEFAULT_APPROVAL_MODE}
-
     deep_merge(data, global_overrides)
-    if for_new_user and active_option is not None:
-        # A new user's Fast option must not inherit the primary model's settings.
-        data["agent"]["reasoning_effort"] = active_option.reasoning_effort
-        if active_option.context_length is not None:
-            auxiliary = data.setdefault("auxiliary", {})
-            compression = auxiliary.setdefault("compression", {})
-            compression["context_length"] = active_option.context_length
     deep_merge(data, deepcopy(user.config_overrides))
 
-    model = data.get("model")
-    if isinstance(model, dict):
-        model["base_url"] = get_model_proxy_base_url(config)
-        model["api_key"] = local_model_proxy_token(user.username, user.model_proxy_token)
+    # User files only bootstrap the local proxy. The protected catalog owns
+    # model settings; each admitted conversation supplies its own snapshot.
+    model = {
+        "default": option.id, "provider": option.provider,
+        "api_mode": option.api_mode, "context_length": option.context_length,
+        "base_url": get_model_proxy_base_url(config),
+        "api_key": local_model_proxy_token(user.username, user.model_proxy_token),
+    }
+    data["model"] = model
+    data.setdefault("agent", {})["reasoning_effort"] = option.reasoning_effort
+    data.setdefault("auxiliary", {}).setdefault("compression", {})["context_length"] = option.context_length
 
     terminal = data.setdefault("terminal", {})
     if not isinstance(terminal, dict):
@@ -730,45 +700,6 @@ def repair_session_db_permissions(user: HermesTarget) -> None:
         user.state_db_path.with_name(f"{user.state_db_path.name}-shm"),
     ):
         repair_user_private_file(user, pw, candidate)
-
-
-def wait_for_hermes_models(
-    api_key: str,
-    host: str,
-    port: int,
-    *,
-    timeout_seconds: int = DEFAULT_RUNTIME_READY_TIMEOUT,
-) -> dict[str, Any]:
-    url = f"http://{host}:{int(port)}/v1/models"
-    deadline = time.time() + timeout_seconds
-    last_error = "unknown error"
-
-    while time.time() < deadline:
-        headers: dict[str, str] = {}
-        if api_key:
-            headers["Authorization"] = f"Bearer {api_key}"
-        request = urllib_request.Request(url, headers=headers)
-        try:
-            with urllib_request.urlopen(request, timeout=5) as response:
-                body = response.read().decode("utf-8", errors="replace")
-                if response.status != 200:
-                    last_error = f"status {response.status}"
-                    time.sleep(1)
-                    continue
-                payload = json.loads(body or "{}")
-                if isinstance(payload.get("data"), list):
-                    return payload
-                last_error = "response missing models list"
-        except urllib_error.HTTPError as exc:
-            detail = exc.read().decode("utf-8", errors="replace").strip()
-            last_error = detail or f"HTTP {exc.code}"
-        except Exception as exc:
-            last_error = str(exc)
-        time.sleep(1)
-
-    raise RuntimeError(
-        f"Hermes models endpoint did not become ready in time for {url}: {last_error}"
-    )
 
 
 def _collect_service_debug_info(service_name: str) -> str:

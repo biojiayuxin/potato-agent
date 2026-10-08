@@ -1354,9 +1354,15 @@ def delete_session_events(
 def delete_display_user_data(
     user_id: str, db_path: Path = DEFAULT_AUTH_DB_PATH
 ) -> dict[str, int]:
+    from interface.session_model_store import ensure_session_model_store
+
     ensure_display_store(db_path)
+    ensure_session_model_store(db_path)
     normalized_user_id = user_id.strip()
     with connect_auth_db(db_path) as conn:
+        model_cursor = conn.execute(
+            "DELETE FROM session_model_state WHERE user_id = ?", (normalized_user_id,)
+        )
         pin_cursor = conn.execute(
             "DELETE FROM session_pin_state WHERE user_id = ?", (normalized_user_id,)
         )
@@ -1382,6 +1388,7 @@ def delete_display_user_data(
         )
         conn.commit()
     return {
+        "session_models": int(model_cursor.rowcount or 0),
         "session_pins": int(pin_cursor.rowcount or 0),
         "display_messages": int(display_cursor.rowcount or 0),
         "fork_boundaries": int(boundary_cursor.rowcount or 0),

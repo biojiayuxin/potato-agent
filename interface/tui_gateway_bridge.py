@@ -33,7 +33,9 @@ from interface.runtime_state import (
 
 
 class TuiGatewayBridgeError(RuntimeError):
-    pass
+    def __init__(self, message: str, *, code: int | None = None):
+        super().__init__(message)
+        self.code = code
 
 
 class _GatewayGenerationState(Enum):
@@ -81,6 +83,7 @@ _BRIDGE_ALLOWED_METHODS = frozenset(
         "prompt.submit",
         "session.create",
         "session.interrupt",
+        "session.model.set",
         "session.resume",
         "session.title",
         "session.turn_state",
@@ -832,10 +835,16 @@ class TuiGatewayBridge:
 
         if "error" in payload:
             error = payload.get("error") if isinstance(payload.get("error"), dict) else {}
+            # Preserve only the safe, structured busy signal. Arbitrary upstream
+            # error messages may contain private endpoints or user paths.
+            code = error.get("code")
             self._loop.call_soon_threadsafe(
                 self._set_future_exception_if_pending,
                 entry.future,
-                TuiGatewayBridgeError("Gateway request failed"),
+                TuiGatewayBridgeError(
+                    "session busy" if code == 4009 else "Gateway request failed",
+                    code=code if isinstance(code, int) else None,
+                ),
             )
             return
 

@@ -7,11 +7,33 @@ import pytest
 import yaml
 
 from interface.mapping import HermesTarget
+from interface.model_catalog import public_catalog
+from interface.test_model_support import make_catalog, install_catalog
 from interface.model_options import (
     ModelOptionsError,
     normalize_model_options,
-    patch_user_active_model,
+    model_options_from_catalog,
+    repair_user_model_config,
 )
+
+
+@pytest.mark.parametrize("hermes", [{}, {"model": {}}, {"model_options": {}}, {"model_catalog": True, "model": {}}])
+def test_legacy_model_mapping_is_rejected(hermes):
+    with pytest.raises(ModelOptionsError, match="schema-v2 model catalog"):
+        normalize_model_options({"hermes": hermes})
+
+
+def test_catalog_controls_defaults_and_exposes_no_private_fields(monkeypatch):
+    catalog = make_catalog()
+    catalog["default_option_id"] = "deep"
+    install_catalog(monkeypatch, catalog)
+    options = normalize_model_options({"hermes": {"model_catalog": True}})
+    assert options.new_user_default.id == "deep"
+    assert options.get("old-fast") is None
+    assert not hasattr(options.primary, "api_key")
+    assert not hasattr(options.primary, "base_url")
+    assert "SECRET" not in str(options)
+    assert "example/v1" not in str(options)
 
 
 def _target(tmp_path: Path) -> HermesTarget:
@@ -34,142 +56,7 @@ def _target(tmp_path: Path) -> HermesTarget:
     )
 
 
-def test_normalize_legacy_single_model_config() -> None:
-    options = normalize_model_options(
-        {
-            "hermes": {
-                "model": {
-                    "default": "gpt-5.4",
-                    "provider": "custom",
-                    "base_url": "https://primary.example/v1",
-                    "api_key": "sk-primary",
-                }
-            }
-        }
-    )
-
-    assert options.primary_id == "gpt-5.4"
-    assert [option.id for option in options.options] == ["gpt-5.4"]
-    assert options.primary.api_mode == "codex_responses"
-    assert options.primary.reasoning_effort == "xhigh"
-
-
-def test_normalize_new_model_options() -> None:
-    options = normalize_model_options(
-        {
-            "hermes": {
-                "model_options": {
-                    "primary": "primary",
-                    "options": [
-                        {
-                            "id": "primary",
-                            "name": "Main",
-                            "provider": "custom",
-                            "model": "gpt-5.4",
-                            "base_url": "https://primary.example/v1",
-                            "api_key": "sk-primary",
-                        },
-                        {
-                            "id": "fast",
-                            "model": "gpt-5.4-mini",
-                            "base_url": "https://fast.example/v1",
-                            "api_key": "sk-fast",
-                            "context_length": "500,000",
-                        },
-                    ],
-                }
-            }
-        }
-    )
-
-    assert options.primary.model == "gpt-5.4"
-    assert options.get("fast").context_length == 500000
-    assert options.get("fast").api_mode == "codex_responses"
-    assert options.get("fast").reasoning_effort == "xhigh"
-
-
-def test_normalize_rejects_invalid_model_options() -> None:
-    base = {
-        "hermes": {
-            "model_options": {
-                "primary": "primary",
-                "options": [
-                    {
-                        "id": "primary",
-                        "model": "gpt-5.4",
-                        "base_url": "https://primary.example/v1",
-                        "api_key": "sk-primary",
-                    }
-                ],
-            }
-        }
-    }
-
-    too_many = yaml.safe_load(yaml.safe_dump(base))
-    too_many["hermes"]["model_options"]["options"].extend(
-        [
-            {
-                "id": "one",
-                "model": "one",
-                "base_url": "https://one.example/v1",
-                "api_key": "sk-one",
-            },
-            {
-                "id": "two",
-                "model": "two",
-                "base_url": "https://two.example/v1",
-                "api_key": "sk-two",
-            },
-            {
-                "id": "three",
-                "model": "three",
-                "base_url": "https://three.example/v1",
-                "api_key": "sk-three",
-            },
-            {
-                "id": "four",
-                "model": "four",
-                "base_url": "https://four.example/v1",
-                "api_key": "sk-four",
-            },
-        ]
-    )
-    with pytest.raises(ModelOptionsError, match="at most 4"):
-        normalize_model_options(too_many)
-
-    public = yaml.safe_load(yaml.safe_dump(base))
-    public["hermes"]["model_options"]["options"][0].pop("api_key")
-    public["hermes"]["model_options"]["options"][0].pop("base_url")
-    assert normalize_model_options(public).primary.model == "gpt-5.4"
-
-    duplicate = yaml.safe_load(yaml.safe_dump(base))
-    duplicate["hermes"]["model_options"]["options"].append(
-        {
-            "id": "primary",
-            "model": "other",
-            "base_url": "https://other.example/v1",
-            "api_key": "sk-other",
-        }
-    )
-    with pytest.raises(ModelOptionsError, match="Duplicate"):
-        normalize_model_options(duplicate)
-
-    forbidden_provider = yaml.safe_load(yaml.safe_dump(base))
-    forbidden_provider["hermes"]["model_options"]["options"][0][
-        "provider"
-    ] = "openrouter"
-    with pytest.raises(ModelOptionsError, match="provider must be 'custom'"):
-        normalize_model_options(forbidden_provider)
-
-    forbidden_transport = yaml.safe_load(yaml.safe_dump(base))
-    forbidden_transport["hermes"]["model_options"]["options"][0][
-        "api_mode"
-    ] = "anthropic_messages"
-    with pytest.raises(ModelOptionsError, match="api_mode must be one of"):
-        normalize_model_options(forbidden_transport)
-
-
-def test_patch_user_active_model_updates_model_to_proxy_and_scrubs_env(monkeypatch, tmp_path) -> None:
+def test_repair_user_model_config_updates_model_to_proxy_and_scrubs_env(monkeypatch, tmp_path) -> None:
     target = _target(tmp_path)
     target.hermes_home.mkdir(parents=True)
     config_path = target.hermes_home / "config.yaml"
@@ -197,44 +84,20 @@ fallback_providers:
     (target.hermes_home / ".env").write_text(
         "FOO=bar\nOPENAI_API_KEY=sk-old\n", encoding="utf-8"
     )
-    options = normalize_model_options(
-        {
-            "hermes": {
-                "model_options": {
-                    "primary": "primary",
-                    "options": [
-                        {
-                            "id": "primary",
-                            "model": "gpt-5.4",
-                            "base_url": "https://primary.example/v1",
-                            "api_key": "sk-primary",
-                        },
-                        {
-                            "id": "fast",
-                            "name": "Fast",
-                            "provider": "custom",
-                            "model": "gpt-5.4-mini",
-                            "base_url": "https://fast.example/v1",
-                            "api_key": "sk-fast",
-                            "context_length": 500000,
-                            "api_mode": "chat_completions",
-                        },
-                    ],
-                }
-            }
-        }
-    )
+    catalog = make_catalog()
+    catalog["options"]["fast"].update(context_length=500000, reasoning_effort="xhigh")
+    options = model_options_from_catalog(public_catalog(catalog))
 
     monkeypatch.setattr(
         "interface.model_options.pwd.getpwnam",
         lambda username: SimpleNamespace(pw_uid=123, pw_gid=456),
     )
 
-    patch_user_active_model(target, options.get("fast"))
+    repair_user_model_config(target, options.get("fast"))
 
     data = yaml.safe_load(config_path.read_text(encoding="utf-8"))
     assert data["model"] == {
-        "default": "Fast",
+        "default": "fast",
         "provider": "custom",
         "base_url": "http://127.0.0.1:8765/v1",
         "api_key": "pmp_alice_0123456789abcdefghijklmnopqrstuvwxyz",
@@ -249,104 +112,3 @@ fallback_providers:
     assert data["display"] == {"compact": True}
     assert "fallback_providers" not in data
     assert (target.hermes_home / ".env").read_text(encoding="utf-8") == "FOO=bar\n"
-
-
-def test_patch_user_active_model_clears_stale_context_length(
-    monkeypatch, tmp_path
-) -> None:
-    target = _target(tmp_path)
-    target.hermes_home.mkdir(parents=True)
-    config_path = target.hermes_home / "config.yaml"
-    config_path.write_text(
-        """
-model:
-  default: old-model
-  provider: custom
-  base_url: https://old.example/v1
-  api_key: sk-old
-  context_length: 800000
-auxiliary:
-  compression:
-    context_length: 800000
-  summarizer:
-    model: summary
-""".lstrip(),
-        encoding="utf-8",
-    )
-    options = normalize_model_options(
-        {
-            "hermes": {
-                "model_options": {
-                    "primary": "primary",
-                    "options": [
-                        {
-                            "id": "primary",
-                            "model": "gpt-5.4",
-                            "base_url": "https://primary.example/v1",
-                            "api_key": "sk-primary",
-                        }
-                    ],
-                }
-            }
-        }
-    )
-
-    monkeypatch.setattr(
-        "interface.model_options.pwd.getpwnam",
-        lambda username: SimpleNamespace(pw_uid=123, pw_gid=456),
-    )
-
-    patch_user_active_model(target, options.primary)
-
-    data = yaml.safe_load(config_path.read_text(encoding="utf-8"))
-    assert data["model"]["base_url"] == "http://127.0.0.1:8765/v1"
-    assert data["model"]["api_key"] == target.model_proxy_token
-    assert data["model"]["api_mode"] == "codex_responses"
-    assert "context_length" not in data["model"]
-    assert "context_length" not in data["auxiliary"]["compression"]
-    assert data["auxiliary"]["summarizer"]["model"] == "summary"
-    assert data["auxiliary"]["summarizer"]["provider"] == "custom"
-    assert data["auxiliary"]["summarizer"]["fallback_chain"] == []
-    assert data["agent"]["reasoning_effort"] == "xhigh"
-    assert "web" in data["agent"]["disabled_toolsets"]
-
-
-def test_active_model_matching_accepts_proxy_route_name(tmp_path) -> None:
-    target = _target(tmp_path)
-    target.hermes_home.mkdir(parents=True)
-    (target.hermes_home / "config.yaml").write_text(
-        """
-model:
-  default: Alt
-  provider: custom
-  base_url: http://127.0.0.1:8765/v1
-  api_key: pmp_alice_0123456789abcdefghijklmnopqrstuvwxyz
-  api_mode: codex_responses
-""".lstrip(),
-        encoding="utf-8",
-    )
-    options = normalize_model_options(
-        {
-            "hermes": {
-                "model_options": {
-                    "primary": "primary",
-                    "options": [
-                        {
-                            "id": "primary",
-                            "name": "Main",
-                            "model": "gpt-5.4",
-                        },
-                        {
-                            "id": "alt",
-                            "name": "Alt",
-                            "model": "gpt-5.4",
-                        },
-                    ],
-                }
-            }
-        }
-    )
-
-    from interface.model_options import get_active_model_option_id
-
-    assert get_active_model_option_id(target, options) == "alt"

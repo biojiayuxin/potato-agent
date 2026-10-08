@@ -219,7 +219,10 @@ def mock_api(page, *, authenticated=True, sessions=None, user_id="example-test")
         responses = {
             "/api/auth/session": {"authenticated": authenticated, "user": user},
             "/api/runtime/start": {"user": user},
-            "/api/models": {"data": [{"id": "test-model", "name": "Test model"}]},
+            "/api/models": {
+                "data": [{"id": "test-model", "name": "Test model"}],
+                "default_id": "test-model",
+            },
             "/api/sessions": {"sessions": sessions},
             "/api/files/tree": {"root": "/", "path": "/", "entries": []},
             "/api/files/config": {"mode": "home_only", "home": "/"},

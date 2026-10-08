@@ -262,6 +262,9 @@ def test_model_proxy_resolves_only_model_and_validates_strict_json() -> None:
     assert calls == ["/v1/models", "/v1/chat/completions"]
 
     def fenced_handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "GET":
+            assert request.url.path == "/v1/models/route"
+            return _response(request, 200, {"id": "route"})
         return _response(
             request,
             200,
@@ -277,6 +280,36 @@ def test_model_proxy_resolves_only_model_and_validates_strict_json() -> None:
     )
     with pytest.raises(LLMOutputError):
         strict.evaluate(Paper("123", "T", "A", "", "", "", ""))
+
+
+@pytest.mark.parametrize("configured_model", [None, "deep"])
+def test_daily_updates_reads_current_api_mode_for_each_completion(configured_model) -> None:
+    mode = ["codex_responses"]
+    calls = []
+    result = json.dumps({"is_relevant": True, "summary": "A potato study. It reports a finding."})
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "GET":
+            model = {"id": "deep", "api_mode": mode[0]}
+            return _response(request, 200, model if configured_model else {"data": [model]})
+        body = json.loads(request.content)
+        calls.append(request.url.path)
+        assert body["model"] == "deep"
+        if mode[0] == "codex_responses":
+            assert request.url.path == "/v1/responses"
+            assert body["instructions"] and body["input"][0]["role"] == "user"
+            assert "messages" not in body and "temperature" not in body
+            return _response(request, 200, {"output": [{"type": "message", "content": [{"type": "output_text", "text": result}]}]})
+        assert request.url.path == "/v1/chat/completions"
+        return _response(request, 200, {"choices": [{"message": {"content": result}}]})
+
+    llm = ModelProxyLLMClient(base_url="http://proxy/v1", token="service-token", model=configured_model,
+                             client=httpx.Client(transport=httpx.MockTransport(handler)), sleep=lambda _: None)
+    paper = Paper("123", "Title", "Abstract", "J", "2026", "2026", "")
+    assert llm.evaluate(paper)[0]
+    mode[0] = "chat_completions"
+    assert llm.evaluate(paper)[0]
+    assert calls == ["/v1/responses", "/v1/chat/completions"]
 
 
 class _FakePubMed:

@@ -34,3 +34,22 @@ proxying, and the agent gateway—and packaged the streamlined runtime as
 ## HPC Deployment
 
 For installation and deployment on an HPC system, see the [HPC Deployment Guide](HPC_DEPLOYMENT.md).
+For this model upgrade on YNNU, follow the [production upgrade runbook](docs/YNNU_MODEL_UPGRADE.md),
+including the separate transition artifact when upgrading an older installation.
+
+## Conversation Models
+
+Each chat saves its own model choice. A response or approval in one chat does not
+prevent choosing a model in another. New chats use the catalog's default option;
+branches inherit their source chat's choice.
+
+Model labels, upstream model names, API modes, reasoning effort, and context
+windows are defined in one protected runtime catalog, `model_proxy.yaml`.
+SQLite saves stable option IDs and separate execution snapshots. Upstream API
+addresses and credentials stay private to the model proxy. See the
+[model configuration contract](interface/MODEL_CATALOG.md) and the
+[catalog deployment prerequisites](HPC_DEPLOYMENT.md#model-catalog-migration).
+
+Deploy Interface and Hermes Lite together. Deployment versions and configuration
+are specific to each host; a local test deployment does not update the public
+YNNU service.

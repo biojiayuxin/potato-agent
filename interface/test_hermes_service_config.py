@@ -22,6 +22,18 @@ from interface.hermes_service import (
 from interface.mapping import HermesTarget
 
 
+@pytest.fixture(autouse=True)
+def runtime_catalog(monkeypatch):
+    from interface.model_options import model_options_from_catalog
+    from interface.model_catalog import public_catalog
+    from interface.test_model_support import make_catalog
+    catalog = make_catalog()
+    # These tests exercise runtime file generation with an already loaded catalog.
+    monkeypatch.setattr("interface.hermes_service.normalize_model_options",
+                        lambda _: model_options_from_catalog(public_catalog(catalog)))
+    return catalog
+
+
 def _write_bioinformatics_skills_template(tmp_path: Path) -> Path:
     source = tmp_path / "skill-source" / "potato-knowledge-bioinformatics"
     nested = source / "potato-gene-search" / "scripts"
@@ -72,77 +84,6 @@ def _target() -> HermesTarget:
         config_overrides={},
         model_proxy_token="pmp_alice_0123456789abcdefghijklmnopqrstuvwxyz",
     )
-
-
-def legacy_test_build_config_data_emits_single_fallback_model_at_top_level() -> None:
-    fallback = {
-        "provider": "openrouter",
-        "model": "anthropic/claude-sonnet-4",
-        "api_key": "sk-fallback",
-    }
-
-    data = build_config_data({"hermes": {"fallback_model": fallback}}, _target())
-
-    assert data["fallback_model"] == fallback
-    assert "fallback_providers" not in data
-
-
-def legacy_test_build_config_data_passes_standard_fallback_providers() -> None:
-    fallbacks = [
-        {
-            "provider": "custom",
-            "model": "gpt-5.4",
-            "base_url": "https://backup.example/v1",
-            "api_key": "sk-fallback",
-        }
-    ]
-
-    data = build_config_data({"hermes": {"fallback_providers": fallbacks}}, _target())
-
-    assert data["fallback_providers"] == fallbacks
-    assert "fallback_model" not in data
-
-
-def legacy_test_build_config_data_does_not_normalize_legacy_fallback_model_list() -> None:
-    fallbacks = [
-        {
-            "provider": "custom",
-            "model": "gpt-5.4",
-            "base_url": "https://backup.example/v1",
-        }
-    ]
-
-    data = build_config_data({"hermes": {"fallback_model": fallbacks}}, _target())
-
-    assert data["fallback_model"] == fallbacks
-    assert "fallback_providers" not in data
-
-
-def legacy_test_build_config_data_passes_both_standard_fallback_fields() -> None:
-    fallback_model = {
-        "provider": "openrouter",
-        "model": "anthropic/claude-sonnet-4",
-    }
-    fallback_providers = [
-        {
-            "provider": "custom",
-            "model": "gpt-5.4",
-            "base_url": "https://backup.example/v1",
-        }
-    ]
-
-    data = build_config_data(
-        {
-            "hermes": {
-                "fallback_model": fallback_model,
-                "fallback_providers": fallback_providers,
-            }
-        },
-        _target(),
-    )
-
-    assert data["fallback_providers"] == fallback_providers
-    assert data["fallback_model"] == fallback_model
 
 
 def test_build_config_data_defaults_approvals_to_smart() -> None:
@@ -261,11 +202,12 @@ def test_build_config_data_disables_fallbacks_and_uses_proxy_credentials() -> No
     )
 
     assert data["model"] == {
-        "default": "gpt-5.4",
+        "default": "deep",
         "provider": "custom",
         "base_url": "http://127.0.0.1:8765/v1",
         "api_key": "pmp_alice_0123456789abcdefghijklmnopqrstuvwxyz",
-        "api_mode": "codex_responses",
+        "api_mode": "chat_completions",
+        "context_length": 200000,
     }
     assert "fallback_providers" not in data
     assert "fallback_model" not in data
@@ -510,18 +452,9 @@ def test_build_systemd_unit_uses_configured_gateway_drain_timeout() -> None:
     assert "TimeoutStopSec=75" in unit
 
 
-@pytest.mark.parametrize(
-    "fast_identity",
-    [
-        None,
-        {"id": "fast", "name": "Quick", "model": "quick-model"},
-        {"id": "optional", "name": "Fast", "model": "quick-model"},
-        {"id": "optional", "model": "gpt-5.6-terra"},
-        {"id": "optional", "model": "gpt-6-sol"},
-    ],
-)
+@pytest.mark.parametrize("default_id", ["deep", "fast", "quick"])
 def test_install_user_runtime_files_writes_only_user_runtime_paths(
-    monkeypatch, tmp_path, fast_identity
+    monkeypatch, tmp_path, runtime_catalog, default_id
 ) -> None:
     user = HermesTarget(
         username="alice",
@@ -570,49 +503,27 @@ def test_install_user_runtime_files_writes_only_user_runtime_paths(
         public_data,
     )
 
-    config = {
-        "hermes": {
-            "model": {
-                "provider": "custom",
-                "default": "gpt-5.5",
-                "base_url": "https://primary.example/v1",
-                "api_key": "sk-user",
-            }
-        }
-    }
-    expected_model = "gpt-5.5"
-    if fast_identity is not None:
-        config["hermes"]["model_options"] = {
-            "primary": "deep",
-            "options": [
-                {"id": "deep", "name": "Deep", "model": "gpt-5.6-sol"},
-                {
-                    **fast_identity,
-                    "context_length": 500000,
-                    "reasoning_effort": "medium",
-                    "api_mode": "chat_completions",
-                },
-            ],
-        }
-        config["hermes"]["config_overrides"] = {
-            "agent": {"reasoning_effort": "xhigh"},
-            "auxiliary": {"compression": {"context_length": 1000000}},
-        }
-        expected_model = fast_identity.get("name", fast_identity["model"])
-        # Explicit administrator updates still use the configured primary model.
-        assert build_config_data(config, user)["model"]["default"] == "Deep"
+    catalog = runtime_catalog
+    if default_id == "quick":
+        catalog["options"]["quick"] = dict(catalog["options"]["fast"], display_name="Custom label")
+    catalog["default_option_id"] = default_id
+    catalog["options"][default_id].update(context_length=500000, reasoning_effort="medium")
+    config = {"hermes": {"model_catalog": True, "config_overrides": {
+        "agent": {"reasoning_effort": "xhigh"},
+        "auxiliary": {"compression": {"context_length": 1000000}},
+    }}}
+    assert build_config_data(config, user)["model"]["default"] == "deep"
 
     install_user_runtime_files(config, user)
 
     env_body = (user.hermes_home / ".env").read_text(encoding="utf-8")
     config_body = (user.hermes_home / "config.yaml").read_text(encoding="utf-8")
     config_data = yaml.safe_load(config_body)
-    assert config_data["model"]["default"] == expected_model
-    if fast_identity is not None:
-        assert config_data["model"]["api_mode"] == "chat_completions"
-        assert config_data["model"]["context_length"] == 500000
-        assert config_data["agent"]["reasoning_effort"] == "medium"
-        assert config_data["auxiliary"]["compression"]["context_length"] == 500000
+    assert config_data["model"]["default"] == default_id
+    assert config_data["model"]["api_mode"] == "chat_completions"
+    assert config_data["model"]["context_length"] == 500000
+    assert config_data["agent"]["reasoning_effort"] == "medium"
+    assert config_data["auxiliary"]["compression"]["context_length"] == 500000
     assert config_data["agent"]["environment_hint"] == DEFAULT_ENVIRONMENT_HINT
     assert "OPENAI_API_KEY" not in env_body
     assert "sk-user" not in env_body

@@ -6,7 +6,7 @@ from agent.auxiliary_client import _build_call_kwargs
 def test_codex_vision_kwargs_do_not_require_anthropic_adapter() -> None:
     kwargs = _build_call_kwargs(
         "custom",
-        "gpt-5.6-terra",
+        "gpt-6-sol",
         [{"role": "user", "content": []}],
         temperature=0.1,
         max_tokens=2_000,

@@ -7,6 +7,8 @@ import sqlite3
 from pathlib import Path
 from types import SimpleNamespace
 
+import yaml
+
 from fastapi.testclient import TestClient
 
 
@@ -18,26 +20,7 @@ def _write_configs(tmp_path: Path) -> tuple[Path, Path]:
         f"""
 start_port: 8643
 hermes:
-  model:
-    default: gpt-5.4
-    provider: custom
-    base_url: http://127.0.0.1:8765/v1
-    api_key: pmp_alice_0123456789abcdefghijklmnopqrstuvwxyz
-  model_options:
-    primary: primary
-    options:
-      - id: primary
-        name: Main
-        provider: custom
-        model: gpt-5.4
-      - id: fast
-        name: Fast
-        provider: custom
-        model: gpt-5.4-mini
-      - id: alt
-        name: Alt
-        provider: custom
-        model: gpt-5.4
+  model_catalog: true
 users:
   - username: alice
     email: alice@example.com
@@ -53,39 +36,27 @@ users:
 """.lstrip(),
         encoding="utf-8",
     )
-    proxy_path.write_text(
-        """
-listen:
-  host: 127.0.0.1
-  port: 8765
-models:
-  - id: primary
-    name: Main
-    provider: custom
-    model: gpt-5.4
-    base_url: https://primary.example/v1
-    api_key: sk-primary
-  - id: fast
-    name: Fast
-    provider: custom
-    model: gpt-5.4-mini
-    base_url: https://fast.example/v1
-    api_key: sk-fast
-  - id: alt
-    name: Alt
-    provider: custom
-    model: gpt-5.4
-    base_url: https://alt.example/v1
-    api_key: sk-alt
-""".lstrip(),
-        encoding="utf-8",
-    )
+    catalog = {
+        "schema_version": 2, "catalog_signing_key": "test-key-" + "s" * 64,
+        "primary_option_id": "Main", "default_option_id": "Fast",
+        "backends": {}, "options": {},
+    }
+    for name, backend, model in (("Main", "primary", "gpt-5.4"), ("Fast", "fast", "gpt-5.4-mini"), ("Alt", "alt", "gpt-5.4")):
+        catalog["backends"][backend] = {
+            "model": model, "base_url": f"https://{backend}.example/v1", "api_key": f"sk-{backend}",
+            "api_mode": "chat_completions",
+        }
+        catalog["options"][name] = {"display_name": name, "backend": backend, "context_length": 128000, "reasoning_effort": "medium"}
+    proxy_path.write_text(yaml.safe_dump(catalog, sort_keys=False), encoding="utf-8")
     proxy_path.chmod(0o600)
     return mapping_path, proxy_path
 
 
-def _client(tmp_path: Path, monkeypatch):
+def _client(tmp_path: Path, monkeypatch, *, primary_api_mode="chat_completions"):
     mapping_path, proxy_path = _write_configs(tmp_path)
+    catalog = yaml.safe_load(proxy_path.read_text())
+    catalog["backends"]["primary"]["api_mode"] = primary_api_mode
+    proxy_path.write_text(yaml.safe_dump(catalog, sort_keys=False))
     monkeypatch.delenv("CREDENTIALS_DIRECTORY", raising=False)
     monkeypatch.delenv("INTERFACE_ENVIRONMENT", raising=False)
     monkeypatch.delenv("POTATO_DAILY_UPDATES_MODEL_PROXY_TOKEN", raising=False)
@@ -393,34 +364,37 @@ def test_daily_updates_service_token_is_rejected_from_production_environment(
 
 
 def test_proxy_rejects_unallowed_or_unknown_models(monkeypatch, tmp_path) -> None:
-    client, _ = _client(tmp_path, monkeypatch)
+    client, proxy = _client(tmp_path, monkeypatch)
+
+    def forbid_upstream(**_):
+        raise AssertionError("Invalid model requests must not contact a provider")
+
+    monkeypatch.setattr(proxy.httpx, "AsyncClient", forbid_upstream)
 
     forbidden = client.post(
         "/v1/chat/completions",
         headers={"authorization": "Bearer pmp_alice_0123456789abcdefghijklmnopqrstuvwxyz"},
         json={"model": "not-whitelisted", "messages": []},
     )
-    assert forbidden.status_code == 403
+    assert forbidden.status_code == 503
 
     proxy_path = Path(os.environ["POTATO_MODEL_PROXY_CONFIG_PATH"])
-    proxy_path.write_text(
-        proxy_path.read_text(encoding="utf-8").replace(
-            "    name: Fast", "    name: ProxyOnly"
-        ),
-        encoding="utf-8",
-    )
+    catalog = yaml.safe_load(proxy_path.read_text())
+    del catalog["options"]["Fast"]
+    catalog["default_option_id"] = "Main"
+    proxy_path.write_text(yaml.safe_dump(catalog))
     unknown = client.post(
         "/v1/chat/completions",
         headers={"authorization": "Bearer pmp_alice_0123456789abcdefghijklmnopqrstuvwxyz"},
         json={"model": "Fast", "messages": []},
     )
-    assert unknown.status_code == 404
+    assert unknown.status_code == 503
 
 
 def test_proxy_sanitizes_null_required_in_responses_tool_schemas(
     monkeypatch, tmp_path
 ) -> None:
-    client, model_proxy = _client(tmp_path, monkeypatch)
+    client, model_proxy = _client(tmp_path, monkeypatch, primary_api_mode="codex_responses")
     captured = {}
 
     class FakeResponse:
@@ -496,7 +470,7 @@ def test_proxy_sanitizes_null_required_in_responses_tool_schemas(
 def test_proxy_normalizes_malformed_responses_sse_terminal_output(
     monkeypatch, tmp_path
 ) -> None:
-    client, model_proxy = _client(tmp_path, monkeypatch)
+    client, model_proxy = _client(tmp_path, monkeypatch, primary_api_mode="codex_responses")
 
     class FakeResponse:
         status_code = 200
@@ -846,7 +820,7 @@ def test_proxy_does_not_record_upstream_error_usage(monkeypatch, tmp_path) -> No
     assert _usage_rows(tmp_path) == []
 
 
-def test_proxy_redacts_upstream_key_from_success_body_and_headers(
+def test_proxy_redacts_upstream_key_and_address_from_success_body_and_headers(
     monkeypatch, tmp_path
 ) -> None:
     client, model_proxy = _client(tmp_path, monkeypatch)
@@ -858,13 +832,15 @@ def test_proxy_redacts_upstream_key_from_success_body_and_headers(
             "authorization": "Bearer sk-primary",
             "set-cookie": "upstream=sk-primary",
             "x-internal-debug": "sk-primary",
-            "x-request-id": "request-sk-primary",
+            "x-request-id": "request-sk-primary-primary.example",
             "x-ratelimit-limit-requests": "100",
         }
 
         async def aiter_bytes(self):
             yield b'{"message":"upstream key sk-pr'
-            yield b'imary must not escape"}'
+            yield b'imary must not escape", "url":"https://pri'
+            yield b'mary.example/v1/responses", "host":"primary.'
+            yield b'example", "escaped":"https:\\/\\/primary.example\\/v1"}'
 
         async def aclose(self):
             return None
@@ -894,14 +870,16 @@ def test_proxy_redacts_upstream_key_from_success_body_and_headers(
 
     assert response.status_code == 200, response.text
     assert response.json() == {
-        "message": "upstream key [REDACTED] must not escape"
+        "message": "upstream key [REDACTED] must not escape",
+        "url": "[REDACTED]/responses", "host": "[REDACTED]", "escaped": "[REDACTED]",
     }
-    assert response.headers["x-request-id"] == "request-[REDACTED]"
+    assert response.headers["x-request-id"] == "request-[REDACTED]-[REDACTED]"
     assert response.headers["x-ratelimit-limit-requests"] == "100"
     assert "authorization" not in response.headers
     assert "set-cookie" not in response.headers
     assert "x-internal-debug" not in response.headers
     assert "sk-primary" not in response.text
+    assert "primary.example" not in response.text
 
 
 def test_proxy_enforces_enabled_quota_before_upstream_request(

@@ -65,6 +65,12 @@ def wait_for_child(child, goal: str, task_id: str, parent, timeout: float | None
     """Return (conversation result, failure entry, still-running future)."""
     from tools.delegate_tool import _get_subagent_approval_callback, _set_subagent_approval_cb
 
+    model_config = getattr(parent, "_potato_model_config", None)
+    if model_config and getattr(child, "model", None) == model_config["model"]:
+        from potato_hermes_lite.session_models import apply_model_config, record_runtime_model
+        apply_model_config(child, model_config)
+        record_runtime_model(child, getattr(child, "session_id", "") or task_id)
+
     future = Future()
     settled = threading.Event()
     stop = getattr(child, "_delegate_stop_event", None)

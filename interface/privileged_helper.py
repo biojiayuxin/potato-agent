@@ -50,13 +50,6 @@ from interface.mapping import (
     upsert_user_mapping_entry,
     write_mapping,
 )
-from interface.model_options import (
-    ModelOptionsError,
-    get_active_model_option_id,
-    patch_user_active_model,
-)
-from interface.model_options import normalize_model_options
-from interface.model_proxy_config import get_model_proxy_base_url
 from interface.process_utils import SESSION_DB_INNER_TIMEOUT_SECONDS, run_process_group
 from interface.runtime_state import (
     DEFAULT_RUNTIME_IDLE_TIMEOUT_SECONDS,
@@ -346,7 +339,6 @@ def build_parser() -> argparse.ArgumentParser:
         "remove-runtime",
         "remove-mapping",
         "has-background-jobs",
-        "get-active-model",
         "tui-gateway-command",
         "tui-gateway",
         "home-usage",
@@ -354,6 +346,7 @@ def build_parser() -> argparse.ArgumentParser:
         p = sub.add_parser(name)
         p.add_argument("--username", required=True)
 
+    sub.add_parser("get-model-catalog")
     p = sub.add_parser("provision-user")
     p.add_argument("--username", required=True)
     p.add_argument("--email", default="")
@@ -371,10 +364,6 @@ def build_parser() -> argparse.ArgumentParser:
         type=int,
         default=DEFAULT_RUNTIME_IDLE_TIMEOUT_SECONDS,
     )
-
-    p = sub.add_parser("patch-active-model")
-    p.add_argument("--username", required=True)
-    p.add_argument("--model-id", required=True)
 
     p = sub.add_parser("session-db")
     p.add_argument("--username", required=True)
@@ -414,13 +403,15 @@ def main() -> int:
             "file-tree",
             "file-stream-v2",
             "file-upload",
-            "patch-active-model",
-            "get-active-model",
-        }
+            }
         if args.command in guarded_commands and os.geteuid() == 0:
             entry_lock = acquire_user_entry_lock(args.username)
             if args.command in {"tui-gateway", "file-stream-v2", "file-upload"}:
                 entry_lock.make_inheritable()
+
+        if args.command == "get-model-catalog":
+            from interface.model_catalog import load_public_catalog
+            return _emit({"ok": True, "catalog": load_public_catalog()})
 
         if args.command == "tui-gateway":
             _exec_tui_gateway(_load_target(args.username))
@@ -572,27 +563,6 @@ def main() -> int:
                     if claim_id:
                         release_runtime_sleep_claim(args.user_id, claim_id=claim_id)
 
-        if args.command == "patch-active-model":
-            target = _load_target(args.username)
-            config = load_mapping(DEFAULT_MAPPING_PATH, resolve_env=True)
-            model_options = normalize_model_options(config)
-            option = model_options.get(args.model_id)
-            if option is None:
-                raise ModelOptionsError("Model is not allowed")
-            patch_user_active_model(
-                target, option, proxy_base_url=get_model_proxy_base_url(config)
-            )
-            return _emit({"ok": True})
-
-        if args.command == "get-active-model":
-            target = _load_target(args.username)
-            config = load_mapping(DEFAULT_MAPPING_PATH, resolve_env=True)
-            model_options = normalize_model_options(config)
-            active_id = get_active_model_option_id(
-                target, model_options, proxy_base_url=get_model_proxy_base_url(config)
-            )
-            return _emit({"ok": True, "active_id": active_id})
-
         if args.command == "session-db":
             target = _load_target(args.username)
             kwargs = json.loads(sys.stdin.read() or "{}")
@@ -668,6 +638,10 @@ def main() -> int:
 
         raise RuntimeError(f"Unsupported command: {args.command}")
     except Exception as exc:
+        if getattr(args, "command", "") == "get-model-catalog":
+            # This operation reads backend secrets; even unexpected parser or
+            # filesystem failures must not echo configuration values.
+            return _emit({"ok": False, "error": "Model catalog is unavailable", "type": type(exc).__name__})
         if getattr(args, "command", "") in {"file-stream-v2", "file-upload"}:
             print(
                 MAINTENANCE_ERROR_MARKER

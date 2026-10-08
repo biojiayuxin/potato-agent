@@ -69,13 +69,16 @@ class _TurnRunManager:
     def __init__(self) -> None:
         self.submit_calls: list[dict[str, Any]] = []
 
+    def session_lock(self, user_id: str, session_id: str) -> asyncio.Lock:
+        return asyncio.Lock()
+
     async def attach_bridge(self, bridge) -> None:
         return None
 
     async def ensure_session_bound(self, **kwargs: Any) -> None:
         return None
 
-    async def submit_turn(self, **kwargs: Any) -> dict[str, Any]:
+    async def _submit_turn(self, **kwargs: Any) -> dict[str, Any]:
         self.submit_calls.append(kwargs)
         return {
             "run_id": "run-1",
@@ -367,6 +370,12 @@ def test_submit_turn_rejects_invalid_mode(monkeypatch) -> None:
 
 def test_submit_turn_passes_plan_mode_to_run_manager(monkeypatch) -> None:
     client, home_dir = _build_client_and_user(monkeypatch)
+    from interface.test_model_support import make_catalog, install_catalog
+    install_catalog(monkeypatch, make_catalog())
+    config = interface_app_mod.mapping_store.load_config()
+    config["hermes"] = {"model_catalog": True}
+    monkeypatch.setattr(interface_app_mod.mapping_store, "load_config",
+                        lambda **_: config)
     auth_db = home_dir.parent / "interface.db"
     monkeypatch.setattr(
         interface_app_mod,

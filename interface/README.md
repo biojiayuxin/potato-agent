@@ -347,31 +347,45 @@ python -m interface.build_genome_feature_index \
 
 ### Lite 前端当前状态
 
+模型配置统一来源、版本快照、SQLite 字段含义和迁移命令见
+[MODEL_CATALOG.md](MODEL_CATALOG.md)。迁移后模型、显示名称和运行参数只在受保护的
+`model_proxy.yaml` 中定义，旧模型更新脚本停止写入并提示使用统一管理命令。
+
 - Lite 前端默认已切换到 `tui_gateway` 聊天主链路
 - Lite 前端不再保留浏览器侧 `api_server` 回退开关，聊天固定走 `tui_gateway`
-- 新用户（含临时用户）生成 Hermes 配置时优先使用模型白名单中的 Fast：按 id、name 或 model
-  匹配 `fast`（不区分大小写），同时兼容页面使用的 `gpt-5.6-terra` / `gpt-6-sol` 别名；未配置 Fast 时使用
-  `hermes.model_options.primary`。初始推理强度和压缩上下文长度跟随所选模型，用户级
-  `config_overrides` 仍可显式覆盖。页面读取后端保存的 active model，已有用户登录或新建聊天时
-  继续使用其已保存的选择。管理员使用 `configure_model_proxy.py --apply-to-users` 时仍按配置的
-  primary 更新用户模型。
+- 启用 `hermes.model_catalog: true` 后，默认选项由目录中的 `default_option_id` 明确指定。
+  首次迁移优先选择 Fast，没有 Fast 时回退 primary；运行时不再从上游模型名推断 Fast。
+  新用户（含临时用户）的模型启动配置来自目录，旧的全局和用户 `config_overrides` 不能覆盖目录中的
+  模型、API 模式、主模型推理强度及上下文窗口。显式辅助模型配置也必须使用目录中的稳定选项 ID。
+- Lite 聊天按逻辑对话独立保存模型。新建空白聊天、导入聊天和尚未保存独立选择的历史聊天使用
+  目录默认选项（初始迁移为 Fast，缺少 Fast 时为 primary）；从消息创建的分支继承源对话当前模型，之后独立保存。
+  刷新、重新登录、网关重启和上下文压缩不会丢失选择。同一对话响应、等待审批或子任务完成前
+  禁止切换模型，其他对话可以继续选择模型和发送消息，共享网关连接不会因此重启。
+- `GET /api/models` 的 `default_id` 用于新聊天；会话快照和 live polling 返回 `model_id`、
+  `model_revision`。`PUT /api/sessions/{id}/model` 接收 `{"id":"模型白名单 ID"}`；草稿首次
+  `POST /api/sessions/draft/turns` 可指定 `model_id`，已有对话按服务端保存的选择发送。
+  用户级 `/api/models/active` 及其特权操作已删除。实际响应只接收后端
+  解析的代理路由、API 模式、推理强度和上下文窗口；浏览器不能传入网关模型配置、端点或密钥。
+- `session_model_state.model_id` 保存 `deep`、`fast` 等稳定选项 ID，`model_revision` 只表示选择版本。
+  每轮的实际上游模型和配置版本另存于 `session_model_runs`，Lite 的 `sessions.model` 显示实际模型名。
+  管理员更换上游模型不会重命名选项 ID 或改写历史运行记录；每轮接纳时冻结配置，其他对话或后续
+  配置更新不会改变该轮的模型。模型标签来自目录的 `display_name`，前端不再硬编码名称映射。
 
-只将现有 Fast 升级为 `gpt-6-sol` / `xhigh`，使用根目录 `update_fast_model.py`：
+日常模型修改使用统一管理命令，默认只输出公开预览：
 
 ```bash
-sudo /opt/interface-env/bin/python update_fast_model.py
-sudo /opt/interface-env/bin/python update_fast_model.py --apply
+sudo /opt/interface-env/bin/python -B /srv/potato_agent/configure_model_catalog.py
+sudo /opt/interface-env/bin/python -B /srv/potato_agent/configure_model_catalog.py \
+  --option deep --model NEW_MODEL --apply
 ```
 
-第一条只输出脱敏预览，第二条保存私有备份后同步修改 mapping、proxy，以及当前选中 Fast 的用户的
-模型名称及推理强度。Fast 路由名和用户 `model.default` 同步为 `gpt-6-sol`，使用户读取配置和
-系统提示词中的模型名称与实际请求一致。Fast 的 id、上下文长度、API 响应模式、压缩配置和上游凭据保留；已有 Deep
-用户的配置不变。若上下文长度未明确配置，或压缩模型未指定 / 指向 Fast，脚本会停止写入，要求先确认
-原值，避免升级主模型时连带改变压缩模型。脚本不重启服务；正在运行的 Fast runtime 应在回复结束后
-重建以加载新的模型名称和推理强度；修改路由名时应先停止使用旧路由的 runtime。
-脚本不会验证上游对新模型的支持。
-若确认要保留压缩跟随 Fast 的策略（压缩也随之使用 `gpt-6-sol`），执行时加
-`--keep-compression-policy`；上下文长度和响应模式仍沿用原配置。
+将 `NEW_MODEL` 替换为上游支持的模型名。命令不探测上游服务，新回合读取新配置，已接纳回合继续使用
+原快照。新主机直接用 `configure_model_catalog.py --initialize-from PRIVATE_FILE` 预览，确认后加
+`--apply` 初始化 schema v2；旧格式站点必须先用过渡版本完成升级，再部署当前代码。
+`configure_model_proxy.py`、`update_fast_model.py`、旧格式解析和选项 ID 迁移代码已删除。
+旧代理路由别名的解析、授权与配置匹配代码也已删除，部署前通过 `--check-user-configs` 检查用户配置。
+升级前提与保密边界见
+[模型配置说明](MODEL_CATALOG.md#removed-compatibility-code-and-remaining-dependencies)。
 
 ### 已验证的最小 bridge 探针
 

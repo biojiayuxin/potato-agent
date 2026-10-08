@@ -732,7 +732,7 @@ def test_composer_is_disabled_until_handoff_has_been_restored(context, site):
     expect(current.locator("#workspace-view")).to_be_visible()
     assert current.locator("#workspace-view").evaluate("e => e.inert")
     assert not current.evaluate("workspaceTest.workspace.ready")
-    pending[0].fulfill(json={"data": [{"id": "test-model"}]})
+    pending[0].fulfill(json={"data": [{"id": "test-model"}], "default_id": "test-model"})
     ready(current)
     assert not current.locator("#workspace-view").evaluate("e => e.inert")
     expect(current.locator("#prompt-input")).to_have_value("Preserve until fully restored")

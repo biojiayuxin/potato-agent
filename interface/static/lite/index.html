@@ -7,7 +7,7 @@
     <title>Potato Agent | PotatoOmics</title>
     <link rel="icon" type="image/png" href="./static/favicon.png" />
     <link rel="stylesheet" href="./static/lite/vendor/katex/katex.min.css?v=0.18.11" />
-    <link rel="stylesheet" href="./static/lite/styles.css?v=20260910-sidebar-home-markdown-math-20261003-session-pins-20261005-pin-center" />
+    <link rel="stylesheet" href="./static/lite/styles.css?v=20260910-sidebar-home-markdown-math-20261003-session-pins-20261005-pin-center-20261008-approval-dialog" />
     <link rel="stylesheet" href="/static/shared/feedback.css?v=20260819-feedback" />
     <link rel="stylesheet" href="/static/shared/announcement.css?v=20260927-synteny">
     <script src="/static/shared/announcement.js?v=20260906" defer></script>
@@ -419,7 +419,7 @@
                   <button id="change-password-button" class="ghost small topbar-password-button" type="button" hidden>Change password</button>
                   <label id="model-name" class="model-select-wrap" for="model-select">
                     <span class="tiny muted">Model</span>
-                    <select id="model-select" class="model-select" aria-label="Model"></select>
+                    <select id="model-select" class="model-select" aria-label="Model" aria-describedby="model-error" title="Response model for this conversation"></select>
                   </label>
                 </div>
               </header>
@@ -453,6 +453,7 @@
               </div>
               <form id="composer-form" class="composer">
                 <div id="chat-error" class="error chat-error" hidden></div>
+                <div id="model-error" class="error chat-error" role="status" hidden></div>
                 <div id="composer-example-row" class="composer-example-row" hidden>
                   <label id="composer-example-label" class="composer-example-label" for="prompt-input">Example:</label>
                 </div>
@@ -706,6 +707,6 @@
     <script src="./static/lite/vendor/marked.umd.js?v=18.0.14"></script>
     <script src="./static/lite/vendor/katex/katex.min.js?v=0.18.11"></script>
     <script src="/static/shared/feedback.js?v=20260819-feedback" defer></script>
-    <script type="module" src="./static/lite/app.js?v=20260930-deep-test-delegation-poll-status-markdown-math-20261003-session-pins-20261005"></script>
+    <script type="module" src="./static/lite/app.js?v=20260930-deep-test-delegation-poll-status-models-20261001-markdown-math-20261003-session-pins-20261005-model-catalog-20261008-cleanup-approval-dialog"></script>
   </body>
 </html>

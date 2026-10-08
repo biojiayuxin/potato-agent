@@ -16,7 +16,7 @@ const state = {
   user: null,
   pendingWorkspaceUser: null,
   models: [],
-  selectedModel: null,
+  defaultModelId: '',
   sessions: [],
   sessionsNextOffset: 0,
   sessionsHasMore: false,
@@ -216,6 +216,7 @@ const dom = {
   mobilePanelBackdrop: document.getElementById('mobile-panel-backdrop'),
   modelName: document.getElementById('model-name'),
   modelSelect: document.getElementById('model-select'),
+  modelError: document.getElementById('model-error'),
   composerForm: document.getElementById('composer-form'),
   promptInput: document.getElementById('prompt-input'),
   exampleRow: document.getElementById('composer-example-row'),
@@ -321,6 +322,10 @@ const persistentIdsByLiveTuiSessionId = new Map();
 const busySessionIds = new Set();
 const sessionPinStatesById = new Map();
 const pinningSessionIds = new Set();
+const sessionModelStatesById = new Map();
+const sessionModelRequestsById = new Map();
+const sessionModelErrorsById = new Map();
+const composerSubmissionsBySessionId = new Map();
 let sessionsRequestGeneration = 0;
 let sessionsNeedResync = false;
 const sessionRunTransportById = new Map();
@@ -1399,49 +1404,17 @@ const syncActiveSessionUiState = () => {
 const isActiveSessionBlockingModelSwitch = () => {
   const activeSessionId = getActivePersistentSessionId();
   return Boolean(activeSessionId) && (
-    isSessionBusy(activeSessionId) || sessionNeedsApproval(activeSessionId)
+    isSessionBusy(activeSessionId)
+    || sessionNeedsApproval(activeSessionId)
+    || shouldPollLiveSession(state.activeSession?.live)
+    || sessionModelRequestsById.has(activeSessionId)
   );
 };
 
-const MODEL_DISPLAY_NAME_OVERRIDES = {
-  'gpt-5.6-sol': 'Deep',
-  'deep-backup': 'Deep-backup',
-  'gpt-5.6-terra': 'Fast',
-  'gpt-6-sol': 'Fast',
-};
-
-const MODEL_DISPLAY_ORDER = [
-  'Deep',
-  'Deep-backup',
-  'Fast',
-];
-
-const getModelKeyCandidates = (model) => [
-  model?.id,
-  model?.name,
-  model?.model,
-].map((value) => String(value || '').trim()).filter(Boolean);
-
 const getModelDisplayName = (model) => {
   if (!model) return '';
-  for (const key of getModelKeyCandidates(model)) {
-    if (MODEL_DISPLAY_NAME_OVERRIDES[key]) {
-      return MODEL_DISPLAY_NAME_OVERRIDES[key];
-    }
-  }
-  return String(model.name || model.model || model.id || '').trim();
+  return String(model.display_name || model.name || model.id || '').trim();
 };
-
-const sortModelsForDisplay = (models) => models
-  .map((model, index) => ({ model, index }))
-  .sort((left, right) => {
-    const leftRank = MODEL_DISPLAY_ORDER.indexOf(getModelDisplayName(left.model));
-    const rightRank = MODEL_DISPLAY_ORDER.indexOf(getModelDisplayName(right.model));
-    const normalizedLeftRank = leftRank === -1 ? MODEL_DISPLAY_ORDER.length : leftRank;
-    const normalizedRightRank = rightRank === -1 ? MODEL_DISPLAY_ORDER.length : rightRank;
-    return normalizedLeftRank - normalizedRightRank || left.index - right.index;
-  })
-  .map(({ model }) => model);
 
 const getSessionPinState = (session, existingSession = null) => {
   const candidates = [sessionPinStatesById.get(session?.id), existingSession, session];
@@ -1465,6 +1438,47 @@ const rememberSessionPinState = (session) => {
   }
 };
 
+const getDefaultModelId = () => state.defaultModelId;
+
+const getSessionModelState = (session, existingSession = null) => {
+  // Keep the newest server selection even when an older list/detail request
+  // finishes after a model save or when a conversation leaves the loaded page.
+  let selected = { model_id: '', model_revision: 0 };
+  for (const candidate of [sessionModelStatesById.get(session?.id), existingSession, session]) {
+    const modelId = String(candidate?.model_id || '').trim();
+    const rawRevision = Number(candidate?.model_revision || 0);
+    const revision = Number.isFinite(rawRevision) ? Math.max(0, rawRevision) : 0;
+    if (modelId && (!selected.model_id || revision > selected.model_revision)) {
+      selected = { model_id: modelId, model_revision: revision };
+    }
+  }
+  return selected;
+};
+
+const getActiveSessionModelId = () => {
+  const pending = sessionModelRequestsById.get(getActivePersistentSessionId());
+  return pending?.modelId || getSessionModelState(state.activeSession).model_id || getDefaultModelId();
+};
+
+const getActiveSessionModel = () => state.models.find((model) => (
+  String(model.id || '').trim() === getActiveSessionModelId()
+)) || null;
+
+const applySessionModelState = (sessionId, modelState) => {
+  const merged = getSessionModelState({ ...modelState, id: sessionId });
+  if (!merged.model_id) return;
+  sessionModelStatesById.set(sessionId, merged);
+  state.sessions = state.sessions.map((session) => (
+    session.id === sessionId ? { ...session, ...merged } : session
+  ));
+  if (state.activeSession?.id === sessionId) {
+    state.activeSession = { ...state.activeSession, ...merged };
+  }
+  if (state.draftSession?.id === sessionId) {
+    state.draftSession = { ...state.draftSession, ...merged };
+  }
+};
+
 const normalizeSessionSnapshot = (session) => {
   if (!session?.id) return null;
 
@@ -1478,6 +1492,7 @@ const normalizeSessionSnapshot = (session) => {
     ...(existingSession || {}),
     ...session,
     ...getSessionPinState(session, existingSession),
+    ...getSessionModelState(session, existingSession),
     id: sessionId,
     persistentSessionId: String(session.persistentSessionId || existingSession?.persistentSessionId || sessionId),
     resume_session_id: String(
@@ -1490,6 +1505,12 @@ const normalizeSessionSnapshot = (session) => {
       || sessionId
     ).trim(),
   };
+  if (normalized.model_id) {
+    sessionModelStatesById.set(sessionId, {
+      model_id: normalized.model_id,
+      model_revision: normalized.model_revision,
+    });
+  }
 
   if (isDefaultChatTitle(normalized.title)) {
     const fallbackTitle = String(existingSession?.title || '').trim();
@@ -2528,6 +2549,7 @@ const attachHorizontalResizer = (resizer, { getNextSize, setSize, storageKey }) 
 const refreshComposerBusyState = () => {
   syncActiveSessionUiState();
   const busy = state.isSending;
+  const savingModel = sessionModelRequestsById.has(getActivePersistentSessionId());
   if (dom.attachButton) {
     dom.attachButton.disabled = busy;
   }
@@ -2538,6 +2560,7 @@ const refreshComposerBusyState = () => {
     dom.planButton.setAttribute('aria-pressed', planActive ? 'true' : 'false');
   }
   if (dom.sendButton) {
+    dom.sendButton.disabled = savingModel;
     dom.sendButton.type = busy ? 'button' : 'submit';
     dom.sendButton.ariaLabel = busy ? 'Stop response' : 'Send message';
     dom.sendButton.title = busy ? 'Stop response' : 'Send message';
@@ -2546,8 +2569,14 @@ const refreshComposerBusyState = () => {
     dom.sendButtonIcon.src = busy ? ICON_STOP_PATH : ICON_SEND_PATH;
   }
   if (dom.modelSelect) {
-    dom.modelSelect.disabled = isActiveSessionBlockingModelSwitch() || state.models.length <= 1;
+    const noAlternative = state.models.length === 0 || (
+      state.models.length === 1 && String(state.models[0].id || '').trim() === getActiveSessionModelId()
+    );
+    dom.modelSelect.disabled = isActiveSessionBlockingModelSwitch() || noAlternative;
+    dom.modelSelect.setAttribute('aria-busy', savingModel ? 'true' : 'false');
+    dom.modelSelect.title = savingModel ? 'Saving model…' : 'Response model for this conversation';
   }
+  showError(dom.modelError, sessionModelErrorsById.get(getActivePersistentSessionId()) || '');
   refreshExportButtonState();
   refreshShareButtonState();
 };
@@ -2668,6 +2697,8 @@ const createDraftSession = () => ({
   last_active: nowSeconds(),
   message_count: 0,
   isDraft: true,
+  model_id: getDefaultModelId(),
+  model_revision: 0,
 });
 
 const activatePersistedSession = (session, { clearMessages = true } = {}) => {
@@ -3966,6 +3997,10 @@ const resetWorkspaceState = () => {
   sessionsNeedResync = false;
   sessionPinStatesById.clear();
   pinningSessionIds.clear();
+  sessionModelStatesById.clear();
+  sessionModelRequestsById.clear();
+  sessionModelErrorsById.clear();
+  composerSubmissionsBySessionId.clear();
   workspacePathNavigationGeneration += 1;
   stopAllLiveSessionPolling();
   resetTuiBridgeReconnectState();
@@ -3992,7 +4027,7 @@ const resetWorkspaceState = () => {
   state.activeWorkspaceTab = CHAT_TAB_ID;
   state.filePreviewTabs = [];
   state.models = [];
-  state.selectedModel = null;
+  state.defaultModelId = '';
   state.chatExporting = false;
   state.chatSharing = false;
   state.shareResult = null;
@@ -6413,7 +6448,7 @@ const renderWorkspaceHeader = () => {
   dom.chatTitle.textContent = getActiveWorkspaceTitle();
   refreshShareButtonState();
   if (!dom.modelSelect) return;
-  const selectedId = String(state.selectedModel?.id || '').trim();
+  const selectedId = getActiveSessionModelId();
   dom.modelSelect.innerHTML = '';
   if (state.models.length === 0) {
     const option = document.createElement('option');
@@ -6421,6 +6456,13 @@ const renderWorkspaceHeader = () => {
     option.textContent = 'No model selected';
     dom.modelSelect.append(option);
   } else {
+    if (selectedId && !state.models.some((model) => model.id === selectedId)) {
+      const option = document.createElement('option');
+      option.value = selectedId;
+      option.textContent = 'Unavailable model';
+      option.disabled = true;
+      dom.modelSelect.append(option);
+    }
     for (const model of state.models) {
       const option = document.createElement('option');
       option.value = String(model.id || '').trim();
@@ -6429,7 +6471,7 @@ const renderWorkspaceHeader = () => {
     }
   }
   dom.modelSelect.value = selectedId;
-  dom.modelSelect.disabled = isActiveSessionBlockingModelSwitch() || state.models.length <= 1;
+  refreshComposerBusyState();
   updateModelSelectWidth();
 };
 
@@ -7723,64 +7765,77 @@ const openWorkspacePathFromMessage = async (rawPath) => {
 };
 
 const fetchModels = async () => {
+  const authGeneration = authSessionGeneration;
   const response = await api('/api/models', { method: 'GET' });
   const json = await response.json();
-  state.models = sortModelsForDisplay(Array.isArray(json?.data) ? json.data : []);
-  const activeId = String(json?.active_id || json?.activeId || '').trim();
-  state.selectedModel = state.models.find((model) => String(model.id || '').trim() === activeId)
-    || state.models.find((model) => Boolean(model.is_active || model.isActive))
-    || state.models[0]
-    || null;
+  if (authGeneration !== authSessionGeneration) return;
+  state.models = Array.isArray(json?.data) ? json.data : [];
+  state.defaultModelId = String(json?.default_id || '').trim();
+  // The session list and model catalog load concurrently. A draft created
+  // before the catalog arrives receives its default only if still unselected.
+  for (const session of [state.draftSession, state.activeSession]) {
+    if (session?.isDraft && !session.model_id) session.model_id = getDefaultModelId();
+  }
   renderWorkspaceHeader();
 };
 
 const switchActiveModel = async (modelId) => {
+  const session = state.activeSession;
+  const sessionId = getActivePersistentSessionId();
   const requestedId = String(modelId || '').trim();
-  if (!requestedId || requestedId === String(state.selectedModel?.id || '').trim()) {
+  if (!session || !sessionId || !requestedId || requestedId === getActiveSessionModelId()) {
     renderWorkspaceHeader();
     return;
   }
   if (isActiveSessionBlockingModelSwitch()) {
-    showChatError('Cannot switch models while a response or approval is active.');
     renderWorkspaceHeader();
     return;
   }
 
-  const previousModel = state.selectedModel;
-  const nextModel = state.models.find((model) => String(model.id || '').trim() === requestedId) || null;
-  if (!nextModel) {
+  if (!state.models.some((model) => String(model.id || '').trim() === requestedId)) {
+    renderWorkspaceHeader();
+    return;
+  }
+  sessionModelErrorsById.delete(sessionId);
+  if (session.isDraft) {
+    applySessionModelState(sessionId, {
+      model_id: requestedId,
+      model_revision: getSessionModelState(session).model_revision + 1,
+    });
     renderWorkspaceHeader();
     return;
   }
 
+  const request = { modelId: requestedId };
+  const authGeneration = authSessionGeneration;
+  const current = () => authGeneration === authSessionGeneration
+    && sessionModelRequestsById.get(sessionId) === request;
+  sessionModelRequestsById.set(sessionId, request);
+  renderWorkspaceHeader();
   try {
-    state.selectedModel = nextModel;
-    renderWorkspaceHeader();
-    const response = await api('/api/models/active', {
+    const response = await api(`/api/sessions/${encodeURIComponent(sessionId)}/model`, {
       method: 'PUT',
       body: JSON.stringify({ id: requestedId }),
     });
     const json = await response.json();
-    const activeModel = json?.model || nextModel;
-    state.models = state.models.map((model) => ({
-      ...model,
-      is_active: String(model.id || '').trim() === String(activeModel.id || requestedId).trim(),
-      isActive: String(model.id || '').trim() === String(activeModel.id || requestedId).trim(),
-    }));
-    state.selectedModel = {
-      ...nextModel,
-      ...activeModel,
-      is_active: true,
-      isActive: true,
-    };
-    resetTuiBridgeReconnectState();
-    closeTuiBridge();
-    showChatError('');
-    renderWorkspaceHeader();
+    if (!current()) return;
+    if (json?.session_id !== sessionId || !json?.model_id) {
+      throw new Error('Failed to confirm the model selection. Please try again.');
+    }
+    applySessionModelState(sessionId, json);
   } catch (error) {
-    state.selectedModel = previousModel;
-    renderWorkspaceHeader();
-    showChatError(String(error.message || 'Failed to switch model'));
+    if (current()) {
+      const restored = error?.payload?.detail;
+      if (restored?.session_id === sessionId && restored?.model_id) {
+        applySessionModelState(sessionId, restored);
+      }
+      sessionModelErrorsById.set(sessionId, String(error.message || 'Failed to switch model'));
+    }
+  } finally {
+    if (current()) {
+      sessionModelRequestsById.delete(sessionId);
+      renderWorkspaceHeader();
+    }
   }
 };
 
@@ -7899,8 +7954,10 @@ const setChatPinned = async (sessionId, pinned) => {
 };
 
 const openSession = async (sessionId, { shouldApply = null } = {}) => {
+  const authGeneration = authSessionGeneration;
   const operationCanApply = () => (
-    typeof shouldApply !== 'function' || shouldApply()
+    authGeneration === authSessionGeneration
+    && (typeof shouldApply !== 'function' || shouldApply())
   );
   if (!operationCanApply()) return;
   resetSessionRenameState();
@@ -7917,6 +7974,7 @@ const openSession = async (sessionId, { shouldApply = null } = {}) => {
 
   if (state.activeSessionId === sessionId && state.messages.length > 0) {
     setActiveWorkspaceTab(CHAT_TAB_ID);
+    renderApprovalModal();
     return;
   }
 
@@ -7959,7 +8017,7 @@ const openSession = async (sessionId, { shouldApply = null } = {}) => {
   try {
     const response = await api(`/api/sessions/${encodeURIComponent(sessionId)}`, { method: 'GET' });
     const json = await response.json();
-    if (!operationCanApply()) {
+    if (!operationCanApply() || state.activeSessionId !== sessionId) {
       if (state.activeSessionId === sessionId) {
         state.sessionHistoryLoading = false;
         renderWorkspace();
@@ -7993,7 +8051,7 @@ const openSession = async (sessionId, { shouldApply = null } = {}) => {
       startLiveSessionPolling(sessionId);
     }
   } catch (error) {
-    if (!operationCanApply()) {
+    if (!operationCanApply() || state.activeSessionId !== sessionId) {
       if (state.activeSessionId === sessionId) {
         state.sessionHistoryLoading = false;
         renderWorkspace();
@@ -8411,7 +8469,15 @@ const applyLiveSessionSnapshot = (
   const mergedMessages = Array.isArray(serverMessages)
     ? mergeSnapshotMessagesWithLocalProgress(serverMessages, previousMessages)
     : null;
-  const snapshotChanged = Array.isArray(serverMessages)
+  const previousModel = getSessionModelState(previousSession);
+  const incomingModel = snapshot?.session || snapshot;
+  if (incomingModel?.model_id) {
+    applySessionModelState(resolvedSessionId, incomingModel);
+  }
+  const currentModel = sessionModelStatesById.get(resolvedSessionId) || previousModel;
+  const snapshotChanged = currentModel.model_id !== previousModel.model_id
+    || currentModel.model_revision !== previousModel.model_revision
+    || Array.isArray(serverMessages)
     || liveRenderKey(previousLiveState) !== liveRenderKey(liveState);
 
   if (snapshotChanged) {
@@ -8610,6 +8676,9 @@ const deleteChat = async (chatId, isDraft = false) => {
   forgetSessionScrollPosition(chatId);
   state.sessions = state.sessions.filter((chat) => chat.id !== chatId);
   sessionPinStatesById.delete(chatId);
+  sessionModelStatesById.delete(chatId);
+  sessionModelRequestsById.delete(chatId);
+  sessionModelErrorsById.delete(chatId);
   sessionsNeedResync = true;
 
   if (chatId !== state.activeSessionId) {
@@ -8723,6 +8792,7 @@ const getTurnSubmissionFailureMessage = (error) => {
 };
 
 const submitPromptViaTuiBridge = async (prompt) => {
+  const authGeneration = authSessionGeneration;
   const trimmedPrompt = prompt.trim();
   const uploadedAttachments = state.pendingAttachments.filter((item) => item.status === 'uploaded' && item.id);
   const hasFailedUploads = state.pendingAttachments.some((item) => item.status === 'error');
@@ -8730,18 +8800,26 @@ const submitPromptViaTuiBridge = async (prompt) => {
   const attachmentsTooLarge = getTotalAttachmentSize(state.pendingAttachments) > MAX_TOTAL_ATTACHMENT_SIZE_BYTES;
 
   if (!trimmedPrompt && uploadedAttachments.length === 0) return;
-  if (!state.selectedModel) {
+  if (!state.activeSession) showDraftChat();
+  const submissionSession = state.activeSession;
+  const submissionSessionId = getActivePersistentSessionId();
+  if (sessionModelRequestsById.has(submissionSessionId)) return;
+  if (!getActiveSessionModel()) {
     try {
       await fetchModels();
     } catch (error) {
-      showChatError(String(error.message || 'No model is currently available.'));
+      if (authGeneration === authSessionGeneration && isViewingSession(submissionSessionId)) {
+        showChatError(String(error.message || 'No model is currently available.'));
+      }
       return;
     }
-    if (!state.selectedModel) {
+    if (authGeneration !== authSessionGeneration || !isViewingSession(submissionSessionId)) return;
+    if (!getActiveSessionModel()) {
       showChatError('No model is currently available.');
       return;
     }
   }
+  if (sessionModelRequestsById.has(submissionSessionId)) return;
   if (hasUploadingFiles) {
     showChatError('Files are still uploading. Please wait before sending.');
     return;
@@ -8755,12 +8833,10 @@ const submitPromptViaTuiBridge = async (prompt) => {
     return;
   }
 
-  if (!state.activeSession) {
-    showDraftChat();
-  }
-
   const optimisticSessionId = getActivePersistentSessionId();
   const draftSessionId = String(state.activeSession?.id || '').trim();
+  const submissionModelId = getActiveSessionModelId();
+  const isDraftSubmission = Boolean(submissionSession.isDraft);
   const currentSessionId = optimisticSessionId || draftSessionId;
   if (currentSessionId && isSessionBusy(currentSessionId)) {
     showChatError('This conversation is already responding.');
@@ -8768,6 +8844,7 @@ const submitPromptViaTuiBridge = async (prompt) => {
   }
 
   showChatError('');
+  sessionModelErrorsById.delete(currentSessionId);
   const submissionMode = getComposerMode();
 
   const userMessage = {
@@ -8814,7 +8891,7 @@ const submitPromptViaTuiBridge = async (prompt) => {
   let persistentSessionId = optimisticSessionId;
   const turnRequestId = uuid();
   try {
-    const requestedSessionId = (!state.activeSession || state.activeSession?.isDraft || !optimisticSessionId)
+    const requestedSessionId = (isDraftSubmission || !optimisticSessionId)
       ? 'draft'
       : optimisticSessionId;
     let json = null;
@@ -8826,6 +8903,7 @@ const submitPromptViaTuiBridge = async (prompt) => {
             prompt: trimmedPrompt,
             mode: submissionMode,
             request_id: turnRequestId,
+            ...(isDraftSubmission ? { model_id: submissionModelId } : {}),
             attachments: uploadedAttachments.map((item) => ({
               type: item.type,
               id: item.id,
@@ -8882,9 +8960,14 @@ const submitPromptViaTuiBridge = async (prompt) => {
       }
       if (!json) throw submissionError;
     }
+    if (authGeneration !== authSessionGeneration) return;
     const nextSession = normalizeSessionSnapshot(
       json?.session
-        ? { ...json.session, persistentSessionId: json.session.id }
+        ? {
+            ...(isDraftSubmission ? { model_id: submissionModelId, model_revision: 0 } : {}),
+            ...json.session,
+            persistentSessionId: json.session.id,
+          }
         : null
     );
     const nextMessages = Array.isArray(json?.messages)
@@ -8896,6 +8979,7 @@ const submitPromptViaTuiBridge = async (prompt) => {
     }
 
     persistentSessionId = String(nextSession.id || '').trim();
+    const stillViewingSubmission = isViewingSession(currentSessionId) || isViewingSession(persistentSessionId);
     if (draftSessionId && persistentSessionId && draftSessionId !== persistentSessionId) {
       saveSessionScrollPosition(draftSessionId);
       moveSessionScrollPosition(draftSessionId, persistentSessionId);
@@ -8903,17 +8987,22 @@ const submitPromptViaTuiBridge = async (prompt) => {
       sessionAbortControllersById.delete(draftSessionId);
       sessionRunTransportById.delete(draftSessionId);
       busySessionIds.delete(draftSessionId);
+      sessionModelStatesById.delete(draftSessionId);
+      sessionModelErrorsById.delete(draftSessionId);
     }
 
     const liveState = json?.live || json?.session?.live || null;
     invalidateLiveSessionPollingForRunChange(nextSession.id, liveState);
     state.sessions = [nextSession, ...state.sessions.filter((chat) => chat.id !== nextSession.id)];
-    state.draftSession = null;
-    state.activeSession = nextSession;
-    state.activeSessionId = nextSession.id;
-    activePersistentSessionId = nextSession.id;
+    if (state.draftSession?.id === draftSessionId) state.draftSession = null;
     setLiveSessionMessages(nextSession.id, nextMessages);
-    state.messages = nextMessages;
+    if (stillViewingSubmission) {
+      state.activeSession = nextSession;
+      state.activeSessionId = nextSession.id;
+      activePersistentSessionId = nextSession.id;
+      state.messages = nextMessages;
+      state.composerMode = 'chat';
+    }
 
     applyLiveStateToSession(nextSession.id, liveState);
     syncStreamingAssistantStateForSession(nextSession.id, {
@@ -8921,18 +9010,20 @@ const submitPromptViaTuiBridge = async (prompt) => {
       nextMessages,
       previousMessages: targetMessages,
     });
-    state.composerMode = 'chat';
-
     const liveSessionId = String(liveState?.live_session_id || '').trim();
     if (liveSessionId) {
-      updateActiveTuiSessionMapping({
-        liveSessionId,
-        persistentSessionId: nextSession.id,
-      });
+      rememberLiveTuiSession(nextSession.id, liveSessionId);
+      if (stillViewingSubmission) {
+        updateActiveTuiSessionMapping({
+          liveSessionId,
+          persistentSessionId: nextSession.id,
+        });
+      }
     }
 
     renderWorkspace();
   } catch (error) {
+    if (authGeneration !== authSessionGeneration) return;
     const failureSessionId = String(persistentSessionId || currentSessionId || '').trim();
     const confirmedSessionId = findConfirmedTurnSessionId(
       turnRequestId,
@@ -9124,7 +9215,8 @@ const returnToPortal = () => {
 
 const yieldWorkspace = async request => {
   if (state.pendingAttachments.some(item => item.status === 'uploading')) return 'uploading';
-  if (composerSubmitPending || state.pendingSessionPromise || state.approvalSubmitting
+  if (composerSubmissionsBySessionId.size || sessionModelRequestsById.size
+    || state.pendingSessionPromise || state.approvalSubmitting
     || state.sessionHistoryLoading || state.shareImportInFlight || state.chatSharing
     || state.passwordChangeSubmitting
     || state.forkingMessageCursors.size || interruptingSessionIds.size) return 'waiting';
@@ -9788,18 +9880,22 @@ dom.modelSelect?.addEventListener('change', (event) => {
   switchActiveModel(event.target.value).catch((error) => showChatError(error.message));
 });
 
-let composerSubmitPending = false;
 dom.composerForm.addEventListener('submit', async (event) => {
   event.preventDefault();
-  if (state.isSending || composerSubmitPending) return;
+  const sessionId = getActivePersistentSessionId();
+  if (state.isSending || composerSubmissionsBySessionId.has(sessionId)
+    || sessionModelRequestsById.has(sessionId)) return;
   const prompt = dom.promptInput.value;
-  composerSubmitPending = true;
+  const submission = {};
+  composerSubmissionsBySessionId.set(sessionId, submission);
   try {
     await submitPromptViaTuiBridge(prompt);
   } catch {
     // Turn submission reports errors in the conversation.
   } finally {
-    composerSubmitPending = false;
+    if (composerSubmissionsBySessionId.get(sessionId) === submission) {
+      composerSubmissionsBySessionId.delete(sessionId);
+    }
   }
 });
 

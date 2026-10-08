@@ -409,6 +409,7 @@ class GatewayProcess(AbstractContextManager["GatewayProcess"]):
         *,
         api_mode: str = "chat_completions",
         gateway_timeout: int | None = None,
+        proxy_token: str = "mock-key",
     ) -> None:
         self.root = root
         self.home = root / "home"
@@ -431,7 +432,7 @@ class GatewayProcess(AbstractContextManager["GatewayProcess"]):
                     "  default: mock-model",
                     "  provider: custom",
                     f"  base_url: {provider.base_url}",
-                    "  api_key: mock-key",
+                    f"  api_key: {proxy_token}",
                     f"  api_mode: {api_mode}",
                     "agent:",
                     "  max_turns: 4",
@@ -806,6 +807,191 @@ def test_session_interrupt_stops_a_streaming_turn(tmp_path: Path) -> None:
                 gateway.wait_event("message.complete", session_id=sid, timeout=20.0)
             )
             assert complete["status"] == "interrupted"
+
+
+def test_sessions_keep_distinct_models_during_streaming_and_cold_resume(tmp_path: Path) -> None:
+    fast = {
+        "id": "fast", "model": "Fast", "provider": "custom",
+        "api_mode": "chat_completions", "context_length": 128_000,
+        "reasoning_effort": "low",
+    }
+    pro = {
+        "id": "pro", "model": "Pro", "provider": "custom",
+        "api_mode": "codex_responses", "context_length": 256_000,
+        "reasoning_effort": "high",
+    }
+    root = tmp_path / "gateway"
+    with MockProvider([]) as provider:
+        provider.state.plan_selector = lambda body: (
+            {"kind": "blocked", "text": "Fast response remains active"}
+            if body["model"] == "Fast" else {"kind": "text", "text": "Pro response"}
+        )
+        with GatewayProcess(root, provider) as gateway:
+            first = gateway.rpc("session.create", {"model_config": fast})
+            second = gateway.rpc("session.create", {"model_config": fast})
+            sid_a, sid_b = first["session_id"], second["session_id"]
+            gateway.rpc("prompt.submit", {"session_id": sid_a, "text": "keep streaming"})
+            gateway.wait_event("message.delta", session_id=sid_a)
+            assert provider.state.first_chunk_sent.wait(timeout=5.0)
+
+            denied = gateway.response(gateway.send("session.model.set", {
+                "session_id": sid_a, "model_config": pro,
+            }))
+            assert denied["error"]["code"] == 4009
+            selected = gateway.rpc("session.model.set", {
+                "session_id": second["stored_session_id"], "model_config": pro,
+            })
+            assert selected == {"found": True, "model_config": pro}
+            gateway.rpc("prompt.submit", {"session_id": sid_b, "text": "respond separately"})
+            completed = _payload(gateway.wait_event("message.complete", session_id=sid_b))
+            assert completed["status"] == "complete"
+            assert completed["text"] == "Pro response"
+
+            first_state = gateway.rpc("session.resume", {"session_id": first["stored_session_id"]})
+            assert first_state["running"] is True
+            assert first_state["info"]["model"] == "Fast"
+            assert first_state["info"]["reasoning_effort"] == "low"
+            assert first_state["info"]["usage"]["context_max"] == 128_000
+            second_state = gateway.rpc("session.resume", {"session_id": second["stored_session_id"]})
+            assert second_state["info"]["model"] == "Pro"
+            assert second_state["info"]["reasoning_effort"] == "high"
+            assert second_state["info"]["usage"]["context_max"] == 256_000
+            requests = [
+                (body, path, headers)
+                for body, path, headers in zip(provider.state.requests, provider.state.request_paths, provider.state.request_headers)
+                if body.get("stream") is True
+            ]
+            assert requests[0][0]["model"] == "Fast"
+            assert requests[0][1] == "/v1/chat/completions"
+            assert requests[1][0]["model"] == "Pro"
+            assert requests[1][1] == "/v1/responses"
+            assert requests[1][0]["reasoning"]["effort"] == "high"
+            assert all(headers["authorization"] == "Bearer mock-key" for _, _, headers in requests)
+            provider.state.release_stream.set()
+            assert _payload(gateway.wait_event("message.complete", session_id=sid_a))["status"] == "complete"
+
+        with GatewayProcess(root, provider) as restarted:
+            resumed = restarted.rpc("session.resume", {
+                "session_id": second["stored_session_id"], "model_config": pro,
+            })
+            assert resumed["info"]["model"] == "Pro"
+            assert resumed["info"]["reasoning_effort"] == "high"
+            assert resumed["info"]["usage"]["context_max"] == 256_000
+            restarted.rpc("prompt.submit", {"session_id": resumed["session_id"], "text": "after restart"})
+            complete = _payload(restarted.wait_event("message.complete", session_id=resumed["session_id"]))
+            assert complete["status"] == "complete"
+            assert complete["text"] == "Pro response"
+            after_restart = [body for body in provider.state.requests if body.get("stream") is True][-1]
+            assert after_restart["model"] == "Pro"
+            assert after_restart["reasoning"]["effort"] == "high"
+
+
+def test_catalog_snapshot_proxy_identity_and_hot_upgrade(tmp_path: Path) -> None:
+    import socket
+    import sqlite3
+    from types import SimpleNamespace
+    from urllib.request import build_opener, ProxyHandler
+    import yaml
+    from interface.model_catalog import public_catalog
+    from interface.test_model_proxy import _write_configs
+
+    mapping_path, proxy_path = _write_configs(tmp_path)
+    mapping = yaml.safe_load(mapping_path.read_text())
+    proxy_token = mapping["users"][0]["model_proxy_token"]
+    with socket.socket() as sock:
+        sock.bind(("127.0.0.1", 0))
+        port = sock.getsockname()[1]
+    with MockProvider([]) as provider:
+        catalog = {
+            "schema_version": 2, "catalog_signing_key": "e2e-signing-" + "s" * 64,
+            "primary_option_id": "deep", "default_option_id": "fast",
+            "backends": {"main": {"model": "gpt-old", "api_mode": "codex_responses",
+                                   "base_url": provider.base_url, "api_key": "upstream-private-e2e"}},
+            "options": {
+                "deep": {"display_name": "Deep", "backend": "main", "reasoning_effort": "xhigh", "context_length": 128000},
+                "fast": {"display_name": "Fast", "backend": "main", "reasoning_effort": "medium", "context_length": 128000},
+            },
+        }
+        def publish():
+            temporary = proxy_path.with_suffix(".tmp")
+            temporary.write_text(yaml.safe_dump(catalog))
+            temporary.chmod(0o600)
+            temporary.replace(proxy_path)
+        def selection():
+            entry = public_catalog(catalog)["options"][0]
+            return {"id": entry["id"], "model": entry["route"], "upstream_model": entry["model"],
+                    **{k: entry[k] for k in ("provider", "api_mode", "reasoning_effort", "context_length", "display_name", "config_revision")}}
+        publish()
+        old = selection()
+        environment = {"PATH": os.environ.get("PATH", ""), "PYTHONPATH": str(LITE_ROOT.parent),
+                       "PYTHONDONTWRITEBYTECODE": "1", "POTATO_AGENT_MAPPING_PATH": str(mapping_path),
+                       "POTATO_MODEL_PROXY_CONFIG_PATH": str(proxy_path),
+                       "POTATO_MODEL_PROXY_USAGE_DB": str(tmp_path / "usage.db"),
+                       "NO_PROXY": "127.0.0.1,localhost"}
+        log = (tmp_path / "proxy.log").open("w")
+        proxy = subprocess.Popen([str(_test_python()), "-m", "uvicorn", "interface.model_proxy:app",
+                                  "--host", "127.0.0.1", "--port", str(port)],
+                                 env=environment, cwd=LITE_ROOT.parent, stdout=log, stderr=log)
+        try:
+            opener = build_opener(ProxyHandler({}))
+            deadline = time.monotonic() + 15
+            while True:
+                try:
+                    with opener.open(f"http://127.0.0.1:{port}/openapi.json", timeout=1):
+                        break
+                except Exception:
+                    assert proxy.poll() is None, (tmp_path / "proxy.log").read_text()
+                    assert time.monotonic() < deadline, "mock proxy did not start"
+                    time.sleep(0.05)
+            provider.state.plan_selector = lambda body: (
+                {"kind": "blocked", "text": "old snapshot reply"} if body["model"] == "gpt-old"
+                else {"kind": "text", "text": "new snapshot reply"})
+            endpoint = SimpleNamespace(base_url=f"http://127.0.0.1:{port}/v1")
+            gateway_root = tmp_path / "catalog-gateway"
+            with GatewayProcess(gateway_root, endpoint, proxy_token=proxy_token) as gateway:
+                first = gateway.rpc("session.create", {"model_config": old})
+                sid_a = first["session_id"]
+                gateway.rpc("prompt.submit", {"session_id": sid_a, "text": "identify model"})
+                gateway.wait_event("message.delta", session_id=sid_a)
+                catalog["backends"]["main"]["model"] = "gpt-new"
+                catalog["options"]["deep"].update(display_name="Research", reasoning_effort="high")
+                publish()
+                new = selection()
+                second = gateway.rpc("session.create", {"model_config": new})
+                sid_b = second["session_id"]
+                gateway.rpc("prompt.submit", {"session_id": sid_b, "text": "new config"})
+                assert _payload(gateway.wait_event("message.complete", session_id=sid_b))["text"] == "new snapshot reply"
+                provider.state.release_stream.set()
+                assert _payload(gateway.wait_event("message.complete", session_id=sid_a))["text"] == "old snapshot reply"
+                gateway.rpc("prompt.submit", {"session_id": sid_a, "text": "still frozen", "model_config": old})
+                assert _payload(gateway.wait_event("message.complete", session_id=sid_a))["status"] == "complete"
+            with GatewayProcess(gateway_root, endpoint, proxy_token=proxy_token) as restarted:
+                resumed = restarted.rpc("session.resume", {"session_id": first["stored_session_id"], "model_config": new})
+                assert resumed["info"]["model"] == "gpt-new"
+                restarted.rpc("prompt.submit", {"session_id": resumed["session_id"], "text": "after restart"})
+                assert _payload(restarted.wait_event("message.complete", session_id=resumed["session_id"]))["status"] == "complete"
+            requests = [item for item in provider.state.requests
+                        if item.get("stream") and "Conversation started:" in json.dumps(item)]
+            assert [item["model"] for item in requests] == ["gpt-old", "gpt-new", "gpt-old", "gpt-new"]
+            assert [item["reasoning"]["effort"] for item in requests] == ["xhigh", "high", "xhigh", "high"]
+            for item in requests:
+                prompt = str(item.get("instructions", "")) + json.dumps(item.get("input", []))
+                assert "Model: " + item["model"] in prompt
+                assert ".pmc1." not in prompt
+                assert "upstream-private-e2e" not in prompt and "e2e-signing-" not in prompt
+                assert provider.base_url not in prompt
+            with sqlite3.connect(gateway_root / "home/.hermes/state.db") as db:
+                assert db.execute("SELECT model FROM sessions WHERE id = ?", (first["stored_session_id"],)).fetchone()[0] == "gpt-new"
+                snapshots = [json.loads(row[0]) for row in db.execute("SELECT model_snapshot FROM potato_model_runs")]
+                assert {item["upstream_model"] for item in snapshots} == {"gpt-old", "gpt-new"}
+        finally:
+            proxy.terminate()
+            try:
+                proxy.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                proxy.kill()
+                proxy.wait(timeout=5)
+            log.close()
 
 
 def test_approval_deny_prevents_dangerous_terminal_command(tmp_path: Path) -> None:

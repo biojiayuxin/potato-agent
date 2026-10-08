@@ -45,6 +45,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict, StrictBool, ValidationError
 
 from interface.auth_db import (
+    DEFAULT_AUTH_DB_PATH,
     EMAIL_VERIFICATION_PURPOSE_PASSWORD_RESET,
     EMAIL_VERIFICATION_PURPOSE_SIGNUP,
     EmailVerificationError,
@@ -213,12 +214,19 @@ from interface.secret_config import (
     load_session_secret,
 )
 from interface.model_options import (
+    ModelOption,
     ModelOptionsError,
     normalize_model_options,
-    get_active_model_option_id,
-    patch_user_active_model,
 )
-from interface.model_proxy_config import get_model_proxy_base_url
+from interface.session_model_store import (
+    delete_session_model_state,
+    ensure_session_model_store,
+    get_session_model_state,
+    initialize_session_model,
+    list_session_model_states,
+    restore_session_model,
+    set_session_model,
+)
 from interface.password_policy import (
     PASSWORD_COMPLEXITY_DETAIL,
     password_complexity_error,
@@ -539,6 +547,7 @@ class SessionTurnSubmitRequest(BaseModel):
     draft_title: str = ""
     mode: str = "chat"
     request_id: str = ""
+    model_id: str = ""
 
 
 class SessionApprovalRequest(BaseModel):
@@ -546,8 +555,10 @@ class SessionApprovalRequest(BaseModel):
     approval_id: str = ""
 
 
-class ActiveModelUpdateRequest(BaseModel):
-    id: str = ""
+class SessionModelUpdateRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    id: str
 
 
 def _max_upload_size_mb() -> int:
@@ -1767,9 +1778,11 @@ def _normalize_logical_session_row(
     live_state: dict[str, Any] | None = None,
     resume_session_id: str | None = None,
     pin_state: dict[str, Any] | None = None,
+    model_state: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     normalized = _normalize_session_row(session)
     normalized.update(pin_state or {"pinned": False, "pin_order": 0, "pin_revision": 0})
+    normalized.update(model_state or {"model_id": "", "model_revision": 0})
     normalized["id"] = logical_session_id
     live_tip_session_id = (
         str(live_state.get("tip_session_id") or "").strip()
@@ -2489,10 +2502,17 @@ def _load_imported_chat_response_sync(
 
     display_meta = get_display_session_meta(user.id, logical_session_id)
     live_state = get_live_session_state(user.id, logical_session_id)
+    options = _load_display_model_options()
+    if options is not None:
+        initialize_session_model(
+            user.id, logical_session_id, options.new_user_default.id,
+            db_path=_session_model_db_path(),
+        )
     return {
         "session": _normalize_logical_session_row(
             projected_session or logical_session,
             pin_state=get_session_pin_state(user.id, logical_session_id),
+            model_state=_get_session_model_state_sync(user.id, logical_session_id),
             logical_session_id=logical_session_id,
             logical_session=logical_session,
             display_meta=display_meta,
@@ -3814,17 +3834,83 @@ def _has_active_background_processes_for_target(target: HermesTarget) -> bool:
     return privileged_client.has_active_background_processes(target.username)
 
 
-def _get_active_model_id_for_user(
-    target: HermesTarget,
-    model_options: Any,
-    *,
-    config: dict[str, Any] | None = None,
-) -> str:
-    if os.geteuid() == 0 and not privileged_client.force_helper:
-        return get_active_model_option_id(
-            target, model_options, proxy_base_url=get_model_proxy_base_url(config)
-        )
-    return privileged_client.get_active_model_id(target.username)
+def _session_model_db_path() -> Path:
+    return Path(os.getenv("INTERFACE_AUTH_DB") or DEFAULT_AUTH_DB_PATH)
+
+
+def _load_model_options():
+    return normalize_model_options(mapping_store.load_config(resolve_env=True))
+
+
+def _session_model_config(option: ModelOption) -> dict[str, Any]:
+    # Only the local proxy alias and public runtime settings cross this boundary.
+    return {
+        "id": option.id,
+        "model": option.route or option.name,
+        "provider": option.provider,
+        "api_mode": option.api_mode,
+        "context_length": option.context_length,
+        "reasoning_effort": option.reasoning_effort,
+        **({"upstream_model": option.model, "display_name": option.display_name,
+            "config_revision": option.config_revision} if option.config_revision else {}),
+    }
+
+
+def _display_model_state(
+    state: dict[str, Any], options, *, user_id: str = "", session_id: str = ""
+) -> dict[str, Any]:
+    if options is None:
+        return state
+    if state.get("model_id") and options.get(state["model_id"]) is None and user_id:
+        # A removed whitelist entry becomes the default with a new revision.
+        # Otherwise clients correctly rejecting old snapshots could retain the
+        # unavailable ID while the server was already using the fallback.
+        state = restore_session_model(
+            user_id, session_id, options.new_user_default.id,
+            expected_revision=state["model_revision"], db_path=_session_model_db_path(),
+        ) or get_session_model_state(user_id, session_id, db_path=_session_model_db_path())
+    selected = options.get(state.get("model_id", "")) or options.new_user_default
+    return {**state, "model_id": selected.id}
+
+
+def _load_display_model_options():
+    # History remains readable during a model configuration repair.
+    try:
+        return _load_model_options()
+    except ModelOptionsError:
+        return None
+
+
+def _get_session_model_state_sync(user_id: str, session_id: str) -> dict[str, Any]:
+    return _display_model_state(
+        get_session_model_state(user_id, session_id, db_path=_session_model_db_path()),
+        _load_display_model_options(),
+        user_id=user_id, session_id=session_id,
+    )
+
+
+def _list_session_model_states_sync(user_id: str) -> tuple[dict[str, dict], dict]:
+    options = _load_display_model_options()
+    states = list_session_model_states(user_id, db_path=_session_model_db_path())
+    return (
+        {sid: _display_model_state(state, options, user_id=user_id, session_id=sid)
+         for sid, state in states.items()},
+        _display_model_state({"model_id": "", "model_revision": 0}, options),
+    )
+
+
+def _resolve_session_model_config_sync(user_id: str, session_id: str) -> dict[str, Any]:
+    options = _load_model_options()
+    state = initialize_session_model(
+        user_id, session_id, options.new_user_default.id, db_path=_session_model_db_path()
+    )
+    state = _display_model_state(state, options, user_id=user_id, session_id=session_id)
+    selected = options.get(state["model_id"]) or options.new_user_default
+    return _session_model_config(selected)
+
+
+async def _resolve_session_model_config(user_id: str, session_id: str) -> dict[str, Any]:
+    return await asyncio.to_thread(_resolve_session_model_config_sync, user_id, session_id)
 
 
 app = FastAPI(title="Potato Interface")
@@ -3976,6 +4062,7 @@ async def on_startup() -> None:
     cleanup_terminal_signup_jobs()
     cleanup_expired_agreement_acceptances()
     ensure_display_store()
+    ensure_session_model_store(db_path=_session_model_db_path())
     app.state.turn_submission_receipt_cleanup = cleanup_turn_submission_receipts()
     app.state.stale_live_sessions_failed = mark_active_live_session_states_failed(
         "interface restarted before the run completed"
@@ -3992,7 +4079,8 @@ async def on_startup() -> None:
     ensure_runtime_state_store()
     app.state.tui_gateway_bridges = TuiGatewayBridgeRegistry()
     app.state.session_run_manager = SessionRunManager(
-        tip_resolver=_resolve_tip_session_id_for_user
+        tip_resolver=_resolve_tip_session_id_for_user,
+        model_resolver=_resolve_session_model_config,
     )
     app.state.archive_scheduler_task = asyncio.create_task(_archive_scheduler_loop())
     app.state.signup_worker_task = asyncio.create_task(_signup_worker_loop())
@@ -4243,7 +4331,7 @@ async def tui_gateway_websocket(websocket: WebSocket) -> None:
                     )
                 )
                 continue
-            if method not in BROWSER_WEBSOCKET_METHODS:
+            if method not in BROWSER_WEBSOCKET_METHODS or "model_config" in params:
                 await websocket.send_text(
                     json.dumps(
                         {
@@ -4257,8 +4345,27 @@ async def tui_gateway_websocket(websocket: WebSocket) -> None:
                 continue
 
             try:
-                result = await bridge.rpc(method, params)
-            except TuiGatewayBridgeError:
+                if method == "session.create":
+                    options = await asyncio.to_thread(_load_model_options)
+                    result = await bridge.rpc(method, {
+                        **params, "model_config": _session_model_config(options.new_user_default),
+                    })
+                elif method == "session.resume":
+                    logical_id, existing, tip_id, _, _ = await asyncio.to_thread(
+                        _load_session_context_sync, user.target, str(params.get("session_id") or "")
+                    )
+                    if not existing or not _is_interface_managed_source(existing.get("source")):
+                        raise TuiGatewayBridgeError("Session not found")
+                    manager: SessionRunManager = app.state.session_run_manager
+                    async with manager.session_lock(user.id, logical_id):
+                        result = await bridge.rpc(method, {
+                            **params,
+                            "session_id": tip_id or logical_id,
+                            "model_config": await _resolve_session_model_config(user.id, logical_id),
+                        })
+                else:
+                    result = await bridge.rpc(method, params)
+            except (TuiGatewayBridgeError, ModelOptionsError, HTTPException):
                 await websocket.send_text(
                     json.dumps(
                         {
@@ -4905,127 +5012,22 @@ async def signout(response: Response) -> dict[str, Any]:
 async def get_models(user: CurrentUser = Depends(get_current_user)) -> dict[str, Any]:
     try:
         config = await asyncio.to_thread(mapping_store.load_config, resolve_env=True)
-        model_options = normalize_model_options(config)
-        active_id = await asyncio.to_thread(
-            _get_active_model_id_for_user,
-            user.target,
-            model_options,
-            config=config,
-        )
+        model_options = await asyncio.to_thread(normalize_model_options, config)
     except ModelOptionsError as exc:
         raise HTTPException(
             status_code=500,
             detail=f"Invalid model whitelist configuration: {exc}",
-        ) from exc
-    except PrivilegedClientError as exc:
-        raise HTTPException(
-            status_code=500,
-            detail=f"Failed to read active model: {exc}",
         ) from exc
 
     return {
         "data": [
             option.to_public(
                 is_primary=option.id == model_options.primary_id,
-                is_active=option.id == active_id,
             )
             for option in model_options.options
         ],
         "primary_id": model_options.primary_id,
-        "active_id": active_id,
-    }
-
-
-@app.put("/api/models/active")
-async def update_active_model(
-    payload: ActiveModelUpdateRequest,
-    user: CurrentUser = Depends(get_current_user),
-) -> dict[str, Any]:
-    requested_id = str(payload.id or "").strip()
-    if not requested_id:
-        raise HTTPException(status_code=400, detail="Model id is required")
-
-    try:
-        config = await asyncio.to_thread(mapping_store.load_config, resolve_env=True)
-        model_options = normalize_model_options(config)
-    except ModelOptionsError as exc:
-        raise HTTPException(
-            status_code=500,
-            detail=f"Invalid model whitelist configuration: {exc}",
-        ) from exc
-
-    selected = model_options.get(requested_id)
-    if selected is None:
-        raise HTTPException(status_code=400, detail="Model is not allowed")
-
-    try:
-        active_id = await asyncio.to_thread(
-            _get_active_model_id_for_user,
-            user.target,
-            model_options,
-            config=config,
-        )
-        if requested_id == active_id:
-            return {
-                "ok": True,
-                "active_id": active_id,
-                "model": selected.to_public(
-                    is_primary=selected.id == model_options.primary_id,
-                    is_active=True,
-                ),
-            }
-    except (ModelOptionsError, PrivilegedClientError) as exc:
-        raise HTTPException(status_code=500, detail=str(exc)) from exc
-
-    registry: TuiGatewayBridgeRegistry = app.state.tui_gateway_bridges
-    existing_bridge = await registry.get_existing(user.id)
-    bridge_reconfigure_conflict = bool(
-        existing_bridge is not None
-        and (
-            existing_bridge.has_reconfigure_conflict()
-            if hasattr(existing_bridge, "has_reconfigure_conflict")
-            else existing_bridge.has_pending_requests()
-        )
-    )
-    if await asyncio.to_thread(_active_live_state_conflict, user.id) or (
-        bridge_reconfigure_conflict
-    ):
-        raise HTTPException(
-            status_code=409,
-            detail="Cannot switch models while a response or approval is active",
-        )
-
-    closed = await registry.close_for_reconfigure(user.id)
-    if not closed:
-        raise HTTPException(
-            status_code=409,
-            detail="Cannot switch models while a response or approval is active",
-        )
-
-    try:
-        if os.geteuid() == 0 and not privileged_client.force_helper:
-            await asyncio.to_thread(
-                patch_user_active_model,
-                user.target,
-                selected,
-                proxy_base_url=get_model_proxy_base_url(config),
-            )
-        else:
-            await asyncio.to_thread(
-                privileged_client.patch_active_model,
-                user.target.username,
-                selected.id,
-            )
-    except (ModelOptionsError, PrivilegedClientError) as exc:
-        raise HTTPException(status_code=500, detail=str(exc)) from exc
-
-    return {
-        "ok": True,
-        "active_id": selected.id,
-        "model": selected.to_public(
-            is_primary=selected.id == model_options.primary_id,
-            is_active=True,
-        ),
+        "default_id": model_options.new_user_default.id,
     }
 
 
@@ -5036,6 +5038,8 @@ def _load_normalized_sessions_sync(
     display_metas: dict[str, dict[str, Any]],
     pin_states: dict[str, dict[str, Any]],
     fetch_limit: int,
+    model_states: dict[str, dict[str, Any]] | None = None,
+    default_model_state: dict[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
     with _open_session_db(target) as db:
         priority_ids = {
@@ -5064,6 +5068,7 @@ def _load_normalized_sessions_sync(
             normalized_by_id[logical_session_id] = _normalize_logical_session_row(
                 item,
                 pin_state=pin_states.get(logical_session_id),
+                model_state=(model_states or {}).get(logical_session_id, default_model_state),
                 logical_session_id=logical_session_id,
                 logical_session=logical_session,
                 display_meta=display_metas.get(logical_session_id),
@@ -5095,6 +5100,7 @@ def _load_normalized_sessions_sync(
                     "tool_call_count": 0,
                 },
                 pin_state=pin_states.get(logical_session_id),
+                model_state=(model_states or {}).get(logical_session_id, default_model_state),
                 logical_session_id=logical_session_id,
                 logical_session={
                     "id": logical_session_id,
@@ -5122,7 +5128,7 @@ async def get_sessions(
     page_limit = max(1, min(int(limit or 50), 200))
     page_offset = max(0, int(offset or 0))
     fetch_limit = page_offset + page_limit + 1
-    live_states, display_metas, pin_states = await asyncio.gather(
+    live_states, display_metas, pin_states, model_settings = await asyncio.gather(
         asyncio.to_thread(list_live_session_states, user.id),
         asyncio.to_thread(
             list_display_session_metas,
@@ -5130,6 +5136,7 @@ async def get_sessions(
             include_messages=False,
         ),
         asyncio.to_thread(list_session_pin_states, user.id),
+        asyncio.to_thread(_list_session_model_states_sync, user.id),
     )
     normalized = await asyncio.to_thread(
         _load_normalized_sessions_sync,
@@ -5138,6 +5145,8 @@ async def get_sessions(
         display_metas=display_metas,
         pin_states=pin_states,
         fetch_limit=fetch_limit,
+        model_states=model_settings[0],
+        default_model_state=model_settings[1],
     )
     page = normalized[page_offset : page_offset + page_limit]
     return {
@@ -5166,6 +5175,88 @@ async def update_session_pin(
         logical_id = session_id
     pin = await asyncio.to_thread(set_session_pinned, user.id, logical_id, payload.pinned)
     return {"ok": True, "session_id": logical_id, **pin}
+
+
+@app.put("/api/sessions/{session_id}/model")
+async def update_session_model(
+    session_id: str,
+    payload: SessionModelUpdateRequest,
+    user: CurrentUser = Depends(get_current_user),
+) -> dict[str, Any]:
+    logical_id, session, tip_id, _, _ = await asyncio.to_thread(
+        _load_session_context_sync, user.target, session_id
+    )
+    if not session or not _is_interface_managed_source(session.get("source")):
+        raise HTTPException(status_code=404, detail="Session not found")
+    try:
+        options = await asyncio.to_thread(_load_model_options)
+    except ModelOptionsError as exc:
+        raise HTTPException(status_code=500, detail="Invalid model whitelist configuration") from exc
+    selected = options.get(payload.id)
+    if selected is None:
+        raise HTTPException(status_code=400, detail="Model is not allowed")
+    manager: SessionRunManager = app.state.session_run_manager
+    async with manager.session_lock(user.id, logical_id):
+        try:
+            await manager.assert_model_change_idle(user.id, logical_id)
+        except TuiGatewayBridgeError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        db_path = _session_model_db_path()
+
+        async def synchronize() -> dict[str, Any]:
+            previous = await asyncio.to_thread(
+                get_session_model_state, user.id, logical_id, db_path=db_path
+            )
+            saved = await asyncio.to_thread(
+                set_session_model, user.id, logical_id, selected.id, db_path=db_path
+            )
+            bridge = None
+            try:
+                registry: TuiGatewayBridgeRegistry = app.state.tui_gateway_bridges
+                bridge = await registry.get_existing(user.id)
+                if bridge is not None:
+                    await bridge.rpc("session.model.set", {
+                        "session_id": tip_id or logical_id,
+                        "model_config": _session_model_config(selected),
+                    })
+            except Exception:
+                restored = await asyncio.to_thread(
+                    restore_session_model, user.id, logical_id, previous["model_id"],
+                    expected_revision=saved["model_revision"], db_path=db_path,
+                )
+                # An RPC may have completed before its transport timed out. Restore
+                # the desired gateway snapshot too; subsequent turns always reapply
+                # the authoritative database selection.
+                if restored is not None and bridge is not None:
+                    old_option = options.get(previous["model_id"]) or options.new_user_default
+                    with contextlib.suppress(Exception):
+                        await bridge.rpc("session.model.set", {
+                            "session_id": tip_id or logical_id,
+                            "model_config": _session_model_config(old_option),
+                        })
+                raise
+            return {"ok": True, "session_id": logical_id, **saved}
+
+        # Finish reconciliation while retaining the session lock even if the tab
+        # closes, so cancellation cannot leave persistence and gateway divergent.
+        task = asyncio.create_task(synchronize())
+        try:
+            return await asyncio.shield(task)
+        except asyncio.CancelledError:
+            with contextlib.suppress(Exception):
+                await task
+            raise
+        except Exception as exc:
+            busy = isinstance(exc, TuiGatewayBridgeError) and exc.code == 4009
+            raise HTTPException(
+                status_code=409 if busy else 503,
+                detail={
+                    "message": "Cannot switch models while this conversation is active"
+                    if busy else "Failed to save conversation model",
+                    "session_id": logical_id,
+                    **await asyncio.to_thread(_get_session_model_state_sync, user.id, logical_id),
+                },
+            ) from exc
 
 
 @app.post("/api/sessions/{session_id}/shares")
@@ -5423,6 +5514,7 @@ def _get_live_poll_snapshot_sync(
     )
     if snapshot is None:
         return None
+    snapshot.update(_get_session_model_state_sync(user_id, session_id))
     messages = snapshot.get("messages")
     if isinstance(messages, list):
         snapshot["messages"] = [_normalize_display_message(item) for item in messages]
@@ -5540,6 +5632,7 @@ async def _build_submitted_turn_response(
             "tool_call_count": 0,
         },
         pin_state=await asyncio.to_thread(get_session_pin_state, user.id, session_id),
+        model_state=await asyncio.to_thread(_get_session_model_state_sync, user.id, session_id),
         logical_session_id=session_id,
         logical_session={"id": session_id, "source": "tui", "title": ""},
         display_meta=display_meta,
@@ -5708,6 +5801,12 @@ def _fork_session_sync(
         target_session_id,
         cloned_display,
     )
+    source_model = _get_session_model_state_sync(user_id, logical_session_id)
+    if source_model["model_id"]:
+        initialize_session_model(
+            user_id, target_session_id, source_model["model_id"],
+            db_path=_session_model_db_path(),
+        )
     if not inserted_display and bool(result.get("created")):
         existing_display = get_display_messages(user_id, target_session_id)
         if existing_display != cloned_display:
@@ -5768,6 +5867,7 @@ def _fork_session_sync(
         "session": _normalize_logical_session_row(
             projected_target or logical_target or {"id": logical_target_id},
             pin_state=get_session_pin_state(user_id, logical_target_id),
+            model_state=_get_session_model_state_sync(user_id, logical_target_id),
             logical_session_id=logical_target_id,
             logical_session=logical_target,
             display_meta=current_display_meta,
@@ -5905,6 +6005,7 @@ async def get_session_detail(
         "session": _normalize_logical_session_row(
             projected_session,
             pin_state=await asyncio.to_thread(get_session_pin_state, user.id, logical_session_id),
+            model_state=await asyncio.to_thread(_get_session_model_state_sync, user.id, logical_session_id),
             logical_session_id=logical_session_id,
             logical_session=logical_session,
             display_meta=display_meta,
@@ -6113,6 +6214,7 @@ async def update_session_title(
         "session": _normalize_logical_session_row(
             projected_session or {"id": logical_session_id, "title": sanitized_title},
             pin_state=await asyncio.to_thread(get_session_pin_state, user.id, logical_session_id),
+            model_state=await asyncio.to_thread(_get_session_model_state_sync, user.id, logical_session_id),
             logical_session_id=logical_session_id,
             logical_session=refreshed_logical_session,
             display_meta=display_meta,
@@ -6160,6 +6262,8 @@ async def submit_session_turn(
     display_messages: list[dict[str, Any]] | None = None
     live_session_id = ""
     created_new_session = False
+    admission_lock: asyncio.Lock | None = None
+    admission_lock_acquired = False
     session_run_manager: SessionRunManager = app.state.session_run_manager
     draft_title = str(payload.draft_title or "").strip()
     request_id = str(payload.request_id or "").strip()
@@ -6194,7 +6298,13 @@ async def submit_session_turn(
     try:
         bridge = await _get_tui_bridge_for_user(user)
         if session_id == "draft":
-            created = await bridge.rpc("session.create", {"cols": 100})
+            options = await asyncio.to_thread(_load_model_options)
+            selected = options.get(payload.model_id) if payload.model_id else options.new_user_default
+            if selected is None:
+                raise HTTPException(status_code=400, detail="Model is not allowed")
+            created = await bridge.rpc("session.create", {
+                "cols": 100, "model_config": _session_model_config(selected),
+            })
             live_session_id = str(created.get("session_id") or "").strip()
             if not live_session_id:
                 raise HTTPException(
@@ -6207,6 +6317,13 @@ async def submit_session_turn(
             logical_session_id = str(
                 title_info.get("session_key") or live_session_id
             ).strip()
+            admission_lock = session_run_manager.session_lock(user.id, logical_session_id)
+            await admission_lock.acquire()
+            admission_lock_acquired = True
+            await asyncio.to_thread(
+                initialize_session_model, user.id, logical_session_id, selected.id,
+                db_path=_session_model_db_path(),
+            )
             logical_session = {
                 "id": logical_session_id,
                 "source": "tui",
@@ -6238,11 +6355,15 @@ async def submit_session_turn(
                 logical_session.get("source")
             ):
                 raise HTTPException(status_code=404, detail="Session not found")
+            admission_lock = session_run_manager.session_lock(user.id, logical_session_id)
+            await admission_lock.acquire()
+            admission_lock_acquired = True
             resumed = await bridge.rpc(
                 "session.resume",
                 {
                     "cols": 100,
                     "session_id": tip_session_id or logical_session_id,
+                    "model_config": await _resolve_session_model_config(user.id, logical_session_id),
                 },
             )
             live_session_id = str(resumed.get("session_id") or "").strip()
@@ -6278,7 +6399,9 @@ async def submit_session_turn(
         )
         if not receipt_is_pending:
             raise TuiGatewayBridgeError("Turn submission is no longer pending")
-        submit_result = await session_run_manager.submit_turn(
+        # Hold the same admission lock across cold resume and submission, since
+        # resume starts a notification poller that can itself generate turns.
+        submit_result = await session_run_manager._submit_turn(
             bridge=bridge,
             user_id=user.id,
             session_id=logical_session_id,
@@ -6307,6 +6430,7 @@ async def submit_session_turn(
             or logical_session
             or {"id": logical_session_id, "source": "tui"},
             pin_state=await asyncio.to_thread(get_session_pin_state, user.id, logical_session_id),
+            model_state=await asyncio.to_thread(_get_session_model_state_sync, user.id, logical_session_id),
             logical_session_id=logical_session_id,
             logical_session=logical_session
             or projected_session
@@ -6360,6 +6484,8 @@ async def submit_session_turn(
             )
         raise
     finally:
+        if admission_lock_acquired:
+            admission_lock.release()
         receipt_heartbeat_task.cancel()
         with contextlib.suppress(asyncio.CancelledError):
             await receipt_heartbeat_task
@@ -6506,6 +6632,7 @@ def _delete_session_sync(
 
 
 def _delete_interface_session_state_sync(user_id: str, session_id: str) -> None:
+    delete_session_model_state(user_id, session_id, db_path=_session_model_db_path())
     delete_session_pin_state(user_id, session_id)
     delete_display_messages(user_id, session_id)
     delete_live_session_state(user_id, session_id)

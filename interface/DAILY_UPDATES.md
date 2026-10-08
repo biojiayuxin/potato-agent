@@ -43,7 +43,17 @@ production rejects literal token/key environment values.
 
 The service principal is restricted to the current primary model route. The
 collector discovers that route through authenticated `GET /v1/models`, so an
-upstream model name is not duplicated in the unit.
+upstream model name is not duplicated in the unit. Each completion refreshes
+the public route metadata and uses its `api_mode` to select `/v1/responses` or
+`/v1/chat/completions`. An explicit `DAILY_UPDATES_LLM_MODEL` is a proxy route ID;
+its metadata is read through `GET /v1/models/{id}` and the primary-only access
+rule still applies. Legacy metadata without `api_mode` uses Chat Completions.
+The collector never receives the real backend address or upstream key. See the
+[model catalog contract](MODEL_CATALOG.md) for configuration and migration.
+
+Deploy the matching collector code before enabling catalog schema v2. An
+already running collector keeps its loaded Python code until it exits; finish
+that job before migration or restart it in the approved maintenance window.
 
 ## Initial host setup
 

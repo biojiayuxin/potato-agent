@@ -41,13 +41,35 @@ returns to the user's home. Existing files under `HERMES_HOME/home/` are retaine
 tool configuration stored there may need to be migrated separately. Activate
 this change with a new gateway process so old shell snapshots are discarded.
 
+## Conversation Model Snapshots
+
+Interface resolves each chat's stable model option from the protected catalog
+and supplies a trusted snapshot at creation, cold recovery, and turn admission.
+Gateway applies it at the shared execution entry, including plan, notification,
+and delegation continuations. `session.model.set` is a backend-only RPC; browsers
+cannot provide model snapshots, endpoints, or credentials. A busy chat cannot
+change models, while other chats continue independently on the same connection.
+
+The `potato_hermes_lite/session_models.py` adapter updates the client route,
+API mode, reasoning effort, compressor window, and primary runtime metadata.
+It renders the actual upstream model in the prompt and records public identity
+snapshots in SQLite. Main calls and children inheriting the parent runtime use
+the signed route for the admitted configuration. Upstream addresses and keys
+remain in the local model proxy's protected file. These adaptations leave the
+inherited turn loop and tool scheduling unchanged.
+
+Deploy Interface, model proxy, and Lite together. Configuration fields, SQLite
+meanings, compatibility aliases, and rollback constraints are documented in the
+[model catalog contract](../interface/MODEL_CATALOG.md).
+
 ## Build And Verify
 
 The source verifier uses `python -S -B -P` and explicit dependency paths to
 prove that owned modules resolve from the isolated Lite tree. Builds and the
 locked release artifacts target CPython 3.12 on Linux x86_64. First create and
 populate the dedicated build venv and prepare a clean browser asset tree as
-documented in sections 6.1 and 6.2 of the root README, then run from
+documented in sections 6.1 and 6.2 of the
+[HPC Deployment Guide](../HPC_DEPLOYMENT.md), then run from
 `hermes-lite/`:
 
 ```bash
@@ -63,6 +85,8 @@ test -f "$BROWSER_ASSETS/browser/chrome/chrome-linux64/chrome_sandbox"
 test ! -e "$BROWSER_ASSETS/browser/chrome/chrome-linux64/chrome-sandbox"
 test ! -e "$RELEASE_OUTPUT"
 
+(
+umask 022
 "$BUILD_PYTHON" -B scripts/verify_lite.py \
   --python "$BUILD_PYTHON"
 
@@ -75,7 +99,16 @@ test ! -e "$RELEASE_OUTPUT"
   --python "$BUILD_PYTHON" \
   --browser-assets "$BROWSER_ASSETS" \
   --output "$RELEASE_OUTPUT"
+)
 ```
+
+Use the same `umask 022` for both reproducibility builds and the inactive
+installer. A restrictive inherited mask can produce unreadable release
+directories even when root's build and install probes pass; it can also change
+ZIP permission metadata and the wheel hash. Keep the enclosing private build
+directory at `0700`. Credentials and database backups retain their separate
+private modes. Before cutover, verify the installed runtime is readable and
+executable by an actual mapped account as described in section 6.4 of the guide.
 
 The build interpreter must be the dedicated build venv. Do not use
 `/opt/potato-hermes-lite/current/venv`, any immutable release venv, or the
@@ -89,7 +122,9 @@ provider E2E starts the real stdio gateway with isolated `HOME` and
 `HERMES_HOME`; it covers prompt completion, resume, interrupt, and approval
 denial and expiration without contacting a real provider. The expiration case
 also verifies that a late response is rejected and the guarded command is not
-executed.
+executed. Model regressions additionally cover independent sessions, busy-state
+rejection, frozen request parameters, catalog updates, prompt identity, and cold
+recovery through a real local proxy and mock provider.
 
 ## Internal Session Visibility
 
@@ -123,11 +158,14 @@ back to an older Interface/Lite pair also rolls back the visibility checks.
 
 ## Deployment Status
 
-Production runs immutable Lite releases through
-`/opt/potato-hermes-lite/current`. Production currently runs
-`0.19.0+potato.lite.3` from release
-`20260729T070500Z-0.19.0-potato.lite.3-f2336202`; the security cutover and
-host-specific requirements are documented in the root README. Its approval protocol carries an exact request ID from
+Deployments use immutable Lite releases through
+`/opt/potato-hermes-lite/current`. Read that symlink and its `manifest.json` on
+the target host for the active release, version, and wheel hash. The checkout's
+version alone does not identify deployed code. Local test and YNNU production
+deployments are independent; updating one does not update the other. The
+[HPC Deployment Guide](../HPC_DEPLOYMENT.md) documents cutover and host requirements.
+
+The approval protocol carries an exact request ID from
 the Lite waiter through Gateway, Interface, and the browser, and emits an
 `approval.expired` lifecycle event when that exact waiter times out. A lost or
 late HTTP response cannot resolve or leave behind another queued approval. Do not

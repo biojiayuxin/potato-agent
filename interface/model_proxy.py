@@ -12,13 +12,14 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 import httpx
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 
-from interface.mapping import DEFAULT_MAPPING_PATH, MappingStore, load_mapping
-from interface.model_options import ModelOptionsError, normalize_model_options
+from interface.mapping import DEFAULT_MAPPING_PATH, MappingStore
+from interface.model_catalog import ModelCatalogError, public_catalog, resolve_route, validate_catalog
 from interface.model_proxy_config import (
     DEFAULT_MODEL_PROXY_CONFIG_PATH,
     ModelProxyConfigError,
@@ -89,6 +90,7 @@ class ProxyModel:
     api_mode: str | None = None
     context_length: int | None = None
     reasoning_effort: str | None = None
+    config_revision: str = ""
 
     def to_models_api_item(self) -> dict[str, Any]:
         item: dict[str, Any] = {
@@ -100,11 +102,9 @@ class ProxyModel:
             item["name"] = self.name
         if self.context_length is not None:
             item["context_length"] = self.context_length
+        if self.api_mode:
+            item["api_mode"] = self.api_mode
         return item
-
-
-class ModelProxyError(RuntimeError):
-    pass
 
 
 @dataclass(frozen=True)
@@ -125,6 +125,7 @@ class UsageTelemetry:
     streaming: bool
     started_at: float
     raw_usage: dict[str, Any] | None = None
+    config_revision: str = ""
 
 
 def _config_path() -> Path:
@@ -139,46 +140,22 @@ def _mapping_path() -> Path:
 
 def _load_proxy_models() -> dict[str, ProxyModel]:
     config = load_model_proxy_config(_config_path())
-    raw_models = config.get("models")
-    if not isinstance(raw_models, list):
-        raise ModelProxyError("model_proxy.yaml models must be a list.")
+    catalog = public_catalog(config, include_routes=False)
+    result = {}
+    for option in catalog["options"]:
+        snapshot, backend = resolve_route(config, option["id"])
+        model = _catalog_proxy_model(snapshot, backend)
+        result[option["id"]] = model
+    return result
 
-    models: dict[str, ProxyModel] = {}
-    for index, item in enumerate(raw_models):
-        if not isinstance(item, dict):
-            raise ModelProxyError(f"models[{index}] must be a mapping/object.")
-        model = str(item.get("model") or item.get("id") or "").strip()
-        base_url = str(item.get("base_url") or "").strip().rstrip("/")
-        api_key = str(item.get("api_key") or "").strip()
-        missing = [
-            field
-            for field, value in (
-                ("model", model),
-                ("base_url", base_url),
-                ("api_key", api_key),
-            )
-            if not value
-        ]
-        if missing:
-            raise ModelProxyError(
-                f"models[{index}] is missing required field(s): {', '.join(missing)}."
-            )
-        route_name = str(item.get("name") or model).strip()
-        if route_name in models:
-            raise ModelProxyError(f"Duplicate proxy model name: {route_name}")
-        context_length = item.get("context_length")
-        models[route_name] = ProxyModel(
-            id=str(item.get("id") or model).strip(),
-            name=route_name,
-            provider=str(item.get("provider") or "custom").strip(),
-            model=model,
-            base_url=base_url,
-            api_key=api_key,
-            api_mode=str(item.get("api_mode") or "").strip() or None,
-            context_length=context_length if isinstance(context_length, int) else None,
-            reasoning_effort=str(item.get("reasoning_effort") or "").strip() or None,
-        )
-    return models
+
+def _catalog_proxy_model(snapshot: dict, backend: dict) -> ProxyModel:
+    return ProxyModel(
+        id=snapshot["id"], name=snapshot["id"], provider=snapshot["provider"],
+        model=snapshot["model"], base_url=backend["base_url"].rstrip("/"), api_key=backend["api_key"],
+        api_mode=snapshot["api_mode"], context_length=snapshot["context_length"],
+        reasoning_effort=snapshot["reasoning_effort"], config_revision=snapshot["config_revision"],
+    )
 
 
 def _extract_bearer_token(request: Request) -> str:
@@ -318,15 +295,15 @@ def _require_principal(request: Request) -> ProxyPrincipal:
 
 def _authorized_model_names(principal: ProxyPrincipal) -> set[str]:
     try:
-        options = normalize_model_options(load_mapping(_mapping_path(), resolve_env=True))
-    except (RuntimeError, ModelOptionsError) as exc:
-        logger.error("Unable to load model whitelist configuration")
-        raise HTTPException(
-            status_code=503, detail="Model proxy is unavailable"
-        ) from exc
-    if principal.is_daily_updates_service:
-        return {options.primary.name}
-    return {option.name for option in options.options}
+        config = load_model_proxy_config(_config_path())
+        validate_catalog(config)
+        names = set()
+        for option_id in config["options"]:
+            if not principal.is_daily_updates_service or option_id == config["primary_option_id"]:
+                names.add(option_id)
+        return names
+    except (ModelProxyConfigError, ModelCatalogError):
+        raise HTTPException(status_code=503, detail="Model proxy is unavailable") from None
 
 
 def _sanitize_schema_required_fields(schema: Any) -> tuple[Any, bool]:
@@ -784,6 +761,7 @@ def _record_completed_usage(telemetry: UsageTelemetry) -> None:
             endpoint=telemetry.endpoint,
             route_model=telemetry.route_model,
             upstream_model=telemetry.upstream_model,
+            config_revision=telemetry.config_revision,
             provider=telemetry.provider,
             api_mode=telemetry.api_mode,
             status_code=telemetry.status_code,
@@ -816,19 +794,14 @@ def _select_model_for_body(
     if not model_name:
         raise HTTPException(status_code=400, detail="model is required")
 
-    if model_name not in _authorized_model_names(principal):
-        raise HTTPException(status_code=403, detail="Model is not allowed")
-
     try:
-        models = _load_proxy_models()
-    except (ModelProxyConfigError, ModelProxyError) as exc:
-        logger.error("Unable to load model proxy route configuration")
-        raise HTTPException(status_code=503, detail="Model proxy is unavailable") from exc
-
-    model = models.get(model_name)
-    if model is None:
-        raise HTTPException(status_code=404, detail="Unknown model")
-    return model, payload
+        config = load_model_proxy_config(_config_path())
+        snapshot, backend = resolve_route(config, model_name)
+        if principal.is_daily_updates_service and snapshot["id"] != config["primary_option_id"]:
+            raise HTTPException(status_code=403, detail="Model is not allowed")
+        return _catalog_proxy_model(snapshot, backend), payload
+    except (ModelProxyConfigError, ModelCatalogError):
+        raise HTTPException(status_code=503, detail="Model configuration is invalid or retired") from None
 
 
 def _enforce_user_quota(username: str) -> None:
@@ -852,7 +825,17 @@ def _redact_exact_secret(value: str, secret: str) -> str:
     return value.replace(secret, "[REDACTED]") if secret else value
 
 
-def _response_headers(headers: httpx.Headers, *, upstream_api_key: str) -> dict[str, str]:
+def _upstream_private_values(api_key: str, base_url: str) -> tuple[str, ...]:
+    # Providers occasionally echo their destination in successful SSE errors or
+    # diagnostic headers. Protect the address as well as the credential.
+    address = base_url.rstrip("/")
+    values = {api_key, address, urlsplit(address).netloc, urlsplit(address).hostname or ""}
+    values.discard("")
+    values.update(value.replace("/", "\\/") for value in tuple(values))
+    return tuple(sorted(values, key=len, reverse=True))
+
+
+def _response_headers(headers: httpx.Headers, *, upstream_api_key: str, upstream_base_url: str = "") -> dict[str, str]:
     safe_headers: dict[str, str] = {}
     for key, value in headers.items():
         normalized_key = key.lower()
@@ -863,12 +846,13 @@ def _response_headers(headers: httpx.Headers, *, upstream_api_key: str) -> dict[
             and not normalized_key.startswith(SAFE_UPSTREAM_RESPONSE_HEADER_PREFIXES)
         ):
             continue
-        safe_headers[key] = _redact_exact_secret(value, upstream_api_key)
+        for secret in _upstream_private_values(upstream_api_key, upstream_base_url):
+            value = _redact_exact_secret(value, secret)
+        safe_headers[key] = value
     return safe_headers
 
 
-async def _redact_response_bytes(source, *, upstream_api_key: str):
-    secret = upstream_api_key.encode("utf-8")
+async def _redact_secret_bytes(source, *, secret: bytes):
     if not secret:
         async for chunk in source:
             yield chunk
@@ -894,6 +878,13 @@ async def _redact_response_bytes(source, *, upstream_api_key: str):
         yield pending.replace(secret, REDACTED_SECRET_BYTES)
 
 
+async def _redact_response_bytes(source, *, upstream_api_key: str, upstream_base_url: str = ""):
+    for secret in _upstream_private_values(upstream_api_key, upstream_base_url):
+        source = _redact_secret_bytes(source, secret=secret.encode("utf-8"))
+    async for chunk in source:
+        yield chunk
+
+
 def _forward_headers(request: Request, model: ProxyModel) -> dict[str, str]:
     headers = {
         key: value
@@ -911,6 +902,18 @@ async def _forward_model_request(request: Request, endpoint: str) -> Response:
     model, payload = _select_model_for_body(principal, body)
     _enforce_user_quota(principal.name)
     route_model = str(payload.get("model") or model.name).strip()
+    if model.config_revision:
+        route_model = model.id
+        expected_endpoint = "responses" if model.api_mode == "codex_responses" else "chat/completions"
+        if endpoint.strip("/") != expected_endpoint:
+            raise HTTPException(status_code=400, detail="Model API mode does not match the request")
+        payload = dict(payload)
+        if model.api_mode == "codex_responses":
+            reasoning = payload.get("reasoning")
+            payload["reasoning"] = {**(reasoning if isinstance(reasoning, dict) else {}), "effort": model.reasoning_effort}
+        else:
+            payload["reasoning_effort"] = model.reasoning_effort
+        body = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode()
     sanitized_payload, payload_changed = _sanitize_outbound_model_payload(payload)
     if str(sanitized_payload.get("model") or "").strip() != model.model:
         sanitized_payload = dict(sanitized_payload)
@@ -950,6 +953,7 @@ async def _forward_model_request(request: Request, endpoint: str) -> Response:
         endpoint=endpoint.strip("/"),
         route_model=route_model,
         upstream_model=model.model,
+        config_revision=model.config_revision,
         provider=model.provider,
         api_mode=model.api_mode or "",
         status_code=response.status_code,
@@ -1012,7 +1016,7 @@ async def _forward_model_request(request: Request, endpoint: str) -> Response:
                 source = non_sse_source()
 
             async for chunk in _redact_response_bytes(
-                source, upstream_api_key=model.api_key
+                source, upstream_api_key=model.api_key, upstream_base_url=model.base_url
             ):
                 yield chunk
 
@@ -1025,7 +1029,7 @@ async def _forward_model_request(request: Request, endpoint: str) -> Response:
             await client.aclose()
 
     response_headers = _response_headers(
-        response.headers, upstream_api_key=model.api_key
+        response.headers, upstream_api_key=model.api_key, upstream_base_url=model.base_url
     )
     media_type = response_headers.pop("content-type", None)
     return StreamingResponse(
@@ -1112,7 +1116,7 @@ async def list_models(request: Request) -> dict[str, Any]:
     allowed = _authorized_model_names(principal)
     try:
         models = _load_proxy_models()
-    except (ModelProxyConfigError, ModelProxyError) as exc:
+    except (ModelProxyConfigError, ModelCatalogError) as exc:
         logger.error("Unable to load model proxy route configuration")
         raise HTTPException(status_code=503, detail="Model proxy is unavailable") from exc
     return {
@@ -1120,7 +1124,7 @@ async def list_models(request: Request) -> dict[str, Any]:
         "data": [
             model.to_models_api_item()
             for model_name, model in models.items()
-            if model_name in allowed
+            if model_name in allowed and model_name == model.id
         ],
     }
 
@@ -1128,17 +1132,16 @@ async def list_models(request: Request) -> dict[str, Any]:
 @app.get("/v1/models/{model_name:path}")
 async def get_model(request: Request, model_name: str) -> dict[str, Any]:
     principal = _require_principal(request)
-    allowed = _authorized_model_names(principal)
-    if model_name not in allowed:
-        raise HTTPException(status_code=403, detail="Model is not allowed")
     try:
-        model = _load_proxy_models().get(model_name)
-    except (ModelProxyConfigError, ModelProxyError) as exc:
-        logger.error("Unable to load model proxy route configuration")
-        raise HTTPException(status_code=503, detail="Model proxy is unavailable") from exc
-    if model is None:
-        raise HTTPException(status_code=404, detail="Unknown model")
-    return model.to_models_api_item()
+        config = load_model_proxy_config(_config_path())
+        snapshot, backend = resolve_route(config, model_name)
+        if principal.is_daily_updates_service and snapshot["id"] != config["primary_option_id"]:
+            raise HTTPException(status_code=403, detail="Model is not allowed")
+        item = _catalog_proxy_model(snapshot, backend).to_models_api_item()
+        item["id"] = model_name
+        return item
+    except (ModelProxyConfigError, ModelCatalogError):
+        raise HTTPException(status_code=503, detail="Model configuration is invalid or retired") from None
 
 
 @app.api_route("/v1/chat/completions", methods=["POST"])

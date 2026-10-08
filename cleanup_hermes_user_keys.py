@@ -11,7 +11,7 @@ from typing import Any
 import yaml
 
 from interface.mapping import DEFAULT_MAPPING_PATH, MappingStore, load_mapping
-from interface.model_options import normalize_model_options, patch_user_active_model
+from interface.model_options import normalize_model_options, repair_user_model_config
 from interface.model_proxy_config import get_model_proxy_base_url
 from interface.user_private_files import UserPrivateFileError, read_user_private_text
 
@@ -24,7 +24,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description=(
             "Remove historical upstream model keys from each mapped user's "
-            "~/.hermes/config.yaml and .env, then rewrite the active model to "
+            "~/.hermes/config.yaml and .env, then rewrite the bootstrap model to "
             "the local model proxy."
         )
     )
@@ -90,29 +90,15 @@ def main() -> int:
         config_path = target.hermes_home / "config.yaml"
         env_path = target.hermes_home / ".env"
         before_config = _load_yaml_mapping(target, config_path)
-        active_id = model_options.primary_id
         model_cfg = before_config.get("model")
-        if isinstance(model_cfg, dict):
-            for option in model_options.options:
-                if option.matches_model_config(
-                    model_cfg, proxy_base_url=proxy_base_url
-                ):
-                    active_id = option.id
-                    break
-                configured_model = str(
-                    model_cfg.get("default") or model_cfg.get("model") or ""
-                ).strip()
-                if configured_model == option.model:
-                    active_id = option.id
-                    break
-
-        option = model_options.get(active_id) or model_options.primary
+        bootstrap_id = model_cfg.get("default", "") if isinstance(model_cfg, dict) else ""
+        option = model_options.get(bootstrap_id) or model_options.new_user_default
         env_text = _read_user_text(target, env_path)
         env_had_key = bool(env_text and "OPENAI_API_KEY" in env_text)
         config_had_key = _contains_key_name(before_config, "api_key")
 
         print(
-            f"{target.username}: active={option.id} "
+            f"{target.username}: bootstrap={option.id} "
             f"config_api_key={config_had_key} env_openai_key={env_had_key}"
         )
         if args.dry_run:
@@ -124,7 +110,7 @@ def main() -> int:
             raise CleanupHermesUserKeysError(
                 f"Linux user {target.linux_user!r} does not exist."
             ) from exc
-        patch_user_active_model(target, option, proxy_base_url=proxy_base_url)
+        repair_user_model_config(target, option, proxy_base_url=proxy_base_url)
 
     return 0
 

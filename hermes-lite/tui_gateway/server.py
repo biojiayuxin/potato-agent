@@ -19,10 +19,12 @@ from typing import Any, Optional
 from hermes_constants import (
     get_hermes_home,
     get_hermes_home_override,
+    parse_reasoning_effort,
     reset_hermes_home_override,
     set_hermes_home_override,
 )
 from hermes_cli.env_loader import load_hermes_dotenv
+from potato_hermes_lite.session_models import apply_model_config, normalize_model_config, model_identity, record_runtime_model
 from utils import is_truthy_value
 from tui_gateway.transport import (
     StdioTransport,
@@ -603,7 +605,12 @@ def _start_agent_build(sid: str, session: dict) -> None:
                 except Exception:
                     session_db = None
             try:
-                agent = _make_agent(sid, key, session_db=session_db)
+                with current["history_lock"]:
+                    model_config = copy.deepcopy(current.get("model_config"))
+                agent = _make_agent(
+                    sid, key, session_db=session_db,
+                    **({"model_config": model_config} if model_config is not None else {}),
+                )
             finally:
                 _clear_session_context(tokens)
 
@@ -826,7 +833,7 @@ def _ensure_session_db_row(session: dict) -> None:
         db.create_session(
             key,
             source="tui",
-            model=_resolve_model(),
+            model=(session.get("model_config") or {}).get("upstream_model") or (session.get("model_config") or {}).get("model") or _resolve_model(),
             cwd=_session_cwd(session) if session.get("explicit_cwd") else None,
         )
     except Exception:
@@ -1482,7 +1489,7 @@ def _sync_session_key_after_compress(
 def _get_usage(agent) -> dict:
     g = lambda k, fb=None: getattr(agent, k, 0) or (getattr(agent, fb, 0) if fb else 0)
     usage = {
-        "model": getattr(agent, "model", "") or "",
+        "model": model_identity(agent),
         "input": g("session_input_tokens", "session_prompt_tokens"),
         "output": g("session_output_tokens", "session_completion_tokens"),
         "cache_read": g("session_cache_read_tokens"),
@@ -1631,7 +1638,7 @@ def _session_info(agent, session: dict | None = None) -> dict:
     except Exception:
         yolo = False
     info: dict = {
-        "model": getattr(agent, "model", ""),
+        "model": model_identity(agent),
         "reasoning_effort": reasoning_effort,
         "service_tier": service_tier,
         "fast": service_tier == "priority",
@@ -2344,6 +2351,7 @@ def _reset_session_agent(sid: str, session: dict) -> dict:
             # session set). See the cross-session-contamination note in
             # _apply_model_switch.
             model_override=session.get("model_override"),
+            model_config=session.get("model_config"),
         )
     finally:
         _clear_session_context(tokens)
@@ -2370,6 +2378,7 @@ def _make_agent(
     session_id: str | None = None,
     session_db=None,
     model_override: dict | None = None,
+    model_config: dict | None = None,
 ):
     from run_agent import AIAgent
     from hermes_cli.runtime_provider import resolve_runtime_provider
@@ -2408,7 +2417,14 @@ def _make_agent(
     # switch) over global config/env resolution. This keeps a rebuilt session
     # (/new, resume) on the model the user picked FOR THIS SESSION, without
     # reading process-global env vars that another session may have changed.
-    if model_override and model_override.get("model"):
+    if model_config is not None:
+        model_config = normalize_model_config(model_config)
+        model = model_config["model"]
+        runtime = resolve_runtime_provider(
+            requested=model_config["provider"], target_model=model,
+        )
+        runtime["api_mode"] = model_config["api_mode"]
+    elif model_override and model_override.get("model"):
         model = str(model_override.get("model") or "")
         requested_provider = model_override.get("provider") or None
         override_base_url = model_override.get("base_url")
@@ -2433,7 +2449,7 @@ def _make_agent(
             requested=requested_provider,
             target_model=model or None,
         )
-    return AIAgent(
+    agent = AIAgent(
         model=model,
         max_iterations=_cfg_max_turns(cfg, 90),
         provider=runtime.get("provider"),
@@ -2449,7 +2465,10 @@ def _make_agent(
         # display detail).  See cli.py PR (decoupling fix) for the matching
         # change on the classic CLI side.
         verbose_logging=False,
-        reasoning_config=_load_reasoning_config(),
+        reasoning_config=(
+            parse_reasoning_effort(model_config["reasoning_effort"])
+            if model_config is not None else _load_reasoning_config()
+        ),
         service_tier=_load_service_tier(),
         enabled_toolsets=_load_enabled_toolsets(),
         disabled_toolsets=_load_disabled_toolsets(),
@@ -2463,9 +2482,15 @@ def _make_agent(
         skip_memory=is_truthy_value(os.environ.get("HERMES_IGNORE_RULES")),
         **_agent_cbs(sid),
     )
+    if model_config is not None:
+        apply_model_config(agent, model_config)
+    return agent
 
 
-def _init_session(sid: str, key: str, agent, history: list, cols: int = 80):
+def _init_session(
+    sid: str, key: str, agent, history: list, cols: int = 80,
+    model_config: dict | None = None,
+):
     now = time.time()
     with _sessions_lock:
         _sessions[sid] = {
@@ -2491,6 +2516,7 @@ def _init_session(sid: str, key: str, agent, history: list, cols: int = 80):
             # Honored on rebuild (/new, resume) so a switch in THIS session
             # never leaks into siblings via process-global env vars.
             "model_override": None,
+            "model_config": copy.deepcopy(model_config),
             # Pin async event emissions to whichever transport created the
             # session (stdio for Ink, JSON-RPC WS for the dashboard sidebar).
             "transport": current_transport() or _stdio_transport,
@@ -2997,6 +3023,13 @@ def _validated_fork_raw_boundary(
 
 @method("session.create")
 def _(rid, params: dict) -> dict:
+    try:
+        model_config = (
+            normalize_model_config(params["model_config"])
+            if "model_config" in params else None
+        )
+    except ValueError as exc:
+        return _err(rid, 4002, str(exc))
     sid = uuid.uuid4().hex[:8]
     key = _new_session_key()
     cols = int(params.get("cols", 80))
@@ -3044,6 +3077,7 @@ def _(rid, params: dict) -> dict:
             "pending_title": title or None,
             "profile_home": str(profile_home) if profile_home is not None else None,
             "running": False,
+            "model_config": model_config,
             "session_key": key,
             "show_reasoning": _load_show_reasoning(),
             "slash_worker": None,
@@ -3080,7 +3114,7 @@ def _(rid, params: dict) -> dict:
             "message_count": len(history),
             "messages": _history_to_messages(history),
             "info": {
-                "model": _resolve_model(),
+                "model": (model_config or {}).get("upstream_model") or (model_config or {}).get("model") or _resolve_model(),
                 "tools": {},
                 "skills": {},
                 "cwd": _sessions[sid]["cwd"],
@@ -3185,6 +3219,13 @@ def _(rid, params: dict) -> dict:
 
 @method("session.resume")
 def _(rid, params: dict) -> dict:
+    try:
+        model_config = (
+            normalize_model_config(params["model_config"])
+            if "model_config" in params else None
+        )
+    except ValueError as exc:
+        return _err(rid, 4002, str(exc))
     target = params.get("session_id", "")
     if not target:
         return _err(rid, 4006, "session_id required")
@@ -3260,7 +3301,10 @@ def _(rid, params: dict) -> dict:
             # Pass the profile's db so the agent persists turns to the right
             # state.db; home override is active here so config/skills/model
             # resolve to the profile too.
-            agent = _make_agent(sid, target, session_id=target, session_db=db)
+            agent = _make_agent(
+                sid, target, session_id=target, session_db=db,
+                **({"model_config": model_config} if model_config is not None else {}),
+            )
         finally:
             _clear_session_context(tokens)
     except Exception as e:
@@ -3291,7 +3335,10 @@ def _(rid, params: dict) -> dict:
             payload["resumed"] = target
             return _ok(rid, payload)
         try:
-            _init_session(sid, target, agent, history, cols=cols)
+            _init_session(
+                sid, target, agent, history, cols=cols,
+                **({"model_config": model_config} if model_config is not None else {}),
+            )
             if sid in _sessions:
                 _sessions[sid]["display_history_prefix"] = display_history_prefix
                 # Remember the profile home so each turn re-binds HERMES_HOME (the
@@ -3317,6 +3364,39 @@ def _(rid, params: dict) -> dict:
             "status": "idle",
         },
     )
+
+
+@method("session.model.set")
+def _set_session_model(rid, params: dict) -> dict:
+    """Save a trusted selection without building or mutating a live agent."""
+    try:
+        model_config = normalize_model_config(params.get("model_config"))
+    except ValueError as exc:
+        return _err(rid, 4002, str(exc))
+    target = str(params.get("session_id") or "").strip()
+    if not target:
+        return _err(rid, 4006, "session_id required")
+    with _sessions_lock:
+        session = _sessions.get(target)
+        live = ((target, session) if session is not None else _find_live_session_by_key(target))
+    if live is None:
+        return _ok(rid, {"found": False, "model_config": None})
+    sid, session = live
+    from tools.approval import has_blocking_approval
+
+    with session["history_lock"]:
+        if session.get("_finalized"):
+            return _ok(rid, {"found": False, "model_config": None})
+        if (session.get("running") or _session_pending_kind(sid)
+                or has_blocking_approval(session["session_key"])):
+            return _err(rid, 4009, "session busy")
+        manager = session.get("delegation_manager")
+        if manager is not None:
+            with manager.lock:
+                if manager._live() or manager.store.pending(manager.owner):
+                    return _err(rid, 4009, "session busy")
+        session["model_config"] = model_config
+    return _ok(rid, {"found": True, "model_config": dict(model_config)})
 
 
 @method("session.cwd.set")
@@ -3398,7 +3478,7 @@ def _session_live_item(sid: str, session: dict, current_sid: str = "") -> dict:
         "id": sid,
         "last_active": float(session.get("last_active") or session.get("created_at") or now),
         "message_count": len(history),
-        "model": str(getattr(agent, "model", "") or _resolve_model()),
+        "model": str(model_identity(agent) or (session.get("model_config") or {}).get("upstream_model") or _resolve_model()),
         "preview": preview,
         "session_key": key,
         "started_at": float(session.get("created_at") or now),
@@ -3670,7 +3750,7 @@ def _(rid, params: dict) -> dict:
 
     usage = _get_usage(agent) if agent is not None else {}
     provider = getattr(agent, "provider", None) or "unknown"
-    model = getattr(agent, "model", None) or "(unknown)"
+    model = model_identity(agent) or "(unknown)"
     lines = [
         "Hermes TUI Status",
         "",
@@ -4266,6 +4346,13 @@ def _(rid, params: dict) -> dict:
     session, err = _sess_nowait(params, rid)
     if err:
         return err
+    try:
+        model_config = (
+            normalize_model_config(params["model_config"])
+            if "model_config" in params else None
+        )
+    except ValueError as exc:
+        return _err(rid, 4002, str(exc))
     # Re-bind to the current client transport for this request. This keeps
     # streaming events on the active websocket even if an earlier disconnect
     # or fallback moved the session transport to stdio.
@@ -4309,6 +4396,8 @@ def _(rid, params: dict) -> dict:
                     db.replace_messages(session["session_key"], truncated)
                 except Exception as exc:
                     print(f"[tui_gateway] prompt.submit: replace_messages failed: {exc}", file=sys.stderr)
+        if model_config is not None:
+            session["model_config"] = model_config
         session["running"] = True
         session["last_active"] = time.time()
         session["interface_turn_state"] = {
@@ -4535,6 +4624,7 @@ def _start_notification_poller(sid: str, session: dict) -> threading.Event:
 
 def _run_prompt_submit(rid, sid: str, session: dict, text: Any, *, turn_id: str = "") -> None:
     with session["history_lock"]:
+        model_config = copy.deepcopy(session.get("model_config"))
         history = list(session["history"])
         history_version = int(session.get("history_version", 0))
         images = list(session.get("attached_images", []))
@@ -4560,6 +4650,15 @@ def _run_prompt_submit(rid, sid: str, session: dict, text: Any, *, turn_id: str 
             _profile_home_str = session.get("profile_home")
             if _profile_home_str:
                 home_token = set_hermes_home_override(_profile_home_str)
+            # Every turn, including goal/notification continuations, enters
+            # here after acquiring this session's running flag. Apply only
+            # its frozen selection before any model-dependent processing.
+            if model_config is not None:
+                apply_model_config(agent, model_config)
+                record_runtime_model(agent, session["session_key"], turn_id)
+                db = getattr(agent, "_session_db", None)
+                if db is not None:
+                    db.update_session_model(session["session_key"], model_config.get("upstream_model") or model_config["model"])
             # The sudo password callback is thread-local (tools.terminal_tool
             # _callback_tls), so wiring it on the build thread doesn't reach this
             # turn thread — terminal sudo prompts would fall through to /dev/tty
@@ -4618,16 +4717,12 @@ def _run_prompt_submit(rid, sid: str, session: dict, text: Any, *, turn_id: str 
                         decide_image_input_mode,
                         build_native_content_parts,
                     )
-                    from agent.auxiliary_client import (
-                        _read_main_model,
-                        _read_main_provider,
-                    )
                     from hermes_cli.config import load_config as _tui_load_config
 
                     _cfg = _tui_load_config()
                     _mode = decide_image_input_mode(
-                        _read_main_provider(),
-                        _read_main_model(),
+                        agent.provider,
+                        agent.model,
                         _cfg,
                     )
                     if getattr(agent, "api_mode", "") == "codex_app_server":

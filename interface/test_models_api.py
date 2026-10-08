@@ -7,9 +7,7 @@ import sys
 import tempfile
 import time
 from pathlib import Path
-from types import SimpleNamespace
 
-import yaml
 from fastapi.testclient import TestClient
 
 
@@ -22,6 +20,19 @@ import interface.display_store as display_store_mod
 import interface.mapping as mapping_mod
 import interface.runtime_state as runtime_state_mod
 from interface import app as interface_app_mod
+
+
+def test_removed_user_model_api_cannot_mutate_runtime(monkeypatch):
+    client, app_mod, _, hermes_home = _build_client_and_user(monkeypatch)
+    try:
+        config = hermes_home / "config.yaml"
+        config.write_text("model:\n  default: fast\n")
+        response = client.put("/api/models/active", json={"id": "deep"})
+        assert response.status_code == 404
+        assert config.read_text() == "model:\n  default: fast\n"
+        assert app_mod.app.state.tui_gateway_bridges.closed_user_ids == []
+    finally:
+        client.close()
 
 
 class _DummyBridgeRegistry:
@@ -51,31 +62,7 @@ start_port: 8643
 hermes:
   api_server_host: 127.0.0.1
   api_server_model_name: Hermes
-  model:
-    default: gpt-5.4
-    provider: custom
-    base_url: https://primary.example/v1
-    api_key: sk-primary
-  extra_env:
-    OPENAI_API_KEY: sk-primary
-  model_options:
-    primary: primary
-    options:
-      - id: primary
-        name: Main
-        provider: custom
-        model: gpt-5.4
-        base_url: https://primary.example/v1
-        api_key: sk-primary
-      - id: fast
-        name: Fast
-        provider: custom
-        model: gpt-5.4-mini
-        base_url: https://fast.example/v1
-        api_key: sk-fast
-        context_length: 500000
-        api_mode: codex_responses
-        reasoning_effort: medium
+  model_catalog: true
 users:
   - username: alice
     email: alice@example.com
@@ -144,25 +131,8 @@ def _build_client_and_user(monkeypatch):
         db_path=auth_db_path,
     )
 
-    monkeypatch.setattr(
-        "interface.model_options.pwd.getpwnam",
-        lambda username: SimpleNamespace(pw_uid=123, pw_gid=456),
-    )
-    monkeypatch.setattr(
-        "interface.model_options.prepare_user_runtime_directories",
-        lambda target, password_entry: None,
-    )
-    monkeypatch.setattr(
-        "interface.model_options.read_user_private_text",
-        lambda target, path: path.read_text(encoding="utf-8")
-        if path.exists()
-        else None,
-    )
-    monkeypatch.setattr(
-        "interface.model_options.write_user_private_text",
-        lambda target, path, body: path.write_text(body, encoding="utf-8"),
-    )
-
+    from interface.test_model_support import install_catalog, make_catalog
+    install_catalog(monkeypatch, make_catalog())
     client = TestClient(interface_app_mod.app)
     token = interface_app_mod._create_session_token(user.id)
     client.cookies.set(interface_app_mod.SESSION_COOKIE_NAME, token)
@@ -188,10 +158,10 @@ model:
         response = client.get("/api/models")
         assert response.status_code == 200, response.text
         payload = response.json()
-        assert payload["active_id"] == "fast"
-        assert [model["id"] for model in payload["data"]] == ["primary", "fast"]
+        assert "active_id" not in payload
+        assert [model["id"] for model in payload["data"]] == ["deep", "fast"]
         assert payload["data"][0]["is_primary"] is True
-        assert payload["data"][1]["is_active"] is True
+        assert all("is_active" not in item for item in payload["data"])
         assert "base_url" not in payload["data"][0]
         assert "api_key" not in payload["data"][0]
         assert "https://primary.example" not in response.text
@@ -201,56 +171,8 @@ model:
         client.close()
 
 
-def test_new_user_starts_with_fast_and_can_keep_a_different_selection(monkeypatch) -> None:
-    from interface.hermes_service import build_config_data
-
-    client, app_mod, _, hermes_home = _build_client_and_user(monkeypatch)
-    try:
-        config = app_mod.mapping_store.load_config(resolve_env=True)
-        target = app_mod.mapping_store.get_target_by_username("alice")
-        (hermes_home / "config.yaml").write_text(
-            yaml.safe_dump(build_config_data(config, target, for_new_user=True)),
-            encoding="utf-8",
-        )
-
-        response = client.get("/api/models")
-        assert response.status_code == 200, response.text
-        assert response.json()["active_id"] == "fast"
-        assert response.json()["primary_id"] == "primary"
-
-        response = client.put("/api/models/active", json={"id": "primary"})
-        assert response.status_code == 200, response.text
-        response = client.get("/api/models")
-        assert response.status_code == 200, response.text
-        assert response.json()["active_id"] == "primary"
-    finally:
-        client.close()
 
 
-def test_get_models_reads_active_model_through_helper_when_not_root(monkeypatch) -> None:
-    client, interface_app_mod, _, _ = _build_client_and_user(monkeypatch)
-    calls: list[str] = []
-
-    def fake_get_active_model_id(username: str) -> str:
-        calls.append(username)
-        return "fast"
-
-    monkeypatch.setattr(interface_app_mod.os, "geteuid", lambda: 1000)
-    monkeypatch.setattr(
-        interface_app_mod.privileged_client,
-        "get_active_model_id",
-        fake_get_active_model_id,
-    )
-
-    try:
-        response = client.get("/api/models")
-        assert response.status_code == 200, response.text
-        payload = response.json()
-        assert payload["active_id"] == "fast"
-        assert payload["data"][1]["is_active"] is True
-        assert calls == ["alice"]
-    finally:
-        client.close()
 
 
 def test_authenticated_api_request_refreshes_idle_activity(monkeypatch) -> None:
@@ -527,65 +449,5 @@ def test_live_session_poll_is_lightweight_and_does_not_refresh_activity(
         state = get_runtime_state(user.id, db_path=db_path)
         assert state is not None
         assert int(state["last_user_message_at"]) == old_activity_at
-    finally:
-        client.close()
-
-
-def test_put_active_model_rejects_non_whitelist_id(monkeypatch) -> None:
-    client, _, _, _ = _build_client_and_user(monkeypatch)
-    try:
-        response = client.put("/api/models/active", json={"id": "not-allowed"})
-        assert response.status_code == 400
-        assert response.json()["detail"] == "Model is not allowed"
-    finally:
-        client.close()
-
-
-def test_put_active_model_rejects_active_live_session(monkeypatch) -> None:
-    client, _, user, _ = _build_client_and_user(monkeypatch)
-    try:
-        from interface.display_store import save_live_session_state
-
-        save_live_session_state(
-            user.id,
-            "session-1",
-            run_id="run-1",
-            live_session_id="live-1",
-            assistant_message_id="assistant-1",
-            status="awaiting_approval",
-            pending_approval={"command": "echo ok"},
-            last_error="",
-            last_event_seq=1,
-            db_path=Path(os.environ["INTERFACE_AUTH_DB"]),
-        )
-
-        response = client.put("/api/models/active", json={"id": "fast"})
-        assert response.status_code == 409
-        assert "Cannot switch models" in response.json()["detail"]
-    finally:
-        client.close()
-
-
-def test_put_active_model_updates_user_config(monkeypatch) -> None:
-    client, _, _, hermes_home = _build_client_and_user(monkeypatch)
-    try:
-        response = client.put("/api/models/active", json={"id": "fast"})
-        assert response.status_code == 200, response.text
-        assert response.json()["active_id"] == "fast"
-
-        config = yaml.safe_load((hermes_home / "config.yaml").read_text(encoding="utf-8"))
-        assert config["model"] == {
-            "default": "Fast",
-            "provider": "custom",
-            "base_url": "http://127.0.0.1:8765/v1",
-            "api_key": "pmp_alice_0123456789abcdefghijklmnopqrstuvwxyz",
-            "context_length": 500000,
-            "api_mode": "codex_responses",
-        }
-        assert config["agent"]["reasoning_effort"] == "medium"
-        assert config["auxiliary"]["compression"]["context_length"] == 500000
-        assert "clarify" in config["agent"]["disabled_toolsets"]
-        assert config["platform_toolsets"]["cli"][-1] == "no_mcp"
-        assert (hermes_home / ".env").read_text(encoding="utf-8") == ""
     finally:
         client.close()

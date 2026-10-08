@@ -4,6 +4,13 @@ The `/admin` workbench is read-only. Token totals cover fully consumed successfu
 model proxy responses and are not billing-grade data. System metrics are sampled
 in memory every five seconds; only daily storage snapshots are retained.
 
+For model catalog requests, usage rows record the stable option in
+`route_model`, the actual outbound model in `upstream_model`, and the resolved
+configuration in `config_revision`. Historical rows retain their original
+values and may have an empty configuration revision. The catalog migration
+does not rewrite usage history. These fields contain no upstream addresses or
+credentials; see the [model catalog contract](MODEL_CATALOG.md).
+
 ## Production authorization boundary
 
 Installing credentials or units, changing sudoers, enabling the storage timer,

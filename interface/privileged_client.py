@@ -4,7 +4,6 @@ import json
 import os
 import subprocess
 import sys
-from pathlib import Path
 from typing import Any
 
 from interface.background_jobs import has_active_background_processes
@@ -36,12 +35,6 @@ from interface.mapping import (
 )
 from interface.mapping import remove_user_mapping_entry
 from interface.mapping import upsert_user_mapping_entry, write_mapping
-from interface.model_options import (
-    get_active_model_option_id,
-    normalize_model_options,
-    patch_user_active_model,
-)
-from interface.model_proxy_config import get_model_proxy_base_url
 from interface.process_utils import SESSION_DB_HELPER_TIMEOUT_SECONDS, run_process_group
 from interface.redaction import force_redact_text
 from interface.runtime_state import (
@@ -384,40 +377,13 @@ class PrivilegedClient:
             "reason": str(payload.get("reason") or ""),
         }
 
-    def patch_active_model(self, username: str, model_id: str) -> None:
-        if self._can_call_directly():
-            target = MappingStore(DEFAULT_MAPPING_PATH).get_target_by_username(username)
-            if target is None:
-                raise PrivilegedClientError(f"Unknown mapping user: {username}")
-            config = load_mapping(DEFAULT_MAPPING_PATH, resolve_env=True)
-            options = normalize_model_options(config)
-            option = options.get(model_id)
-            if option is None:
-                raise PrivilegedClientError("Model is not allowed")
-            patch_user_active_model(
-                target, option, proxy_base_url=get_model_proxy_base_url(config)
-            )
-            return
-        self._call_helper(
-            ["patch-active-model", "--username", username, "--model-id", model_id]
-        )
 
-    def get_active_model_id(self, username: str) -> str:
+    def get_model_catalog(self) -> dict[str, Any]:
         if self._can_call_directly():
-            target = MappingStore(DEFAULT_MAPPING_PATH).get_target_by_username(username)
-            if target is None:
-                raise PrivilegedClientError(f"Unknown mapping user: {username}")
-            config = load_mapping(DEFAULT_MAPPING_PATH, resolve_env=True)
-            options = normalize_model_options(config)
-            return get_active_model_option_id(
-                target, options, proxy_base_url=get_model_proxy_base_url(config)
-            )
+            from interface.model_catalog import load_public_catalog
+            return load_public_catalog()
+        return self._call_helper(["get-model-catalog"])["catalog"]
 
-        payload = self._call_helper(["get-active-model", "--username", username])
-        active_id = str(payload.get("active_id") or "").strip()
-        if not active_id:
-            raise PrivilegedClientError("privileged helper returned no active model")
-        return active_id
 
     def session_db_call(
         self, username: str, method: str, kwargs: dict[str, Any]

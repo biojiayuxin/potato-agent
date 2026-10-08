@@ -174,6 +174,13 @@ class SessionDB(HermesSessionDB):
                 self.close()
                 raise
 
+    def _insert_session_row(self, session_id: str, source: str, **kwargs) -> None:
+        metadata = kwargs.get("model_config")
+        identity = metadata.get("potato_model") if isinstance(metadata, dict) else None
+        if isinstance(identity, dict) and identity.get("upstream_model"):
+            kwargs["model"] = identity["upstream_model"]
+        return super()._insert_session_row(session_id, source, **kwargs)
+
     def get_internal_session_ids(self) -> set[str]:
         return internal_session_ids(self)
 

@@ -7,6 +7,12 @@ runtime、home、工作目录和 systemd service。
 本文档是当前安全部署方式的唯一说明。不要把运行时数据库、用户映射文件或密钥放在
 Git checkout 里。
 
+部署前先确认目标主机。本机测试服务器与 `potato-agent.ynnu.edu.cn` 对应的 YNNU 生产服务器是独立部署，
+代码、模型目录、用户数据和 release 状态分别管理。2026-10-08 的统一模型目录升级已在本机测试服务器
+完成部署验证；这不表示 YNNU 生产服务器已升级。本文中的命令均作用于执行命令的目标主机。
+本次模型升级的现状判断、独立过渡包、迁移顺序及验收见
+[YNNU 模型升级操作手册](docs/YNNU_MODEL_UPGRADE.md)。
+
 ## 架构
 
 - 网页入口：`interface/` 中的 FastAPI 应用，前端路径是 `/lite`。
@@ -15,6 +21,9 @@ Git checkout 里。
 - 用户运行时：每个网页用户对应一个 Linux 用户和一个 `hermes-<username>.service`。
 - 代码目录：`/srv/potato_agent`。
 - interface 状态目录：`/var/lib/potato-agent`。
+- 模型配置唯一来源：受保护的 `/var/lib/potato-agent/config/model_proxy.yaml`（schema v2）。
+  Interface 通过固定 helper 获取公开快照，浏览器和用户 runtime 不读取真实上游地址或密钥；
+  选项、SQLite 字段及兼容规则见 [MODEL_CATALOG.md](interface/MODEL_CATALOG.md)。
 - 空间转录组查看器数据目录：`/srv/spatial_data`，运行时默认读取
   `/srv/spatial_data/current`。
 - WGCNA 共表达网络查看器入口：`/wgcna`；运行数据快照放在 `/srv/wgcna_data/current`，
@@ -90,18 +99,21 @@ runtime 在 `HERMES_RUNTIME_PROFILE_PATH` 缺失或 provider/API mode 不在 all
 用户数据不属于任何源码或 release。`HERMES_HOME`、用户工作目录、mapping、Interface 数据库和托管 skills
 始终保留在外部路径；构建和切换 release 不得复制、清空或重建这些数据。
 
-当前生产状态：
+实际部署版本应在目标主机读取，不能从仓库版本号或其他服务器的部署记录推断：
 
-```text
-release:      /opt/potato-hermes-lite/releases/20260729T070500Z-0.19.0-potato.lite.3-f2336202
-current:      /opt/potato-hermes-lite/current
-version:      0.19.0+potato.lite.3
-wheel SHA256: f23362028b3f1ab3f85d929e83eb4e88d3b6b18495d2f86a3508476bfe0777b9
+```bash
+readlink -f /opt/potato-hermes-lite/current
+/opt/potato-hermes-lite/current/venv/bin/python3 -B - <<'PY'
+import json
+from pathlib import Path
+manifest = json.loads(Path('/opt/potato-hermes-lite/current/manifest.json').read_text())
+print('version:', manifest['project']['version'])
+print('wheel SHA256:', manifest['wheel']['sha256'])
+PY
 ```
 
-本次切换前基线是
-`20260728T141258Z-0.19.0-potato.lite.2-a96c1091`；该 immutable release 在新版本验收和观察期结束前保留作
-回滚目标。当前 mapping 中的全部用户 unit 和 Interface gateway Python 均使用 Lite；用户数量必须从受保护的
+每次切换都记录当时的 `current` 目标，在新版本验收和观察期结束前保留该 immutable release 作回滚目标。
+全部 mapped 用户 unit 和 Interface gateway Python 应使用 Lite；用户数量必须从受保护的
 mapping 动态读取。构建、切换、验收和回滚流程见
 本文第 6.3 至 6.7 小节及 [`hermes-lite/README.md`](hermes-lite/README.md)。
 
@@ -934,6 +946,8 @@ test ! -e "$BUILD_ROOT"
 test ! -L "$BUILD_ROOT"
 install -d -o root -g root -m 0700 "$BUILD_ROOT"
 
+(
+umask 022
 "$BUILD_PYTHON" -B hermes-lite/scripts/build_lite_release.py \
   --dry-run \
   --python "$BUILD_PYTHON" \
@@ -948,6 +962,7 @@ install -d -o root -g root -m 0700 "$BUILD_ROOT"
   --python "$BUILD_PYTHON" \
   --browser-assets "$BROWSER_ASSETS" \
   --output "$RELEASE_B"
+)
 
 sha256sum "$RELEASE_A"/wheel/*.whl "$RELEASE_B"/wheel/*.whl
 cmp "$RELEASE_A"/wheel/*.whl "$RELEASE_B"/wheel/*.whl
@@ -955,6 +970,11 @@ cmp "$RELEASE_A"/wheel/*.whl "$RELEASE_B"/wheel/*.whl
 
 `--output` 和可选的 `--work-dir` 必须位于 `/opt`、`/srv` 和源码树之外，且目标不能预先存在。build 只生成
 候选 release，不创建生产 venv、不切换 symlink、不重启服务，也不读取或写入用户状态。
+
+构建和安装子进程必须使用一致的 `umask 022`。`077` 会影响 wheel ZIP 权限元数据及校验值，还可能生成
+`0700` 的 release 根目录、`config` 或 `share`，导致 root 的构建/安装探针通过，但 mapped 用户无法启动。
+上面的子 shell 只调整构建权限；外层 `$BUILD_ROOT` 仍为 `0700`，配置、凭据和数据库备份继续使用各自的
+私有权限。遇到该问题应重新构建并使用新 release ID，不要放宽模型配置或用户数据的权限。
 
 #### 6.4 准备离线 wheelhouse 并安装 inactive release
 
@@ -1004,7 +1024,10 @@ WHEEL_SHA=$(
 RELEASE_ID="$(date -u +%Y%m%dT%H%M%SZ)-${RELEASE_VERSION//+/-}-${WHEEL_SHA:0:8}"
 printf 'release id: %s\n' "$RELEASE_ID"
 
-sudo "$BUILD_ROOT/install_lite_release.sh" \
+sudo /bin/sh -c '
+  umask 022
+  exec "$@"
+' install-lite "$BUILD_ROOT/install_lite_release.sh" \
   "$RELEASE_A" "$RELEASE_ID" "$WHEELHOUSE"
 ```
 
@@ -1019,6 +1042,20 @@ origin，并创建 root-owned immutable release：
 此时 release 仍是 inactive：脚本不修改 `current`、不重启服务、不接触 mapping、Interface 数据库或任何
 `HERMES_HOME`。如果 venv 或 pip 阶段失败，可能留下 incomplete final 目录；确认它未被 `current` 引用后再
 人工处理，不能直接复用同一个 release ID。
+
+已有 mapped 用户的站点还须在切换前验证实际账号的访问权限。将 `AUDIT_USER` 设置为其中一个 Linux
+账号，不要使用 root 代替；以下检查应无输出且全部成功：
+
+```bash
+: "${AUDIT_USER:?set an existing mapped Linux account}"
+LITE_CANDIDATE=/opt/potato-hermes-lite/releases/$RELEASE_ID
+test "$(stat -c '%U:%G:%a' "$LITE_CANDIDATE")" = 'root:root:755'
+sudo -u "$AUDIT_USER" test -x "$LITE_CANDIDATE/venv/bin/python3"
+sudo -u "$AUDIT_USER" test -x "$LITE_CANDIDATE/venv/bin/hermes"
+sudo -u "$AUDIT_USER" test -r "$LITE_CANDIDATE/config/runtime-profile.yaml"
+sudo -u "$AUDIT_USER" test -r "$LITE_CANDIDATE/config/installed-distributions.json"
+sudo -u "$AUDIT_USER" test -x "$LITE_CANDIDATE/share/hermes/skills"
+```
 
 #### 6.5 空主机首次激活
 
@@ -1386,6 +1423,38 @@ Hermes 0.16.0 的 gateway 重启流程默认会等待 `agent.restart_drain_timeo
 `hermes.config_overrides.agent.restart_drain_timeout` 或用户
 `config_overrides.agent.restart_drain_timeout` 中覆盖该值，生成的 unit 会按覆盖值加 30 秒计算；只有显式设置
 `hermes.service.timeout_stop_sec` 时才使用手写值。
+
+<a id="model-catalog-migration"></a>
+
+#### 6.9 模型目录部署前提
+
+当前版本只读取 schema v2 模型目录。部署前必须已具备 `hermes.model_catalog: true`、受保护的
+`model_proxy.yaml`，以及使用稳定选项 ID 的会话设置、用户启动模型和显式辅助模型配置。
+cutover 在停止任何服务前执行以下只读检查：
+
+```bash
+sudo /opt/interface-env/bin/python -B "$CODE_SOURCE/configure_model_catalog.py" \
+  --mapping /var/lib/potato-agent/config/users_mapping.yaml \
+  --proxy-config /var/lib/potato-agent/config/model_proxy.yaml \
+  --check-session-db /var/lib/potato-agent/data/interface.db --check-user-configs
+```
+
+旧格式解析、`--migrate` 和选项 ID 迁移工具已经移除。尚未完成升级的旧站点必须先使用保留的过渡版本，
+在独立维护窗口完成凭据隔离、目录转换、SQLite 备份和 ID 迁移；不能直接切换到本版本。空主机直接按
+第 12 节初始化 schema v2。两种流程都不能把测试主机状态直接复制到 YNNU 生产服务器。
+
+用户级 `/api/models/active` 和 `active_id` / `is_active` 已删除，客户端只使用对话级设置。
+旧代理路由的解析、授权和配置匹配代码已经删除；目录中也不再允许 `legacy_ids`、`legacy_routes`。
+旧站点必须先私密备份用户配置，按原映射将启动模型及显式辅助模型改为稳定选项 ID，再清理目录中的
+旧别名字段。清理前需确认活动任务使用目录签名快照，或在维护窗口等待相关进程完成任务后重启。
+保留原签名密钥与后端定义，不按上游模型名猜测 Fast / Deep，也不改写历史运行记录。
+`--check-user-configs` 仅验证，不修改用户文件；不能只根据 SQLite 已迁移就判断可以部署。
+
+验证 `GET /api/models` 的默认值和标签、各对话的选择、忙碌限制及实际运行记录；公开接口与对话中不得
+出现上游地址或密钥。回退到不支持 schema v2 的旧代码需要匹配的配置及数据方案，不能仅切换 symlink。
+详细说明见 [MODEL_CATALOG.md](interface/MODEL_CATALOG.md)。
+旧站点实际执行时按 [YNNU 升级手册](docs/YNNU_MODEL_UPGRADE.md) 先取得已校验的过渡包；
+不能在新版代码上运行已删除的 `--migrate`，也不能把最终 cutover 的事后备份当作迁移前备份。
 
 ### 7. 部署空间转录组查看器数据
 
@@ -1859,14 +1928,13 @@ cutover，应先让 cutover 在原服务状态下完成切换和健康验收，�
 `/var/lib/potato-agent/config/model_proxy.yaml`；每个用户的 Hermes 配置只会包含
 `http://127.0.0.1:8765/v1` 和独立随机生成的 `pmp_...` token。旧的可预测 token 不再兼容。
 
+新主机直接初始化 schema v2；已有站点先满足[目录部署前提](#model-catalog-migration)。
+真实地址和 key 使用无回显输入写入 root-only 临时文件，不放入命令行或环境变量。以下命令在 root shell
+执行，模型与 API 模式应按实际供应商能力填写；初始化不调用供应商验证其可用性。
+
 ```bash
 export POTATO_AGENT_MAPPING_PATH=/var/lib/potato-agent/config/users_mapping.yaml
 export POTATO_MODEL_PROXY_CONFIG_PATH=/var/lib/potato-agent/config/model_proxy.yaml
-```
-
-先创建代理专用身份和私有状态目录，再交互式配置。脚本用无回显输入读取 key，不会把 key 放进 argv：
-
-```bash
 groupadd --system potato-model-proxy 2>/dev/null || true
 useradd --system --gid potato-model-proxy --groups potato-interface \
   --home-dir /nonexistent --shell /usr/sbin/nologin \
@@ -1875,12 +1943,46 @@ usermod -a -G potato-interface potato-model-proxy
 install -d -o potato-model-proxy -g potato-model-proxy -m 0700 \
   /var/lib/potato-agent/model-proxy
 
-/opt/interface-env/bin/python /srv/potato_agent/configure_model_proxy.py
+CATALOG_INPUT=$(mktemp /run/potato-model-catalog.XXXXXX)
+chmod 0600 "$CATALOG_INPUT"
+trap 'rm -f "$CATALOG_INPUT"' EXIT
+/opt/interface-env/bin/python - "$CATALOG_INPUT" <<'PYINIT'
+import getpass
+import os
+import sys
+import yaml
+
+backend = {
+    'model': getpass.getpass('Upstream model name: '),
+    'base_url': getpass.getpass('Private upstream API URL: '),
+    'api_key': getpass.getpass('Private upstream API key: '),
+    'api_mode': getpass.getpass('API mode (codex_responses or chat_completions): '),
+}
+catalog = {
+    'schema_version': 2, 'primary_option_id': 'deep', 'default_option_id': 'fast',
+    'backends': {'main': backend},
+    'options': {
+        'deep': {'display_name': 'Deep', 'backend': 'main', 'reasoning_effort': 'xhigh', 'context_length': 500000},
+        'fast': {'display_name': 'Fast', 'backend': 'main', 'reasoning_effort': 'medium', 'context_length': 500000},
+    },
+}
+fd = os.open(sys.argv[1], os.O_WRONLY | os.O_TRUNC | os.O_NOFOLLOW)
+with os.fdopen(fd, 'w') as stream:
+    yaml.safe_dump(catalog, stream, sort_keys=False)
+PYINIT
+/opt/interface-env/bin/python -B /srv/potato_agent/configure_model_catalog.py \
+  --initialize-from "$CATALOG_INPUT"
+/opt/interface-env/bin/python -B /srv/potato_agent/configure_model_catalog.py \
+  --initialize-from "$CATALOG_INPUT" --apply
+rm -f "$CATALOG_INPUT"
+trap - EXIT
 ```
 
-自动化时只能使用 root-readable 私有文件或已打开的 FD，例如 `--api-key-file /run/private-key-file` 或
-`--api-key-fd 3`；不要把真实 key 写在命令行、shell history、环境变量、mapping 或用户 home 中。可选
-fallback 使用对应的 `--fallback-api-key-file` 或 `--fallback-api-key-fd`。配置完成后验证：
+根据实际模型能力调整示例中的推理强度和上下文窗口。输入文件读取遵循私有配置权限检查；签名密钥由工具
+生成。初始化拒绝覆盖已有目录或含用户的 mapping；已有站点只能用正常更新流程。
+
+目录记录稳定选项 ID、显示标签、实际模型名、推理强度、上下文窗口以及私有后端引用。实际地址、API key
+和目录签名密钥不复制到 mapping 或用户 home。配置完成后验证：
 
 ```bash
 test "$(stat -c '%U:%G:%a' /var/lib/potato-agent/config/model_proxy.yaml)" = \
@@ -1925,17 +2027,9 @@ systemctl daemon-reload
 systemctl enable --now potato-model-proxy.service
 ```
 
-已有 mapped 用户必须生成随机 token 并同步更新其私有 Hermes 配置：
-
-```bash
-/opt/interface-env/bin/python /srv/potato_agent/configure_model_proxy.py \
-  --apply-to-users
-```
-
-`--apply-to-users` 会先打印摘要，并要求手动输入 `APPLY`，然后才会重写已有用户的 Hermes
-配置并重启当前正在运行的 Hermes service。升级旧部署后还必须先运行
-`cleanup_hermes_user_keys.py --dry-run` 检查历史 key，再去掉 `--dry-run` 执行清理。该清理只把用户配置改为
-本地 proxy，不删除 root-owned `model_proxy.yaml` 中仍在使用的真实上游 key。
+已有 mapped 用户的随机 token 与凭据隔离必须在部署当前版本前完成。安全修复工具
+`cleanup_hermes_user_keys.py` 仍可移除用户文件中的意外 key，使用当前目录重建本地代理配置；
+它不会转换旧格式目录，也不用于日常切换对话模型。
 
 ### 13. 安装 privileged helper
 
@@ -2507,6 +2601,10 @@ POTATO_DASHBOARD_BROWSER_TESTS=1 POTATO_NAVIGATION_BROWSER_TESTS=1 \
 
 ### 1. 一次性安全升级
 
+本小节保留系统凭据隔离和状态边界的维护步骤。模型目录、随机 token 和会话 ID 迁移必须先在过渡版本上
+完成，再使用当前代码执行 cutover。当前版本不包含旧模型迁移命令，普通模型更新也不需要重新生成
+proxy token、session secret 或目录签名密钥。参见 [6.9 节](#model-catalog-migration)。
+
 从旧的明文 secret、可预测 proxy token 或共享 proxy 身份升级时，必须先按 6.1 至 6.4、6.6 小节准备好
 inactive release 和全新的 root-owned `CODE_SOURCE`，但暂时不要运行 cutover。以下步骤在同一个维护窗口内
 完成。确认当前配置的 public origin 健康后立即让入口进入维护模式，并保持到随机 token 迁移和全部验收结束；
@@ -2704,7 +2802,7 @@ test "$(stat -c '%U:%G:%a' "$RESEND_CREDENTIAL")" = 'root:root:600'
 文件的 group-read 位。普通 `INTERFACE_*_FILE` 路径仍必须没有任何 group/other 权限。
 
 创建独立 proxy 身份和状态目录，并只调整现有 `model_proxy.yaml` 的读取边界。此时不要运行
-`configure_model_proxy.py`，mapping 和用户配置必须继续使用旧 token，直到 cutover 已成功完成：
+任何凭据轮换命令；mapping、用户配置和 proxy 必须继续使用已经验证的随机 token：
 
 ```bash
 groupadd --system potato-model-proxy 2>/dev/null || true
@@ -2801,33 +2899,11 @@ drop-in 后启动服务。
 usage/quota 表，不复制认证数据或聊天记录。不要在 cutover 前手工运行迁移，否则无法得到维护窗口停写后的
 完整快照。
 
-cutover 报错时会自动恢复旧 code、两个主 unit、Interface drop-in、symlink 和原 active 服务；因为此时还没有
-随机化 token，旧模型链路也能恢复。这是自动回滚边界。cutover 成功后，新 proxy 会拒绝旧可预测 token，模型
-请求暂时 fail closed；保持公网维护模式，立即执行第二阶段迁移。
-
-旧上游模型 key 曾写入每个普通用户的 `~/.hermes/config.yaml`，必须视为已暴露。先在上游供应商创建全新的
-primary key，以及每个 fallback/model option 各自的新 key。下面用 root-only 临时文件注入 primary key，真实
-值不会进入 argv 或导出的环境变量：
+cutover 报错时会自动恢复旧 code、两个主 unit、Interface drop-in、symlink 和原 active 服务。
+cutover 不轮换已有随机 token，也不转换模型目录。若旧 key 曾暴露，应在部署当前版本前于上游轮换并完成
+过渡版本的凭据迁移；当前版本的 key 更新只在受保护目录中进行。以下可检查并修复用户文件中的残留 key：
 
 ```bash
-PRIMARY_MODEL_KEY_FILE=$(mktemp /run/potato-primary-model-key.XXXXXX)
-chmod 0600 "$PRIMARY_MODEL_KEY_FILE"
-trap 'rm -f "$PRIMARY_MODEL_KEY_FILE"' EXIT
-IFS= read -r -s -p 'New primary model API key: ' PRIMARY_MODEL_KEY
-printf '\n'
-printf '%s' "$PRIMARY_MODEL_KEY" >"$PRIMARY_MODEL_KEY_FILE"
-unset PRIMARY_MODEL_KEY
-
-PYTHONPATH=/srv/potato_agent \
-/opt/interface-env/bin/python /srv/potato_agent/configure_model_proxy.py \
-  --mapping "$MAPPING" \
-  --proxy-config /var/lib/potato-agent/config/model_proxy.yaml \
-  --api-key-file "$PRIMARY_MODEL_KEY_FILE" \
-  --apply-to-users
-
-rm -f "$PRIMARY_MODEL_KEY_FILE"
-trap - EXIT
-
 PYTHONPATH=/srv/potato_agent \
 /opt/interface-env/bin/python /srv/potato_agent/cleanup_hermes_user_keys.py \
   --mapping "$MAPPING" --dry-run
@@ -3176,12 +3252,21 @@ systemctl status hermes-alice.service
 ### 修改模型配置
 
 ```bash
-export POTATO_AGENT_MAPPING_PATH=/var/lib/potato-agent/config/users_mapping.yaml
-/opt/interface-env/bin/python /srv/potato_agent/configure_model_proxy.py
+sudo /opt/interface-env/bin/python -B /srv/potato_agent/configure_model_catalog.py
+sudo /opt/interface-env/bin/python -B /srv/potato_agent/configure_model_catalog.py \
+  --option deep --model NEW_MODEL --reasoning-effort xhigh
+sudo /opt/interface-env/bin/python -B /srv/potato_agent/configure_model_catalog.py \
+  --option deep --model NEW_MODEL --reasoning-effort xhigh --apply
 ```
 
-如果需要立即写入已有用户 runtime，追加 `--apply-to-users`。真实上游 key 只能通过交互式无回显提示、
-`--api-key-file` 或 `--api-key-fd` 输入。
+先预览，将 `NEW_MODEL` 替换为上游支持的名称，再按需 `--apply`。更新保留稳定选项 ID，旧运行记录不变；
+新回合使用最新目录，已接纳回合继续原快照，不需要重启用户 runtime。可用参数还有 `--display-name` 和
+`--context-length`。命令不验证上游是否支持新模型，应通过实际请求参数和受保护的 usage 记录验收。
+
+默认选项、API 模式、后端地址和凭据仍只在受保护目录中管理，发布时保留 `root:potato-model-proxy 0640`。
+改变端点时必须使用新 backend ID 并保留旧 backend 供进行中的回合使用；普通模型升级不轮换目录签名密钥。
+不要在命令行、环境变量、日志或文档中放入真实上游地址或 key。完整规则见
+[MODEL_CATALOG.md](interface/MODEL_CATALOG.md)。未迁移旧站点先满足 [6.9 节](#model-catalog-migration) 的部署前提。
 
 ## 验证
 
@@ -3353,23 +3438,32 @@ sudo -u potato-model-proxy test ! -r /var/lib/potato-agent/data/feedback.db
 从两个普通 Web 账号分别创建一条可识别的测试会话，再确认双方的会话列表、resume、归档状态和 title 修改接口
 都看不到或不能修改对方记录。Linux 文件权限检查不能替代这项应用层验收。
 
-最后确认三个真实 secret 均未出现在任何进程 argv。下面的探针只在内存中比较并最多报告 PID，不打印 secret：
+最后确认真实上游地址、各 backend 的 API key、目录签名密钥及 Interface 凭据没有出现在 mapping、用户配置、
+unit 或进程 argv。探针兼容 schema v2 与旧格式，只在内存中比较，不打印配置值或用户 home 路径：
 
 ```bash
 PYTHONPATH=/srv/potato_agent /opt/interface-env/bin/python - <<'PY'
 import pathlib
-import yaml
-
 from interface.mapping import MappingStore
+from interface.model_proxy_config import load_model_proxy_config
 from interface.user_private_files import read_user_private_text
 
 proxy_path = pathlib.Path("/var/lib/potato-agent/config/model_proxy.yaml")
-proxy = yaml.safe_load(proxy_path.read_text(encoding="utf-8")) or {}
+try:
+    proxy = load_model_proxy_config(proxy_path)
+except Exception:
+    raise SystemExit("cannot read protected model configuration; values omitted") from None
+if proxy.get("schema_version") == 2:
+    entries = list((proxy.get("backends") or {}).values())
+else:
+    entries = proxy.get("models") or []
 secrets = {
-    str(model.get("api_key") or "").encode()
-    for model in proxy.get("models") or []
+    str(model.get(field) or "").encode()
+    for model in entries
     if isinstance(model, dict)
+    for field in ("api_key", "base_url")
 }
+secrets.add(str(proxy.get("catalog_signing_key") or "").encode())
 for path in (
     pathlib.Path("/etc/potato-agent/credentials/interface-session-secret"),
     pathlib.Path("/etc/potato-agent/credentials/resend-api-key"),
@@ -3404,7 +3498,7 @@ for candidate, value in candidate_values:
     if any(secret in value for secret in secrets):
         leaked_paths.append(str(candidate))
 if leaked_paths:
-    raise SystemExit("configured secret found outside its owner: " + ", ".join(leaked_paths))
+    raise SystemExit(f"configured private value found outside its owner in {len(leaked_paths)} file(s)")
 
 leaked_pids = []
 for cmdline in pathlib.Path("/proc").glob("[0-9]*/cmdline"):
@@ -3416,7 +3510,7 @@ for cmdline in pathlib.Path("/proc").glob("[0-9]*/cmdline"):
         leaked_pids.append(cmdline.parent.name)
 if leaked_pids:
     raise SystemExit("secret found in process argv for PID(s): " + ", ".join(leaked_pids))
-print("no configured secret found in process argv")
+print("no configured private value found in checked files or process argv")
 PY
 ```
 

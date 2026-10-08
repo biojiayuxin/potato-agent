@@ -38,7 +38,8 @@ CREATE TABLE IF NOT EXISTS model_proxy_usage_requests (
     cache_read_tokens INTEGER NOT NULL DEFAULT 0,
     cache_write_tokens INTEGER NOT NULL DEFAULT 0,
     usage_status TEXT NOT NULL,
-    raw_usage_json TEXT NOT NULL DEFAULT '{}'
+    raw_usage_json TEXT NOT NULL DEFAULT '{}',
+    config_revision TEXT NOT NULL DEFAULT ''
 );
 
 CREATE INDEX IF NOT EXISTS idx_model_proxy_usage_user_started
@@ -120,6 +121,8 @@ def ensure_token_usage_store(db_path: Path | str | None = None) -> Path:
     )
     with _connect_usage_db(resolved) as conn:
         conn.executescript(SCHEMA_SQL)
+        if "config_revision" not in {row[1] for row in conn.execute("PRAGMA table_info(model_proxy_usage_requests)")}:
+            conn.execute("ALTER TABLE model_proxy_usage_requests ADD COLUMN config_revision TEXT NOT NULL DEFAULT ''")
         conn.commit()
     ensure_sqlite_sidecar_modes(resolved, mode=DEFAULT_PRIVATE_FILE_MODE)
     return resolved
@@ -178,6 +181,7 @@ def record_usage_request(
     cache_write_tokens: int = 0,
     usage_status: str,
     raw_usage: dict[str, Any] | None = None,
+    config_revision: str = "",
     db_path: Path | str | None = None,
 ) -> str:
     ensure_token_usage_store(db_path)
@@ -202,8 +206,8 @@ def record_usage_request(
                 provider, api_mode, status_code, streaming, started_at,
                 completed_at, duration_ms, input_tokens, output_tokens,
                 cache_read_tokens, cache_write_tokens, usage_status,
-                raw_usage_json
-            ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                raw_usage_json, config_revision
+            ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 request_id,
@@ -224,6 +228,7 @@ def record_usage_request(
                 normalized_tokens["cache_write_tokens"],
                 usage_status.strip() or "missing",
                 raw_usage_json,
+                config_revision,
             ),
         )
         conn.commit()

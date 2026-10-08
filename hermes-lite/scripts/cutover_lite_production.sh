@@ -68,6 +68,10 @@ backup_root=/var/backups/potato-agent/hermes-lite-cutover
 legacy_code_paths=(
   configure_hermes_model.py
   interface/test_configure_hermes_model.py
+  configure_model_proxy.py
+  update_fast_model.py
+  interface/test_configure_model_proxy.py
+  interface/test_update_fast_model.py
 )
 legacy_deploy_paths=(
   hermes-agent
@@ -387,6 +391,15 @@ if [[ -L ${model_proxy_config} ]] || [[ ! -f ${model_proxy_config} ]] || \
    [[ $(stat -c '%U:%G:%a' "${model_proxy_config}") != \
       "root:${model_proxy_user}:640" ]]; then
   echo "error: unsafe model proxy key configuration ownership or mode" >&2
+  exit 2
+fi
+# Check the staged code's configuration contract before stopping any service.
+# The command prints only public metadata; discard it because preflight needs
+# only its exit status. Old-ID conversion belongs to the earlier transition release.
+if ! "${interface_python}" -B "${code_source}/configure_model_catalog.py" \
+    --mapping "${mapping}" --proxy-config "${model_proxy_config}" \
+    --check-session-db "${auth_db}" --check-user-configs >/dev/null; then
+  echo "error: schema-v2 catalog and stable session/user model IDs are required before cutover" >&2
   exit 2
 fi
 if [[ -L ${credential_dir} ]] || \

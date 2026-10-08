@@ -60,6 +60,7 @@ Browser tests mock every API and never start a real agent runtime:
 ```bash
 POTATO_WORKSPACE_BROWSER_TESTS=1 python -m pytest interface/test_chat_workspace_browser.py
 POTATO_WORKSPACE_BROWSER_TESTS=1 python -m pytest interface/test_chat_workspace_http_browser.py
+POTATO_WORKSPACE_BROWSER_TESTS=1 python -m pytest interface/test_lite_session_models_browser.py
 POTATO_EXAMPLE_BROWSER_TESTS=1 python -m pytest interface/test_agent_examples.py
 POTATO_NAVIGATION_BROWSER_TESTS=1 python -m pytest interface/test_navigation_browser.py
 python -m pytest interface/test_chat_workspace_routes.py interface/test_lite_*.py
@@ -70,11 +71,14 @@ Set `POTATO_PLAYWRIGHT_EXECUTABLE` for an existing Chromium installation and
 
 ## Release
 
-This change adds a page route and static assets. It adds no business API,
-database migration, systemd change, or runtime orchestration change. Static
-Lite JavaScript uses `20260910-http-tabs`, examples use `20260910-http-fallback`,
-and styles use `20260910-sidebar-home`. Shared navigation uses
-`20260912-portal-link`.
+The workspace handoff feature itself adds a page route and static assets.
+The current release also includes independent conversation model selection,
+new SQLite model settings/audit tables, and a protected model catalog; deploy
+the matching Interface/Lite code and follow the
+[catalog deployment prerequisites](../HPC_DEPLOYMENT.md#model-catalog-migration).
+Asset cache versions are defined in `static/lite/index.html`; deploy that file
+with the corresponding JavaScript and styles instead of reusing an older
+version string from this document.
 Previously open chat tabs running older JavaScript must be refreshed or closed to participate
 in the handoff protocol. Deploying this checkout to `/srv/potato_agent` still
 requires owner approval.
