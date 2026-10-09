@@ -1,6 +1,13 @@
 {
   "updates": [
     {
+      "version": "2026-10-09-001",
+      "title": "Independent model selection",
+      "date": "October 9, 2026",
+      "summary": "You can now choose models independently for each conversation, even while another conversation is responding.",
+      "items": []
+    },
+    {
       "version": "2026-10-05-001",
       "title": "Chat pinning",
       "date": "October 5, 2026",
