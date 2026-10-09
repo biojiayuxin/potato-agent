@@ -22,7 +22,7 @@ def fixture_database(path: Path) -> Path:
     """Independent evidence graph: split isoforms, shared proteins, no-hit and no-CDS."""
     with sqlite3.connect(path) as conn:
         conn.executescript(SCHEMA_SQL)
-        conn.execute("INSERT INTO metadata VALUES(1,3,'fixture-v1','2026-09-28',?)", (json.dumps({
+        conn.execute("INSERT INTO metadata VALUES(1,4,'fixture-v1','2026-09-28',?)", (json.dumps({
             "counts": {}, "method": "Public PlantTFDB rules", "limitations": ["Not an official server result"],
         }),))
         for order, assembly in enumerate((A, B)):
@@ -123,6 +123,107 @@ def test_no_cds_no_hit_and_ambiguous_candidates_remain_distinct(client):
     assert detail["transcript"]["decisionStatus"] == "unassessable_no_valid_protein"
 
 
+@pytest.mark.parametrize("schema", [3, 4])
+def test_selected_tf_queries_preserve_scopes_isoforms_and_pagination(client, schema):
+    with sqlite3.connect(annotations.database_path()) as conn:
+        conn.execute("UPDATE metadata SET schema_version=?", (schema,))
+    for view, expected_total in (("genes", 4), ("transcripts", 5)):
+        complete = query(client, view=view, tfStatus="selected")
+        explicit = query(client, view=view, tfStatus="selected", assemblyIds=[B, A])
+        scoped = [row for assembly in (A, B)
+                  for row in query(client, view=view, tfStatus="selected", assemblyIds=[assembly])["items"]]
+        assert complete["total"] == explicit["total"] == expected_total
+        assert complete["items"] == explicit["items"] == scoped
+        page = query(client, view=view, tfStatus="selected", limit=2, offset=1)
+        assert page["total"] == expected_total and page["hasMore"] is True
+        assert page["items"] == complete["items"][1:3]
+        assert query(client, view=view, tfStatus="selected", annotationStatus="hit")["items"] == complete["items"]
+        for status in ("no_match", "no_cds", "extraction_error"):
+            assert query(client, view=view, tfStatus="selected", annotationStatus=status)["total"] == 0
+    compound = query(client, tfStatus="selected", tfFamilies=["WRKY"], signatures=["PF_B"])
+    assert [(row["geneId"], row["matchedTranscriptIds"]) for row in compound["items"]] == [("whole", ["whole.1"])]
+    conflict = query(client, tfStatus="selected", conflict="family", tfFamilies=["WRKY"])
+    assert [(row["geneId"], row["matchedTranscriptIds"]) for row in conflict["items"]] == [("split", ["split.1"])]
+    assert query(client, tfStatus="selected", grades=["C"])["items"][0]["geneId"] == "candidate"
+
+
+@pytest.fixture
+def extraction_client(client):
+    with sqlite3.connect(annotations.database_path()) as conn:
+        gene = {"assembly_id": A, "gene_id": "errors", "global_gene_key": A + "::errors",
+                "gene_decision": "extraction_exception_only", "total_transcript_count": "3",
+                "valid_transcript_count": "0", "exception_transcript_count": "3", "distinct_protein_count": "0"}
+        conn.execute("INSERT INTO genes VALUES(?,?,?,?,?,?)", (A, "errors", gene["gene_decision"], 0, 0, json.dumps(gene)))
+        for status in ("duplicate_gff_transcript_id", "empty_protein", "missing_protein"):
+            identifier = "errors." + status
+            raw = {"assembly_id": A, "transcript_id": identifier, "global_transcript_key": A + "::" + identifier,
+                   "gene_id": "errors", "gff_occurrences": "2" if status.startswith("duplicate") else "1",
+                   "inferred_from_cds": "false", "cds_features": "1", "protein_fasta_occurrences": "0",
+                   "protein_length": "0", "status": status, "reason": "Source reported " + status}
+            conn.execute("INSERT INTO transcripts VALUES(?,?,?,?,?,?,?)",
+                         (A, identifier, "errors", None, status, raw["reason"], json.dumps(raw)))
+    return client
+
+
+def test_extraction_errors_keep_raw_status_and_are_not_no_match_or_no_cds(extraction_client):
+    client = extraction_client
+    result = query(client, view="transcripts", annotationStatus="extraction_error")
+    expected = {"duplicate_gff_transcript_id", "empty_protein", "missing_protein"}
+    assert result["total"] == 3
+    assert {row["extractionStatus"] for row in result["items"]} == expected
+    assert query(client, view="transcripts", annotationStatus="no_match")["total"] == 1
+    assert query(client, view="transcripts", annotationStatus="no_cds")["total"] == 2
+    assert query(client, view="transcripts", tfStatus="unassessable")["total"] == 5
+    assert query(client, view="transcripts", annotationStatus="extraction_error", tfStatus="not_selected")["total"] == 0
+    assert query(client, annotationStatus="extraction_error", signatures=["PF_A"])["total"] == 0
+    allowed_source = {"assembly_id", "transcript_id", "global_transcript_key", "gene_id", "gff_occurrences",
+                      "inferred_from_cds", "cds_features", "protein_fasta_occurrences", "protein_length", "status", "reason"}
+    for row in result["items"]:
+        assert row["annotationStatus"] == "extraction_error"
+        assert row["proteinId"] is None and row["proteinLength"] is None
+        assert row["decisionStatus"] == "unassessable_no_valid_protein" and row["isTf"] is False
+        assert row["tfFamilies"] == [] and row["signatures"] == []
+        assert set(row["source"]) == allowed_source
+        assert row["source"]["status"] == row["extractionStatus"]
+        assert row["source"]["reason"] == row["reason"]
+        detail = client.get("/api/genome-annotations/transcripts/" + row["transcriptId"], params={"assembly": A}).json()
+        assert detail["transcript"] == row
+        assert detail["matches"] == detail["tfEvidence"] == []
+        assert detail["proteinDecision"] == {}
+    gene = client.get("/api/genome-annotations/genes/errors", params={"assembly": A}).json()
+    assert gene["gene"]["annotationStatus"] == "extraction_error"
+    assert {row["extractionStatus"] for row in gene["transcripts"]} == expected
+    with sqlite3.connect(annotations.database_path()) as conn:
+        conn.execute("INSERT INTO transcripts VALUES(?,?,?,?,?,?,?)", (A, "errors.valid", "errors", "P4", "valid", "", "{}"))
+    mixed = client.get("/api/genome-annotations/genes/errors", params={"assembly": A}).json()
+    assert mixed["gene"]["annotationStatus"] == "mixed"
+
+
+@pytest.mark.parametrize("format_, delimiter", [("tsv", "\t"), ("csv", ",")])
+def test_exception_exports_preserve_status_and_existing_field_contract(extraction_client, format_, delimiter):
+    body = {"datasetVersion": "fixture-v1", "format": format_,
+            "query": {"view": "transcripts", "tfStatus": "unassessable"},
+            "tables": ["transcripts", "tf_decisions", "domains", "tf_evidence"]}
+    files = unpack(extraction_client.post("/api/genome-annotations/export", json=body))
+    original_fields = ["assembly_id", "gene_id", "transcript_id", "global_unique_protein_id", "annotation_status", "reason",
+                       "decision_status", "is_tf_inclusive_result", "selection_basis", "tf_families", "confidence_grades",
+                       "unresolved_candidates", "relevant_pfam_counts", "protein_length", "sequence_md5", "sequence_sha256",
+                       "annotation_origin", "decision_reason"]
+    gene_fields = ["gene_decision", "tf_family_union", "tf_family_intersection", "isoform_presence_conflict", "family_conflict"]
+    for table in ("transcripts", "tf_decisions"):
+        reader = csv.DictReader(io.StringIO(files[f"{table}.{format_}"]), delimiter=delimiter)
+        assert reader.fieldnames == original_fields + (gene_fields if table == "tf_decisions" else []) + ["extraction_status"]
+        rows = list(reader)
+        assert len(rows) == 5
+        for row in rows:
+            assert row["annotation_status"] == ("no_cds" if row["extraction_status"] == "no_cds" else "extraction_error")
+            assert row["reason"]
+            assert row["decision_status"] == "unassessable_no_valid_protein"
+            assert row["global_unique_protein_id"] == row["tf_families"] == ""
+    for table in ("domains", "tf_evidence"):
+        assert list(csv.DictReader(io.StringIO(files[f"{table}.{format_}"]), delimiter=delimiter)) == []
+
+
 def test_exact_ids_ambiguity_unknown_and_filter_reports(client):
     result = query(client, ids=["split", "nohit", "missing", "split"], signatures=["PF_A"])
     assert result["total"] == 2  # One gene in each assembly, with shared global protein.
@@ -153,6 +254,24 @@ def unpack(response):
     with zipfile.ZipFile(io.BytesIO(response.content)) as archive:
         assert archive.testzip() is None
         return {name: archive.read(name).decode() for name in archive.namelist()}
+
+
+def test_selected_tf_exports_keep_shared_proteins_and_selection_scope(client):
+    body = {"datasetVersion": "fixture-v1", "query": {"tfStatus": "selected", "limit": 1},
+            "tables": ["genes", "transcripts", "tf_decisions"]}
+    files = unpack(client.post("/api/genome-annotations/export", json=body))
+    meta = json.loads(files["metadata.json"])
+    assert meta["tableCounts"] == {"genes": 4, "transcripts": 5, "tf_decisions": 5}
+    rows = list(csv.DictReader(io.StringIO(files["transcripts.tsv"]), delimiter="\t"))
+    assert {row["transcript_id"] for row in rows} == {"candidate.1", "split.1", "split.2", "whole.1", "other.1"}
+    body["selection"] = [{"assemblyId": B, "geneId": "split"}]
+    selected = unpack(client.post("/api/genome-annotations/export", json=body))
+    rows = list(csv.DictReader(io.StringIO(selected["transcripts.tsv"]), delimiter="\t"))
+    assert [(row["assembly_id"], row["transcript_id"]) for row in rows] == [(B, "other.1")]
+    body["query"]["tfFamilies"] = ["WRKY"]
+    body["query"]["signatures"] = ["PF_B"]
+    empty = unpack(client.post("/api/genome-annotations/export", json=body))
+    assert json.loads(empty["metadata.json"])["tableCounts"] == {"genes": 0, "transcripts": 0, "tf_decisions": 0}
 
 
 def test_export_all_pages_keeps_matched_isoforms_and_all_their_evidence(client):
@@ -217,7 +336,7 @@ def test_domain_details_and_exports_exclude_pathways(client):
 
 def test_public_metadata_validation_and_errors(client, monkeypatch, tmp_path):
     response = client.get("/api/genome-annotations/metadata")
-    assert response.status_code == 200 and response.json()["schemaVersion"] == 3
+    assert response.status_code == 200 and response.json()["schemaVersion"] == 4
     assert str(tmp_path) not in response.text
     assert client.post("/api/genome-annotations/query", json={"assemblyIds": ["DM8.2"]}).status_code == 400
     for payload in ({"limit": 501}, {"limit": 0}, {"ids": ["x"] * 5001}, {"serverPath": "/tmp"},
@@ -229,8 +348,73 @@ def test_public_metadata_validation_and_errors(client, monkeypatch, tmp_path):
     assert response.status_code == 503 and "secret-name" not in response.text
 
 
-@pytest.mark.parametrize("schema", [1, 2])
-def test_legacy_database_requires_matching_schema3_release(client, schema):
+def test_all_154_assemblies_and_large_transcript_offset_are_supported(client):
+    additional = [f"monoploid/fixture-{number:03d}" for number in range(152)]
+    with sqlite3.connect(annotations.database_path()) as conn:
+        conn.executemany("INSERT INTO assemblies VALUES(?,?,?,?)",
+                         [(assembly, assembly.rsplit("/", 1)[-1], order + 2, "{}") for order, assembly in enumerate(additional)])
+        conn.execute("INSERT INTO genes VALUES(?,?,?,?,?,?)", (additional[-1], "new-gene", "not_selected", 0, 0, "{}"))
+        conn.execute("INSERT INTO transcripts VALUES(?,?,?,?,?,?,?)", (additional[-1], "new-transcript", "new-gene", "P4", "valid", "", "{}"))
+    metadata = client.get("/api/genome-annotations/metadata").json()
+    identifiers = [row["assemblyId"] for row in metadata["assemblies"]]
+    assert len(identifiers) == 154
+    assert metadata["limits"]["maxAssemblies"] == 256 and metadata["limits"]["maxOffset"] == 100_000_000
+    assert query(client, assemblyIds=identifiers)["total"] == query(client, assemblyIds=[])["total"] == 8
+    assert query(client, assemblyIds=[additional[-1]])["items"][0]["geneId"] == "new-gene"
+    page = query(client, view="transcripts", assemblyIds=identifiers, offset=10_000_001)
+    assert page["items"] == [] and page["hasMore"] is False and page["offset"] == 10_000_001
+    for body in ({"assemblyIds": [f"assembly-{number}" for number in range(257)]}, {"offset": 100_000_001}):
+        assert client.post("/api/genome-annotations/query", json=body).status_code == 422
+
+
+def test_legacy_order_survives_shuffled_catalog_in_all_query_views(client):
+    legacy = [A, B, "monoploid/A6-26", "phased_tetraploid/Des", "phased_tetraploid/C88"]
+    additional = ["monoploid/Z-new", "monoploid/A-new"]
+    source_order = [additional[0], legacy[4], legacy[2], additional[1], legacy[1], legacy[3], legacy[0]]
+    with sqlite3.connect(annotations.database_path()) as conn:
+        for position, assembly in enumerate(source_order):
+            conn.execute("INSERT INTO assemblies VALUES(?,?,?,?) ON CONFLICT(assembly_id) "
+                         "DO UPDATE SET display_order=excluded.display_order",
+                         (assembly, assembly.rsplit("/", 1)[-1], position, "{}"))
+            conn.execute("INSERT INTO genes VALUES(?,?,?,?,?,?)",
+                         (assembly, "ordering-gene", "selected_tf", 0, 0, "{}"))
+            conn.execute("INSERT INTO transcripts VALUES(?,?,?,?,?,?,?)",
+                         (assembly, "ordering-gene.1", "ordering-gene", "P1", "valid", "", "{}"))
+    expected = legacy + additional
+    metadata = client.get("/api/genome-annotations/metadata").json()
+    assert [row["assemblyId"] for row in metadata["assemblies"]] == expected
+    # The unfiltered gene fast path and the ordinary transcript path use the same order.
+    for view in ("genes", "transcripts"):
+        rows = query(client, view=view)["items"]
+        assert list(dict.fromkeys(row["assemblyId"] for row in rows)) == expected
+        for extra in ({}, {"tfStatus": "selected"}, {"signatures": ["PF_A"]}):
+            page = query(client, view=view, ids=["ordering-gene"], offset=3, limit=3, **extra)
+            assert page["total"] == 7 and page["hasMore"] is True
+            assert [row["assemblyId"] for row in page["items"]] == [legacy[3], legacy[4], additional[0]]
+            subset = query(client, view=view, ids=["ordering-gene"],
+                           assemblyIds=[additional[1], legacy[3], legacy[0]], **extra)
+            assert [row["assemblyId"] for row in subset["items"]] == [legacy[0], legacy[3], additional[1]]
+    fast_page = query(client, assemblyIds=[additional[1], legacy[3], legacy[0]], offset=6, limit=3)
+    assert [(row["assemblyId"], row["geneId"]) for row in fast_page["items"]] == [
+        (legacy[0], "whole"), (legacy[3], "ordering-gene"), (additional[1], "ordering-gene")]
+
+
+def test_schema3_database_still_supports_queries_details_and_exports(client):
+    with sqlite3.connect(annotations.database_path()) as conn:
+        conn.execute("UPDATE metadata SET schema_version=3")
+    assert client.get("/api/genome-annotations/metadata").json()["schemaVersion"] == 3
+    result = query(client, view="transcripts", annotationStatus="no_cds")
+    assert result["total"] == 2 and all(row["extractionStatus"] == "no_cds" for row in result["items"])
+    assert query(client, annotationStatus="extraction_error")["total"] == 0
+    detail = client.get("/api/genome-annotations/transcripts/split.1", params={"assembly": A}).json()
+    assert detail["transcript"]["extractionStatus"] == "valid" and len(detail["matches"]) == 2
+    files = unpack(client.post("/api/genome-annotations/export", json={
+        "datasetVersion": "fixture-v1", "query": {"view": "transcripts", "annotationStatus": "no_cds"}, "tables": ["transcripts"]}))
+    assert len(list(csv.DictReader(io.StringIO(files["transcripts.tsv"]), delimiter="\t"))) == 2
+
+
+@pytest.mark.parametrize("schema", [1, 2, 5])
+def test_unsupported_database_schema_is_unavailable(client, schema):
     with sqlite3.connect(annotations.database_path()) as conn:
         conn.execute("UPDATE metadata SET schema_version=?", (schema,))
     assert client.get("/api/genome-annotations/metadata").status_code == 503

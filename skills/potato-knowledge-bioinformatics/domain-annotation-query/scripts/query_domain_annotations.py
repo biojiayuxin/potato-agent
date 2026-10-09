@@ -23,6 +23,8 @@ from typing import Any, Sequence
 API_PATH = "/api/genome-annotations"
 INSTALL_BASE_URL_FILE = Path(__file__).resolve().parents[1] / "api-base-url.txt"
 MAX_IDS = 5000
+MAX_ASSEMBLIES = 256
+MAX_OFFSET = 100_000_000
 
 
 def deployment_base_url(override: str | None) -> str:
@@ -100,11 +102,11 @@ def build_parser() -> argparse.ArgumentParser:
         sub.add_argument("--tf-family", action="append")
         sub.add_argument("--tf-grade", action="append", choices=("A", "B", "C", "U"))
         sub.add_argument("--tf-status", choices=("all", "selected", "not_selected", "ambiguous", "unassessable"))
-        sub.add_argument("--annotation-status", choices=("all", "hit", "no_match", "no_cds"))
+        sub.add_argument("--annotation-status", choices=("all", "hit", "no_match", "no_cds", "extraction_error"))
         sub.add_argument("--conflict", choices=("all", "presence", "family", "any"))
         if command == "query":
             sub.add_argument("--limit", type=bounded_int(1, 500))
-            sub.add_argument("--offset", type=bounded_int(0, 10_000_000))
+            sub.add_argument("--offset", type=bounded_int(0, MAX_OFFSET))
         else:
             sub.add_argument("--output", type=Path, required=True, help="Local .zip path; existing files are never overwritten.")
             sub.add_argument("--version", help="Pin the queried dataset version; otherwise read current metadata first.")
@@ -139,6 +141,8 @@ def query_payload(args: argparse.Namespace) -> dict[str, Any]:
         payload["assemblyIds"] = args.assembly
     elif "assemblyIds" not in payload:
         payload["assemblyIds"] = ["monoploid/DMv8.2"]
+    if isinstance(payload["assemblyIds"], list) and len(payload["assemblyIds"]) > MAX_ASSEMBLIES:
+        raise ValueError(f"at most {MAX_ASSEMBLIES} assembly IDs are allowed")
     raw_ids = list(args.ids)
     if args.ids_file:
         raw_ids.append(args.ids_file.read_text(encoding="utf-8-sig"))

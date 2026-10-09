@@ -1,7 +1,7 @@
 ---
 name: domain-annotation-query
-description: 查询 Domain annotation 页面的已有蛋白结构域、InterPro/GO 和转录因子注释，支持五个马铃薯基因组的精确或批量 ID 查询、结构域组合筛选及表格导出。通过当前部署的公开 API 访问，无需登录；不用于基因结构预测或重新注释。
-version: 1.1.1
+description: 查询 PotatoOmics 已有蛋白结构域、InterPro/GO 和转录因子注释，支持已发布全部基因组的精确或批量 ID 查询、结构域组合筛选及表格导出。通过当前部署的公开 API 访问，无需登录；不用于基因结构预测或重新注释。
+version: 1.2.0
 author: Potato Agent
 license: MIT
 metadata:
@@ -25,7 +25,7 @@ prerequisites:
 ## 何时使用
 
 - 查询一个或多个基因、转录本或全局蛋白的结构域、InterPro/GO 关联和 TF 证据。
-- 筛选具有某些结构域或 TF 家族的记录，比较五个基因组中的家族计数。
+- 筛选具有某些结构域或 TF 家族的记录，比较已发布基因组中的家族计数。
 - 导出基因汇总、转录本汇总、全部结构域明细、TF 判定或 TF 证据表。
 
 基因结构预测、输入新 FASTA、运行 InterProScan、重新鉴定 TF、提取序列和表达分析不属于本技能。
@@ -35,7 +35,7 @@ prerequisites:
 1. 先运行 `metadata` 确认数据版本和合法 assembly ID。保留 API 返回的 `datasetVersion`，回答中注明材料和版本；不要把 HTTP 错误或缺库理解为没有匹配结果。
 2. ID 必须精确匹配并保留点号和异构体后缀。基因、转录本和全局 `UP` 蛋白 ID 的对应关系来自发布映射，不要通过截断 `.1` 等后缀推断基因。不能把局部 subset protein ID 当作全局蛋白 ID。
 3. 同时要求结构域 A+B 或 TF 家族+结构域时，必须由同一个转录本对应的蛋白满足；不能拼接不同异构体的证据。`--domain-match all` 是默认组合规则，`any` 表示任一结构域满足。
-4. 区分有效蛋白有命中（`hit`）、有效蛋白在四个应用中无命中（`no_match`）、无 CDS 且未进入蛋白注释（`no_cds`）。无命中不能描述为没有生物学功能。
+4. 区分有效蛋白有命中（`hit`）、有效蛋白在四个应用中无命中（`no_match`）、无 CDS（`no_cds`）与蛋白提取错误（`extraction_error`）。后者包括重复 GFF 转录本 ID、空蛋白及缺失蛋白；具体原因读取 `extractionStatus` 和 `reason`。`tfStatus=unassessable` 包括所有未获得有效蛋白的转录本，不能解释为非 TF。无命中不能描述为没有生物学功能。
 5. TF 是“基于 PlantTFDB 公开规则的本地鉴定”，不是 PlantTFDB 官方数据库的直接注释。A/B/C 代表规则覆盖方式，不能称为实验验证等级或概率。默认保留 Grade-C Homeobox 候选；如果用户排除候选，明确写出筛选条件。
 6. 11 个缺少必要自建 HMM 的官方家族属于“本方法不可判定”，不能写成这些基因组没有该家族。未被本地规则选中的基因也不能称为确定的非 TF。
 7. 保留原始基因 TF 判定和异构体冲突。家族计数可以共享存在冲突的基因，逐家族相加不能代替去重后的 TF 总数。
@@ -43,7 +43,7 @@ prerequisites:
 9. 查询分页的 `returned` 和 `items` 长度只表示当前页，全部数量读取 `total`。依据 `hasMore` 和 `offset` 继续查询；需要大量结果时用导出，不要把几千行放入对话。
 10. 检查 `idReport.unmatchedIds`、`ambiguousIds`、`filteredIds`；分别报告找不到、跨材料歧义和被筛选排除的输入，不能默默丢弃。
 
-当前数据库接口为 schema 3（`metadata.schemaVersion`）。结构域详情、导出和整套下载
+全量数据库使用 schema 4，服务兼容 schema 3；当前版本读取 `metadata.schemaVersion`。结构域详情、导出和整套下载
 均已移除 `pathways`，不再查询或补齐该字段；实际数据发布版本读取 `datasetVersion`。
 
 ## 命令
@@ -55,9 +55,10 @@ python3 "${HERMES_SKILL_DIR}/scripts/query_domain_annotations.py" metadata
 python3 "${HERMES_SKILL_DIR}/scripts/query_domain_annotations.py" --help
 ```
 
-当前五个规范 assembly ID：`monoploid/DMv8.2`、`monoploid/E4-63`、`monoploid/A6-26`、
-`phased_tetraploid/Des`、`phased_tetraploid/C88`。默认查询 DMv8.2；指定多个材料时重复
-`--assembly`，查询全部材料时使用 `--all-assemblies`。名称以后续 `metadata` 返回值为准。
+全量发布包含 154 个基因组；以当前 `metadata.assemblies` 为完整目录。网页暂时只展示原五个材料，
+不代表 API 或本技能仅支持五个。默认查询 `monoploid/DMv8.2`；指定多个材料时重复
+`--assembly`，最多 256 个；查询全部已发布材料时使用 `--all-assemblies`。
+`--offset` 支持 0 至 100,000,000，实际分页依据返回的 `total` 和 `hasMore`；大量记录优先导出。
 
 精确 ID 查询、基因详情和转录本详情：
 
@@ -90,7 +91,7 @@ python3 "${HERMES_SKILL_DIR}/scripts/query_domain_annotations.py" families
 
 其他筛选包括 `--text`、`--interpro`、`--go`、`--domain-match all|any`、
 `--tf-status all|selected|not_selected|ambiguous|unassessable`、
-`--annotation-status all|hit|no_match|no_cds` 和 `--conflict all|presence|family|any`。
+`--annotation-status all|hit|no_match|no_cds|extraction_error` 和 `--conflict all|presence|family|any`。
 结构域、InterPro、GO、TF 家族和等级参数可重复。
 `--tf-grade` 接受当前 API 的 `A`、`B`、`C`、`U`；`U` 表示规则覆盖不可判定，
 该等级查询无记录不能解释为对应家族不存在，应结合 `families` 的覆盖信息。
@@ -102,6 +103,8 @@ python3 "${HERMES_SKILL_DIR}/scripts/query_domain_annotations.py" families
 通过重复 `--table` 选择 `genes`、`transcripts`、`domains`、`tf_decisions`、`tf_evidence`。
 ZIP 同时包含 `metadata.json`，记录版本、查询条件和统计；批量查询附 ID 匹配报告。
 `domains` 包含匹配转录本的全部原始命中，并标记哪些命中满足结构域筛选。
+`transcripts` 和 `tf_decisions` 保留 `annotation_status`、`reason`，并以 `extraction_status`
+记录原始提取状态；无有效蛋白的记录没有结构域或 TF 蛋白证据。
 
 ```bash
 python3 "${HERMES_SKILL_DIR}/scripts/query_domain_annotations.py" export \

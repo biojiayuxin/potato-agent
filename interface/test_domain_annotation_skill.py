@@ -105,6 +105,36 @@ def test_query_preserves_exact_ids_and_reports_and_sends_combined_filters(api_se
     assert result["data"]["idReport"]["unmatchedIds"] == ["Absent"]
 
 
+def test_client_supports_full_catalog_extraction_errors_and_large_offsets(api_server):
+    site, requests, _ = api_server
+    assemblies = [f"monoploid/fixture-{index:03d}" for index in range(154)]
+    arguments = ["query", "--view", "transcripts", "--annotation-status", "extraction_error",
+                 "--tf-status", "unassessable", "--offset", "10000001", "--base-url", site]
+    for assembly in assemblies:
+        arguments.extend(["--assembly", assembly])
+    skill.run(skill.build_parser().parse_args(arguments))
+    assert requests[0][2]["assemblyIds"] == assemblies
+    assert requests[0][2]["annotationStatus"] == "extraction_error"
+    assert requests[0][2]["tfStatus"] == "unassessable"
+    assert requests[0][2]["offset"] == 10_000_001
+
+
+def test_client_rejects_out_of_range_catalog_and_offset_before_http(api_server, tmp_path):
+    site, requests, _ = api_server
+    arguments = ["query", "--base-url", site]
+    for index in range(257):
+        arguments.extend(["--assembly", f"monoploid/fixture-{index}"])
+    with pytest.raises(ValueError, match="at most 256 assembly IDs"):
+        skill.run(skill.build_parser().parse_args(arguments))
+    query_path = tmp_path / "query.json"
+    query_path.write_text(json.dumps({"assemblyIds": [f"genome-{index}" for index in range(257)]}))
+    with pytest.raises(ValueError, match="at most 256 assembly IDs"):
+        skill.run(skill.build_parser().parse_args(["query", "--query-json", str(query_path), "--base-url", site]))
+    with pytest.raises(SystemExit) as error:
+        skill.build_parser().parse_args(["query", "--offset", "100000001", "--base-url", site])
+    assert error.value.code == 2 and requests == []
+
+
 @pytest.mark.parametrize("command, endpoint", [("gene", "genes"), ("transcript", "transcripts")])
 def test_detail_url_encodes_exact_identifier_and_assembly(api_server, command, endpoint):
     site, requests, _ = api_server
@@ -268,7 +298,7 @@ def current_annotation_api(tmp_path, monkeypatch):
 
     source = make_source(tmp_path / "source")
     database = tmp_path / "release/annotations.sqlite"
-    build_database(source, database, "test-schema3-no-pathways", downloads_dir=database.parent / "downloads")
+    build_database(source, database, "test-schema4-no-pathways", downloads_dir=database.parent / "downloads")
     monkeypatch.setenv("GENOME_ANNOTATIONS_DB_PATH", str(database))
     monkeypatch.setenv("INTERFACE_PUBLIC_BASE_URL", "http://testserver")
     app = FastAPI()
@@ -296,18 +326,20 @@ def run_client(*arguments):
 
 def test_current_metadata_details_families_and_published_downloads(current_annotation_api):
     metadata = run_client("metadata")["data"]
-    assert metadata["schemaVersion"] == 3
-    assert metadata["datasetVersion"] == "test-schema3-no-pathways"
+    assert metadata["schemaVersion"] == 4
+    assert metadata["datasetVersion"] == "test-schema4-no-pathways"
     assembly = metadata["assemblies"][0]["assemblyId"]
     gene = run_client("gene", "gene.1", "--assembly", assembly)["data"]
     assert [row["transcriptId"] for row in gene["transcripts"]] == ["gene.1.1", "gene.1.2"]
     transcript = run_client("transcript", "gene.1.1", "--assembly", assembly)["data"]
     assert transcript["transcript"]["proteinLength"] == 100
+    assert transcript["transcript"]["extractionStatus"] == "valid"
     assert [hit["start"] for hit in transcript["matches"]] == [10, 25]
     assert all("pathways" not in hit and "pathway_set_id" not in hit for hit in transcript["matches"])
     assert transcript["tfEvidence"][0]["signature_accession"] == "PF03106"
     no_cds = run_client("transcript", "lnc-mRNA-1", "--assembly", assembly)["data"]
     assert no_cds["transcript"]["annotationStatus"] == "no_cds" and no_cds["matches"] == []
+    assert no_cds["transcript"]["extractionStatus"] == "no_cds"
 
     families = {row["family"]: row for row in run_client("families")["data"]["items"]}
     assert families["WRKY"]["counts"][0]["genes"] == 1
@@ -342,7 +374,7 @@ def test_client_round_trip_against_built_annotation_api(current_annotation_api, 
     result = run_client("export", "gene.1", "--signature", "PF03106", "--format", format_,
                         "--table", "genes", "--table", "transcripts", "--table", "domains",
                         "--table", "tf_decisions", "--table", "tf_evidence", "--output", str(output))
-    assert result["metadata"]["datasetVersion"] == "test-schema3-no-pathways"
+    assert result["metadata"]["datasetVersion"] == "test-schema4-no-pathways"
     assert result["metadata"]["tableCounts"] == {
         "genes": 1, "transcripts": 1, "domains": 2, "tf_decisions": 1, "tf_evidence": 1,
     }
@@ -352,6 +384,9 @@ def test_client_round_trip_against_built_annotation_api(current_annotation_api, 
         domain_rows = list(reader)
         assert [row["start"] for row in domain_rows] == ["10", "25"]
         assert all(row["go_terms"] == "GO:0003700(Pfam)|GO:0006355" for row in domain_rows)
+        for table in ("transcripts", "tf_decisions"):
+            rows = list(csv.DictReader(io.StringIO(archive.read(f"{table}.{format_}").decode()), delimiter=delimiter))
+            assert len(rows) == 1 and rows[0]["extraction_status"] == "valid"
 
 
 def test_stale_query_requires_explicit_version_override(current_annotation_api, tmp_path, capsys):

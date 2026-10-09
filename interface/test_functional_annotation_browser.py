@@ -27,6 +27,10 @@ ASSEMBLIES = [
     {"assemblyId": "phased_tetraploid/Des", "label": "Des", "browserAssemblyId": "phased_tetraploid/Des"},
     {"assemblyId": "phased_tetraploid/C88", "label": "C88", "browserAssemblyId": "phased_tetraploid/C88"},
 ]
+FULL_ASSEMBLIES = [
+    {"assemblyId": f"diploid/additional-{index}", "label": f"Additional genome {index}"}
+    for index in range(149)
+] + list(reversed(ASSEMBLIES))
 
 
 def gene(index=1):
@@ -46,7 +50,7 @@ def transcript(index=1, no_cds=False):
             "tfFamilies": [] if no_cds else ["WRKY"], "confidenceGrades": [] if no_cds else ["A"]}
 
 
-def mock_annotations(context, *, unavailable=False, export_error=False):
+def mock_annotations(context, *, unavailable=False, export_error=False, assemblies=None):
     calls = []
 
     def handle(route):
@@ -60,7 +64,7 @@ def mock_annotations(context, *, unavailable=False, export_error=False):
         if unavailable:
             route.fulfill(status=503, json={"detail": "Annotation release is not configured."})
         elif path.endswith("/metadata"):
-            route.fulfill(json={"datasetVersion": "test-release", "assemblies": ASSEMBLIES,
+            route.fulfill(json={"datasetVersion": "test-release", "assemblies": FULL_ASSEMBLIES if assemblies is None else assemblies,
                                 "method": "Local PlantTFDB rule evaluation", "limitations": ["Unavailable custom HMM families are not assessable."]})
         elif path.endswith("/query"):
             offset = payload.get("offset", 0)
@@ -106,6 +110,82 @@ def screenshot(page, name, tmp_path):
     directory = Path(os.getenv("POTATO_ANNOTATION_SCREENSHOTS", str(tmp_path)))
     directory.mkdir(parents=True, exist_ok=True)
     page.screenshot(path=str(directory / name), full_page=True)
+
+
+def test_full_metadata_keeps_original_genomes_and_bounds_all_export(site, browser):
+    from playwright.sync_api import expect
+
+    with browser.new_context(accept_downloads=True) as context:
+        calls = mock_annotations(context)
+        page = context.new_page()
+        page.goto(site + "/functional-annotation")
+        expect(page.locator("#query-status")).to_contain_text("51 matching genes")
+        expect(page.locator("#assembly-options label span")).to_have_text([
+            "DMv8.2", "E4-63", "A6-26", "Désirée", "C88"])
+        assert len(FULL_ASSEMBLIES) == 154
+        assert page.locator("#assembly-options input:checked").evaluate_all("nodes => nodes.map(n => n.value)") == [ASSEMBLIES[0]["assemblyId"]]
+        page.locator("#all-assemblies").click()
+        page.locator("#search-button").click()
+        expected_ids = [assembly["assemblyId"] for assembly in ASSEMBLIES]
+        expect(page.locator("#query-status")).to_contain_text("51 matching genes")
+        assert [payload for path, payload in calls if path.endswith("/query")][-1]["assemblyIds"] == expected_ids
+        assert parse_qs(urlsplit(page.url).query)["assemblyIds"] == expected_ids
+        page.locator("#export-all").click()
+        with page.expect_download():
+            page.locator("#download-export").click()
+        payload = [payload for path, payload in calls if path.endswith("/export-download")][-1]
+        assert payload["query"]["assemblyIds"] == expected_ids
+        page.locator("#close-export").click()
+        page.locator("#assembly-options input").evaluate_all("nodes => nodes.forEach(n => n.checked = false)")
+        queries_before = sum(path.endswith("/query") for path, _ in calls)
+        page.locator("#search-button").click()
+        expect(page.locator("#query-status")).to_have_text("Select at least one genome.")
+        assert sum(path.endswith("/query") for path, _ in calls) == queries_before
+        page.locator("#reset-search").click()
+        expect(page.locator("#query-status")).to_contain_text("51 matching genes")
+        assert [payload for path, payload in calls if path.endswith("/query")][-1]["assemblyIds"] == [ASSEMBLIES[0]["assemblyId"]]
+
+
+@pytest.mark.parametrize("assembly_params", [
+    "assemblyIds=diploid%2Fadditional-0&assemblyIds=monoploid%2FE4-63",
+    "assemblyIds=diploid%2Fadditional-0",
+    "assemblyIds=",
+])
+def test_url_genomes_never_expand_to_full_release(site, browser, assembly_params):
+    from playwright.sync_api import expect
+
+    with browser.new_context() as context:
+        calls = mock_annotations(context)
+        page = context.new_page()
+        page.goto(site + "/functional-annotation?" + assembly_params)
+        if "E4-63" in assembly_params:
+            expect(page.locator("#query-status")).to_contain_text("51 matching genes")
+            assert [payload for path, payload in calls if path.endswith("/query")][-1]["assemblyIds"] == ["monoploid/E4-63"]
+            assert parse_qs(urlsplit(page.url).query)["assemblyIds"] == ["monoploid/E4-63"]
+        else:
+            expect(page.locator("#query-status")).to_have_text("Select at least one genome.")
+            expect(page.locator("#dataset-status")).to_be_hidden()
+            expect(page.locator("#search-button")).to_be_enabled()
+            expect(page.locator("#export-all")).to_be_disabled()
+            expect(page.locator("#assembly-options input:checked")).to_have_count(0)
+            expect(page.locator("#results-body tr")).to_have_count(0)
+            assert not any(path.endswith("/query") for path, _ in calls)
+            page.get_by_role("checkbox", name="DMv8.2", exact=True).check()
+            page.locator("#search-button").click()
+            expect(page.locator("#query-status")).to_contain_text("51 matching genes")
+            assert [payload for path, payload in calls if path.endswith("/query")][-1]["assemblyIds"] == ["monoploid/DMv8.2"]
+
+
+def test_release_without_visible_genomes_does_not_query_hidden_genomes(site, browser):
+    from playwright.sync_api import expect
+
+    with browser.new_context() as context:
+        calls = mock_annotations(context, assemblies=FULL_ASSEMBLIES[:149])
+        page = context.new_page()
+        page.goto(site + "/functional-annotation")
+        expect(page.locator("#dataset-status")).to_contain_text("No annotation genomes are available")
+        expect(page.locator("#search-button")).to_be_disabled()
+        assert not any(path.endswith("/query") for path, _ in calls)
 
 
 @pytest.mark.parametrize("width", [390, 1440])

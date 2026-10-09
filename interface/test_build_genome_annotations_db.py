@@ -144,9 +144,13 @@ def test_annotation_download_omits_pathways_and_keeps_other_columns(tmp_path):
     assert filename.endswith(".domains.tsv.gz")
     with gzip.open(output.parent / relative, "rt") as handle:
         reader = csv.DictReader(handle, delimiter="\t")
-        assert reader.fieldnames == ["assembly_id", "transcript_id", "signature_accession", "go_terms", "score"]
-        assert list(reader) == [{"assembly_id": "monoploid/DMv8.2", "transcript_id": "gene.1.1",
-                                 "signature_accession": "PF03106", "go_terms": "GO:0003700(Pfam)", "score": "1E-20"}]
+        from interface.genome_annotation_fields import DOMAIN_DOWNLOAD_FIELDS
+        assert reader.fieldnames == list(DOMAIN_DOWNLOAD_FIELDS)
+        rows = list(reader)
+        assert len(rows) == 2
+        assert [row["start"] for row in rows] == ["10", "25"]
+        assert all(row["global_unique_protein_id"] == "UPglobal1" for row in rows)
+        assert all(row["global_transcript_key"] == "monoploid/DMv8.2::gene.1.1" for row in rows)
 
 
 def test_checksum_failure_preserves_existing_release(tmp_path):
@@ -176,7 +180,7 @@ def test_pathways_omitted_without_collapsing_repeated_hits(tmp_path):
     freeze_manifests(source)
     output = tmp_path / "annotations.sqlite"
     result = build_database(source, output, "v1")
-    assert result["schema_version"] == 3
+    assert result["schema_version"] == 4
     assert result["counts"]["annotation_hits"] == len(pathways)
     with sqlite3.connect(output) as conn:
         assert not conn.execute("SELECT name FROM sqlite_master WHERE name LIKE '%pathway%'").fetchall()
@@ -185,8 +189,8 @@ def test_pathways_omitted_without_collapsing_repeated_hits(tmp_path):
         assert len(rows) == len(pathways)
         assert all(row[1:] == rows[0][1:] for row in rows)
         assert conn.execute("PRAGMA foreign_key_check").fetchall() == []
-        assert conn.execute("PRAGMA user_version").fetchone()[0] == 3
-        assert conn.execute("SELECT schema_version FROM metadata").fetchone()[0] == 3
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == 4
+        assert conn.execute("SELECT schema_version FROM metadata").fetchone()[0] == 4
         assert conn.execute("SELECT COUNT(*) FROM matches_fts WHERE matches_fts MATCH 'WRKY'").fetchone()[0] == len(pathways)
 
 
@@ -252,3 +256,240 @@ def test_inclusive_tf_decision_preserves_nonselected_states_and_families(tmp_pat
         assert selected == 0
         assert json.loads(raw)["is_tf_inclusive_result"] == decision
         assert conn.execute("SELECT COUNT(*) FROM protein_families WHERE protein_id='UPglobal2'").fetchone()[0] == (0 if decision == "false" else 2)
+
+
+def make_full_source(root: Path) -> Path:
+    """Native full-release contracts, four exception kinds and private extra columns."""
+    source = make_source(root)
+    tf = source / TF_ROOT
+    assembly = "monoploid/DMv8.2"
+    metadata = source / "parent/metadata/transcripts/monoploid/DMv8.2.transcripts.tsv.gz"
+    with gzip.open(metadata, "rt") as handle:
+        transcripts = list(csv.DictReader(handle, delimiter="\t"))
+    for status in ("duplicate_gff_transcript_id", "empty_protein", "missing_protein"):
+        transcripts.append(dict(transcripts[-1], transcript_id=status + ".t", gene_id=status,
+                                status=status, reason="retained source exception"))
+    for row in transcripts:
+        row.update(global_transcript_key=f"{assembly}::{row['transcript_id']}",
+                   gff_occurrences="4" if row["status"] == "duplicate_gff_transcript_id" else "1",
+                   internal_path="/private/source/never-publish")
+    _tsv(source / "metadata/transcripts/monoploid/DMv8.2.transcripts.tsv.gz", transcripts)
+    exceptions = [dict(row, gene_attribution="assigned", global_gene_key=f"{assembly}::{row['gene_id']}")
+                  for row in transcripts if row["status"] != "valid"]
+    _tsv(tf / "results/extraction_exceptions.tsv.gz", exceptions)
+    genes_path = tf / "results/gene_decisions.tsv.gz"
+    with gzip.open(genes_path, "rt") as handle:
+        genes = list(csv.DictReader(handle, delimiter="\t"))
+    genes.extend(dict(genes[-1], gene_id=row["gene_id"]) for row in exceptions[1:])
+    _tsv(genes_path, genes)
+    _tsv(source / "metadata/source_assemblies.tsv", [{"id": assembly, "reference_absolute": "/private/source/genome.fa"}])
+    (source / "metadata/source_inputs.lock.json").unlink()
+    _tsv(source / "qc/final_counts_by_assembly.tsv", [{"assembly_id": assembly, "metadata_rows": 6,
+        "valid_transcripts": 2, "matched_transcripts": 1, "no_match_transcripts": 1,
+        "exception_unique_transcript_ids": 4}])
+    _tsv(tf / "qc/assembly_summary.tsv", [{"assembly_id": assembly, "total_genes": 5,
+        "total_transcripts": 6, "valid_transcripts": 2, "extraction_exceptions": 4}])
+    _write(source / "qc/T14_final_validation.json", json.dumps({"status": "PASS",
+        "validation": {"all_assembly_counts_close": True, "unknown_or_missing_ids": 0, "duplicate_annotation_rows": 0},
+        "counts": {"assemblies": 1, "metadata_rows": 6, "valid_transcripts": 2,
+                   "exception_unique_transcript_ids": 4, "input_protein_count": 2,
+                   "matched_protein_count": 1, "no_hit_protein_count": 1,
+                   "matched_transcripts": 1, "no_match_transcripts": 1,
+                   "annotation_rows": 2, "tsv_line_count": 2}}))
+    summary_path = tf / "qc/run_summary.json"
+    summary = json.loads(summary_path.read_text())
+    summary["status"] = "COMPUTE_COMPLETE"
+    summary.pop("software")
+    summary.pop("limitations")
+    summary["counts"] = {"total_genes": 5, "total_transcripts": 6, "valid_transcripts": 2,
+                         "extraction_exceptions": 4, "unique_proteins_total": 2,
+                         "protein_selected_tf": 1, "selected_tf_genes": 1,
+                         "selected_tf_transcripts": 1, "evidence_rows": 1,
+                         **{"exception_" + row["status"]: 1 for row in exceptions}}
+    summary_path.write_text(json.dumps(summary))
+    _write(tf / "qc/final_validation.json", json.dumps({"status": "PASS",
+        "checks": {"all_transcripts_match_protein_decisions": True}, "counts": summary["counts"],
+        "five_genome_regression": "PASS"}))
+    _write(tf / "qc/five_genome_regression.json", json.dumps({"status": "PASS",
+        "biological_and_sequence_fields_strict": True, "unused_source_difference_approvals": []}))
+    _write(source / "metadata/production_signature.json", json.dumps({"payload": {
+        "execution_signature_payload": {"applications": ["CDD", "PANTHER", "Pfam", "SMART"],
+            "tracked_files": {"interproscan_jar": {"path": "/opt/interproscan-5.74-105.0/interproscan-5.jar"}}}}}))
+    for old, new in (("results/unique/interproscan_global_unique.tsv.gz", "results/unique/interproscan_unique.tsv.gz"),
+                     ("results/unique/no_match_global_unique.tsv.gz", "results/unique/no_match_unique.tsv.gz"),
+                     ("metadata/transcript_to_selected_unique.tsv.gz", "unique/transcript_to_unique.tsv.gz")):
+        with gzip.open(source / old, "rt") as handle:
+            content = handle.read()
+        _write(source / new, content.replace("global_unique_protein_id", "unique_protein_id"))
+        (source / old).unlink()
+    for name in ("gene_decisions", "protein_decisions", "transcript_decisions", "tf_evidence"):
+        path = tf / f"results/{name}.tsv.gz"
+        with gzip.open(path, "rt") as handle:
+            rows = list(csv.DictReader(handle, delimiter="\t"))
+        for row in rows:
+            row["internal_path"] = "/private/source/never-publish"
+            row["pathways"] = "NEVER_IMPORT"
+        _tsv(path, rows)
+    freeze_manifests(source)
+    return source
+
+
+def test_full_source_preserves_exceptions_and_only_original_public_fields(tmp_path):
+    from interface.build_genome_annotations_db import preflight_sources
+    from interface.genome_annotation_fields import EXCEPTION_DOWNLOAD_FIELDS, EXCEPTION_FIELDS
+    source = make_full_source(tmp_path / "source")
+    assert preflight_sources(source)["source_format"] == "full"
+    output = tmp_path / "release/annotations.sqlite"
+    result = build_database(source, output, "full-v4", downloads_dir=output.parent / "downloads")
+    assert result["counts"]["transcripts_total"] == 6
+    assert result["counts"]["transcripts_exceptions"] == 4
+    assert result["counts"]["annotation_hits"] == 2
+    with sqlite3.connect(output) as conn:
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == 4
+        statuses = dict(conn.execute("SELECT status,count(*) FROM transcripts GROUP BY status"))
+        assert statuses == {"valid": 2, "no_cds": 1, "duplicate_gff_transcript_id": 1, "empty_protein": 1, "missing_protein": 1}
+        raw = json.loads(conn.execute("SELECT data_json FROM transcripts WHERE status='duplicate_gff_transcript_id'").fetchone()[0])
+        assert set(raw) <= set(EXCEPTION_FIELDS)
+        assert raw["gff_occurrences"] == "4"
+        for table in ("genes", "proteins", "transcripts", "tf_evidence", "tf_families"):
+            assert not any("internal_path" in row[0] or "pathways" in row[0] or "/private" in row[0]
+                           for row in conn.execute(f"SELECT data_json FROM {table}"))
+        public = conn.execute("SELECT metadata_json FROM metadata").fetchone()[0]
+        assert "/opt/" not in public and "/private" not in public and "execution_signature_payload" not in public
+        relative = conn.execute("SELECT relative_path FROM downloads WHERE category='extraction_exceptions'").fetchone()[0]
+        with gzip.open(output.parent / relative, "rt") as handle:
+            reader = csv.DictReader(handle, delimiter="\t")
+            assert reader.fieldnames == list(EXCEPTION_DOWNLOAD_FIELDS)
+            assert len(list(reader)) == 4
+        for filename, relative in conn.execute("SELECT filename,relative_path FROM downloads"):
+            data = gzip.open(output.parent / relative, "rt").read() if filename.endswith(".gz") else (output.parent / relative).read_text()
+            assert "pathways" not in data and "NEVER_IMPORT" not in data and "/private" not in data
+
+
+@pytest.mark.parametrize("failure", ["annotation_gate", "tf_gate", "checksum", "exception_parent", "expanded_count", "orphan_exception"])
+def test_full_source_rejects_failed_release_without_replacing_database(tmp_path, failure):
+    source = make_full_source(tmp_path / "source")
+    if failure in {"annotation_gate", "tf_gate", "expanded_count"}:
+        path = source / ("tf_extraction_planttfdb_rules/qc/final_validation.json" if failure == "tf_gate" else "qc/T14_final_validation.json")
+        report = json.loads(path.read_text())
+        if failure == "expanded_count":
+            report["counts"]["annotation_rows"] = 99
+        elif failure == "annotation_gate":
+            report["validation"]["all_assembly_counts_close"] = False
+        else:
+            report["checks"]["all_transcripts_match_protein_decisions"] = False
+        path.write_text(json.dumps(report))
+    else:
+        path = source / TF_ROOT / "results/extraction_exceptions.tsv.gz"
+        with gzip.open(path, "rt") as handle:
+            rows = list(csv.DictReader(handle, delimiter="\t"))
+        if failure == "exception_parent":
+            rows[0]["gene_id"] = "gene.1"
+        elif failure == "orphan_exception":
+            rows[0]["gene_attribution"] = "unassigned"
+        else:
+            rows[0]["reason"] = "changed after release"
+        _tsv(path, rows)
+    if failure != "checksum":
+        freeze_manifests(source)
+    output = tmp_path / "annotations.sqlite"
+    output.write_bytes(b"previous release")
+    with pytest.raises(ValueError):
+        build_database(source, output, "full-v4")
+    assert output.read_bytes() == b"previous release"
+    assert not list(tmp_path.glob(".annotations.sqlite-*.tmp"))
+
+
+def test_huge_pathway_cells_are_dropped_before_csv_field_limit(tmp_path):
+    source = make_full_source(tmp_path / "source")
+    path = source / "results/unique/interproscan_unique.tsv.gz"
+    with gzip.open(path, "rt") as handle:
+        rows = list(csv.reader(handle, delimiter="\t"))
+    payload = "pathway-padding" * 100_000
+    _write(path, "\n".join("\t".join([*row[:-1], payload]) for row in rows) + "\n")
+    freeze_manifests(source)
+    output = tmp_path / "annotations.sqlite"
+    result = build_database(source, output, "full-v4")
+    assert result["counts"]["annotation_hits"] == 2
+    assert output.stat().st_size < 1_000_000
+
+
+def test_full_release_keeps_global_proteins_shared_across_assembly_qualified_ids(tmp_path):
+    source = make_full_source(tmp_path / "source")
+    tf = source / TF_ROOT
+    first, second = "monoploid/DMv8.2", "phased_diploid/other"
+    for relative in ("results/gene_decisions.tsv.gz", "results/transcript_decisions.tsv.gz", "results/extraction_exceptions.tsv.gz"):
+        path = tf / relative
+        with gzip.open(path, "rt") as handle:
+            rows = list(csv.DictReader(handle, delimiter="\t"))
+        copied = [{key: value.replace(first + "::", second + "::") if key.startswith("global_") else value
+                   for key, value in row.items()} for row in rows]
+        for row in copied:
+            row["assembly_id"] = second
+        _tsv(path, [*rows, *copied])
+    metadata = source / f"metadata/transcripts/{first}.transcripts.tsv.gz"
+    with gzip.open(metadata, "rt") as handle:
+        rows = list(csv.DictReader(handle, delimiter="\t"))
+    for row in rows:
+        row["assembly_id"] = second
+        row["global_transcript_key"] = row["global_transcript_key"].replace(first + "::", second + "::")
+    _tsv(source / f"metadata/transcripts/{second}.transcripts.tsv.gz", rows)
+    mapping = source / "unique/transcript_to_unique.tsv.gz"
+    with gzip.open(mapping, "rt") as handle:
+        rows = list(csv.DictReader(handle, delimiter="\t"))
+    _tsv(mapping, [*rows, *[dict(row, assembly_id=second) for row in rows]])
+    _tsv(source / "metadata/source_assemblies.tsv", [{"id": first}, {"id": second}])
+    for path in (source / "qc/final_counts_by_assembly.tsv", tf / "qc/assembly_summary.tsv"):
+        rows = list(csv.DictReader(path.open(), delimiter="\t"))
+        _tsv(path, [*rows, *[dict(row, assembly_id=second) for row in rows]])
+    for path in (tf / "qc/run_summary.json", tf / "qc/final_validation.json"):
+        report = json.loads(path.read_text())
+        for key in ("total_genes", "total_transcripts", "valid_transcripts", "extraction_exceptions",
+                    "selected_tf_genes", "selected_tf_transcripts", "exception_no_cds",
+                    "exception_empty_protein", "exception_missing_protein", "exception_duplicate_gff_transcript_id"):
+            report["counts"][key] *= 2
+        path.write_text(json.dumps(report))
+    path = source / "qc/T14_final_validation.json"
+    report = json.loads(path.read_text())
+    for key in ("assemblies", "metadata_rows", "valid_transcripts", "exception_unique_transcript_ids",
+                "matched_transcripts", "no_match_transcripts", "annotation_rows"):
+        report["counts"][key] *= 2
+    path.write_text(json.dumps(report))
+    _tsv(tf / "qc/family_counts.tsv", [
+        {"scope": scope, "family": "WRKY", "selected_genes": 2 if scope == "ALL" else 1,
+         "selected_transcripts": 2 if scope == "ALL" else 1, "selected_unique_proteins": 1}
+        for scope in ("ALL", first, second)])
+    freeze_manifests(source)
+    output = tmp_path / "annotations.sqlite"
+    result = build_database(source, output, "full-two-genomes")
+    assert result["counts"]["genes_total"] == 10
+    assert result["counts"]["transcripts_total"] == 12
+    assert result["counts"]["unique_proteins_total"] == 2
+    assert result["counts"]["annotation_hits"] == 2
+    with sqlite3.connect(output) as conn:
+        assert conn.execute("SELECT assembly_id FROM genes WHERE gene_id='gene.1' ORDER BY assembly_id").fetchall() == [(first,), (second,)]
+        assert conn.execute("SELECT genes,transcripts,proteins FROM tf_counts WHERE assembly_id='ALL'").fetchone() == (2, 2, 1)
+        assert conn.execute("PRAGMA foreign_key_check").fetchall() == []
+
+
+@pytest.mark.parametrize("field,value", [("status", "FAIL"), ("biological_and_sequence_fields_strict", False),
+                                        ("unused_source_difference_approvals", ["unreviewed"])])
+def test_full_regression_gate_requires_accepted_source_differences(tmp_path, field, value):
+    from interface.build_genome_annotations_db import preflight_sources
+    source = make_full_source(tmp_path / "source")
+    path = source / TF_ROOT / "qc/five_genome_regression.json"
+    report = json.loads(path.read_text())
+    report[field] = value
+    path.write_text(json.dumps(report))
+    freeze_manifests(source)
+    with pytest.raises(ValueError, match="five-genome regression"):
+        preflight_sources(source)
+
+
+def test_schema4_rejects_protein_for_exception_and_missing_protein_for_valid(tmp_path):
+    from interface.build_genome_annotations_db import SCHEMA_SQL
+    with sqlite3.connect(":memory:") as conn:
+        conn.executescript(SCHEMA_SQL)
+        for status, protein in (("valid", None), ("no_cds", "UP1"), ("missing_protein", "UP1")):
+            with pytest.raises(sqlite3.IntegrityError, match="CHECK"):
+                conn.execute("INSERT INTO transcripts VALUES(?,?,?,?,?,?,?)", ("a", "t", "g", protein, status, "", "{}"))

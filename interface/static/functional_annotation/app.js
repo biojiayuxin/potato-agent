@@ -2,6 +2,9 @@
   'use strict';
   const API = '/api/genome-annotations';
   const PAGE_SIZE = 20;
+  // The API covers the full release; this page keeps its original genome scope.
+  const PAGE_ASSEMBLY_IDS = ['monoploid/DMv8.2', 'monoploid/E4-63', 'monoploid/A6-26',
+    'phased_tetraploid/Des', 'phased_tetraploid/C88'];
   const $ = id => document.getElementById(id);
   const split = value => [...new Set(String(value || '').split(/[\s,;]+/).filter(Boolean))];
   const format = value => Number(value || 0).toLocaleString('en-US');
@@ -70,7 +73,7 @@
     return query;
   }
   function setQuery(query) {
-    const assemblies = query.assemblyIds?.length ? query.assemblyIds : state.metadata.assemblies.map(a => a.assemblyId);
+    const assemblies = list(query.assemblyIds);
     $('assembly-options').querySelectorAll('input').forEach(n => { n.checked = assemblies.includes(n.value); });
     $('gene-scope').querySelectorAll('input').forEach(n => { n.checked = n.value === (query.tfStatus === 'selected' ? 'selected' : 'all'); });
     Object.entries(scalarControls).forEach(([key, id]) => {
@@ -84,7 +87,7 @@
     updateSearchLabel();
   }
   function defaultQuery() {
-    const assembly = state.metadata.assemblies.find(a => a.label === 'DMv8.2' || a.assemblyId.endsWith('/DMv8.2')) || state.metadata.assemblies[0];
+    const assembly = state.metadata.assemblies[0];
     return {assemblyIds:[assembly.assemblyId], view:'genes', tfStatus:'all', ids:[], limit:PAGE_SIZE, offset:0};
   }
   function queryFromURL() {
@@ -336,13 +339,19 @@
     document.body.append(frame,form); form.submit(); form.remove();
     message($('export-status'),'Download requested. Your browser will show its progress; use browser downloads to cancel.');
   }
+  function applyQuery() {
+    try { return runQuery(readQuery()); }
+    catch (error) {
+      message($('query-status'),error.message,true);
+      if (!state.result) $('results-body').replaceChildren();
+    }
+  }
   function bind() {
     for (const event of ['pointerover','pointermove','focusin']) $('results-body').addEventListener(event,showDomainTooltip);
     for (const event of ['pointerout','pointerleave','focusout']) $('results-body').addEventListener(event,hideDomainTooltip);
     document.addEventListener('keydown',event => { if (event.key === 'Escape') hideDomainTooltip(); });
     window.addEventListener('scroll',hideDomainTooltip,true);
     window.addEventListener('resize',hideDomainTooltip);
-    const applyQuery = () => { try { runQuery(readQuery()); } catch (error) { message($('query-status'),error.message,true); } };
     $('query-form').addEventListener('submit',event => { event.preventDefault(); applyQuery(); });
     $('gene-scope').addEventListener('change',applyQuery);
     $('search-kind').addEventListener('change',updateSearchLabel);
@@ -364,6 +373,7 @@
     bind(); $('ask-potato-agent').disabled = true;
     try {
       state.metadata = await json(`${API}/metadata`);
+      state.metadata.assemblies = PAGE_ASSEMBLY_IDS.map(id => state.metadata.assemblies?.find(a => a.assemblyId === id)).filter(Boolean);
       if (!state.metadata.assemblies?.length) throw new Error('No annotation genomes are available in this release.');
       state.metadata.assemblies.forEach(assembly => {
         const label = el('label',null,'assembly-option'), checkbox = el('input'); checkbox.type = 'checkbox'; checkbox.value = assembly.assemblyId; label.append(checkbox,el('span',assemblyLabel(assembly.assemblyId))); $('assembly-options').append(label);
@@ -372,7 +382,7 @@
       if (params.get('batch') === 'reimport') {
         message($('query-status'),'This link originally used a batch of IDs. Reimport the batch and press Search to reproduce the results.');
         $('results-body').replaceChildren(); $('batch-section').open = true; updateSelection();
-      } else await runQuery(readQuery());
+      } else await applyQuery();
     } catch (error) {
       $('dataset-status').hidden = false;
       message($('dataset-status'),`Annotation data is unavailable. ${error.message}`,true);
