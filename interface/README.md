@@ -337,6 +337,15 @@ python -m interface.build_genome_feature_index \
   总请求长度上限均为 1,000,000 bp，最多 256 段。只有显式 `clip=true` 时才裁剪越界区间。
 - Genome Browser 数据下载路由只允许 manifest 明确列出的 JBrowse 文件；集中索引不会作为静态文件公开。
 
+2026-10-09 已接入 Atlantic（ATL_v3，2023-02-17 更新）和 Castle Russet（CR_v2.0），
+发布时共 156 个材料、17 个四倍体材料，保留完整参考序列及未定位 scaffold。
+Atlantic 注释补充了 mRNA Parent，并由通用导入器生成 gene 行；原始下载文件、ID、坐标和
+CDS phase 保持不变，逐转录本审计表保存在其 annotation 目录。
+本批次来源、验收报告及截图保存在
+`/mnt/data/public_data/.genome-browser-imports/20261009-atlantic-castle-russet/`，
+发布前清单和索引备份保存在数据库 `.deployment-backups/20261009-atlantic-castle-russet/`。
+一次性批次脚本已清理；后续导入使用上文的通用导入器及特征索引工具。
+
 ## 新增的 TUI Gateway Bridge 骨架
 
 - `GET /api/tui/ws`

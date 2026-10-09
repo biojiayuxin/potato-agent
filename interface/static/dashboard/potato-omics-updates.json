@@ -1,6 +1,14 @@
 {
   "updates": [
     {
+      "version": "2026-10-09-001",
+      "title": "Atlantic and Castle Russet genomes",
+      "date": "October 9, 2026",
+      "summary": "Added the Atlantic and Castle Russet tetraploid genomes to the genome browser.",
+      "items": [],
+      "source_commits": []
+    },
+    {
       "version": "2026-09-28-002",
       "title": "Domain annotation",
       "date": "September 28, 2026",
