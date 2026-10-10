@@ -1,7 +1,7 @@
 {
-  "template_version": "v8",
+  "template_version": "v9",
   "template_file": "potato-template.svg",
-  "template_sha256": "10cff8ddc59742bada2dc500b20809c9eb017b9d6fe5dae786abcfffc32e3ce2",
+  "template_sha256": "5a5eed624c37d007aab25a9b3353faedc8f2b453aa7e473fd78af07aac064dd3",
   "tissues": [
     {
       "id": "flower",
@@ -22,6 +22,10 @@
     {
       "id": "anther",
       "label": "花药"
+    },
+    {
+      "id": "carpel",
+      "label": "心皮"
     },
     {
       "id": "stem",

@@ -4,6 +4,7 @@ import shutil
 import subprocess
 import hashlib
 import json
+import re
 import xml.etree.ElementTree as ET
 from pathlib import Path
 
@@ -39,8 +40,23 @@ def test_efp_pdf_assets_match_the_svg_and_embedded_fonts() -> None:
     geometry = json.loads((STATIC / 'pdf-geometry.json').read_text())
     assert geometry['templateSha256'] == hashlib.sha256(svg).hexdigest()
     root = ET.fromstring(svg)
-    assert set(geometry['regions']) == {node.attrib['data-tissue'] for node in root.iter() if 'data-tissue' in node.attrib}
+    tissues = [node.attrib['data-tissue'] for node in root.iter() if 'data-tissue' in node.attrib]
+    assert len(tissues) == len(set(tissues)) == 17
+    assert 'carpel' in tissues and 'pistil' not in tissues
+    assert set(geometry['regions']) == set(tissues)
     assert geometry['viewBox'] == [float(n) for n in root.attrib['viewBox'].split()]
+    ids = [node.attrib['id'] for node in root.iter() if 'id' in node.attrib]
+    assert len(ids) == len(set(ids))
+    references = set()
+    for node in root.iter():
+        for name, value in node.attrib.items():
+            if name.rsplit('}', 1)[-1] == 'href':
+                assert value.startswith('#')
+                references.add(value[1:])
+            elif name in {'aria-labelledby', 'aria-describedby'}:
+                references.update(value.split())
+            references.update(re.findall(r'url\(\s*[\'"]?#([^\s)\'"]+)', value))
+    assert references <= set(ids)
     for font in geometry['fonts']:
         assert hashlib.sha256((STATIC / font['file']).read_bytes()).hexdigest() == font['sha256']
         assert len(font['widths']) == 95
@@ -99,9 +115,10 @@ const floral = adaptExpression({...data,
   columns: ['flower', 'perianth', 'anther', 'flower bud', 'carpel'].map(tissue => ({tissue})),
 });
 assert.deepEqual([floral.payload.expression.flower, floral.payload.expression.perianth,
-  floral.payload.expression.anther, floral.payload.expression.flower_bud], [-1, 0, 1, 2]);
-assert.deepEqual(floral.unmappedTissues, ['carpel']);
-assert.equal(floral.payload.scale.max, 3); // Includes unmapped tissues.
+  floral.payload.expression.anther, floral.payload.expression.flower_bud,
+  floral.payload.expression.carpel], [-1, 0, 1, 2, 3]);
+assert.deepEqual(floral.unmappedTissues, []);
+assert.equal(floral.payload.scale.max, 3);
 assert.throws(() => adaptExpression({...data, values: [[NaN, 0, 1, 2, 3]]}), /invalid value/);
 assert.throws(() => adaptExpression({...data, rawValues: [['0', 2, 10, 20, 40]]}), /invalid value/);
 assert.throws(() => adaptExpression({...data, values: [[0]]}), /Expected/);
@@ -109,6 +126,69 @@ assert.throws(() => adaptExpression({...data, scope: 'sample'}), /Expected/);
 assert.throws(() => adaptExpression({...data, columns: [{tissue:'root'}, {tissue:'root'}, ...data.columns.slice(2)]}), /Ambiguous/);
 assert.throws(() => prepareExpression({...logged.payload, expression: {root: -1}}), /invalid/);
 console.log('eFP adapter and scale checks passed');
+'''
+    result = subprocess.run([node, "--input-type=module", "-e", script], cwd=STATIC, text=True, capture_output=True)
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
+def test_efp_floral_organs_use_independent_exact_api_tissues() -> None:
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("Node is required for frontend numerical regression checks")
+    script = r'''
+import assert from 'node:assert/strict';
+import {adaptExpression} from './expression.mjs';
+import {prepareExpression, MISSING_COLOUR} from './potato-efp.mjs';
+const tissues = ['flower', 'perianth', 'anther', 'carpel', 'pistil'];
+const raw = [40, 0, 10, 20, 100];
+const data = {
+  scope: 'tissue', genes: [{geneId: 'FloralGene'}],
+  columns: tissues.map(tissue => ({tissue})), rawValues: [raw],
+};
+for (const [transform, values, min, max] of [
+  ['tpm', raw, 0, 100],
+  ['log2_tpm', [5.357552, 0, 3.459432, 4.392317, 6.658211], 0, 6.658211],
+  ['row_zscore', [-1, 0, 1, -2, 4], -4, 4],
+]) {
+  const adapted = adaptExpression({...data, transform, values: [values]});
+  const result = prepareExpression(adapted.payload);
+  for (const [index, tissue] of tissues.slice(0, 4).entries()) {
+    assert.equal(adapted.payload.expression[tissue], values[index]);
+    assert.equal(adapted.rawTpm[tissue], raw[index]);
+    assert.deepEqual(adapted.tissueValues.find(row => row.tissue === tissue).diagramIds, [tissue]);
+    const region = result.rows.find(row => row.id === tissue);
+    assert.equal(region.missing, false);
+    assert.notEqual(region.colour, MISSING_COLOUR);
+  }
+  assert.equal(result.rows.find(row => row.id === 'carpel').label, 'Carpel');
+  assert.equal(result.scale.min, min);
+  assert.equal(result.scale.max, max); // Includes the unmapped pistil column.
+  assert.deepEqual(adapted.unmappedTissues, ['pistil']);
+  assert.deepEqual(adapted.tissueValues.find(row => row.tissue === 'pistil').diagramIds, []);
+  assert.ok(!Object.hasOwn(adapted.payload.expression, 'pistil'));
+}
+for (const tissue of tissues.slice(0, 4)) {
+  const index = tissues.indexOf(tissue);
+  for (const value of [0, null]) {
+    const values = raw.map((original, i) => i === index ? value : original);
+    const adapted = adaptExpression({...data, transform: 'tpm', values: [values], rawValues: [values]});
+    const result = prepareExpression(adapted.payload);
+    for (const [i, id] of tissues.slice(0, 4).entries()) {
+      const region = result.rows.find(row => row.id === id);
+      assert.equal(region.value, values[i]);
+      assert.equal(region.missing, values[i] === null);
+      assert.equal(region.colour === MISSING_COLOUR, values[i] === null);
+    }
+  }
+}
+const absent = adaptExpression({
+  ...data, transform: 'tpm', columns: [{tissue: 'flower'}, {tissue: 'pistil'}],
+  values: [[40, 20]], rawValues: [[40, 20]],
+});
+assert.equal(absent.payload.expression.flower, 40);
+for (const id of ['perianth', 'anther', 'carpel']) assert.equal(absent.payload.expression[id], null);
+assert.deepEqual(absent.unmappedTissues, ['pistil']); // No alias and no generic flower fallback.
+console.log('eFP independent floral tissue checks passed');
 '''
     result = subprocess.run([node, "--input-type=module", "-e", script], cwd=STATIC, text=True, capture_output=True)
     assert result.returncode == 0, result.stdout + result.stderr

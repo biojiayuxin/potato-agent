@@ -17,11 +17,11 @@ let assetsPromise;
 async function assets() {
   if (!assetsPromise) assetsPromise = (async () => {
     const base = new URL('.', import.meta.url);
-    const response = await fetch(new URL('pdf-geometry.json?v=20260923-pdf1', base));
+    const response = await fetch(new URL('pdf-geometry.json?v=20261010-petal-fill-fix', base));
     if (!response.ok) throw new Error('PDF drawing data could not be loaded. Please retry.');
     const geometry = await response.json();
     const fonts = await Promise.all(geometry.fonts.map(async font => {
-      const response = await fetch(new URL(font.file + '?v=20260923-pdf1', base));
+      const response = await fetch(new URL(font.file + '?v=20261010-flower-details', base));
       if (!response.ok) throw new Error('PDF fonts could not be loaded. Please retry.');
       return new Uint8Array(await response.arrayBuffer());
     }));
@@ -101,7 +101,11 @@ export async function vectorPdf(figure, suppliedAssets) {
     if (figure.viewBox && figure.viewBox.join() !== box.join()) throw new Error('The PDF template does not match the drawing.');
     const groups = figure.regions;
     if (groups.length !== Object.keys(geometry.regions).length) throw new Error('The PDF tissue regions do not match.');
-    push('q', `${n(value(el, 'width') / box[2])} 0 0 ${n(value(el, 'height') / box[3])} ${n(value(el, 'x'))} ${n(value(el, 'y'))} cm`);
+    // Match the SVG default preserveAspectRatio="xMidYMid meet".
+    const scale = Math.min(value(el, 'width') / box[2], value(el, 'height') / box[3]);
+    const x = value(el, 'x') + (value(el, 'width') - box[2] * scale) / 2 - box[0] * scale;
+    const y = value(el, 'y') + (value(el, 'height') - box[3] * scale) / 2 - box[1] * scale;
+    push('q', `${n(scale)} 0 0 ${n(scale)} ${n(x)} ${n(y)} cm`);
     for (const group of groups) {
       const path = geometry.regions[group.id];
       if (!path) throw new Error(`Missing PDF region: ${group.id}`);
@@ -109,6 +113,8 @@ export async function vectorPdf(figure, suppliedAssets) {
     }
     push(`0 0 0 RG ${n(geometry.strokeWidth)} w 0 J 0 j 10 M`);
     for (const path of geometry.linework) push(path, 'S');
+    push('0 0 0 rg');
+    for (const path of geometry.filledLinework || []) push(path, 'f');
     push('Q');
   }
   function render(el) {

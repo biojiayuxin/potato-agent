@@ -12,7 +12,10 @@ are accepted for young/mature leaves and flower buds. Generic `flower` does not
 map to flower bud. It maps to the two front-facing open flowers at the top of the
 drawing, including their petals and centers, as marked in `Potato-flower-2.png`.
 These shapes belong exclusively to `flower`; the other floral shapes retain
-their separate perianth, anther, and flower-bud assignments. The following
+their separate perianth, anther, and flower-bud assignments. The upper-right
+flower detail drawing shares `perianth` and `anther` with the plant and adds
+`carpel`, matching the atlas tissue name exactly. There is no `pistil` alias.
+The following
 correspondences were explicitly selected for this dataset:
 
 | Transcriptome tissue | Diagram region |
@@ -34,10 +37,15 @@ fuzzy tissue matching is performed.
 The original SVG and tissue definitions were supplied in
 `Potato_eFP_web_handoff_v7.zip` (original template SHA-256
 `c9a6c7dcd9ba70387e91f89e66a369bbfe9e9380ed94a4821a96bfdda630aca0`).
-The current v8 template adds the independent `flower` region by moving seven
+The v8 plant source added the independent `flower` region by moving seven
 petal paths and two center paths from perianth/anther into `flower-shape-v8`.
-All 303 original path geometries and the linework remain intact. `tissues.json`
-records the current template version, checksum, and 16 tissue regions.
+The current v9 template retains that plant at its original coordinates and adds
+the supplied whole flower, detached anthers, and carpel at the upper right,
+without a connector. `sources/potato-plant.svg` and `sources/flower-details.svg`
+are the editable source drawings; the latter uses the canonical `carpel` key
+in place of the attachment's `pistil`. `build_efp_template.py` composes them
+reproducibly, namespaces imported IDs, and keeps one public group per tissue.
+`tissues.json` records the current template version, checksum, and 17 regions.
 The supplied `potato-efp.mjs` renderer was adapted for English labels, signed
 values, and a diverging Z-score palette. Its SVG reference namespacing is retained.
 
@@ -66,15 +74,24 @@ The fonts are distributed unmodified under the bundled SIL Open Font License.
 `figure.mjs` builds a DOM-free layout shared by browser and API exports.
 `export.mjs` can turn that layout into an SVG reference; `pdf.mjs` uses the same
 layout and prepared vector geometry to produce the PDF in the browser or Node.
-`pdf-geometry.json` resolves the SVG's reusable shapes,
-leaf clipping, and stem mask through vector Boolean operations, preserving the
-original curve geometry. Regenerate it whenever the source SVG changes. The
+`pdf-geometry.json` resolves the SVG's reusable shapes, placement transforms,
+ellipses, leaf clipping, and binary masks through vector Boolean operations.
+The new artwork's black/white fills and strokes are compiled in drawing order
+into black filled paths, preserving both internal detail and tissue boundaries.
+Independent SVG elements are combined by filled-area union, preserving each
+element's inherited `fill-rule`; opposite contour directions must not cancel
+overlapping petals. PDF regression checks include a magnified petal crop to
+catch small uncolored holes that a full-figure comparison can miss.
+The expanded diagram and its PDF layout use the same aspect ratio.
+Regenerate the geometry whenever the source SVG changes. The
 asset regression verifies the SVG and font checksums to catch stale geometry.
 Build dependencies are only needed in an isolated development environment:
 
 ```bash
 python -m pip install skia-pathops==0.9.1 fonttools==4.61.1
+python interface/build_efp_template.py
 python interface/build_efp_pdf_assets.py
+python -m pytest interface/test_efp_pdf_builder.py
 ```
 
 The builder accepts `--font-directory` and `--font-license` for the unmodified

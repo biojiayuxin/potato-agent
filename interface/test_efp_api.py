@@ -92,8 +92,8 @@ def test_expression_and_vector_pdf_share_page_data(client, transform):
 
 
 def test_mapping_missing_zero_and_scale_preserve_page_rules(client, monkeypatch):
-    tissues = ["root", "flower", "stolon", "stolon tip", "tuber", "carpel", "stamen"]
-    values = [0, 2, 4, None, 8, 32, 100]
+    tissues = ["root", "flower", "stolon", "stolon tip", "tuber", "carpel", "stamen", "pistil"]
+    values = [0, 2, 4, None, 8, 32, 100, 64]
     monkeypatch.setattr(efp_viewer, "load_expression", lambda *_: {
         "dataset": "fixture", "scope": "tissue", "transform": "tpm", "genes": [{"geneId": "GeneA"}],
         "columns": [{"tissue": tissue} for tissue in tissues], "values": [values], "rawValues": [values],
@@ -103,13 +103,19 @@ def test_mapping_missing_zero_and_scale_preserve_page_rules(client, monkeypatch)
     assert data["rawTpm"]["mature_tuber"] == 8
     assert data["rawTpm"]["stolon_tip_S1"] is None
     assert data["scale"]["max"] == 100  # Includes stamen, despite its omission from the page.
-    assert data["unmappedTissues"] == ["carpel"]
+    assert data["unmappedTissues"] == ["pistil"]
     regions = {row["id"]: row for row in data["regions"]}
     assert regions["root"]["missing"] is False
     assert regions["root"]["colour"] != "#C9CED0"
     assert regions["stolon_tip_S1"]["missing"] is True
     assert regions["stolon_tip_S1"]["colour"] == "#C9CED0"
     assert regions["flower"]["value"] == 2
+    assert regions["carpel"]["value"] == 32
+    assert regions["carpel"]["label"] == "Carpel"
+    assert regions["carpel"]["missing"] is False
+    assert data["rawTpm"]["carpel"] == 32
+    assert next(row for row in data["tissueValues"] if row["tissue"] == "carpel")["diagramIds"] == ["carpel"]
+    assert "pistil" not in regions
     assert "stamen" not in json.dumps(data)
     pdf = client.get("/api/efp/export.pdf", params=params).content
     assert pdf_metadata(pdf)["tissueValues"] == data["tissueValues"]

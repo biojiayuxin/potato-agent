@@ -1,6 +1,6 @@
-import {mountPotatoEFP, PALETTES, mixColour} from './potato-efp.mjs?v=20260923-flower';
-import {adaptExpression, formatNumber, formatValue} from './expression.mjs?v=20260923-flower';
-import {downloadPdf} from './export.mjs?v=20260926-api1';
+import {mountPotatoEFP, PALETTES, mixColour} from './potato-efp.mjs?v=20261010-flower-details';
+import {adaptExpression, formatNumber, formatValue} from './expression.mjs?v=20261010-flower-details';
+import {downloadPdf} from './export.mjs?v=20261010-petal-fill-fix';
 import {createViewport} from './viewport.mjs?v=20260923-layout2';
 
 const $ = id => document.getElementById(id);
@@ -17,7 +17,7 @@ async function get(url, signal, text = false) {
 
 function ensureViewer() {
   if (!state.viewerPromise) {
-    state.viewerPromise = get('/static/efp/potato-template.svg?v=8', undefined, true).then(svg => {
+    state.viewerPromise = get('/static/efp/potato-template.svg?v=9', undefined, true).then(svg => {
       state.viewer = mountPotatoEFP($('plant'), svg);
       state.viewport = createViewport(state.viewer.svg, $('map-viewport'), ({zoom, canZoomIn, canZoomOut, enabled}) => {
         $('zoom-level').textContent = `${Math.round(zoom * 100)}%`;

@@ -32,13 +32,14 @@ def site(tmp_path, monkeypatch):
         "root", "young leaf", "mature leaf", "stem", "flower", "tuber", "stolon", "stamen",
         "immature small tuber (transection diameter < 1 cm)",
         "immature big tuber (1 cm <transection diameter < 5 cm)",
+        "perianth", "anther", "carpel",
     ]
     (source / "sample_tissue_list.tsv").write_text("sample_column\tsample_name\ttissue\n" + "".join(
         f"S{i}\tMaterialA\t{tissue}\n" for i, tissue in enumerate(tissues)
     ))
     (source / "transcript_tpm_matrix_merged.tsv").write_text(
         "transcript_id\tgene_id\tgene_name\t" + "\t".join(f"S{i}" for i in range(len(tissues))) + "\n"
-        "TxA\tGeneA\t\t0\t2\t10\t20\t40\t80\t12\t160\t0\t4\n"
+        "TxA\tGeneA\t\t0\t2\t10\t20\t40\t80\t12\t160\t0\t4\t2\t10\t30\n"
         "TxZ\tGeneZero\t\t" + "\t".join("0" for _ in tissues) + "\n"
         "TxC\tGeneConstant\t\t" + "\t".join("5" for _ in tissues) + "\n"
     )
@@ -97,7 +98,7 @@ def test_efp_scales_missing_values_export_and_navigation(site, browser, tmp_path
         expect(page.locator('#plant title, #plant [title]')).to_have_count(0)
         expect(page.locator('#plant [data-tissue="flower_bud"]')).to_have_attribute("fill", "#C9CED0")
         expect(page.locator('#plant [data-tissue="young_leaf"]')).to_have_attribute("data-expression", "1.584963")
-        expect(page.locator('#tissue-rows tr')).to_have_count(9)
+        expect(page.locator('#tissue-rows tr')).to_have_count(12)
         expect(page.locator('#tissue-rows tr[data-tissue="stamen"]')).to_have_count(0)
         expect(page.locator('#plant [data-tissue="stolon_tip_S1"]')).to_have_attribute('data-label', 'Stolon')
         expect(page.locator('#plant [data-tissue="stolon_tip_S1"]')).to_have_attribute('data-expression', '3.70044')
@@ -158,6 +159,9 @@ def test_efp_scales_missing_values_export_and_navigation(site, browser, tmp_path
         metadata = json.loads(bytes.fromhex(metadata_match[1].decode()).decode('utf-16'))
         assert metadata["rawTpm"]["root"] == 0
         assert metadata["rawTpm"]["flower"] == 40
+        for tissue, value in [('perianth', 2), ('anther', 10), ('carpel', 30)]:
+            assert metadata['rawTpm'][tissue] == value
+            assert next(row for row in metadata['tissueValues'] if row['tissue'] == tissue)['diagramIds'] == [tissue]
         assert metadata["values"]["flower"] == float(page.locator('#plant [data-tissue="flower"]').get_attribute('data-expression'))
         assert next(row for row in metadata['tissueValues'] if row['tissue'] == 'flower')['diagramIds'] == ['flower']
         assert metadata["values"]["root"] < 0
@@ -171,7 +175,7 @@ def test_efp_scales_missing_values_export_and_navigation(site, browser, tmp_path
         assert stolon_row['diagramIds'] == ['stolon', 'stolon_tip_S1']
         assert 'stamen' not in json.dumps(metadata)
         assert metadata["transform"] == "row_zscore"
-        assert len(metadata['tissueValues']) == 9
+        assert len(metadata['tissueValues']) == 12
         assert next(row for row in metadata['tissueValues'] if row['tissue'] == 'flower')['rawTpm'] == 40
         # Font programs are embedded and graphics contain no raster images or
         # transparency masks. Validate real PDF operators, xref offsets and text.
@@ -192,16 +196,30 @@ def test_efp_scales_missing_values_export_and_navigation(site, browser, tmp_path
             assert 'mature leaf' in extracted and 'immature small tuber' in extracted
             # Compare the complete PDF drawing with the original SVG layout,
             # even though the user zoomed the interactive viewport to 125%.
-            reference = page.evaluate("""async () => {
-                const {adaptExpression} = await import('/static/efp/expression.mjs?v=20260923-flower');
-                const {prepareExpression} = await import('/static/efp/potato-efp.mjs?v=20260923-flower');
-                const {exportSvg} = await import('/static/efp/export.mjs?v=20260923-pdf1');
+            reference = page.evaluate(r"""async () => {
+                const {adaptExpression} = await import('/static/efp/expression.mjs');
+                const {prepareExpression} = await import('/static/efp/potato-efp.mjs');
+                const {exportSvg} = await import('/static/efp/export.mjs');
+                const {buildFigure} = await import('/static/efp/figure.mjs');
                 const response = await fetch('/api/bulk-rnaseq/expression?genes=GeneA&scope=tissue&transform=row_zscore');
                 const data = adaptExpression(await response.json());
-                return exportSvg(document.querySelector('#plant > svg'), prepareExpression(data.payload), data);
+                const plant = document.querySelector('#plant > svg');
+                const result = prepareExpression(data.payload);
+                const figure = buildFigure(result, data);
+                const drawing = figure.elements.find(element => element.type === 'plant').attrs;
+                const viewBox = plant.dataset.originalViewBox.split(/\s+/).map(Number);
+                const scale = Math.min(drawing.width / viewBox[2], drawing.height / viewBox[3]);
+                const left = drawing.x + (drawing.width - scale * viewBox[2]) / 2;
+                const top = drawing.y + (drawing.height - scale * viewBox[3]) / 2;
+                const region = (x, y, width, height) => [left + x * scale, top + y * scale,
+                    left + (x + width) * scale, top + (y + height) * scale].map(Math.round);
+                return {svg: exportSvg(plant, result, data), regions: [
+                    region(0, 0, viewBox[2], viewBox[3]),
+                    region(550, 35, 793.7 * .7, 291.8 * .7),
+                ], petalRegion: region(674, 160, 22, 12)};
             }""")
             image_page = context.new_page()
-            image_page.set_content('<body style="margin:0;background:white">' + reference + '</body>')
+            image_page.set_content('<body style="margin:0;background:white">' + reference['svg'] + '</body>')
             reference_file = tmp_path / 'pdf-reference.png'
             image_page.locator('svg').first.screenshot(path=str(reference_file))
             prefix = tmp_path / 'pdf-rendered'
@@ -211,14 +229,52 @@ def test_efp_scales_missing_values_export_and_navigation(site, browser, tmp_path
             rendered = Image.open(prefix.with_suffix('.png')).convert('RGB')
             colors = page.locator('#plant [data-tissue]').evaluate_all('nodes => nodes.map(node => node.getAttribute("fill"))')
             palette = {tuple(int(color[i:i+2], 16) for i in (1, 3, 5)) for color in colors}
-            region = (24, 205, 691, 1239)
-            original_pixels = list(reference_image.crop(region).getdata())
-            pdf_pixels = list(rendered.crop(region).getdata())
-            mask = Image.new('L', (region[2] - region[0], region[3] - region[1]))
-            mask.putdata([255 if pixel in palette else 0 for pixel in original_pixels])
-            interior = list(mask.filter(ImageFilter.MinFilter(3)).getdata())
-            compared = [max(abs(a-b) for a,b in zip(left,right)) for left,right,valid in zip(original_pixels,pdf_pixels,interior) if valid]
-            assert len(compared) > 10000
+            assert reference_image.size == rendered.size
+            for region, minimum_pixels in zip(reference['regions'], [10000, 300]):
+                original_pixels = list(reference_image.crop(region).getdata())
+                pdf_pixels = list(rendered.crop(region).getdata())
+                mask = Image.new('L', (region[2] - region[0], region[3] - region[1]))
+                mask.putdata([255 if pixel in palette else 0 for pixel in original_pixels])
+                interior = list(mask.filter(ImageFilter.MinFilter(3)).getdata())
+                compared = [max(abs(a-b) for a,b in zip(left,right)) for left,right,valid in zip(original_pixels,pdf_pixels,interior) if valid]
+                assert len(compared) > minimum_pixels
+                assert sum(delta <= 3 for delta in compared) / len(compared) > .995
+            # The detail artwork also contains filled black texture and thin
+            # outlines; comparing only tissue interiors misses lost linework.
+            # Allow one pixel for Chromium/Poppler antialiasing differences.
+            detail_region = reference['regions'][1]
+            reference_ink = [max(pixel) <= 80 for pixel in reference_image.crop(detail_region).getdata()]
+            pdf_detail = rendered.crop(detail_region)
+            pdf_ink = Image.new('L', pdf_detail.size)
+            pdf_ink.putdata([255 if max(pixel) <= 128 else 0 for pixel in pdf_detail.getdata()])
+            nearby_ink = list(pdf_ink.filter(ImageFilter.MaxFilter(3)).getdata())
+            assert sum(reference_ink) > 250
+            assert sum(found > 0 for expected, found in zip(reference_ink, nearby_ink) if expected) / sum(reference_ink) > .98
+            # A small hole in overlapping petal paths can pass the full-figure
+            # tolerance. Compare this area separately at eight times the scale.
+            left, top, right, bottom = reference['petalRegion']
+            width, height = right - left, bottom - top
+            image_page.locator('svg').first.evaluate('''(svg, region) => {
+                const [x, y, width, height] = region;
+                svg.setAttribute('viewBox', `${x} ${y} ${width} ${height}`);
+                svg.setAttribute('width', width * 8);
+                svg.setAttribute('height', height * 8);
+            }''', [left, top, width, height])
+            petal_reference = tmp_path / 'petal-reference.png'
+            image_page.locator('svg').first.screenshot(path=str(petal_reference))
+            petal_prefix = tmp_path / 'petal-pdf'
+            subprocess.run(['pdftoppm', '-r', '768', '-x', str(left * 8), '-y', str(top * 8),
+                            '-W', str(width * 8), '-H', str(height * 8), '-singlefile', '-png',
+                            str(exported), str(petal_prefix)], check=True, capture_output=True)
+            petal_svg = Image.open(petal_reference).convert('RGB')
+            petal_pdf = Image.open(petal_prefix.with_suffix('.png')).convert('RGB')
+            assert petal_svg.size == petal_pdf.size
+            mask = Image.new('L', petal_svg.size)
+            mask.putdata([255 if pixel in palette else 0 for pixel in petal_svg.getdata()])
+            interior = mask.filter(ImageFilter.MinFilter(3)).getdata()
+            compared = [max(abs(a-b) for a, b in zip(left, right))
+                        for left, right, valid in zip(petal_svg.getdata(), petal_pdf.getdata(), interior) if valid]
+            assert len(compared) > 1000
             assert sum(delta <= 3 for delta in compared) / len(compared) > .995
             directory = Path(os.getenv('POTATO_EFP_SCREENSHOTS') or tmp_path)
             rendered.save(directory / 'efp-vector-pdf.png')
@@ -248,12 +304,25 @@ def test_efp_pdf_asset_failure_can_retry(site, browser):
 @pytest.mark.parametrize('transform', ['tpm', 'log2_tpm', 'row_zscore'])
 def test_efp_api_pdf_matches_browser_export(site, browser, tmp_path, transform):
     import httpx
+    from playwright.sync_api import expect
     from interface.test_efp_api import drawing_stream, pdf_metadata
 
     with browser.new_context(accept_downloads=True) as context:
         page = context.new_page()
         page.goto(f'{site}/efp?gene=GeneA&transform={transform}')
         loaded(page, 'GeneA')
+        for tissue, raw_value in [('flower', 40), ('perianth', 2), ('anther', 10), ('carpel', 30)]:
+            group = page.locator(f'#plant [data-tissue="{tissue}"]')
+            row = page.locator(f'#tissue-rows tr[data-tissue="{tissue}"]')
+            expect(row).to_have_attribute('data-mapped', 'true')
+            expect(row.locator('td').nth(1)).to_have_text(str(raw_value))
+            displayed_value = row.locator('td').nth(1 if transform == 'tpm' else 2).inner_text()
+            expect(group).to_have_attribute('data-expression', displayed_value)
+            group.focus()
+            expect(page.locator('#tissue-tooltip')).to_contain_text(f'TPM: {raw_value}')
+            if transform != 'tpm':
+                unit = 'log2(TPM + 1)' if transform == 'log2_tpm' else 'Z-score'
+                expect(page.locator('#tissue-tooltip')).to_contain_text(f'{unit}: {displayed_value}')
         with page.expect_download() as download:
             page.locator('#download-pdf').click()
         output = tmp_path / 'browser.pdf'
@@ -270,8 +339,8 @@ def test_efp_flower_regions_follow_annotation(site, browser):
 
     payload = {
         'scope': 'tissue', 'transform': 'tpm', 'genes': [{'geneId': 'FloralGene'}],
-        'columns': [{'tissue': tissue} for tissue in ['flower', 'perianth', 'anther', 'flower bud']],
-        'values': [[40, 2, 10, 20]], 'rawValues': [[40, 2, 10, 20]],
+        'columns': [{'tissue': tissue} for tissue in ['flower', 'perianth', 'anther', 'carpel', 'flower bud']],
+        'values': [[40, 2, 10, 30, 20]], 'rawValues': [[40, 2, 10, 30, 20]],
     }
     with browser.new_context(viewport={'width': 1440, 'height': 1100}) as context:
         page = context.new_page()
@@ -286,27 +355,65 @@ def test_efp_flower_regions_follow_annotation(site, browser):
             (384, 120, 'perianth', 'Perianth', 2), (397, 126, 'anther', 'Anther', 10),
             (199, 181, 'flower_bud', 'Flower bud', 20),
         ]
+        # Original coordinates stay unchanged. New coordinates are the source
+        # drawing at translate(550, 35) scale(.7): whole flower, four detached
+        # anthers and the detached carpel. Thin central regions deliberately
+        # exercise SVG hit testing rather than synthetic group hover events.
+        detail_points = [
+            (80, 180, 'perianth', 'Perianth', 2),
+            (200, 135, 'perianth', 'Perianth', 2),
+            (150, 150, 'anther', 'Anther', 10),
+            (140, 145, 'carpel', 'Carpel', 30),
+            (340, 150, 'anther', 'Anther', 10),
+            (400, 150, 'anther', 'Anther', 10),
+            (455, 150, 'anther', 'Anther', 10),
+            (570, 160, 'anther', 'Anther', 10),
+            (686, 180, 'carpel', 'Carpel', 30),
+            (690, 100, 'carpel', 'Carpel', 30),
+        ]
+        points.extend((550 + .7*x, 35 + .7*y, tissue, label, value)
+                      for x, y, tissue, label, value in detail_points)
         for x, y, tissue, label, value in points:
             screen = page.locator('#plant > svg').evaluate('''(svg, point) => {
                 const screen = new DOMPoint(...point).matrixTransform(svg.getScreenCTM());
-                const tissue = document.elementFromPoint(screen.x, screen.y)?.closest('[data-tissue]')?.dataset.tissue;
-                return {x: screen.x, y: screen.y, tissue};
+                const target = document.elementFromPoint(screen.x, screen.y);
+                const group = target?.closest('[data-tissue]');
+                return {x: screen.x, y: screen.y, tissue: group?.dataset.tissue,
+                    fill: target && getComputedStyle(target).fill,
+                    tissueFill: group && getComputedStyle(group).fill};
             }''', [x, y])
             assert screen['tissue'] == tissue
+            assert screen['fill'] == screen['tissueFill']
             page.mouse.move(screen['x'], screen['y'])
             expect(page.locator('#tissue-tooltip')).to_have_text(f'{label}\nTPM: {value}')
-        flower = page.locator('#plant [data-tissue="flower"]')
-        perianth = page.locator('#plant [data-tissue="perianth"]')
-        for value, expected_color in [(0, '#FFFFCC'), (None, '#C9CED0')]:
-            payload['values'][0][0] = value
-            payload['rawValues'][0][0] = value
-            search(page, 'FloralGene')
-            loaded(page, 'FloralGene')
-            expect(flower).to_have_attribute('fill', expected_color)
-            # The shared scale can change when flower is no longer the maximum;
-            # perianth must still keep its own value and remain colored.
-            expect(perianth).to_have_attribute('data-expression', '2')
-            expect(perianth).not_to_have_attribute('fill', '#C9CED0')
+        groups = {tissue: page.locator(f'#plant [data-tissue="{tissue}"]')
+                  for tissue in ['flower', 'perianth', 'anther', 'carpel']}
+        for tissue, group in groups.items():
+            expect(group).to_have_count(1)
+            expect(group).to_have_attribute('tabindex', '0')
+            group.focus()
+            expect(page.locator('#tissue-tooltip')).to_contain_text(tissue.capitalize())
+            page.keyboard.press('Escape')
+            expect(page.locator('#tissue-tooltip')).to_be_hidden()
+        expect(page.locator('#plant [data-tissue="pistil"]')).to_have_count(0)
+        # Each floral value can be zero or missing without borrowing another
+        # region's value; the whole flower keeps its independent API source.
+        original = [40, 2, 10, 30, 20]
+        for index, tissue in enumerate(groups):
+            for value, expected_color in [(0, '#FFFFCC'), (None, '#C9CED0')]:
+                raw = original.copy()
+                raw[index] = value
+                payload.update(values=[raw], rawValues=[raw])
+                search(page, 'FloralGene')
+                loaded(page, 'FloralGene')
+                expect(groups[tissue]).to_have_attribute('fill', expected_color)
+                expect(groups[tissue]).to_have_attribute('data-expression', 'NA' if value is None else '0')
+                groups[tissue].focus()
+                expect(page.locator('#tissue-tooltip')).to_contain_text('TPM: NA' if value is None else 'TPM: 0')
+                for other_index, other in enumerate(groups):
+                    if other != tissue:
+                        expect(groups[other]).to_have_attribute('data-expression', str(original[other_index]))
+                        expect(groups[other]).not_to_have_attribute('fill', '#C9CED0')
 
 
 def test_efp_stolon_tip_stays_independent_and_updates_labels(site, browser):
@@ -414,10 +521,14 @@ def test_efp_responsive_layout(site, browser, tmp_path, width):
         page.goto(site + "/efp?gene=GeneA")
         loaded(page, "GeneA")
         assert page.evaluate("document.documentElement.scrollWidth <= innerWidth")
+        stage = page.locator('.efp-stage').bounding_box()
+        table = page.locator('#tissue-panel').bounding_box()
+        assert table['y'] >= stage['y'] + stage['height']
+        screenshot(page, tmp_path, f"efp-{width}")
         page.locator('#zoom-in').click()
         assert page.evaluate("document.documentElement.scrollWidth <= innerWidth")
-        assert page.locator('#tissue-rows tr').count() == 9
-        screenshot(page, tmp_path, f"efp-{width}")
+        assert page.locator('#tissue-rows tr').count() == 12
+        screenshot(page, tmp_path, f"efp-{width}-zoom")
 
 
 def test_efp_zoom_pan_reset_and_limits(site, browser):

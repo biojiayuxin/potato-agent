@@ -1,5 +1,5 @@
-import {buildFigure} from './figure.mjs?v=20260926-api1';
-import {vectorPdf} from './pdf.mjs?v=20260926-api1';
+import {buildFigure} from './figure.mjs?v=20261010-flower-details';
+import {vectorPdf} from './pdf.mjs?v=20261010-petal-fill-fix';
 
 const NS = 'http://www.w3.org/2000/svg';
 

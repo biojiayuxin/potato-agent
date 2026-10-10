@@ -1,4 +1,4 @@
-import {TISSUES} from './potato-efp.mjs?v=20260923-flower';
+import {TISSUES} from './potato-efp.mjs?v=20261010-flower-details';
 
 export const TRANSFORMS = Object.freeze({
   log2_tpm: 'log2(TPM + 1)',
@@ -26,7 +26,7 @@ function tissueDisplayGroup(tissue) {
 // Flower remains distinct from flower bud.
 export const TISSUE_SOURCES = Object.freeze({
   flower: ['flower'], perianth: ['perianth'], flower_bud: ['flower_bud', 'flower bud'],
-  fruit: ['fruit'], anther: ['anther'], stem: ['stem'],
+  fruit: ['fruit'], anther: ['anther'], carpel: ['carpel'], stem: ['stem'],
   young_leaf: ['young_leaf', 'young leaf'], leaf: ['leaf'],
   mature_leaf: ['mature_leaf', 'mature leaf'], root: ['root'], stolon: ['stolon'],
   stolon_tip_S1: ['stolon_tip_S1', 'stolon_tip', 'stolon tip', 'stolon tip (S1)'],

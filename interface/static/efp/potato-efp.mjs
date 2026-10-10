@@ -2,6 +2,7 @@
 export const TISSUES = Object.freeze([
   ['flower', 'Flower'],
   ['perianth', 'Perianth'], ['flower_bud', 'Flower bud'], ['fruit', 'Fruit'], ['anther', 'Anther'],
+  ['carpel', 'Carpel'],
   ['stem', 'Stem'], ['young_leaf', 'Young leaf'], ['leaf', 'Leaf'], ['mature_leaf', 'Mature leaf'],
   ['root', 'Root'], ['stolon', 'Stolon'], ['stolon_tip_S1', 'Stolon tip (S1)'],
   ['swelled_stolon_S2', 'Swelled stolon (S2)'], ['young_tuber_S3', 'Young tuber (S3)'],
@@ -124,14 +125,19 @@ export function mountPotatoEFP(container, svgText) {
   svg.querySelectorAll('title').forEach(title => title.remove());
   svg.removeAttribute('aria-labelledby');
   svg.setAttribute('aria-label', 'Potato tissue expression map');
-  const groups = new Map(Array.from(svg.querySelectorAll('[data-tissue]')).map(g => [g.dataset.tissue, g]));
+  const groups = new Map();
+  for (const group of svg.querySelectorAll('[data-tissue]')) {
+    const id = group.dataset.tissue;
+    if (groups.has(id)) throw new Error(`模板中存在重复组织 ID：${id}`);
+    groups.set(id, group);
+  }
   if (groups.size !== TISSUES.length || TISSUES.some(t => !groups.has(t.id))) throw new Error(`模板应包含指定的 ${TISSUES.length} 个组织。`);
   svg.setAttribute('width', '100%');
   svg.removeAttribute('height');
   svg.style.display = 'block';
   svg.style.width = '100%';
   svg.style.height = 'auto';
-  svg.dataset.efpTemplate = 'v8';
+  svg.dataset.efpTemplate = 'v9';
   container.replaceChildren(svg);
 
   function render(payload, options = {}) {

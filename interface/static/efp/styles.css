@@ -1,5 +1,5 @@
 .efp-app { grid-template-rows: auto 1fr; }
-.efp-app .bulk-main { align-items: start; }
+.efp-app .bulk-main { align-items: start; grid-template-columns: 280px minmax(0, 1fr); }
 .efp-app .query-panel, .efp-viewer { min-width: 0; }
 .efp-subtitle { white-space: nowrap; }
 .efp-help { margin: 0; color: var(--muted); font-size: 12px; line-height: 1.6; }
@@ -8,13 +8,14 @@
 .efp-viewer { grid-template-rows: auto minmax(0, 1fr); }
 .efp-viewer .graph-title { overflow-wrap: anywhere; }
 .efp-viewer .viewer-toolbar > div:first-child { min-width: 0; }
-.efp-display { display: grid; grid-template-columns: minmax(0, 1fr) minmax(300px, 38%); height: clamp(760px, calc(100vh - 170px), 1040px); }
+.efp-display { display: grid; grid-template-columns: minmax(0, 1fr) 380px; height: clamp(760px, calc(100vh - 170px), 1040px); }
 .efp-stage { position: relative; min-width: 0; overflow: hidden; }
 #map-viewport { position: absolute; inset: 114px 8px 58px; overflow: hidden; touch-action: pan-y; }
 #map-viewport:focus-visible { outline: 2px solid #166534; outline-offset: -2px; border-radius: 4px; }
 #map-viewport[data-zoomed="true"] { touch-action: none; cursor: grab; }
 #map-viewport[data-dragging="true"] { cursor: grabbing; }
 #plant, #plant > svg { width: 100%; height: 100%; }
+#plant { position: absolute; inset: 0; }
 #plant [data-tissue] { cursor: help; }
 #map-viewport[data-zoomed="true"] [data-tissue] { cursor: inherit; }
 #plant [data-tissue]:focus-visible { outline: 2px solid #166534; outline-offset: 3px; }
@@ -47,12 +48,14 @@
   .efp-zoom-help { display: none; }
   .efp-values { padding-inline: 12px; }
 }
-@media (max-width: 1050px) and (min-width: 861px), (max-width: 640px) {
+@media (max-width: 1200px) {
   .efp-display { grid-template-columns: minmax(0, 1fr); height: auto; }
-  .efp-stage { height: 760px; }
+  .efp-stage { padding: 114px 8px 58px; }
+  #map-viewport { position: relative; inset: auto; aspect-ratio: 1120 / 1089.4; }
   .efp-values { border-left: 0; border-top: 1px solid var(--border); }
   .efp-table-wrap { max-height: none; }
 }
 @media (max-width: 860px) {
+  .efp-app .bulk-main { grid-template-columns: minmax(0, 1fr); }
   .efp-viewer .viewer-toolbar { flex-direction: row; }
 }
