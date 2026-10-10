@@ -1,7 +1,7 @@
 ---
 name: sgrna-design
 description: 使用 CRISPOR 进行 CRISPR/Cas9 基因敲除 sgRNA 设计。运行时先检查 public_data/CRISPR_DB/<genome_name>/ 是否已有可复用 CRISPOR 数据库；若无，则告知用户需要构建且耗时较长，并通过 Slurm 后台任务构建数据库。
-version: 2.4.0
+version: 2.5.1
 metadata:
   hermes:
     tags: [CRISPR, gRNA, CRISPOR, sgRNA, knockout, design]
@@ -197,32 +197,19 @@ crispor --genomeDir "$CRISPOR_GENOME_DIR" "$CRISPOR_GENOME_ID" \
 | Doench '16-Score | on-target 效率（0-100） |
 | Moreno-Mateos-Score | CRISPRscan（0-100） |
 | Doench-RuleSet3-Score | RS3（-200~+200） |
-| Out-of-Frame-Score | 移码概率（0-100） |
-| Lindel-Score | indel 预测（0-100） |
-| GrafEtAlStatus | `tt`=polyT 终止信号需排除，`GrafOK`=通过 |
+| GrafEtAlStatus | 序列活性警告（如 TT/GCC motif）；`GrafOK` 表示未触发该项警告 |
 
 **offtargets.tsv：** 每条 guide 的脱靶位点，包括 chrom、坐标、mismatch、MIT/CFD 风险分、基因注释等。
 
-## 筛选排序
+## 推荐筛选规则
 
-默认排除：
+推荐只关注候选位点的编辑适用性、脱靶和组合，不依赖移码或最终功能丧失预测。不设置评分、错配数或靶点间距的固定筛选门槛。
 
-- `GrafEtAlStatus='tt'`；
-- 明显不在目标功能区域的 guide；
-- 低特异性或高风险 exonic off-target guide。
-
-默认排序：
-
-```text
-无高风险 exonic off-target
-→ cfdSpecScore 高
-→ offtargetCount 少
-→ mitSpecScore 高
-→ Doench '16 / RS3 / 其它效率评分较高
-→ 位于合适 CDS/exon 区域
-```
-
-每个基因默认输出 Top 5，除非用户要求更多或要求多 sgRNA 构建。
+1. **默认推荐 4 条组成一组。** 用户指定数量时按其要求；合格候选不足时如实说明，不为凑数放宽筛选要求。
+2. **选择无明显序列问题的候选。** 排除影响 sgRNA 表达或使用的明确问题，例如适用表达系统下的 polyT 终止风险。
+3. **优先控制高风险脱靶。** 排除存在非预期完全匹配位点或高风险 CDS 脱靶的候选；其余结合整体特异性、逐位点 CFD 和所在区域比较。不能只按脱靶总数排序，也不能把基因间区自动视为安全。预期编辑的等位基因命中不算脱靶。
+4. **活性评分作为辅助，不追逐小分差。** 参考可用的 Doench16、RuleSet3、CRISPRscan 等预测，明显冲突时简要说明；不因微小分差决定优劣，不将不同模型或指标合成总分。
+5. **单条合格后，再选组合。** 避免所选靶位点高度重叠；二倍体中，组合应覆盖全部预期编辑的等位基因，不要求每条都同时覆盖两个等位基因。
 
 ## FlashFry 备选说明
 
@@ -245,11 +232,13 @@ recommended_sgrnas.tsv
 summary.txt
 ```
 
-用户回复中给出精简表格：
+用户回复中给出精简表格，每条附一句入选理由：
 
 ```text
-Rank  guide+PAM  locus  MIT  CFD  offtargets  exonic_offtargets  efficiency  note
+guide+PAM  locus  intended_alleles  off_target_summary  activity_scores  reason
 ```
+
+再用一句话说明组合覆盖情况。将结果称为“预测支持编辑的候选”，不保证实际编辑效率。
 
 ## 常见问题
 
@@ -269,4 +258,4 @@ Rank  guide+PAM  locus  MIT  CFD  offtargets  exonic_offtargets  efficiency  not
 - [ ] 已记录 Slurm job ID、日志路径和数据库路径。
 - [ ] sgRNA 设计使用了正确的 `--genomeDir` 和 CRISPOR genome ID。
 - [ ] 已保存 guides/offtargets/recommended 结果文件。
-- [ ] 最终推荐排除了 polyT 和高风险脱靶 guide。
+- [ ] 已按五条推荐规则选择组合，并简要说明入选理由和覆盖情况。
