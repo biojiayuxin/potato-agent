@@ -347,6 +347,10 @@ def build_parser() -> argparse.ArgumentParser:
         p.add_argument("--username", required=True)
 
     sub.add_parser("get-model-catalog")
+    for name in ("reset-workspace-stop", "reset-workspace"):
+        p = sub.add_parser(name)
+        p.add_argument("--username", required=True)
+        p.add_argument("--job-id", required=True)
     p = sub.add_parser("provision-user")
     p.add_argument("--username", required=True)
     p.add_argument("--email", default="")
@@ -395,6 +399,13 @@ def main() -> int:
     require_binary("runuser")
 
     try:
+        if args.command in {"reset-workspace-stop", "reset-workspace"}:
+            from interface.workspace_reset import execute_reset, ResetError
+            try:
+                execute_reset(args.username, args.job_id, stop_only=args.command.endswith('-stop'))
+            except ResetError as exc:
+                return _emit({"ok": False, "error": exc.code})
+            return _emit({"ok": True})
         entry_lock = None
         guarded_commands = {
             "tui-gateway",

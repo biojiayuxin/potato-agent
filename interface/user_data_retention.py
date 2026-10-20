@@ -1963,6 +1963,9 @@ def _system_clock_synchronized() -> bool:
 
 
 def user_activity_reason(identity: UserIdentity) -> str | None:
+    from interface.workspace_reset_store import maintenance_active
+    if maintenance_active(identity.target.username):
+        return "lock_busy"
     service = _run_checked(["systemctl", "is-active", identity.target.systemd_service])
     service_state = service.stdout.strip()
     if service.returncode == 0 and service_state == "active":

@@ -1321,6 +1321,9 @@ class TuiGatewayBridgeRegistry:
         self._lock = asyncio.Lock()
 
     async def get_or_create(self, user_id: str, target: HermesTarget) -> TuiGatewayBridge:
+        from interface.workspace_reset_store import maintenance_active
+        if await asyncio.to_thread(maintenance_active, target.username):
+            raise TuiGatewayBridgeError("Workspace reset is in progress")
         async with self._lock:
             close_task = self._close_tasks.pop(user_id, None)
             if close_task is not None:
@@ -1335,6 +1338,16 @@ class TuiGatewayBridgeRegistry:
     async def get_existing(self, user_id: str) -> TuiGatewayBridge | None:
         async with self._lock:
             return self._bridges.get(user_id)
+
+    async def close_for_reset(self, user_id: str) -> None:
+        async with self._lock:
+            bridge = self._bridges.pop(user_id, None)
+            task = self._close_tasks.pop(user_id, None)
+        if task:
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+        if bridge:
+            await bridge.close()
 
     async def close_for_reconfigure(self, user_id: str) -> bool:
         async with self._lock:

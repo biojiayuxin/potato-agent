@@ -85,7 +85,12 @@ def _open_lock(path: Path) -> object:
     flags = os.O_RDWR | os.O_CREAT | os.O_CLOEXEC
     if hasattr(os, "O_NOFOLLOW"):
         flags |= os.O_NOFOLLOW
-    fd = os.open(path, flags, 0o640)
+    try:
+        fd = os.open(path, flags, 0o640)
+    except PermissionError:
+        # Interface can hold shared locks created by the root helper without
+        # needing permission to rewrite their files.
+        fd = os.open(path, os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW)
     if os.geteuid() == 0:
         try:
             os.fchown(fd, 0, grp.getgrnam(LIFECYCLE_GROUP).gr_gid)
@@ -209,6 +214,10 @@ def user_lifecycle_lock(
         run_id=run_id,
         lock_dir=lock_dir,
     ):
+        if exclusive and lock_dir == DEFAULT_LIFECYCLE_LOCK_DIR:
+            from interface.workspace_reset_store import maintenance_active
+            if maintenance_active(mapping_username):
+                raise UserMaintenanceError(MAINTENANCE_ERROR_MESSAGE)
         yield
 
 
@@ -217,13 +226,21 @@ def acquire_user_entry_lock(
     *,
     lock_dir: Path = DEFAULT_LIFECYCLE_LOCK_DIR,
 ) -> LifecycleLock:
+    if lock_dir == DEFAULT_LIFECYCLE_LOCK_DIR:
+        from interface.workspace_reset_store import maintenance_active
+        if maintenance_active(mapping_username):
+            raise UserMaintenanceError(MAINTENANCE_ERROR_MESSAGE)
     try:
-        return acquire_user_lock(
+        lock = acquire_user_lock(
             mapping_username,
             exclusive=False,
             blocking=False,
             lock_dir=lock_dir,
         )
+        if lock_dir == DEFAULT_LIFECYCLE_LOCK_DIR and maintenance_active(mapping_username):
+            lock.close()
+            raise UserMaintenanceError(MAINTENANCE_ERROR_MESSAGE)
+        return lock
     except BlockingIOError as exc:
         raise UserMaintenanceError(MAINTENANCE_ERROR_MESSAGE) from exc
 

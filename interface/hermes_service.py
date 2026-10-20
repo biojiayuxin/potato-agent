@@ -225,7 +225,7 @@ def _strip_api_keys_outside_model(
             _strip_api_keys_outside_model(child, protected_model=protected_model)
 
 
-def ensure_linux_user(username: str) -> None:
+def ensure_linux_user(username: str) -> bool:
     result = subprocess.run(
         ["id", "-u", username],
         capture_output=True,
@@ -233,8 +233,9 @@ def ensure_linux_user(username: str) -> None:
         env=interface_subprocess_env(),
     )
     if result.returncode == 0:
-        return
+        return False
     _run_command(["useradd", "-m", "-s", "/bin/bash", username])
+    return True
 
 
 def get_linux_user_info(username: str) -> dict[str, Any]:
@@ -585,7 +586,7 @@ def install_user_runtime_files(config: dict[str, Any], user: HermesTarget) -> No
 
 
 def install_user_files(config: dict[str, Any], user: HermesTarget) -> None:
-    ensure_linux_user(user.linux_user)
+    created = ensure_linux_user(user.linux_user)
     install_user_runtime_files(config, user)
     ensure_user_runtime_temp_dir(user)
 
@@ -603,6 +604,10 @@ def install_user_files(config: dict[str, Any], user: HermesTarget) -> None:
         check=False,
         env=interface_subprocess_env(),
     )
+
+    if created:
+        from interface.workspace_reset import enroll
+        enroll(user, source="platform_created")
 
 
 def restart_service(service_name: str) -> None:

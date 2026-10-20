@@ -320,6 +320,20 @@ def list_active_runtime_user_ids(
     return {str(row["user_id"]) for row in rows}
 
 
+def reset_workspace_runtime_state(user_id: str, db_path: Path = DEFAULT_AUTH_DB_PATH) -> None:
+    """Drop task leases without reviving previously revoked login cookies."""
+    ensure_runtime_state_store(db_path)
+    now = _now()
+    with connect_auth_db(db_path) as conn:
+        _ensure_runtime_state_row(user_id, conn)
+        conn.execute("DELETE FROM runtime_leases WHERE user_id = ?", (user_id,))
+        conn.execute("DELETE FROM runtime_sleep_claims WHERE user_id = ?", (user_id,))
+        conn.execute("""UPDATE runtime_state SET runtime_started_at=?, last_user_message_at=?,
+                        last_background_activity_at=0, updated_at=? WHERE user_id=?""",
+                     (now, now, now, user_id))
+        conn.commit()
+
+
 def delete_runtime_state(user_id: str, db_path: Path = DEFAULT_AUTH_DB_PATH) -> None:
     ensure_runtime_state_store(db_path)
     normalized_user_id = user_id.strip()
@@ -548,6 +562,10 @@ def claim_runtime_sleep(
     """
     with connect_auth_db(db_path) as conn:
         conn.execute("BEGIN IMMEDIATE")
+        if (conn.execute("SELECT 1 FROM sqlite_master WHERE name='workspace_reset_jobs'").fetchone()
+                and conn.execute("SELECT 1 FROM workspace_reset_jobs WHERE user_id=? AND status IN ('queued','running','blocked')", (normalized_user_id,)).fetchone()):
+            return None
+
         conn.execute(
             "DELETE FROM runtime_sleep_claims WHERE user_id = ? AND claimed_at <= ?",
             (normalized_user_id, stale_claim_cutoff),
@@ -947,6 +965,10 @@ def claim_temporary_user_cleanup(
     """
     with connect_auth_db(db_path) as conn:
         conn.execute("BEGIN IMMEDIATE")
+        if (conn.execute("SELECT 1 FROM sqlite_master WHERE name='workspace_reset_jobs'").fetchone()
+                and conn.execute("SELECT 1 FROM workspace_reset_jobs WHERE user_id=? AND status IN ('queued','running','blocked')", (normalized_user_id,)).fetchone()):
+            return None
+
         row = conn.execute(query, (checked_at, normalized_user_id)).fetchone()
         if row is None:
             conn.rollback()

@@ -147,6 +147,7 @@ from interface.display_store import (
     save_message_fork_boundary,
 )
 from interface import file_browser_policy
+from interface import workspace_reset_api, workspace_reset_store
 from interface.file_browser_policy import (
     FileBrowserAccessError,
     authorize_file_browser_path,
@@ -980,6 +981,7 @@ def _serialize_user(user: CurrentUser) -> dict[str, Any]:
         "workspace_root": str(_get_user_workspace_root(user)),
         "is_temporary": bool(user.is_temporary),
         "features": {"chat_sharing": CHAT_SHARING_ENABLED},
+        "workspace_reset": workspace_reset_api.feature_state(user),
     }
 
 
@@ -2894,6 +2896,16 @@ def _archive_expired_target_sync(
     auth_user: Any,
     cutoff: float,
 ) -> int:
+    from interface.user_lifecycle_lock import acquire_user_entry_lock, UserMaintenanceError
+    try:
+        lock = acquire_user_entry_lock(target.username)
+    except UserMaintenanceError:
+        return 0
+    with lock:
+        return _archive_expired_target_locked(target, auth_user, cutoff)
+
+
+def _archive_expired_target_locked(target: HermesTarget, auth_user: Any, cutoff: float) -> int:
     archived_count = 0
     with _open_session_db(target) as db:
         sessions = db.list_sessions_rich(source=None, limit=100000, offset=0)
@@ -3112,6 +3124,8 @@ async def _close_temporary_user_bridge(user_id: str) -> bool:
 async def _cleanup_temporary_user_candidate(
     auth_user: Any, target: HermesTarget
 ) -> bool:
+    if workspace_reset_store.maintenance_active(target.username):
+        return False
     user_id = str(getattr(auth_user, "id", "") or "").strip()
     mapping_username = str(
         getattr(target, "username", "")
@@ -3223,6 +3237,8 @@ async def _cleanup_temporary_user_candidate(
 
 
 def _stop_idle_runtime_candidate(auth_user: Any, target: HermesTarget) -> bool:
+    if workspace_reset_store.maintenance_active(target.username):
+        return False
     if not target.systemd_service or not target.username:
         return False
     if not os.path.exists(f"/etc/systemd/system/{target.systemd_service}"):
@@ -4059,6 +4075,7 @@ async def protect_admin_responses(request: Request, call_next):
 @app.on_event("startup")
 async def on_startup() -> None:
     ensure_auth_db()
+    workspace_reset_store.ensure_reset_store()
     cleanup_terminal_signup_jobs()
     cleanup_expired_agreement_acceptances()
     ensure_display_store()
@@ -4082,6 +4099,7 @@ async def on_startup() -> None:
         tip_resolver=_resolve_tip_session_id_for_user,
         model_resolver=_resolve_session_model_config,
     )
+    app.state.workspace_reset_task = asyncio.create_task(workspace_reset_api.worker(app))
     app.state.archive_scheduler_task = asyncio.create_task(_archive_scheduler_loop())
     app.state.signup_worker_task = asyncio.create_task(_signup_worker_loop())
     app.state.runtime_idle_scheduler_task = asyncio.create_task(
@@ -4099,6 +4117,10 @@ async def on_startup() -> None:
 
 @app.on_event("shutdown")
 async def on_shutdown() -> None:
+    reset_task = getattr(app.state, "workspace_reset_task", None)
+    if reset_task:
+        reset_task.cancel()
+        await asyncio.gather(reset_task, return_exceptions=True)
     archive_scheduler_task = getattr(app.state, "archive_scheduler_task", None)
     if archive_scheduler_task is not None:
         archive_scheduler_task.cancel()
@@ -6998,3 +7020,5 @@ app.add_middleware(
     limit_for_scope=_interface_request_body_limit,
     error_headers_for_scope=_interface_request_body_error_headers,
 )
+
+workspace_reset_api.install(app, get_current_user)

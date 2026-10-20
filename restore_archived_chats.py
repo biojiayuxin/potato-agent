@@ -1076,6 +1076,12 @@ def apply_restore(
     return summary
 
 
+def _verify_no_workspace_resets(interface_db: Path, mappings: set[str]) -> None:
+    from interface.workspace_reset_store import maintenance_active
+    if any(maintenance_active(username, interface_db) for username in mappings):
+        raise RestoreError("Finish workspace reset recovery before restoring archives.")
+
+
 def run_restore(
     paths: RestorePaths,
     *,
@@ -1102,6 +1108,7 @@ def run_restore(
     mappings = set(summary.mappings)
     if not apply:
         return summary, None
+    _verify_no_workspace_resets(normalized_paths.interface_db, mappings)
     if backup_dir is None:
         raise RestoreError("--backup-dir is required with --apply")
     if enforce_services_stopped:

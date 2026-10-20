@@ -332,6 +332,7 @@ def test_interface_launcher_fixes_uvicorn_websocket_limit(monkeypatch) -> None:
     from interface import serve
 
     calls = []
+    monkeypatch.setenv("WEB_CONCURRENCY", "4")
     monkeypatch.setattr(serve.uvicorn, "run", lambda *args, **kwargs: calls.append((args, kwargs)))
     serve.main(["--host", "127.0.0.1", "--port", "3100"])
 
@@ -342,6 +343,7 @@ def test_interface_launcher_fixes_uvicorn_websocket_limit(monkeypatch) -> None:
                 "host": "127.0.0.1",
                 "port": 3100,
                 "ws_max_size": 1024 * 1024,
+                "workers": 1,
             },
         )
     ]

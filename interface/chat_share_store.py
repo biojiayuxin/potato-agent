@@ -1114,6 +1114,21 @@ def finalize_source_session_invalidation(
     return True
 
 
+def reset_user_chat_share_data(user_id: str) -> None:
+    """Clear an already-quiesced workspace without tombstoning its account."""
+    resolved = ensure_chat_share_store()
+    with _connect_chat_share_db(resolved) as conn:
+        conn.execute("begin immediate")
+        conn.execute("delete from chat_shares where owner_user_id = ?", (user_id,))
+        for table in ("chat_share_owner_tombstones", "chat_share_source_tombstones", "chat_share_source_lifecycle_claims"):
+            conn.execute(f"delete from {table} where owner_user_id = ?", (user_id,))
+        for recipient in (user_id, f"formal:{user_id}", f"temporary:{user_id}"):
+            conn.execute("delete from chat_share_imports where recipient_user_id = ?", (recipient,))
+            conn.execute("delete from chat_share_recipient_tombstones where recipient_user_id = ?", (recipient,))
+            conn.execute("delete from chat_share_rate_events where user_id = ?", (recipient,))
+        conn.commit()
+
+
 def invalidate_user_chat_share_data(
     user_id: str,
     *,

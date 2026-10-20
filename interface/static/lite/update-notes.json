@@ -1,6 +1,13 @@
 {
   "updates": [
     {
+      "version": "2026-10-20-001",
+      "title": "Workspace reset",
+      "date": "October 20, 2026",
+      "summary": "You can now reset your workspace from Settings, clearing files and chat history after confirmation.",
+      "items": []
+    },
+    {
       "version": "2026-10-09-001",
       "title": "Independent model selection",
       "date": "October 9, 2026",

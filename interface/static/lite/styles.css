@@ -5097,3 +5097,12 @@ button.stretch {
     text-align: center;
   }
 }
+/* Destructive workspace reset has an explicit, keyboard-accessible confirmation. */
+.sidebar-settings-menu-item.workspace-reset-danger { color: #d44949; }
+.workspace-reset-dialog { width: min(540px, calc(100vw - 32px)); max-height: 90vh; overflow: auto; }
+.workspace-reset-dialog:not([open]) { display: none; }
+.workspace-reset-dialog p { line-height: 1.6; }
+.workspace-reset-dialog input { width: 100%; box-sizing: border-box; margin-top: 10px; padding: 10px; }
+.workspace-reset-actions { display: flex; justify-content: flex-end; flex-wrap: wrap; gap: 12px; margin-top: 24px; }
+.workspace-reset-danger-button { background: #b91c1c !important; color: white !important; }
+.workspace-reset-danger-button:disabled { opacity: .45; cursor: not-allowed; }

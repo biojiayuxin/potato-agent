@@ -253,6 +253,42 @@ class SessionRunManager:
         self._bridge_event_locks: dict[str, asyncio.Lock] = {}
         self._workspace_change_revisions: dict[str, str] = {}
         self._delegation_counts: dict[tuple[str, str], int] = {}
+        self._resetting_users: set[str] = set()
+        self._submission_tasks: dict[str, set[asyncio.Task]] = {}
+
+    async def _reset_safe_io(self, function, *args, **kwargs):
+        """Cancellation must not leave a database thread writing after reset."""
+        task = asyncio.create_task(asyncio.to_thread(function, *args, **kwargs))
+        try:
+            return await asyncio.shield(task)
+        except asyncio.CancelledError:
+            with contextlib.suppress(Exception):
+                await task
+            raise
+
+    async def quiesce_user(self, user_id: str) -> None:
+        self._resetting_users.add(user_id)
+        entry = self._bridge_listener_entries.pop(user_id, None)
+        if entry:
+            entry[0].remove_event_listener(entry[1])
+        async with self._bridge_event_locks.setdefault(user_id, asyncio.Lock()):
+            pass
+        tasks = list(self._submission_tasks.pop(user_id, set()))
+        tasks.extend(task for key, task in self._flush_tasks.items() if key[0] == user_id)
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+        async with self._lock:
+            for collection in (self._run_contexts_by_session_id, self._run_contexts_by_live_session_id,
+                               self._flush_tasks, self._flush_events, self._delegation_counts,
+                               self._approval_state_locks):
+                for key in list(collection):
+                    if key[0] == user_id:
+                        collection.pop(key, None)
+            self._workspace_change_revisions.pop(user_id, None)
+
+    def release_user_after_reset(self, user_id: str) -> None:
+        self._resetting_users.discard(user_id)
 
     async def get_workspace_change_revision(self, user_id: str) -> str:
         async with self._lock:
@@ -265,7 +301,7 @@ class SessionRunManager:
     async def _get_live_session_state(
         self, user_id: str, session_id: str
     ) -> dict[str, Any] | None:
-        return await asyncio.to_thread(
+        return await self._reset_safe_io(
             get_live_session_state, user_id, session_id, db_path=self._db_path
         )
 
@@ -275,7 +311,7 @@ class SessionRunManager:
         session_id: str,
         **kwargs: Any,
     ) -> dict[str, Any]:
-        return await asyncio.to_thread(
+        return await self._reset_safe_io(
             save_live_session_state,
             user_id,
             session_id,
@@ -284,7 +320,7 @@ class SessionRunManager:
         )
 
     async def _list_live_session_states(self, user_id: str) -> dict[str, dict[str, Any]]:
-        return await asyncio.to_thread(
+        return await self._reset_safe_io(
             list_live_session_states, user_id, db_path=self._db_path
         )
 
@@ -293,7 +329,7 @@ class SessionRunManager:
         user_id: str,
         session_id: str,
     ) -> list[dict[str, Any]] | None:
-        return await asyncio.to_thread(
+        return await self._reset_safe_io(
             get_display_messages, user_id, session_id, db_path=self._db_path
         )
 
@@ -305,7 +341,7 @@ class SessionRunManager:
         *,
         draft_title: str | None = None,
     ) -> None:
-        await asyncio.to_thread(
+        await self._reset_safe_io(
             save_display_messages,
             user_id,
             session_id,
@@ -320,7 +356,7 @@ class SessionRunManager:
         session_id: str,
         **kwargs: Any,
     ) -> None:
-        await asyncio.to_thread(
+        await self._reset_safe_io(
             append_session_event,
             user_id,
             session_id,
@@ -329,6 +365,8 @@ class SessionRunManager:
         )
 
     async def attach_bridge(self, bridge: TuiGatewayBridge) -> None:
+        if bridge.user_id in self._resetting_users:
+            raise TuiGatewayBridgeError("Workspace reset is in progress")
         async with self._lock:
             existing_entry = self._bridge_listener_entries.get(bridge.user_id)
             if existing_entry is not None and existing_entry[0] is bridge:
@@ -339,7 +377,9 @@ class SessionRunManager:
 
             async def _listener(event: dict[str, Any]) -> None:
                 async with event_lock:
-                    await self.handle_bridge_event(bridge, event)
+                    if (bridge.user_id not in self._resetting_users
+                            and self._bridge_listener_entries.get(bridge.user_id, (None,))[0] is bridge):
+                        await self.handle_bridge_event(bridge, event)
 
             if existing_entry is not None:
                 existing_bridge, existing_listener_id = existing_entry
@@ -422,7 +462,7 @@ class SessionRunManager:
         run_id = str(request_id or "").strip() or uuid.uuid4().hex
         if model_config is not None:
             from interface.session_model_store import record_model_run
-            await asyncio.to_thread(record_model_run, user_id, session_id, run_id, model_config, self._db_path)
+            await self._reset_safe_io(record_model_run, user_id, session_id, run_id, model_config, self._db_path)
         submitted_at = now_seconds()
         user_message_id = uuid.uuid4().hex
         assistant_message_id = uuid.uuid4().hex
@@ -520,7 +560,7 @@ class SessionRunManager:
         )
 
         submission_text = build_hermes_user_content(prompt, attachments)
-        asyncio.create_task(
+        submission_task = asyncio.create_task(
             self._submit_prompt_task(
                 bridge=bridge,
                 context=context,
@@ -531,6 +571,9 @@ class SessionRunManager:
                 model_config=model_config,
             )
         )
+        tasks = self._submission_tasks.setdefault(user_id, set())
+        tasks.add(submission_task)
+        submission_task.add_done_callback(tasks.discard)
         return {
             "run_id": run_id,
             "session_id": session_id,
@@ -1362,7 +1405,7 @@ class SessionRunManager:
         raw_boundary = payload.get("_fork_raw_boundary")
         if isinstance(raw_boundary, dict):
             try:
-                await asyncio.to_thread(
+                await self._reset_safe_io(
                     save_message_fork_boundary,
                     context.user_id,
                     context.session_id,

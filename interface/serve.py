@@ -92,6 +92,7 @@ def _run_server(hosts: tuple[str, ...], port: int) -> None:
             host=hosts[0],
             port=port,
             ws_max_size=UVICORN_WEBSOCKET_MAX_BYTES,
+            workers=1,
         )
         return
 
@@ -100,6 +101,7 @@ def _run_server(hosts: tuple[str, ...], port: int) -> None:
         host=hosts[0],
         port=port,
         ws_max_size=UVICORN_WEBSOCKET_MAX_BYTES,
+        workers=1,
     )
     sockets: list[socket.socket] = []
     try:

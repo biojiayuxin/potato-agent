@@ -2377,7 +2377,7 @@ const ensureTuiBridge = async () => {
   setTuiBridgeStatus('Connecting to TUI gateway...');
   tuiBridgeConnectPromise = new Promise((resolve, reject) => {
     const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-    const ws = new WebSocket(`${protocol}//${window.location.host}/api/tui/ws`);
+    const ws = new WebSocket(`${protocol}//${window.location.host}/api/tui/ws?workspace_generation=${Number(state.user?.workspace_reset?.generation || 0)}`);
     tuiBridgeConnectingSocket = ws;
 
     const cleanup = () => {
@@ -4093,6 +4093,11 @@ const showRuntimeStartView = ({ title, copy, error = '', canRetry = false, canBa
 };
 
 const startWorkspaceRuntime = async (user, { allowRetry = true, source = 'signin', takeover = true } = {}) => {
+  if (user?.workspace_reset?.job) {
+    state.user = user;
+    showWorkspaceResetProgress(user.workspace_reset.job);
+    return;
+  }
   if (workspaceStarting) return;
   if (!isChatPage()) history.pushState(null, '', '/chat');
   currentPagePath = location.pathname;
@@ -4131,7 +4136,8 @@ const startWorkspaceRuntime = async (user, { allowRetry = true, source = 'signin
     }
     if (!workspace.owned || generation !== workspace.generation) return;
     restoringHandoff = workspace.exclusive ? await handoffRecord('get') : null;
-    if (restoringHandoff?.account !== accountKey(user)) {
+    if (restoringHandoff?.account !== accountKey(user)
+        || Number(restoringHandoff?.workspaceGeneration || 0) !== Number(auth.user?.workspace_reset?.generation || 0)) {
       if (restoringHandoff) await handoffRecord('delete', restoringHandoff);
       restoringHandoff = null;
     }
@@ -4217,6 +4223,12 @@ const pollAuthSession = async () => {
       handleSessionExpired('The signed-in account changed. Please sign in again.');
       return;
     }
+    if (isChatPage() && json.user.workspace_reset?.job) {
+      showWorkspaceResetProgress(json.user.workspace_reset.job);
+    } else if (isChatPage() && Number(json.user.workspace_reset?.generation || 0) !== Number(state.user.workspace_reset?.generation || 0)) {
+      window.location.replace('/chat');
+      return;
+    }
   } catch {
     // Ignore transient polling failures and try again later.
   }
@@ -4298,6 +4310,7 @@ const api = async (path, options = {}) => {
     }
   };
   const headers = new Headers(options.headers || {});
+  if (workspaceRequest) headers.set('X-Workspace-Generation', String(state.user?.workspace_reset?.generation || 0));
   if (!(options.body instanceof FormData) && !headers.has('Content-Type') && options.body) {
     headers.set('Content-Type', 'application/json');
   }
@@ -4352,6 +4365,11 @@ const api = async (path, options = {}) => {
       handleSessionExpired(payload?.message || detail);
     }
     const requestError = new Error(detail);
+    if (payload?.detail?.code === 'workspace_reset_in_progress' && payload.detail.job) {
+      showWorkspaceResetProgress(payload.detail.job);
+    } else if (payload?.detail?.code === 'workspace_generation_changed') {
+      window.location.replace('/chat');
+    }
     requestError.status = response.status;
     requestError.payload = payload;
     requestError.retryAfter = response.headers.get('Retry-After');
@@ -6444,6 +6462,7 @@ const renderWorkspaceHeader = () => {
   const canChangePassword = Boolean(state.user) && !state.user?.is_temporary;
   if (dom.changePasswordButton) dom.changePasswordButton.hidden = !canChangePassword;
   if (dom.sidebarChangePasswordButton) dom.sidebarChangePasswordButton.hidden = !canChangePassword;
+  document.getElementById('sidebar-reset-workspace-button').hidden = !state.user?.workspace_reset?.enabled;
   renderUpdateNotesUnreadState();
   dom.chatTitle.textContent = getActiveWorkspaceTitle();
   refreshShareButtonState();
@@ -9237,6 +9256,7 @@ const yieldWorkspace = async request => {
     const handoff = {
       id: request.id,
       account: accountKey(state.user),
+      workspaceGeneration: Number(state.user?.workspace_reset?.generation || 0),
       snapshot: {
         activeSession: state.activeSession,
         draftMessages: state.activeSession?.isDraft ? state.messages : [],
@@ -9420,6 +9440,10 @@ const bootstrapSession = async ({ takeover = true } = {}) => {
       return;
     }
     state.user = json.user;
+    if (json.user.workspace_reset?.job && isChatPage()) {
+      showWorkspaceResetProgress(json.user.workspace_reset.job);
+      return;
+    }
     if (pendingEntry?.account && pendingEntry.account !== accountKey(state.user)) {
       pendingEntry = null;
       saveEntry(null);
@@ -10064,6 +10088,142 @@ window.addEventListener('hashchange', () => {
     if (state.user) startWorkspaceRuntime(state.user);
   }
   renderShareLoginBanner();
+});
+
+const resetDialog = document.getElementById('workspace-reset-dialog');
+const resetInput = document.getElementById('workspace-reset-confirmation');
+const resetSubmit = document.getElementById('workspace-reset-submit');
+const resetCancel = document.getElementById('workspace-reset-cancel');
+const resetStatus = document.getElementById('workspace-reset-status');
+let resetConfirmationToken = '';
+let resetRequestId = '';
+let resetJob = null;
+let resetPollTimer = null;
+let resetSubmitting = false;
+
+const resetRequest = (path, body) => api(path, {
+  method: 'POST', headers: { 'X-Workspace-Reset': '1' }, body: JSON.stringify(body || {}),
+}).then(response => response.json());
+
+const openWorkspaceResetConfirmation = async () => {
+  closeSidebarSettingsMenu();
+  resetJob = null;
+  resetConfirmationToken = '';
+  resetRequestId = uuid();
+  resetInput.value = '';
+  resetSubmit.disabled = true;
+  resetSubmit.hidden = false;
+  resetSubmit.textContent = 'Permanently reset workspace';
+  resetCancel.textContent = 'Cancel';
+  resetCancel.hidden = false;
+  resetCancel.disabled = false;
+  document.getElementById('workspace-reset-title').textContent = 'Reset workspace?';
+  document.getElementById('workspace-reset-warning').hidden = false;
+  resetStatus.textContent = 'Checking workspace…';
+  resetDialog.showModal();
+  resetCancel.focus();
+  const requestId = resetRequestId;
+  try {
+    const result = await resetRequest('/api/workspace/reset/prepare');
+    if (!resetDialog.open || requestId !== resetRequestId) return;
+    resetConfirmationToken = result.token;
+    resetStatus.textContent = '';
+    resetSubmit.disabled = resetInput.value !== 'RESET';
+  } catch (error) {
+    resetStatus.textContent = error.message;
+  }
+};
+
+function showWorkspaceResetProgress(job) {
+  if (resetJob?.job_id === job.job_id && resetDialog.open) return;
+  resetJob = job;
+  resetWorkspaceState();
+  clearPendingShareIntent();
+  pendingEntry = null;
+  saveEntry(null);
+  if (state.user && workspace.exclusive) handoffRecord('delete', accountKey(state.user)).catch(() => {});
+  document.getElementById('workspace-reset-title').textContent = 'Resetting workspace';
+  document.getElementById('workspace-reset-warning').hidden = true;
+  resetSubmit.hidden = true;
+  resetCancel.hidden = true;
+  if (!resetDialog.open) resetDialog.showModal();
+  resetStatus.textContent = 'Stopping running tasks… You can leave this page and return later.';
+  window.clearTimeout(resetPollTimer);
+  pollWorkspaceReset();
+}
+
+async function pollWorkspaceReset() {
+  if (!resetJob || !state.user) return;
+  const currentId = resetJob.job_id;
+  try {
+    const response = await api(`/api/workspace/reset/${encodeURIComponent(currentId)}`);
+    const job = await response.json();
+    if (resetJob?.job_id !== currentId) return;
+    resetJob = job;
+    if (job.status === 'succeeded') {
+      resetStatus.textContent = 'Workspace reset complete. Opening your fresh workspace…';
+      window.location.replace('/chat');
+      return;
+    }
+    if (job.status === 'failed' || job.status === 'blocked') {
+      document.getElementById('workspace-reset-title').textContent = 'Workspace reset needs attention';
+      const reason = job.error_code === 'unmanaged_processes'
+        ? 'Another process or login session is using this workspace. Close it before trying again.'
+        : job.error_code === 'external_schedules' ? 'An external scheduled task can still change workspace files. Ask an administrator to stop it before resetting.'
+        : job.error_code === 'requests_busy' ? 'A file transfer or request is still active. Finish it before trying again.'
+        : 'The workspace could not be reset.';
+      resetStatus.textContent = job.status === 'blocked'
+        ? `Reset could not finish. Your workspace is locked to protect its state. Contact an administrator with task ID ${job.job_id}.`
+        : `${reason} Your workspace data was preserved. Running tasks may have stopped.`;
+      resetCancel.hidden = false;
+      resetCancel.textContent = job.status === 'blocked' ? 'Back to home' : 'Return to workspace';
+      return;
+    }
+    const phases = { stopping: 'Stopping tasks and waiting for file transfers…', rebuilding: 'Restoring the default environment…', cleaning: 'Deleting old files, chats and shares…' };
+    resetStatus.textContent = `${phases[job.phase] || 'Resetting workspace…'} You can leave this page and return later.`;
+  } catch (error) {
+    resetStatus.textContent = 'Connection interrupted. Checking reset status again…';
+  }
+  resetPollTimer = window.setTimeout(pollWorkspaceReset, 1500);
+}
+
+document.getElementById('sidebar-reset-workspace-button').addEventListener('click', openWorkspaceResetConfirmation);
+resetInput.addEventListener('input', () => {
+  resetSubmit.disabled = resetSubmitting || !resetConfirmationToken || resetInput.value !== 'RESET';
+});
+resetDialog.addEventListener('cancel', event => {
+  if (resetJob || resetSubmitting) event.preventDefault();
+});
+resetCancel.addEventListener('click', () => {
+  if (resetJob) window.location.replace(resetJob.status === 'blocked' ? '/' : '/chat');
+  else if (!resetSubmitting) resetDialog.close();
+});
+resetSubmit.addEventListener('click', async () => {
+  if (resetSubmitting || resetInput.value !== 'RESET' || !resetConfirmationToken) return;
+  resetSubmitting = true;
+  resetSubmit.disabled = true;
+  resetCancel.disabled = true;
+  resetStatus.textContent = 'Submitting reset request…';
+  try {
+    const job = await resetRequest('/api/workspace/reset', {
+      token: resetConfirmationToken, confirmation: resetInput.value, request_id: resetRequestId,
+    });
+    try { localStorage.setItem('potato.workspaceReset', JSON.stringify({ userId: state.user.id, job })); } catch { /* Status polling also discovers resets. */ }
+    showWorkspaceResetProgress(job);
+  } catch (error) {
+    resetStatus.textContent = `${error.message} You can retry this request safely.`;
+    resetSubmit.disabled = false;
+  } finally {
+    resetSubmitting = false;
+    resetCancel.disabled = false;
+  }
+});
+window.addEventListener('storage', event => {
+  if (event.key !== 'potato.workspaceReset' || !event.newValue) return;
+  try {
+    const message = JSON.parse(event.newValue);
+    if (message.userId === state.user?.id && isChatPage()) showWorkspaceResetProgress(message.job);
+  } catch { /* Ignore unrelated or malformed storage events. */ }
 });
 
 initResizablePanels();

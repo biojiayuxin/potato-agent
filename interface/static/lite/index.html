@@ -7,7 +7,7 @@
     <title>Potato Agent | PotatoOmics</title>
     <link rel="icon" type="image/png" href="./static/favicon.png" />
     <link rel="stylesheet" href="./static/lite/vendor/katex/katex.min.css?v=0.18.11" />
-    <link rel="stylesheet" href="./static/lite/styles.css?v=20260910-sidebar-home-markdown-math-20261003-session-pins-20261005-pin-center-20261008-approval-dialog" />
+    <link rel="stylesheet" href="./static/lite/styles.css?v=20260910-sidebar-home-markdown-math-20261003-session-pins-20261005-pin-center-20261008-approval-dialog-20261019-workspace-reset" />
     <link rel="stylesheet" href="/static/shared/feedback.css?v=20260819-feedback" />
     <link rel="stylesheet" href="/static/shared/announcement.css?v=20260927-synteny">
     <script src="/static/shared/announcement.js?v=20260906" defer></script>
@@ -365,6 +365,10 @@
                   </svg>
                   <span>Change password</span>
                 </button>
+                <button id="sidebar-reset-workspace-button" class="sidebar-settings-menu-item workspace-reset-danger" type="button" role="menuitem" hidden>
+                  <svg class="sidebar-settings-menu-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M3 11a9 9 0 1 1 2.6 7M3 4v7h7"></path></svg>
+                  <span>Reset workspace</span>
+                </button>
                 <button id="sidebar-sign-out-button" class="sidebar-settings-menu-item" type="button" role="menuitem">
                   <svg class="sidebar-settings-menu-icon" viewBox="0 0 24 24" aria-hidden="true">
                     <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"></path>
@@ -528,6 +532,22 @@
           </div>
         </main>
       </section>
+
+      <dialog id="workspace-reset-dialog" class="share-dialog workspace-reset-dialog" aria-labelledby="workspace-reset-title" aria-describedby="workspace-reset-description">
+        <h2 id="workspace-reset-title">Reset workspace?</h2>
+        <div id="workspace-reset-warning">
+          <p id="workspace-reset-description">This permanently deletes all files, uploads, chats, memories and custom environments in this workspace. Running tasks will stop and old share links will expire.</p>
+          <p>Your workspace will use the current platform defaults. Your account, password, usage and quota records stay unchanged. Public datasets and copies already imported by other users are kept.</p>
+          <p><strong>This cannot be undone. Download important files first.</strong></p>
+          <label for="workspace-reset-confirmation">Type <strong>RESET</strong> to confirm</label>
+          <input id="workspace-reset-confirmation" autocomplete="off" spellcheck="false" maxlength="5" aria-label="Type RESET to confirm" />
+        </div>
+        <p id="workspace-reset-status" role="status" aria-live="polite"></p>
+        <div class="workspace-reset-actions">
+          <button id="workspace-reset-cancel" class="ghost" type="button" autofocus>Cancel</button>
+          <button id="workspace-reset-submit" class="primary workspace-reset-danger-button" type="button" disabled>Permanently reset workspace</button>
+        </div>
+      </dialog>
 
       <dialog id="workspace-entry-dialog" class="share-dialog workspace-entry-dialog" aria-labelledby="workspace-entry-title" aria-describedby="workspace-entry-description">
         <h2 id="workspace-entry-title">Open incoming request?</h2>
@@ -707,6 +727,6 @@
     <script src="./static/lite/vendor/marked.umd.js?v=18.0.14"></script>
     <script src="./static/lite/vendor/katex/katex.min.js?v=0.18.11"></script>
     <script src="/static/shared/feedback.js?v=20260819-feedback" defer></script>
-    <script type="module" src="./static/lite/app.js?v=20260930-deep-test-delegation-poll-status-models-20261001-markdown-math-20261003-session-pins-20261005-model-catalog-20261008-cleanup-approval-dialog"></script>
+    <script type="module" src="./static/lite/app.js?v=20260930-deep-test-delegation-poll-status-models-20261001-markdown-math-20261003-session-pins-20261005-model-catalog-20261008-cleanup-approval-dialog-20261019-workspace-reset-20261020-reset-http"></script>
   </body>
 </html>

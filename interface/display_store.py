@@ -1363,6 +1363,7 @@ def delete_display_user_data(
         model_cursor = conn.execute(
             "DELETE FROM session_model_state WHERE user_id = ?", (normalized_user_id,)
         )
+        conn.execute("DELETE FROM session_model_runs WHERE user_id = ?", (normalized_user_id,))
         pin_cursor = conn.execute(
             "DELETE FROM session_pin_state WHERE user_id = ?", (normalized_user_id,)
         )
