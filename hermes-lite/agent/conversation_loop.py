@@ -3814,8 +3814,14 @@ def run_conversation(
                 # final response path.
                 agent._mute_post_response = False
                 
-                # Check if response only has think block with no actual content after it
-                if not agent._has_content_after_think_block(final_response):
+                # Responses can explicitly complete with reasoning and no
+                # visible answer. Respect that status instead of retrying.
+                _codex_completed = (
+                    agent.api_mode == "codex_responses"
+                    and finish_reason == "stop"
+                    and str(getattr(response, "status", "") or "").strip().lower() == "completed"
+                )
+                if not agent._has_content_after_think_block(final_response) and not _codex_completed:
                     # ── Partial stream recovery ─────────────────────
                     # If content was already streamed to the user before
                     # the connection died, use it as the final response

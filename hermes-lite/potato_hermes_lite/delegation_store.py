@@ -84,11 +84,19 @@ class DelegationStore:
                 CREATE TABLE IF NOT EXISTS children (
                     id TEXT PRIMARY KEY, unit_id TEXT NOT NULL REFERENCES units(id) ON DELETE CASCADE,
                     task_index INTEGER NOT NULL, goal TEXT NOT NULL,
-                    status TEXT NOT NULL DEFAULT 'running', result TEXT NOT NULL DEFAULT '{}'
+                    status TEXT NOT NULL DEFAULT 'running', result TEXT NOT NULL DEFAULT '{}',
+                    read_at REAL
                 );
                 CREATE INDEX IF NOT EXISTS children_unit ON children(unit_id);
                 CREATE TABLE IF NOT EXISTS owners (session_id TEXT PRIMARY KEY, owner TEXT NOT NULL);
             """)
+            # Serialize migration against other sessions opening the same ledger.
+            db.execute("BEGIN IMMEDIATE")
+            if "read_at" not in {row["name"] for row in db.execute("PRAGMA table_info(children)")}:
+                db.execute("ALTER TABLE children ADD COLUMN read_at REAL")
+                db.execute("""UPDATE children SET read_at=(
+                    SELECT COALESCE(finished,created) FROM units WHERE id=children.unit_id)
+                    WHERE status!='running' AND unit_id IN (SELECT id FROM units WHERE delivery='delivered')""")
 
     @contextmanager
     def connect(self):
@@ -155,7 +163,14 @@ class DelegationStore:
                 db.execute("UPDATE units SET delivery='pending',finished=? WHERE id=? AND delivery='running'",
                            (time.time(), row["id"]))
 
-    def list(self, owner: str, *, unit_ids: list[str] | None = None, child_id: str = "") -> list[dict]:
+    def list(self, owner: str, *, unit_ids: list[str] | None = None, child_id: str = "",
+             unread_only: bool = False, limit: int | None = 200) -> list[dict]:
+        with self.connect() as db:
+            return self._list(db, owner, unit_ids=unit_ids, child_id=child_id, unread_only=unread_only, limit=limit)
+
+    @staticmethod
+    def _list(db, owner: str, *, unit_ids: list[str] | None = None, child_id: str = "",
+              unread_only: bool = False, limit: int | None = 200) -> list[dict]:
         sql = """SELECT c.*,u.delivery,u.created FROM children c JOIN units u ON u.id=c.unit_id
                  WHERE u.owner=?"""
         args: list = [owner]
@@ -167,16 +182,41 @@ class DelegationStore:
         if child_id:
             sql += " AND c.id=?"
             args.append(child_id)
-        with self.connect() as db:
-            rows = db.execute(sql + " ORDER BY u.created DESC,c.task_index LIMIT 200", args).fetchall()
+        if unread_only:
+            sql += " AND c.read_at IS NULL AND c.status!='running'"
+        sql += " ORDER BY u.created DESC,c.task_index"
+        if limit is not None:
+            sql += " LIMIT ?"
+            args.append(limit)
+        rows = db.execute(sql, args).fetchall()
         return [{**json.loads(row["result"]), "subagent_id": row["id"], "delegation_id": row["unit_id"],
                  "task_index": row["task_index"], "goal": row["goal"], "status": row["status"],
-                 "delivery": row["delivery"]} for row in rows]
+                 "delivery": row["delivery"], "read": row["read_at"] is not None} for row in rows]
+
+    def read_result(self, owner: str, child_id: str) -> list[dict]:
+        """Return an owned snapshot, marking it read only if it is terminal."""
+        with self.connect() as db:
+            # The snapshot and its read flag must refer to the same result.
+            # A worker cannot finish between reading a running snapshot and ACK.
+            db.execute("BEGIN IMMEDIATE")
+            records = self._list(db, owner, child_id=child_id) if child_id else []
+            if records and records[0]["status"] != "running":
+                db.execute("UPDATE children SET read_at=COALESCE(read_at,?) WHERE id=?",
+                           (time.time(), child_id))
+                db.execute("""UPDATE units SET delivery='delivered',claim=NULL,claimed_at=NULL
+                    WHERE id=? AND owner=? AND delivery IN ('running','pending','claimed')
+                    AND NOT EXISTS(SELECT 1 FROM children WHERE unit_id=units.id
+                                   AND (status='running' OR read_at IS NULL))""",
+                           (records[0]["delegation_id"], owner))
+                records = self._list(db, owner, child_id=child_id)
+            return records
 
     def pending(self, owner: str) -> list[str]:
         with self.connect() as db:
             return [row[0] for row in db.execute("""SELECT id FROM units WHERE owner=? AND
-                (delivery='pending' OR (delivery='claimed' AND claimed_at<?)) ORDER BY created LIMIT 50""",
+                (delivery='pending' OR (delivery='claimed' AND claimed_at<?))
+                AND EXISTS(SELECT 1 FROM children WHERE unit_id=units.id AND read_at IS NULL AND status!='running')
+                ORDER BY created LIMIT 50""",
                 (owner, time.time() - 300))]
 
     def claim(self, owner: str, unit_ids: list[str], token: str) -> list[str]:
@@ -185,7 +225,9 @@ class DelegationStore:
             for unit in dict.fromkeys(unit_ids):
                 updated = db.execute("""UPDATE units SET delivery='claimed',claim=?,claimed_at=?,worker=?
                     WHERE id=? AND owner=? AND (delivery='pending' OR
-                    (delivery='claimed' AND claimed_at<?))""", (token, time.time(), process_identity(), unit, owner, time.time() - 300))
+                    (delivery='claimed' AND claimed_at<?))
+                    AND EXISTS(SELECT 1 FROM children WHERE unit_id=units.id AND read_at IS NULL AND status!='running')""",
+                    (token, time.time(), process_identity(), unit, owner, time.time() - 300))
                 if updated.rowcount:
                     claimed.append(unit)
         return claimed
@@ -195,10 +237,20 @@ class DelegationStore:
             db.execute("UPDATE units SET claimed_at=? WHERE owner=? AND claim=? AND delivery='claimed'",
                        (time.time(), owner, token))
 
-    def settle(self, owner: str, token: str, *, accepted: bool) -> None:
+    def settle(self, owner: str, token: str, *, accepted: bool, child_ids: list[str] | None = None) -> None:
         with self.connect() as db:
-            db.execute("UPDATE units SET delivery=?,claim=NULL,claimed_at=NULL WHERE owner=? AND claim=? AND delivery='claimed'",
-                       ("delivered" if accepted else "pending", owner, token))
+            if accepted:
+                sql = """UPDATE children SET read_at=COALESCE(read_at,?) WHERE status!='running'
+                    AND unit_id IN (SELECT id FROM units WHERE owner=? AND claim=? AND delivery='claimed')"""
+                args: list = [time.time(), owner, token]
+                if child_ids is not None:
+                    sql += " AND id IN (" + ",".join("?" for _ in child_ids) + ")"
+                    args.extend(child_ids)
+                db.execute(sql, args)
+            db.execute("""UPDATE units SET delivery=CASE WHEN EXISTS(
+                    SELECT 1 FROM children WHERE unit_id=units.id AND (read_at IS NULL OR status='running'))
+                    THEN 'pending' ELSE 'delivered' END,claim=NULL,claimed_at=NULL
+                WHERE owner=? AND claim=? AND delivery='claimed'""", (owner, token))
 
     def suppress(self, owner: str) -> None:
         """Explicit Stop keeps results readable without waking the stopped session."""

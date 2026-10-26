@@ -4779,6 +4779,8 @@ def _run_prompt_submit(rid, sid: str, session: dict, text: Any, *, turn_id: str 
             result = agent.run_conversation(run_message, **run_kwargs)
             # A returned turn has accepted the retained completion into its conversation.
             delegation_gateway.settle(session, accepted=True)
+            # Include children read through result even when no notification is needed.
+            delegation_gateway.account(session)
 
             last_reasoning = None
             status_note = None

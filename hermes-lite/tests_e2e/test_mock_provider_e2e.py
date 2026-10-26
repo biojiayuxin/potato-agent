@@ -302,6 +302,7 @@ class MockProvider(AbstractContextManager["MockProvider"]):
                 self.end_headers()
                 self.close_connection = True
 
+                response_status = str(plan.get("status") or "completed")
                 text = str(plan.get("text") or "Mock Responses reply")
                 response_id = "resp-hermes-lite-e2e"
                 message_id = "msg-hermes-lite-e2e"
@@ -346,14 +347,14 @@ class MockProvider(AbstractContextManager["MockProvider"]):
                         "item": message,
                     },
                     {
-                        "type": "response.completed",
+                        "type": f"response.{response_status}",
                         "sequence_number": 4,
                         "response": {
                             "id": response_id,
                             "object": "response",
                             "created_at": 1,
                             "completed_at": 1,
-                            "status": "completed",
+                            "status": response_status,
                             "error": None,
                             "incomplete_details": None,
                             "instructions": None,
@@ -377,6 +378,43 @@ class MockProvider(AbstractContextManager["MockProvider"]):
                         },
                     },
                 ]
+                if plan.get("kind") == "reasoning":
+                    reasoning = str(plan.get("reasoning") or "No additional answer is needed.")
+                    events[:3] = [
+                        {
+                            "type": "response.reasoning_summary_text.delta",
+                            "sequence_number": 1,
+                            "item_id": "rs-hermes-lite-e2e",
+                            "output_index": 0,
+                            "summary_index": 0,
+                            "delta": reasoning,
+                        },
+                        {
+                            "type": "response.output_item.done",
+                            "sequence_number": 2,
+                            "output_index": 0,
+                            "item": {
+                                "id": "rs-hermes-lite-e2e",
+                                "type": "reasoning",
+                                "summary": [{"type": "summary_text", "text": reasoning}],
+                                "encrypted_content": "opaque-reasoning-fixture",
+                            },
+                        },
+                    ]
+                elif plan.get("kind") == "tool":
+                    events[:3] = [{
+                        "type": "response.output_item.done",
+                        "sequence_number": 1,
+                        "output_index": 0,
+                        "item": {
+                            "id": "fc-" + plan.get("call_id", "hermes-lite-e2e"),
+                            "call_id": plan.get("call_id", "call-hermes-lite-e2e"),
+                            "type": "function_call",
+                            "status": "completed",
+                            "name": plan["name"],
+                            "arguments": json.dumps(plan["arguments"]),
+                        },
+                    }]
                 for event in events:
                     if not self._write_sse(event):
                         return
@@ -786,6 +824,51 @@ def test_codex_responses_prompt_submit_streams_to_completion(
             )
 
 
+@pytest.mark.parametrize("prior_answer", [False, True])
+def test_codex_completed_reasoning_only_finishes_without_retry(tmp_path: Path, prior_answer: bool) -> None:
+    plans = ([{"kind": "text", "text": "The original question is answered."}] if prior_answer else [])
+    plans.append({"kind": "reasoning", "status": "completed"})
+    with MockProvider(plans) as provider:
+        with GatewayProcess(tmp_path / "gateway", provider, api_mode="codex_responses") as gateway:
+            sid = _create_session(gateway)["session_id"]
+            # Keep automatic title generation from consuming a response plan.
+            gateway.rpc("session.title", {"session_id": sid, "title": "Completion regression"})
+            if prior_answer:
+                gateway.rpc("prompt.submit", {"session_id": sid, "text": "original question", "turn_id": "first"})
+                first = _payload(gateway.wait_event("message.complete", session_id=sid))
+                assert first["text"] == "The original question is answered."
+                _wait_turn_idle(gateway, sid, "first")
+
+            gateway.rpc("prompt.submit", {"session_id": sid, "text": "review the available information", "turn_id": "reasoning"})
+            complete = _payload(gateway.wait_event("message.complete", session_id=sid))
+            _wait_turn_idle(gateway, sid, "reasoning")
+
+            assert complete["status"] == "complete", gateway.diagnostics()
+            assert complete["text"] == ""
+            assert complete["reasoning"] == "No additional answer is needed."
+            assert provider.state.streaming_request_count == len(plans)
+
+
+@pytest.mark.parametrize("exhausted", [False, True])
+def test_codex_incomplete_reasoning_only_still_continues_or_reports_error(tmp_path: Path, exhausted: bool) -> None:
+    incomplete = {"kind": "reasoning", "status": "incomplete"}
+    plans = [incomplete] * 3 if exhausted else [incomplete, {"kind": "reasoning", "status": "completed"}]
+    with MockProvider(plans) as provider:
+        with GatewayProcess(tmp_path / "gateway", provider, api_mode="codex_responses") as gateway:
+            sid = _create_session(gateway)["session_id"]
+            gateway.rpc("prompt.submit", {"session_id": sid, "text": "review the available information", "turn_id": "incomplete"})
+            complete = _payload(gateway.wait_event("message.complete", session_id=sid))
+            _wait_turn_idle(gateway, sid, "incomplete")
+
+            assert provider.state.streaming_request_count == len(plans)
+            if exhausted:
+                assert complete["status"] == "error"
+                assert "remained incomplete" in complete["text"]
+            else:
+                assert complete["status"] == "complete", gateway.diagnostics()
+                assert complete["text"] == ""
+
+
 def test_session_interrupt_stops_a_streaming_turn(tmp_path: Path) -> None:
     with MockProvider(
         [{"kind": "blocked", "text": "Partial response must stop"}]
@@ -1182,6 +1265,67 @@ def test_background_delegation_continues_across_parent_turns_and_delivers_once(t
                 saved = json.loads(db.execute("SELECT result FROM children").fetchone()[0])
                 assert saved["status"] == "completed"
                 assert "Retained child finding" in saved["summary"]
+
+
+@pytest.mark.parametrize("read_count", [1, 2])
+def test_parent_reads_completed_children_before_notification(tmp_path: Path, read_count: int) -> None:
+    import sqlite3
+
+    plans = [{"kind": "tool", "name": "delegate_task", "call_id": f"read-result-{i}",
+              "arguments": {"action": "result", "subagent_id": f"saved-child-{i}"}}
+             for i in range(read_count)]
+    plans.append({"kind": "text", "text": "The parent answer is complete."})
+    if read_count == 1:
+        plans.append({"kind": "reasoning", "status": "completed"})
+    with MockProvider(plans) as provider:
+        with GatewayProcess(tmp_path / "gateway", provider, api_mode="codex_responses") as gateway:
+            created = _create_session(gateway)
+            sid = created["session_id"]
+            gateway.rpc("session.title", {"session_id": sid, "title": "Result delivery regression"})
+            assert gateway.rpc("prompt.submit", {"session_id": sid, "delegation_ids": ["initialize-ledger"]}) == {"status": "no_results"}
+            ledger = gateway.hermes_home / "potato-delegations.db"
+            # Seed completed workers; result reads and notification turns use the real runtime.
+            with sqlite3.connect(ledger) as db:
+                db.execute("""INSERT INTO units(id,owner,worker,created,finished,delivery)
+                              VALUES('saved-unit',?,'finished-worker',?,?,'pending')""",
+                           (created["stored_session_id"], time.time(), time.time()))
+                for i in range(2):
+                    db.execute("""INSERT INTO children(id,unit_id,task_index,goal,status,result)
+                                  VALUES(?,'saved-unit',?,?,'completed',?)""",
+                               (f"saved-child-{i}", i, f"task {i}",
+                                json.dumps({"status": "completed", "summary": f"finding {i}"})))
+
+            gateway.rpc("prompt.submit", {"session_id": sid, "text": "Use the saved child findings.",
+                                          "turn_id": "parent-read", "delegation_delivery": True})
+            done = _payload(gateway.wait_event("message.complete", session_id=sid))
+            _wait_turn_idle(gateway, sid, "parent-read")
+            assert done["status"] == "complete", gateway.diagnostics()
+            assert done["text"] == "The parent answer is complete."
+            with sqlite3.connect(ledger) as db:
+                flags = [r[0] for r in db.execute("SELECT read_at IS NOT NULL FROM children ORDER BY task_index")]
+            assert flags == [True, read_count == 2]
+
+            submit = gateway.rpc("prompt.submit", {"session_id": sid, "delegation_ids": ["saved-unit"],
+                                                   "turn_id": "unread-delivery"})
+            if read_count == 2:
+                assert submit == {"status": "no_results"}
+            else:
+                assert submit == {"status": "streaming"}
+                done = _payload(gateway.wait_event("message.complete", session_id=sid))
+                _wait_turn_idle(gateway, sid, "unread-delivery")
+                assert done["status"] == "complete", gateway.diagnostics()
+                assert done["text"] == ""
+                assert done["reasoning"] == "No additional answer is needed."
+                last_request = provider.state.requests[-1]
+                notice = next(item for item in reversed(last_request["input"]) if item.get("role") == "user")
+                notice_text = json.dumps(notice, ensure_ascii=False)
+                assert "saved-child-1" in notice_text
+                assert "saved-child-0" not in notice_text
+            assert provider.state.streaming_request_count == len(plans)
+            assert gateway.rpc("prompt.submit", {"session_id": sid, "delegation_ids": ["saved-unit"]}) == {"status": "no_results"}
+            with sqlite3.connect(ledger) as db:
+                assert db.execute("SELECT delivery FROM units WHERE id='saved-unit'").fetchone()[0] == "delivered"
+                assert db.execute("SELECT COUNT(*) FROM children WHERE read_at IS NULL").fetchone()[0] == 0
 
 
 @pytest.mark.parametrize("expire", [False, True])

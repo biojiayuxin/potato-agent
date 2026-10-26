@@ -1247,13 +1247,13 @@ def _normalize_codex_response(
         finish_reason = "incomplete"
     elif has_incomplete_items or (saw_commentary_phase and not saw_final_answer_phase):
         finish_reason = "incomplete"
-    elif (reasoning_items_raw or reasoning_parts or saw_reasoning_item) and not final_text:
-        # Response contains only reasoning (encrypted thinking state and/or
-        # human-readable summary) with no visible content or tool calls. The
-        # model is still thinking and needs another turn to produce the actual
-        # answer. Marking this as "stop" would send it into the empty-content
-        # retry loop which burns retries then fails — treat it as incomplete so
-        # the Codex continuation path handles it correctly.
+    elif (
+        response_status != "completed"
+        and (reasoning_items_raw or reasoning_parts or saw_reasoning_item)
+        and not final_text
+    ):
+        # Reasoning alone does not override an explicit completed response.
+        # Without that terminal status, retain the continuation path.
         finish_reason = "incomplete"
     else:
         finish_reason = "stop"

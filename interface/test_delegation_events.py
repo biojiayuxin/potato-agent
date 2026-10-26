@@ -61,6 +61,30 @@ def test_ready_waits_while_user_turn_is_active(tmp_path):
     assert bridge.calls == []
 
 
+def test_reasoning_only_completion_finishes_managed_notification(tmp_path):
+    db_path = tmp_path / "interface.db"
+    seed(db_path)
+
+    async def scenario():
+        bridge = _SubmitBridge(complete_on_submit=False)
+        manager = SessionRunManager(db_path=db_path)
+        await handle_event(manager, bridge, event("delegation.ready", delegation_ids=["unread-result"]))
+        for _ in range(100):
+            if bridge.calls:
+                break
+            await asyncio.sleep(0.01)
+        assert bridge.calls
+        await manager.handle_bridge_event(bridge, event(
+            "message.complete", text="", reasoning="No additional answer is needed.", status="complete",
+        ))
+        assert get_live_session_state("user-1", "session-1", db_path=db_path)["status"] == "completed"
+        message = get_display_messages("user-1", "session-1", db_path=db_path)[-1]
+        assert not message.get("content")
+        assert message["reasoningContent"] == "No additional answer is needed."
+
+    asyncio.run(scenario())
+
+
 def test_http_snapshot_keeps_polling_across_background_result_handoff(tmp_path):
     db_path = tmp_path / "interface.db"
     seed(db_path)

@@ -70,7 +70,7 @@ def _consume_codex_event_stream(
       if no message item was emitted directly.
     * ``output_text``: assembled text from ``response.output_text.delta`` deltas.
     * ``usage``: copied from the terminal event's ``response.usage`` (when present).
-    * ``status``: ``completed`` / ``incomplete`` / ``failed`` (or ``completed`` if
+    * ``status``: ``completed`` / ``incomplete`` / ``failed`` (or ``None`` if
       the stream ended without a terminal frame but produced content).
     * ``id``: ``response.id`` when present.
     * ``incomplete_details``: passed through for ``response.incomplete`` frames.
@@ -96,7 +96,7 @@ def _consume_codex_event_stream(
     collected_text_deltas: List[str] = []
     has_tool_calls = False
     first_delta_fired = False
-    terminal_status: str = "completed"
+    terminal_status: str | None = None
     terminal_usage: Any = None
     terminal_response_id: str = None
     terminal_incomplete_details: Any = None

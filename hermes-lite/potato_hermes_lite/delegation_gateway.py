@@ -65,36 +65,51 @@ def poll(session: dict, sid: str, emit) -> None:
 
 def claim(session: dict, ids: list[str], token: str) -> str | None:
     manager = session["delegation_manager"]
-    if manager.stopped:
-        return None
-    claimed = manager.store.claim(manager.owner, ids, token)
-    if not claimed:
-        return None
-    session["delegation_delivery"] = (token, claimed)
-    return completion_text(manager.store.list(manager.owner, unit_ids=claimed))
+    with manager.lock:
+        if manager.stopped:
+            return None
+        claimed = manager.store.claim(manager.owner, ids, token)
+        if not claimed:
+            return None
+        try:
+            results = manager.store.list(manager.owner, unit_ids=claimed, unread_only=True, limit=None)
+            if not results:
+                manager.store.settle(manager.owner, token, accepted=False)
+                return None
+            text = completion_text(results)
+        except Exception:
+            manager.store.settle(manager.owner, token, accepted=False)
+            raise
+        session["delegation_delivery"] = (token, claimed, [r["subagent_id"] for r in results])
+        return text
 
 
 def settle(session: dict, *, accepted: bool) -> None:
     delivery = session.pop("delegation_delivery", None)
     manager = session.get("delegation_manager")
     if delivery is not None and manager is not None:
-        manager.store.settle(manager.owner, delivery[0], accepted=accepted)
+        manager.store.settle(manager.owner, delivery[0], accepted=accepted, child_ids=delivery[2])
 
 
 def account(session: dict) -> None:
     delivery = session.get("delegation_delivery")
     manager = session.get("delegation_manager")
     agent = session.get("agent")
-    if delivery is None or manager is None or agent is None:
+    if manager is None or agent is None:
         return
-    ids = [uid for uid in delivery[1] if uid not in manager.accounted]
-    total = sum(float(r.get("cost_usd") or 0) for r in manager.store.list(manager.owner, unit_ids=ids))
+    delivering = set(delivery[2]) if delivery else set()
+    results = [r for r in manager.store.list(manager.owner, limit=None)
+               if r["status"] != "running" and r["subagent_id"] not in manager.accounted
+               and (r["read"] or r["subagent_id"] in delivering)]
+    if not results:
+        return
+    total = sum(float(r.get("cost_usd") or 0) for r in results)
     agent.session_estimated_cost_usd = float(getattr(agent, "session_estimated_cost_usd", 0) or 0) + total
     if total:
         agent.session_cost_source = "subagent"
         agent.session_cost_status = "estimated"
     # Preserve completion hooks on the parent thread, between model turns.
-    for result in manager.store.list(manager.owner, unit_ids=ids):
+    for result in results:
         memory = getattr(agent, "_memory_manager", None)
         if memory is not None:
             try:
@@ -111,4 +126,4 @@ def account(session: dict) -> None:
                         duration_ms=int((result.get("duration_seconds") or 0) * 1000))
         except Exception:
             pass
-    manager.accounted.update(ids)
+    manager.accounted.update(r["subagent_id"] for r in results)

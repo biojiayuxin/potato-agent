@@ -1,6 +1,13 @@
 {
   "updates": [
     {
+      "version": "2026-10-26-001",
+      "title": "Subagent result fixes",
+      "date": "October 26, 2026",
+      "summary": "Fixed duplicate subagent result delivery and false errors when no additional reply is needed.",
+      "items": []
+    },
+    {
       "version": "2026-10-20-001",
       "title": "Workspace reset",
       "date": "October 20, 2026",

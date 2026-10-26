@@ -27,7 +27,8 @@ class DelegationManager:
         self.children: dict[str, object] = {}
         self.notify = None
         self.stopped = False
-        self.accounted: set[str] = set()
+        # Historical reads have already belonged to an earlier parent turn.
+        self.accounted: set[str] = {r["subagent_id"] for r in self.store.list(self.owner, limit=None) if r["read"]}
         self.unsaved: dict[str, dict] = {}
 
     def _live(self) -> dict:
@@ -118,16 +119,18 @@ class DelegationManager:
                 "message": "Do independent work now, then end your turn. Results arrive between turns. Use list/steer/stop for live control, or result to read retained output; do not poll while waiting."}
 
     def control(self, action: str, subagent_id: str = "", message: str = "") -> dict:
+        if action == "result":
+            with self.lock:
+                records = self.store.read_result(self.owner, subagent_id)
+            return {"results": records} if records else {"error": "No owned subagent with that ID."}
         records = self.store.list(self.owner, child_id=subagent_id)
         live = self._live()
         if action == "list":
             return {"tasks": [{k: value for k, value in row.items()
-                               if k in {"subagent_id", "delegation_id", "task_index", "goal", "status", "delivery"}}
+                               if k in {"subagent_id", "delegation_id", "task_index", "goal", "status", "delivery", "read"}}
                               for row in records], "running": len(live)}
         if not subagent_id or not records:
             return {"error": "No owned subagent with that ID."}
-        if action == "result":
-            return {"results": records}
         child = live.get(subagent_id)
         if child is None or getattr(child, "_delegate_result_saved", False):
             return {"error": "Subagent has finished. Use action='result' to read its retained output."}
