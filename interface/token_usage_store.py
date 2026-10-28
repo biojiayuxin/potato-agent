@@ -54,13 +54,11 @@ ON model_proxy_usage_requests(route_model, started_at);
 CREATE TABLE IF NOT EXISTS web_search_usage_requests (
     id TEXT PRIMARY KEY,
     mapping_username TEXT NOT NULL,
-    topic TEXT NOT NULL DEFAULT '',
     status_code INTEGER NOT NULL,
     started_at REAL NOT NULL,
     completed_at REAL NOT NULL,
     duration_ms INTEGER NOT NULL,
     result_count INTEGER NOT NULL DEFAULT 0,
-    credits_used REAL,
     error_code TEXT,
     provider_request_id TEXT
 );
@@ -238,43 +236,34 @@ def record_usage_request(
 def record_web_search_usage(
     *,
     mapping_username: str,
-    topic: str,
     status_code: int,
     started_at: float,
     completed_at: float,
     duration_ms: int,
     result_count: int,
-    credits_used: float | int | None,
     error_code: str | None,
     provider_request_id: str | None,
     db_path: Path | str | None = None,
 ) -> str:
     ensure_token_usage_store(db_path)
     request_id = str(uuid.uuid4())
-    normalized_credits = None
-    if credits_used is not None:
-        normalized_credits = float(credits_used)
-        if not math.isfinite(normalized_credits) or normalized_credits < 0:
-            raise ValueError("credits_used must be a finite non-negative number")
     with _connect_usage_db(_resolve_db_path(db_path)) as conn:
         conn.execute(
             """
             insert into web_search_usage_requests (
-                id, mapping_username, topic, status_code, started_at,
-                completed_at, duration_ms, result_count, credits_used,
+                id, mapping_username, status_code, started_at,
+                completed_at, duration_ms, result_count,
                 error_code, provider_request_id
-            ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) values (?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 request_id,
                 mapping_username.strip(),
-                topic.strip(),
                 int(status_code),
                 float(started_at),
                 float(completed_at),
                 max(0, int(duration_ms)),
                 max(0, int(result_count)),
-                normalized_credits,
                 (error_code or "").strip() or None,
                 (provider_request_id or "").strip() or None,
             ),

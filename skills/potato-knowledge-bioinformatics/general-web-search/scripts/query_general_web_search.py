@@ -14,10 +14,8 @@ from urllib.parse import urlsplit
 
 
 MAX_CONFIG_BYTES = 1024 * 1024
-MAX_PROXY_RESPONSE_BYTES = 64 * 1024
+MAX_PROXY_RESPONSE_BYTES = 4 * 1024 * 1024
 DEFAULT_TIMEOUT_SECONDS = 60.0
-VALID_TOPICS = ("general", "news", "finance")
-VALID_TIME_RANGES = ("day", "week", "month", "year")
 ERROR_MESSAGES = {
     "client_config": "Web search client is not configured",
     "client_dependency": "Run with a Python environment containing PyYAML",
@@ -26,6 +24,7 @@ ERROR_MESSAGES = {
     "unauthorized": "Web search authorization failed",
     "search_forbidden": "This principal cannot use web search",
     "invalid_request": "Invalid web search request",
+    "query_too_long": "Web search query must be at most 128 characters",
     "request_too_large": "Web search request is too large",
     "rate_limited": "Web search is temporarily rate limited",
     "provider_auth": "Web search provider authentication failed",
@@ -33,6 +32,7 @@ ERROR_MESSAGES = {
     "provider_budget_exhausted": "Web search provider budget is exhausted",
     "provider_timeout": "Web search provider timed out",
     "provider_error": "Web search provider returned an invalid response",
+    "provider_rejected": "Web search provider rejected the request",
     "search_unavailable": "Web search is unavailable",
 }
 
@@ -121,13 +121,12 @@ def _timeout(value: str) -> float:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Search public web pages.")
-    parser.add_argument("query", metavar="QUERY")
-    parser.add_argument("--max-results", type=int, choices=range(1, 11), default=5)
-    parser.add_argument("--topic", choices=VALID_TOPICS, default="general")
-    parser.add_argument("--time-range", choices=VALID_TIME_RANGES)
-    parser.add_argument("--include-domain", action="append", default=[])
-    parser.add_argument("--exclude-domain", action="append", default=[])
+    parser = argparse.ArgumentParser(description="Search public web pages with DeepSeek.")
+    parser.add_argument("query", metavar="QUERY", help="1–128 Unicode characters")
+    parser.add_argument("--count", type=int, choices=range(1, 51), default=10)
+    parser.add_argument("--ori-question", help="Original public question, at most 128 characters")
+    parser.add_argument("--localization", help="IP address for localized results")
+    parser.add_argument("--need-content", action="store_true", help="Include webpage content")
     parser.add_argument("--timeout", type=_timeout, default=DEFAULT_TIMEOUT_SECONDS)
     return parser
 
@@ -135,13 +134,13 @@ def build_parser() -> argparse.ArgumentParser:
 def _request_payload(args: argparse.Namespace) -> dict[str, Any]:
     payload: dict[str, Any] = {
         "query": args.query,
-        "max_results": args.max_results,
-        "topic": args.topic,
-        "include_domains": args.include_domain,
-        "exclude_domains": args.exclude_domain,
+        "count": args.count,
+        "need_content": args.need_content,
     }
-    if args.time_range is not None:
-        payload["time_range"] = args.time_range
+    if args.ori_question is not None:
+        payload["ori_question"] = args.ori_question
+    if args.localization is not None:
+        payload["localization"] = args.localization
     return payload
 
 
@@ -166,18 +165,16 @@ def _proxy_error(payload: Any) -> ClientFailure:
 
 
 def _validated_success(payload: Any) -> dict[str, Any]:
-    # The local proxy validates and normalizes result fields and provider metadata.
+    # The local proxy validates DeepSeek result fields.
     if (
         not isinstance(payload, dict)
-        or payload.get("success") is not True
         or not isinstance(payload.get("results"), list)
-        or not isinstance(payload.get("meta"), dict)
-        or len(payload["results"]) > 10
+        or len(payload["results"]) > 50
     ):
         raise ClientFailure("proxy_error")
     if any(not isinstance(result, dict) for result in payload["results"]):
         raise ClientFailure("proxy_error")
-    return payload
+    return {"results": payload["results"]}
 
 
 def query_proxy(config: ProxyConfig, args: argparse.Namespace) -> dict[str, Any]:

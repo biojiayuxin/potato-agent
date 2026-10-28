@@ -108,18 +108,42 @@ def test_ensure_token_usage_store_creates_tables_idempotently(tmp_path) -> None:
     assert "idx_model_proxy_usage_route_model_started" in index_names
     assert {
         "mapping_username",
-        "topic",
         "status_code",
         "started_at",
         "completed_at",
         "duration_ms",
         "result_count",
-        "credits_used",
         "error_code",
         "provider_request_id",
     }.issubset(search_columns)
     assert "idx_web_search_usage_user_started" in search_index_names
     assert "idx_web_search_usage_started" in search_index_names
+
+
+def test_search_usage_appends_to_existing_database_without_changing_history(tmp_path) -> None:
+    db_path = tmp_path / "usage.db"
+    token_usage_store.ensure_token_usage_store(db_path)
+    with sqlite3.connect(db_path) as conn:
+        conn.execute("alter table web_search_usage_requests add column topic TEXT NOT NULL DEFAULT ''")
+        conn.execute("alter table web_search_usage_requests add column credits_used REAL")
+        conn.execute(
+            "insert into web_search_usage_requests "
+            "(id, mapping_username, status_code, started_at, completed_at, duration_ms, "
+            "result_count, topic, credits_used) values ('existing', 'alice', 200, 1, 2, 1000, 5, 'general', 1)"
+        )
+    request_id = token_usage_store.record_web_search_usage(
+        mapping_username="alice", status_code=200, started_at=3, completed_at=4,
+        duration_ms=1000, result_count=50, error_code=None,
+        provider_request_id="deepseek-request", db_path=db_path,
+    )
+    with sqlite3.connect(db_path) as conn:
+        assert conn.execute(
+            "select result_count, topic, credits_used from web_search_usage_requests where id='existing'"
+        ).fetchone() == (5, "general", 1)
+        assert conn.execute(
+            "select status_code, result_count, provider_request_id, topic, credits_used "
+            "from web_search_usage_requests where id=?", (request_id,),
+        ).fetchone() == (200, 50, "deepseek-request", "", None)
 
 
 def test_usage_store_discards_arbitrary_raw_upstream_fields(tmp_path) -> None:

@@ -13,7 +13,7 @@ from interface.test_model_proxy import (
 
 
 USER_TOKEN = "pmp_alice_0123456789abcdefghijklmnopqrstuvwxyz"
-TAVILY_FIXTURE_KEY = "tvly-fixture-never-log-this-value"
+DEEPSEEK_FIXTURE_KEY = "sk-fixture-never-log-this-value"
 SERVICE_TOKEN = "svc_0123456789abcdefghijklmnopqrstuvwxyz"
 
 
@@ -27,19 +27,25 @@ def _success_payload(*, url: str = "https://example.org/page") -> dict:
             {
                 "title": "Example title",
                 "url": url,
-                "content": "Example snippet",
-                "score": 0.81,
-                "published_date": "2026-08-01",
-                "raw_content": "must not escape",
+                "summary": "Example summary",
+                "snippet": "Example snippet",
+                "content": "# Example\n\nFull page.",
+                "private_debug": "must not escape",
+                "rerank_score": 2.4,
+                "date": "2026-08-01T00:00:00+00:00",
+                "site_name": "Example",
+                "site_icon": "https://example.org/favicon.ico",
+                "authority": 3,
             }
         ],
         "answer": "must not escape",
-        "usage": {"credits": 1},
+        "usage": {"credits": "must not be used"},
     }
 
 
 def _search_client(tmp_path, monkeypatch, handler):
-    monkeypatch.setenv("TAVILY_API_KEY", TAVILY_FIXTURE_KEY)
+    monkeypatch.delenv("DEEPSEEK_SEARCH_API_KEY_FILE", raising=False)
+    monkeypatch.setenv("DEEPSEEK_SEARCH_API_KEY", DEEPSEEK_FIXTURE_KEY)
     client, model_proxy = _client(tmp_path, monkeypatch)
     model_proxy.app.state.web_search_transport = httpx.MockTransport(handler)
     model_proxy.app.state.web_search_limiter = model_proxy.web_search.SearchRateLimiter()
@@ -69,7 +75,7 @@ def test_search_recovers_after_two_connection_failures(
     assert model_proxy.app.state.web_search_limiter._active == 0
     with sqlite3.connect(tmp_path / "usage.db") as conn:
         rows = conn.execute(
-            "select status_code, credits_used from web_search_usage_requests"
+            "select status_code, result_count from web_search_usage_requests"
         ).fetchall()
     assert rows == [(200, 1)]
 
@@ -86,7 +92,7 @@ def test_search_stops_after_two_connection_retries_and_logs_safely(
 ) -> None:
     calls = 0
     query = "private query sentinel"
-    details = f"private connection details {TAVILY_FIXTURE_KEY} {query}"
+    details = f"private connection details {DEEPSEEK_FIXTURE_KEY} {query}"
 
     def handler(request: httpx.Request) -> httpx.Response:
         nonlocal calls
@@ -104,7 +110,7 @@ def test_search_stops_after_two_connection_retries_and_logs_safely(
     assert model_proxy.app.state.web_search_limiter._active == 0
     assert f"type={failure.__name__}" in caplog.text
     assert "duration_ms=" in caplog.text
-    for secret in (query, TAVILY_FIXTURE_KEY, USER_TOKEN, details):
+    for secret in (query, DEEPSEEK_FIXTURE_KEY, USER_TOKEN, details):
         assert secret not in caplog.text
         assert secret not in response.text
     assert all(record.exc_info is None for record in caplog.records)
@@ -193,112 +199,65 @@ def test_search_total_deadline_includes_connection_retry_backoff(
     assert rows == [(504, "provider_timeout")]
 
 
-def test_search_sends_only_fixed_validated_tavily_payload_and_cleans_response(
+def test_search_sends_native_deepseek_payload_and_returns_native_results(
     tmp_path, monkeypatch
 ) -> None:
-    captured: dict = {}
+    captured = {}
+    payload = {
+        "query": '  potato "late  blight" site:example.org after:2026-10-01',
+        "count": 3,
+        "ori_question": "Which potato genes confer late blight resistance?",
+        "localization": "8.8.8.8",
+        "need_content": True,
+    }
 
     def handler(request: httpx.Request) -> httpx.Response:
-        captured["url"] = str(request.url)
-        captured["authorization"] = request.headers["authorization"]
-        captured["body"] = json.loads(request.content)
-        return httpx.Response(
-            200,
-            json=_success_payload(),
-            headers={"x-request-id": "tavily-request-1"},
-        )
+        captured.update(url=str(request.url), authorization=request.headers["authorization"],
+                        body=json.loads(request.content))
+        return httpx.Response(200, json=_success_payload(),
+                              headers={"x-request-id": "deepseek-request-1"})
 
     client, _ = _search_client(tmp_path, monkeypatch, handler)
-    response = client.post(
-        "/v1/search",
-        headers=_headers(),
-        json={
-            "query": "  recent\n potato   news ",
-            "max_results": 3,
-            "topic": "news",
-            "time_range": "week",
-            "include_domains": ["Example.ORG."],
-            "exclude_domains": ["blocked.example"],
-        },
-    )
-
-    assert response.status_code == 200, response.text
+    response = client.post("/v1/search", headers=_headers(), json=payload)
+    assert response.status_code == 200
     assert captured == {
-        "url": "https://api.tavily.com/search",
-        "authorization": f"Bearer {TAVILY_FIXTURE_KEY}",
-        "body": {
-            "query": "recent potato news",
-            "search_depth": "basic",
-            "max_results": 3,
-            "topic": "news",
-            "chunks_per_source": 2,
-            "include_answer": False,
-            "include_raw_content": False,
-            "include_images": False,
-            "auto_parameters": False,
-            "include_usage": True,
-            "time_range": "week",
-            "include_domains": ["example.org"],
-            "exclude_domains": ["blocked.example"],
-        },
+        "url": "https://api.deepseek.com/v1/tools/search",
+        "authorization": f"Bearer {DEEPSEEK_FIXTURE_KEY}",
+        "body": payload,
     }
-    assert response.json() == {
-        "success": True,
-        "results": [
-            {
-                "title": "Example title",
-                "url": "https://example.org/page",
-                "content": "Example snippet",
-                "score": 0.81,
-                "published_date": "2026-08-01",
-            }
-        ],
-        "meta": {
-            "provider": "tavily",
-            "topic": "news",
-            "search_depth": "basic",
-            "result_count": 1,
-            "credits_used": 1,
-        },
-    }
-    assert "raw_content" not in response.text
+    assert response.json() == {"results": [{
+        "title": "Example title", "url": "https://example.org/page",
+        "snippet": "Example snippet", "summary": "Example summary",
+        "content": "# Example\n\nFull page.", "rerank_score": 2.4,
+        "site_name": "Example", "site_icon": "https://example.org/favicon.ico",
+        "date": "2026-08-01T00:00:00+00:00", "authority": 3,
+    }]}
     assert "must not escape" not in response.text
-
     with sqlite3.connect(tmp_path / "usage.db") as conn:
         conn.row_factory = sqlite3.Row
         row = dict(conn.execute("select * from web_search_usage_requests").fetchone())
     assert row["mapping_username"] == "alice"
-    assert row["topic"] == "news"
     assert row["status_code"] == 200
     assert row["result_count"] == 1
-    assert row["credits_used"] == 1
-    assert row["provider_request_id"] == "tavily-request-1"
-    assert "query" not in row
-    assert TAVILY_FIXTURE_KEY not in json.dumps(row)
-    assert USER_TOKEN not in json.dumps(row)
+    assert row["provider_request_id"] == "deepseek-request-1"
+    assert not {"query", "ori_question", "localization"}.intersection(row)
+    for value in [DEEPSEEK_FIXTURE_KEY, USER_TOKEN, payload["query"], payload["ori_question"]]:
+        assert value not in json.dumps(row)
 
 
 @pytest.mark.parametrize(
     "payload",
     [
-        {},
-        {"query": True},
-        {"query": "x", "unknown": 1},
-        {"query": "x", "max_results": True},
-        {"query": "x", "max_results": "5"},
-        {"query": "x", "topic": "science"},
-        {"query": "x", "time_range": "hour"},
-        {"query": "x", "include_domains": "example.org"},
-        {"query": "x", "include_domains": ["https://example.org"]},
-        {"query": "x", "include_domains": ["localhost"]},
-        {"query": "x", "include_domains": ["127.0.0.1"]},
-        {
-            "query": "x",
-            "include_domains": ["example.org"],
-            "exclude_domains": ["EXAMPLE.ORG"],
-        },
-        {"query": "a\x00b"},
-        {"query": "a\x01b"},
+        {}, {"query": True}, {"query": "   "}, {"query": "x", "unknown": 1},
+        *({"query": "x", "count": count} for count in [True, "5", None, 0, 51]),
+        *({"query": "x", "need_content": value} for value in [None, 1, "true"]),
+        *({"query": "x", "ori_question": value} for value in [True, "", " " * 5, "x" * 129]),
+        *({"query": "x", "localization": value} for value in [None, True, "example.org", "8.8.8.8/32", "fe80::1%eth0"]),
+        *({"query": "x", field: value} for field, value in [
+            ("max_results", 5), ("topic", "general"), ("time_range", "week"),
+            ("include_domains", ["example.org"]), ("exclude_domains", []),
+        ]),
+        {"query": "a\x00b"}, {"query": "a\x01b"},
     ],
 )
 def test_search_rejects_invalid_requests_before_provider(
@@ -345,8 +304,8 @@ def test_search_enforces_actual_body_limit_with_stable_error(
     "body",
     [
         b'{"query":"first","query":"second"}',
-        b'{"query":"x","max_results":NaN}',
-        b'{"query":"x","max_results":Infinity}',
+        b'{"query":"x","count":NaN}',
+        b'{"query":"x","count":Infinity}',
     ],
 )
 def test_search_rejects_ambiguous_or_nonstandard_json(
@@ -396,8 +355,12 @@ def test_search_authenticates_and_rejects_service_principal_before_provider(
     [
         (401, 503, "provider_auth"),
         (429, 429, "provider_rate_limited"),
-        (432, 503, "provider_budget_exhausted"),
-        (433, 503, "provider_budget_exhausted"),
+        (402, 503, "provider_budget_exhausted"),
+        (400, 502, "provider_rejected"),
+        (403, 502, "provider_rejected"),
+        (422, 502, "provider_rejected"),
+        (408, 504, "provider_timeout"),
+        (504, 504, "provider_timeout"),
         (302, 502, "provider_error"),
         (500, 502, "provider_error"),
     ],
@@ -425,6 +388,7 @@ def test_search_maps_provider_status_without_returning_body(
     assert response.json()["error_code"] == error_code
     assert sentinel not in response.text
     assert calls == 1
+    assert response.json()["retryable"] == (provider_status in {302, 408, 429, 500, 504})
     if provider_status == 429:
         assert response.json()["retry_after_seconds"] == 60
 
@@ -477,9 +441,9 @@ def test_search_rejects_invalid_json_nan_and_oversized_provider_body(
             httpx.Response(200, content=b"not-json"),
             httpx.Response(
                 200,
-                content=b'{"results":[{"title":"x","url":"https://example.org","score":NaN}]}',
+                content=b'{"results":[{"title":"x","url":"https://example.org","rerank_score":NaN}]}',
             ),
-            httpx.Response(200, content=b"x" * (512 * 1024 + 1)),
+            httpx.Response(200, content=b"x" * (8 * 1024 * 1024 + 1)),
         ]
     )
     client, _ = _search_client(
@@ -506,7 +470,7 @@ def test_search_rejects_provider_result_count_above_requested_limit(
     response = client.post(
         "/v1/search",
         headers=_headers(),
-        json={"query": "x", "max_results": 1},
+        json={"query": "x", "count": 1},
     )
     assert response.status_code == 502
     assert response.json()["error_code"] == "provider_error"
@@ -521,7 +485,7 @@ def test_search_rejects_oversized_declared_provider_body_before_read(
         lambda _request: httpx.Response(
             200,
             content=b"{}",
-            headers={"content-length": str(512 * 1024 + 1)},
+            headers={"content-length": str(8 * 1024 * 1024 + 1)},
         ),
     )
     response = client.post(
@@ -531,24 +495,26 @@ def test_search_rejects_oversized_declared_provider_body_before_read(
     assert response.json()["error_code"] == "provider_error"
 
 
-def test_tavily_systemd_drop_in_uses_credential_without_literal_secret() -> None:
+def test_deepseek_systemd_drop_in_uses_credential_without_literal_secret() -> None:
     drop_in = (
         __import__("pathlib").Path(__file__).resolve().parents[1]
         / "packaging"
         / "systemd"
-        / "potato-model-proxy-tavily.conf"
+        / "potato-model-proxy-deepseek-search.conf"
     ).read_text(encoding="utf-8")
     assert drop_in == (
         "[Service]\n"
-        "LoadCredential=tavily-api-key:"
-        "/etc/potato-agent/credentials/tavily-api-key\n"
+        "LoadCredential=deepseek-search-api-key:"
+        "/etc/potato-agent/credentials/deepseek-search-api-key\n"
     )
-    assert "Environment=TAVILY_API_KEY" not in drop_in
+    assert "Environment=DEEPSEEK_SEARCH_API_KEY" not in drop_in
 
 
 def test_search_missing_secret_and_production_literal_secret_are_safe(
     tmp_path, monkeypatch
 ) -> None:
+    monkeypatch.delenv("DEEPSEEK_SEARCH_API_KEY", raising=False)
+    monkeypatch.delenv("DEEPSEEK_SEARCH_API_KEY_FILE", raising=False)
     client, _ = _client(tmp_path, monkeypatch)
     missing = client.post(
         "/v1/search", headers=_headers(), json={"query": "private query"}
@@ -558,12 +524,12 @@ def test_search_missing_secret_and_production_literal_secret_are_safe(
     assert "private query" not in missing.text
 
     monkeypatch.setenv("INTERFACE_ENVIRONMENT", "production")
-    monkeypatch.setenv("TAVILY_API_KEY", TAVILY_FIXTURE_KEY)
+    monkeypatch.setenv("DEEPSEEK_SEARCH_API_KEY", DEEPSEEK_FIXTURE_KEY)
     rejected = client.post(
         "/v1/search", headers=_headers(), json={"query": "x"}
     )
     assert rejected.status_code == 503
-    assert TAVILY_FIXTURE_KEY not in rejected.text
+    assert DEEPSEEK_FIXTURE_KEY not in rejected.text
 
 
 @pytest.mark.asyncio
@@ -584,29 +550,149 @@ async def test_search_limiter_enforces_rate_and_concurrency_and_releases() -> No
         await limiter.acquire("alice")
 
 
-def test_search_truncates_fields_and_drops_tail_to_stay_under_response_limit(
+def test_search_rejects_oversized_output_without_returning_partial_results(
     tmp_path, monkeypatch
 ) -> None:
-    item = {
-        "title": "t" * 2000,
-        "url": "https://example.org/page",
-        "content": "内" * 9000,
-        "score": 1,
-        "published_date": "d" * 200,
-    }
-    payload = {"results": [item] * 10, "usage": {"credits": 1}}
+    payload = _success_payload()
+    payload["results"][0]["content"] = "x" * (4 * 1024 * 1024)
     client, _ = _search_client(
-        tmp_path,
-        monkeypatch,
-        lambda _request: httpx.Response(200, json=payload),
+        tmp_path, monkeypatch, lambda _: httpx.Response(200, json=payload)
     )
-    response = client.post(
-        "/v1/search", headers=_headers(), json={"query": "x", "max_results": 10}
-    )
+    response = client.post("/v1/search", headers=_headers(), json={
+        "query": "x", "need_content": True,
+    })
+    assert response.status_code == 502
+    assert response.json()["error_code"] == "provider_error"
+
+
+@pytest.mark.parametrize("query", ["马" * 128, "🥔" * 128, 'potato "late blight" lang:en'])
+def test_search_preserves_query_and_unicode_character_limit(tmp_path, monkeypatch, query):
+    bodies = []
+
+    def handler(request):
+        bodies.append(json.loads(request.content))
+        return httpx.Response(200, json={"results": []})
+
+    client, _ = _search_client(tmp_path, monkeypatch, handler)
+    response = client.post("/v1/search", headers=_headers(), json={"query": query})
     assert response.status_code == 200
-    assert len(response.content) <= 64 * 1024
-    body = response.json()
-    assert 1 <= body["meta"]["result_count"] < 10
-    assert len(body["results"][0]["title"]) == 1000
-    assert len(body["results"][0]["content"]) == 8000
-    assert len(body["results"][0]["published_date"]) == 128
+    assert bodies == [{"query": query, "count": 10, "need_content": False}]
+    assert response.json()["results"] == []
+    assert response.json() == {"results": []}
+
+
+@pytest.mark.parametrize("query", ["马" * 129, " " + "x" * 128])
+def test_search_rejects_overlong_query_before_credentials_and_limiter(
+    tmp_path, monkeypatch, query
+) -> None:
+    def handler(_request):
+        pytest.fail("Invalid query reached the provider")
+
+    client, model_proxy = _search_client(tmp_path, monkeypatch, handler)
+    monkeypatch.delenv("DEEPSEEK_SEARCH_API_KEY")
+    response = client.post("/v1/search", headers=_headers(), json={"query": query})
+    assert response.status_code == 400
+    assert response.json()["error_code"] == "query_too_long"
+    assert response.json()["retryable"] is False
+    assert not model_proxy.app.state.web_search_limiter._global
+
+
+@pytest.mark.parametrize("count", [1, 50])
+def test_search_supports_native_count_range_and_default_empty_content(
+    tmp_path, monkeypatch, count
+) -> None:
+    payload = _success_payload()
+    payload["results"] *= count
+    bodies = []
+
+    def handler(request):
+        bodies.append(json.loads(request.content))
+        return httpx.Response(200, json=payload)
+
+    client, _ = _search_client(tmp_path, monkeypatch, handler)
+    response = client.post("/v1/search", headers=_headers(), json={"query": "x", "count": count})
+    assert response.status_code == 200
+    assert len(response.json()["results"]) == count
+    assert all(item["content"] == "" for item in response.json()["results"])
+    assert bodies == [{"query": "x", "count": count, "need_content": False}]
+
+
+@pytest.mark.parametrize("localization", ["", "2001:4860:4860::8888"])
+def test_search_accepts_optional_native_parameters(tmp_path, monkeypatch, localization):
+    bodies = []
+
+    def handler(request):
+        bodies.append(json.loads(request.content))
+        return httpx.Response(200, json={"results": []})
+
+    client, _ = _search_client(tmp_path, monkeypatch, handler)
+    response = client.post("/v1/search", headers=_headers(), json={
+        "query": "x", "ori_question": None, "localization": localization,
+    })
+    assert response.status_code == 200
+    expected = {"query": "x", "count": 10, "need_content": False}
+    if localization:
+        expected["localization"] = localization
+    assert bodies == [expected]
+
+
+def test_search_keeps_empty_summary_and_nullable_result_fields(tmp_path, monkeypatch):
+    payload = _success_payload()
+    item = payload["results"][0]
+    item.update(summary="", site_name=None, site_icon=None, date=None, authority=-1)
+    client, _ = _search_client(tmp_path, monkeypatch, lambda _: httpx.Response(200, json=payload))
+    response = client.post("/v1/search", headers=_headers(), json={"query": "x"})
+    assert response.status_code == 200
+    result = response.json()["results"][0]
+    assert result["summary"] == ""
+    assert result["snippet"] == "Example snippet"
+    assert result["site_name"] is result["site_icon"] is result["date"] is None
+    assert result["authority"] == -1
+
+
+@pytest.mark.parametrize(("field", "value"), [
+    ("authority", True), ("authority", -2), ("authority", 5), ("authority", 1.5),
+    ("summary", None), ("snippet", []), ("site_icon", "file:///etc/passwd"),
+])
+def test_search_rejects_malformed_native_result_fields(tmp_path, monkeypatch, field, value):
+    payload = _success_payload()
+    payload["results"][0][field] = value
+    client, _ = _search_client(tmp_path, monkeypatch, lambda _: httpx.Response(200, json=payload))
+    response = client.post("/v1/search", headers=_headers(), json={"query": "x"})
+    assert response.status_code == 502
+    assert response.json()["error_code"] == "provider_error"
+
+
+@pytest.mark.parametrize("score", [-0.01, 3.01, True, "2.4", 10**400])
+def test_search_rejects_invalid_deepseek_scores(tmp_path, monkeypatch, score):
+    payload = _success_payload()
+    payload["results"][0]["rerank_score"] = score
+    client, _ = _search_client(
+        tmp_path, monkeypatch, lambda _: httpx.Response(200, json=payload)
+    )
+    response = client.post("/v1/search", headers=_headers(), json={"query": "x"})
+    assert response.status_code == 502
+    assert response.json()["error_code"] == "provider_error"
+
+
+@pytest.mark.parametrize("source", ["file", "credential"])
+def test_search_loads_private_deepseek_key_in_production(tmp_path, monkeypatch, source):
+    def handler(request):
+        assert request.headers["authorization"] == f"Bearer {DEEPSEEK_FIXTURE_KEY}"
+        return httpx.Response(200, json=_success_payload())
+
+    client, _ = _search_client(tmp_path, monkeypatch, handler)
+    monkeypatch.delenv("DEEPSEEK_SEARCH_API_KEY")
+    monkeypatch.setenv("INTERFACE_ENVIRONMENT", "production")
+    credential_dir = tmp_path / "credentials"
+    credential_dir.mkdir(mode=0o700)
+    secret = credential_dir / "deepseek-search-api-key"
+    secret.write_text(DEEPSEEK_FIXTURE_KEY + "\n")
+    secret.chmod(0o600)
+    if source == "file":
+        monkeypatch.setenv("DEEPSEEK_SEARCH_API_KEY_FILE", str(secret))
+    else:
+        monkeypatch.setenv("CREDENTIALS_DIRECTORY", str(credential_dir))
+    response = client.post("/v1/search", headers=_headers(), json={"query": "x"})
+    assert response.status_code == 200
+    assert DEEPSEEK_FIXTURE_KEY not in response.text

@@ -215,6 +215,31 @@ Potato Agent 更新直接读取 `static/lite/update-notes.json`；PotatoOmics �
   `$GENOME_BROWSER_DB_ROOT/feature_index.sqlite`
 - `GENOME_BROWSER_SAMTOOLS` 可指定坐标序列 API 使用的 `samtools` 可执行文件，默认从 `PATH` 解析 `samtools`
 
+## 通用网页搜索
+
+`general-web-search` 技能通过本地模型代理的认证接口 `POST /v1/search` 调用
+`https://api.deepseek.com/v1/tools/search`。用户使用本地 `pmp_` token。
+[搜索指南](https://api-docs.deepseek.com/zh-cn/guides/search) ·
+[API Schema](https://api-docs.deepseek.com/zh-cn/api/search)
+
+请求使用 DeepSeek 字段：`query`（1～128 个 Unicode 字符）、`count`（1～50，默认 10）、
+`ori_question`（可选，最多 128 字符）、`localization`（可选 IP 地址）和
+`need_content`（默认 false）。查询原样传递，站点、语言和日期条件直接使用搜索语法。
+
+响应为 `{"results": [...]}`，保留 `title`、`url`、`snippet`、`summary`、`content`、
+`rerank_score`、`site_name`、`site_icon`、`date`、`authority`。代理校验字段类型和公开网页
+URL，保留正文换行，并限制上游响应为 8 MiB、返回数据为 4 MiB；超限返回错误。
+技能将 JSON 包裹为不可信网页数据。用量记录只保存账号、请求状态、耗时、结果数量和请求 ID。
+
+生产凭据使用 `deepseek-search-api-key` systemd credential，或由
+`DEEPSEEK_SEARCH_API_KEY_FILE` 指定私密文件。部署模板为
+`packaging/systemd/potato-model-proxy-deepseek-search.conf`，凭据文件为
+`/etc/potato-agent/credentials/deepseek-search-api-key`（root 所有，权限 `0600`）。
+非生产环境可设置 `DEEPSEEK_SEARCH_API_KEY`。密钥不进入技能、用户配置或源码。
+
+修改服务端或技能后，备份并发布相关文件，刷新用户技能副本、重启相关服务，
+使用账号内的搜索脚本验证请求和返回结果。生产操作遵循仓库 `AGENTS.md`。
+
 ## 公开 Feedback
 
 - 所有公开页面加载 `/static/shared/feedback.css` 和 `/static/shared/feedback.js`，通过无需登录的
