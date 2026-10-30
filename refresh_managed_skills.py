@@ -12,18 +12,17 @@ from typing import Callable, Sequence
 
 from interface.hermes_service import (
     MANAGED_BIOINFORMATICS_SKILLS_DIR_NAME,
+    install_managed_skills,
     is_service_active,
+    managed_skill_sources,
     restart_service,
 )
 from interface.mapping import DEFAULT_MAPPING_PATH, HermesTarget, MappingStore
-from interface.user_private_files import (
-    replace_user_private_tree,
-    validate_user_runtime_paths,
-)
+from interface.user_private_files import validate_user_runtime_paths
 
 
 DEPLOYED_ROOT = Path("/srv/potato_agent")
-SOURCE_RELATIVE_PATH = Path("skills") / MANAGED_BIOINFORMATICS_SKILLS_DIR_NAME
+SOURCE_RELATIVE_PATH = Path("skills")
 DEFAULT_UNIT_DIR = Path("/etc/systemd/system")
 
 
@@ -49,8 +48,9 @@ class RefreshResult:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description=(
-            "Dry-run or refresh the Potato-managed bioinformatics skill category "
-            "without changing other Hermes runtime files."
+            "Dry-run or refresh the Potato-managed skill collections: "
+            + ", ".join(managed_skill_sources())
+            + ". Other skill collections and Hermes runtime files are preserved."
         )
     )
     scope = parser.add_mutually_exclusive_group(required=True)
@@ -76,20 +76,29 @@ def _real_directory(path: Path) -> bool:
 def _validate_source(source_path: Path) -> None:
     if not _real_directory(source_path):
         raise ManagedSkillRefreshError("Managed skill source is unavailable.")
-    if not (source_path / "DESCRIPTION.md").is_file() or not (
-        source_path / "general-web-search" / "SKILL.md"
-    ).is_file():
-        raise ManagedSkillRefreshError("Managed skill source is incomplete.")
-    try:
-        for candidate in source_path.rglob("*"):
-            if candidate.is_symlink():
-                raise ManagedSkillRefreshError(
-                    "Managed skill source contains an unsupported symlink."
-                )
-    except OSError as exc:
-        raise ManagedSkillRefreshError(
-            "Managed skill source cannot be inspected."
-        ) from exc
+    for name, collection in managed_skill_sources(source_path).items():
+        if not _real_directory(collection):
+            raise ManagedSkillRefreshError(f"Managed skill source is unavailable: {name}.")
+        has_skill = False
+        try:
+            for candidate in collection.rglob("*"):
+                if candidate.is_symlink():
+                    raise ManagedSkillRefreshError(
+                        f"Managed skill source contains an unsupported symlink: {name}."
+                    )
+                if candidate.name == "SKILL.md" and candidate.is_file():
+                    has_skill = True
+        except OSError as exc:
+            raise ManagedSkillRefreshError(
+                f"Managed skill source cannot be inspected: {name}."
+            ) from exc
+        if not has_skill:
+            raise ManagedSkillRefreshError(f"Managed skill source is incomplete: {name}.")
+        if name == MANAGED_BIOINFORMATICS_SKILLS_DIR_NAME and (
+            not (collection / "DESCRIPTION.md").is_file()
+            or not (collection / "general-web-search" / "SKILL.md").is_file()
+        ):
+            raise ManagedSkillRefreshError(f"Managed skill source is incomplete: {name}.")
 
 
 def _validate_production_source(source_path: Path) -> None:
@@ -193,6 +202,7 @@ def refresh_managed_skills(
     service_restart: Callable[[str], None] = restart_service,
     require_deployed_source: bool = True,
 ) -> RefreshResult:
+    """Refresh all managed collections from the repository's skills root."""
     if bool(username) == bool(all_users):
         raise ManagedSkillRefreshError("Select exactly one refresh scope.")
     if expect_count is not None and expect_count < 0:
@@ -231,15 +241,10 @@ def refresh_managed_skills(
     for candidate in candidates:
         target = candidate.target
         try:
-            replace_user_private_tree(
+            install_managed_skills(
                 target,
-                candidate.password_entry,
-                source=source_path,
-                destination=(
-                    target.hermes_home
-                    / "skills"
-                    / MANAGED_BIOINFORMATICS_SKILLS_DIR_NAME
-                ),
+                password_entry=candidate.password_entry,
+                source_root=source_path,
             )
             if candidate.was_active:
                 service_restart(target.systemd_service)

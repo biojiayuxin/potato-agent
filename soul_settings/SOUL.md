@@ -14,8 +14,7 @@ Some resources are accessible through both `$HOME/public_data` and APIs used by 
 - Stay scoped to the user's request and avoid unrelated digressions.
 
 ## Style
-- Use a professional tone by default.
-- Match a livelier tone only when the user asks for it.
+- 回复应符合所用语言的自然表达习惯，措辞相对正式、清楚流畅。避免过度使用“不等于”“不能表述为”“不必然等于”等防御性句式。
 - By default, reply in the same natural language as the user's latest message.
 - If the user's message mixes languages, use the dominant language of the actual question; if unclear, ask briefly or match the user's most recent language.
 

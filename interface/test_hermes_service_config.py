@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import shutil
 import stat
 from dataclasses import replace
 from pathlib import Path
@@ -16,6 +17,7 @@ from interface.hermes_service import (
     build_config_data,
     build_systemd_unit,
     ensure_user_runtime_temp_dir,
+    install_managed_skills,
     install_public_data_link,
     install_user_runtime_files,
 )
@@ -57,6 +59,26 @@ def _write_plan_mode_skills_template(tmp_path: Path) -> Path:
         encoding="utf-8",
     )
     return source
+
+
+def _write_managed_skills_templates(tmp_path: Path, monkeypatch) -> None:
+    sources = {
+        "DEFAULT_BIOINFORMATICS_SKILLS_PATH": _write_bioinformatics_skills_template(tmp_path),
+        "DEFAULT_PLAN_MODE_SKILLS_PATH": _write_plan_mode_skills_template(tmp_path),
+    }
+    for setting, category, name in (
+        ("DEFAULT_WET_LAB_SKILLS_PATH", "potato-wet-lab-protocols", "pcr-amplification"),
+        ("DEFAULT_WRITING_SKILLS_PATH", "writing", "academic-writing"),
+    ):
+        source = tmp_path / "skill-source" / category
+        skill = source / name
+        references = skill / "references"
+        references.mkdir(parents=True)
+        (skill / "SKILL.md").write_text(f"{name} instructions\n", encoding="utf-8")
+        (references / "guide.md").write_text(f"{name} reference\n", encoding="utf-8")
+        sources[setting] = source
+    for setting, source in sources.items():
+        monkeypatch.setattr(f"interface.hermes_service.{setting}", source)
 
 
 def _write_public_data_template(tmp_path: Path) -> Path:
@@ -474,8 +496,7 @@ def test_install_user_runtime_files_writes_only_user_runtime_paths(
     )
     soul_template = tmp_path / "SOUL.template.md"
     soul_template.write_text("Template soul\n", encoding="utf-8")
-    skills_template = _write_bioinformatics_skills_template(tmp_path)
-    plan_mode_template = _write_plan_mode_skills_template(tmp_path)
+    _write_managed_skills_templates(tmp_path, monkeypatch)
     public_data = _write_public_data_template(tmp_path)
 
     monkeypatch.setattr(
@@ -489,14 +510,6 @@ def test_install_user_runtime_files_writes_only_user_runtime_paths(
     monkeypatch.setattr(
         "interface.hermes_service.DEFAULT_SOUL_TEMPLATE_PATH",
         soul_template,
-    )
-    monkeypatch.setattr(
-        "interface.hermes_service.DEFAULT_BIOINFORMATICS_SKILLS_PATH",
-        skills_template,
-    )
-    monkeypatch.setattr(
-        "interface.hermes_service.DEFAULT_PLAN_MODE_SKILLS_PATH",
-        plan_mode_template,
     )
     monkeypatch.setattr(
         "interface.hermes_service.DEFAULT_PUBLIC_DATA_PATH",
@@ -543,6 +556,13 @@ def test_install_user_runtime_files_writes_only_user_runtime_paths(
     assert (
         user.hermes_home / "skills" / "plan-mode" / "plan" / "SKILL.md"
     ).read_text(encoding="utf-8").startswith("---\nname: plan\n")
+    for category, name in (
+        ("potato-wet-lab-protocols", "pcr-amplification"),
+        ("writing", "academic-writing"),
+    ):
+        skill = user.hermes_home / "skills" / category / name
+        assert (skill / "SKILL.md").read_text() == f"{name} instructions\n"
+        assert (skill / "references" / "guide.md").read_text() == f"{name} reference\n"
     public_data_link = user.home_dir / "public_data"
     assert public_data_link.is_symlink()
     assert public_data_link.resolve() == public_data
@@ -573,8 +593,7 @@ def test_install_user_runtime_files_overwrites_soul_file_with_template(
     )
     soul_template = tmp_path / "SOUL.template.md"
     soul_template.write_text("Current template\n", encoding="utf-8")
-    skills_template = _write_bioinformatics_skills_template(tmp_path)
-    plan_mode_template = _write_plan_mode_skills_template(tmp_path)
+    _write_managed_skills_templates(tmp_path, monkeypatch)
     public_data = _write_public_data_template(tmp_path)
     user.hermes_home.mkdir(parents=True)
     (user.hermes_home / "SOUL.md").write_text("Old user soul\n", encoding="utf-8")
@@ -588,14 +607,6 @@ def test_install_user_runtime_files_overwrites_soul_file_with_template(
         soul_template,
     )
     monkeypatch.setattr(
-        "interface.hermes_service.DEFAULT_BIOINFORMATICS_SKILLS_PATH",
-        skills_template,
-    )
-    monkeypatch.setattr(
-        "interface.hermes_service.DEFAULT_PLAN_MODE_SKILLS_PATH",
-        plan_mode_template,
-    )
-    monkeypatch.setattr(
         "interface.hermes_service.DEFAULT_PUBLIC_DATA_PATH",
         public_data,
     )
@@ -607,7 +618,7 @@ def test_install_user_runtime_files_overwrites_soul_file_with_template(
     assert stat.S_IMODE(soul_path.stat().st_mode) == 0o600
 
 
-def test_install_user_runtime_files_replaces_managed_bioinformatics_skills(
+def test_install_user_runtime_files_replaces_all_managed_skills(
     monkeypatch, tmp_path
 ) -> None:
     user = HermesTarget(
@@ -628,8 +639,7 @@ def test_install_user_runtime_files_replaces_managed_bioinformatics_skills(
     )
     soul_template = tmp_path / "SOUL.template.md"
     soul_template.write_text("Template soul\n", encoding="utf-8")
-    skills_template = _write_bioinformatics_skills_template(tmp_path)
-    plan_mode_template = _write_plan_mode_skills_template(tmp_path)
+    _write_managed_skills_templates(tmp_path, monkeypatch)
     public_data = _write_public_data_template(tmp_path)
     old_skill_dir = user.hermes_home / "skills" / "potato-knowledge-bioinformatics"
     old_skill_dir.mkdir(parents=True)
@@ -637,6 +647,13 @@ def test_install_user_runtime_files_replaces_managed_bioinformatics_skills(
     old_plan_mode_dir = user.hermes_home / "skills" / "plan-mode"
     old_plan_mode_dir.mkdir(parents=True)
     (old_plan_mode_dir / "old.txt").write_text("stale\n", encoding="utf-8")
+    for category in ("potato-wet-lab-protocols", "writing"):
+        old_category = user.hermes_home / "skills" / category
+        old_category.mkdir()
+        (old_category / "old.txt").write_text("stale\n", encoding="utf-8")
+    custom = user.hermes_home / "skills" / "custom-skill"
+    custom.mkdir()
+    (custom / "SKILL.md").write_text("custom\n", encoding="utf-8")
 
     monkeypatch.setattr(
         "interface.hermes_service.pwd.getpwnam",
@@ -645,14 +662,6 @@ def test_install_user_runtime_files_replaces_managed_bioinformatics_skills(
     monkeypatch.setattr(
         "interface.hermes_service.DEFAULT_SOUL_TEMPLATE_PATH",
         soul_template,
-    )
-    monkeypatch.setattr(
-        "interface.hermes_service.DEFAULT_BIOINFORMATICS_SKILLS_PATH",
-        skills_template,
-    )
-    monkeypatch.setattr(
-        "interface.hermes_service.DEFAULT_PLAN_MODE_SKILLS_PATH",
-        plan_mode_template,
     )
     monkeypatch.setattr(
         "interface.hermes_service.DEFAULT_PUBLIC_DATA_PATH",
@@ -677,6 +686,43 @@ def test_install_user_runtime_files_replaces_managed_bioinformatics_skills(
     ).read_text(encoding="utf-8").startswith("---\nname: plan\n")
     assert stat.S_IMODE((user.hermes_home / "skills").stat().st_mode) == 0o700
     assert stat.S_IMODE(target_script.stat().st_mode) == 0o700
+    for category, name in (
+        ("potato-wet-lab-protocols", "pcr-amplification"),
+        ("writing", "academic-writing"),
+    ):
+        target = user.hermes_home / "skills" / category
+        assert not (target / "old.txt").exists()
+        assert (target / name / "SKILL.md").read_text() == f"{name} instructions\n"
+        assert (target / name / "references" / "guide.md").read_text() == (
+            f"{name} reference\n"
+        )
+        assert stat.S_IMODE(target.stat().st_mode) == 0o700
+        assert stat.S_IMODE((target / name / "SKILL.md").stat().st_mode) == 0o600
+    assert (custom / "SKILL.md").read_text() == "custom\n"
+
+
+def test_install_managed_skills_checks_all_sources_before_replacing(
+    monkeypatch, tmp_path
+) -> None:
+    _write_managed_skills_templates(tmp_path, monkeypatch)
+    shutil.rmtree(tmp_path / "skill-source" / "writing")
+    user = replace(
+        _target(),
+        home_dir=tmp_path / "home",
+        hermes_home=tmp_path / "home" / ".hermes",
+        workdir=tmp_path / "home" / "work",
+    )
+    marker = user.hermes_home / "skills" / "potato-knowledge-bioinformatics" / "old.txt"
+    marker.parent.mkdir(parents=True)
+    marker.write_text("keep\n", encoding="utf-8")
+
+    with pytest.raises(RuntimeError, match="writing"):
+        install_managed_skills(
+            user,
+            password_entry=SimpleNamespace(pw_uid=os.geteuid(), pw_gid=os.getegid()),
+        )
+
+    assert marker.read_text() == "keep\n"
 
 
 def test_install_public_data_link_creates_home_symlink(monkeypatch, tmp_path) -> None:

@@ -83,6 +83,10 @@ DEFAULT_BIOINFORMATICS_SKILLS_PATH = (
 )
 MANAGED_PLAN_MODE_SKILLS_DIR_NAME = "plan-mode"
 DEFAULT_PLAN_MODE_SKILLS_PATH = REPO_ROOT / "skills" / MANAGED_PLAN_MODE_SKILLS_DIR_NAME
+MANAGED_WET_LAB_SKILLS_DIR_NAME = "potato-wet-lab-protocols"
+DEFAULT_WET_LAB_SKILLS_PATH = REPO_ROOT / "skills" / MANAGED_WET_LAB_SKILLS_DIR_NAME
+MANAGED_WRITING_SKILLS_DIR_NAME = "writing"
+DEFAULT_WRITING_SKILLS_PATH = REPO_ROOT / "skills" / MANAGED_WRITING_SKILLS_DIR_NAME
 PUBLIC_DATA_LINK_NAME = "public_data"
 SYSTEMCTL_STOP_TIMEOUT_SECONDS = 120.0
 SYSTEMCTL_QUERY_TIMEOUT_SECONDS = 30.0
@@ -288,11 +292,31 @@ def _install_managed_skill_dir(
     )
 
 
-def install_managed_skills(user: HermesTarget, *, password_entry: Any) -> None:
-    for target_dir_name, source_path in (
-        (MANAGED_BIOINFORMATICS_SKILLS_DIR_NAME, DEFAULT_BIOINFORMATICS_SKILLS_PATH),
-        (MANAGED_PLAN_MODE_SKILLS_DIR_NAME, DEFAULT_PLAN_MODE_SKILLS_PATH),
-    ):
+def managed_skill_sources(source_root: Path | None = None) -> dict[str, Path]:
+    """Return the collections shared by user provisioning and skill refreshes."""
+    sources = {
+        MANAGED_BIOINFORMATICS_SKILLS_DIR_NAME: DEFAULT_BIOINFORMATICS_SKILLS_PATH,
+        MANAGED_PLAN_MODE_SKILLS_DIR_NAME: DEFAULT_PLAN_MODE_SKILLS_PATH,
+        MANAGED_WET_LAB_SKILLS_DIR_NAME: DEFAULT_WET_LAB_SKILLS_PATH,
+        MANAGED_WRITING_SKILLS_DIR_NAME: DEFAULT_WRITING_SKILLS_PATH,
+    }
+    if source_root is not None:
+        return {name: source_root / name for name in sources}
+    return sources
+
+
+def install_managed_skills(
+    user: HermesTarget,
+    *,
+    password_entry: Any,
+    source_root: Path | None = None,
+) -> None:
+    sources = managed_skill_sources(source_root)
+    # Check every collection before replacing any existing user skills.
+    for name, source in sources.items():
+        if not source.is_dir() or source.is_symlink():
+            raise RuntimeError(f"Managed skills not found: {name}")
+    for target_dir_name, source_path in sources.items():
         _install_managed_skill_dir(
             user,
             password_entry=password_entry,

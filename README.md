@@ -29,6 +29,9 @@ proxying, and the agent gateway—and packaged the streamlined runtime as
 - [`interface/`](interface/) contains the web application and data exploration interfaces.
 - [`hermes-lite/`](hermes-lite/) is the primary Potato-owned agent runtime and development tree.
 - [`skills/potato-knowledge-bioinformatics/`](skills/potato-knowledge-bioinformatics/) contains skills for potato data and knowledge exploration.
+- [`skills/potato-wet-lab-protocols/`](skills/potato-wet-lab-protocols/) contains laboratory protocols,
+  and [`skills/writing/`](skills/writing/) contains academic writing skills. These collections and
+  [`skills/plan-mode/`](skills/plan-mode/) are installed alongside the bioinformatics collection for each user.
 - [`hermes-agent/`](hermes-agent/) is retained as the upstream reference and rollback baseline.
 
 ## HPC Deployment

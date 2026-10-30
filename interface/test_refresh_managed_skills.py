@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import shutil
 import stat
 from pathlib import Path
 from types import SimpleNamespace
@@ -10,16 +11,27 @@ import pytest
 import refresh_managed_skills as refresh
 
 
+COLLECTION_SKILLS = {
+    "potato-knowledge-bioinformatics": "general-web-search",
+    "plan-mode": "plan",
+    "potato-wet-lab-protocols": "pcr-amplification",
+    "writing": "academic-writing",
+}
+
+
 def _source(tmp_path: Path) -> Path:
     source = tmp_path / "source"
-    skill = source / "general-web-search"
-    script_dir = skill / "scripts"
-    script_dir.mkdir(parents=True)
-    (source / "DESCRIPTION.md").write_text("managed description\n", encoding="utf-8")
-    (skill / "SKILL.md").write_text("managed skill\n", encoding="utf-8")
-    script = script_dir / "query.py"
-    script.write_text("#!/usr/bin/env python3\n", encoding="utf-8")
-    script.chmod(0o755)
+    for category, name in COLLECTION_SKILLS.items():
+        skill = source / category / name
+        script_dir = skill / "scripts"
+        script_dir.mkdir(parents=True)
+        (skill / "SKILL.md").write_text(f"managed {name}\n", encoding="utf-8")
+        script = script_dir / "query.py"
+        script.write_text("#!/usr/bin/env python3\n", encoding="utf-8")
+        script.chmod(0o755)
+    (source / "potato-knowledge-bioinformatics" / "DESCRIPTION.md").write_text(
+        "managed description\n", encoding="utf-8"
+    )
     return source
 
 
@@ -76,13 +88,17 @@ def _password_lookup(entries):
     return lambda linux_user: entries[linux_user]
 
 
-def _managed_path(tmp_path: Path, username: str) -> Path:
+def _managed_path(
+    tmp_path: Path,
+    username: str,
+    category: str = "potato-knowledge-bioinformatics",
+) -> Path:
     return (
         tmp_path
         / f"home-{username}"
         / ".hermes"
         / "skills"
-        / "potato-knowledge-bioinformatics"
+        / category
     )
 
 
@@ -111,6 +127,9 @@ def test_refresh_defaults_to_dry_run_without_writes(tmp_path) -> None:
     assert result.selected == ("alice",)
     assert result.active == ("alice",)
     assert marker.read_text(encoding="utf-8") == "keep until apply\n"
+    assert not _managed_path(tmp_path, "alice", "plan-mode").exists()
+    assert not _managed_path(tmp_path, "alice", "potato-wet-lab-protocols").exists()
+    assert not _managed_path(tmp_path, "alice", "writing").exists()
 
 
 def test_all_apply_requires_matching_expect_count_before_writes(tmp_path) -> None:
@@ -151,7 +170,7 @@ def test_all_apply_requires_matching_expect_count_before_writes(tmp_path) -> Non
     assert marker.exists()
 
 
-def test_apply_replaces_only_managed_category_and_restarts_only_active(
+def test_apply_replaces_all_managed_categories_and_restarts_only_active(
     tmp_path,
 ) -> None:
     source = _source(tmp_path)
@@ -163,19 +182,29 @@ def test_apply_replaces_only_managed_category_and_restarts_only_active(
         (hermes_home / "config.yaml").write_text("config\n", encoding="utf-8")
         (hermes_home / "SOUL.md").write_text("soul\n", encoding="utf-8")
         custom = hermes_home / "skills" / "custom-skill"
-        plan = hermes_home / "skills" / "plan-mode"
         custom.mkdir(parents=True)
-        plan.mkdir()
         (custom / "SKILL.md").write_text("custom\n", encoding="utf-8")
-        (plan / "SKILL.md").write_text("plan\n", encoding="utf-8")
-        managed = _managed_path(tmp_path, username)
-        managed.mkdir()
-        (managed / "obsolete.txt").write_text("obsolete\n", encoding="utf-8")
+        for category in COLLECTION_SKILLS:
+            managed = _managed_path(tmp_path, username, category)
+            managed.mkdir()
+            (managed / "obsolete.txt").write_text("obsolete\n", encoding="utf-8")
         before[username] = (
             (hermes_home / "config.yaml").read_text(encoding="utf-8"),
             (hermes_home / "SOUL.md").read_text(encoding="utf-8"),
             (custom / "SKILL.md").read_text(encoding="utf-8"),
         )
+
+    # Additional source directories are not part of the managed collection set.
+    extra_source = source / "not-managed"
+    extra_source.mkdir()
+    (extra_source / "SKILL.md").write_text("not managed\n", encoding="utf-8")
+
+    def restart(service: str) -> None:
+        # Reload only after all four collections have been installed.
+        for category, name in COLLECTION_SKILLS.items():
+            skill = _managed_path(tmp_path, "alice", category) / name / "SKILL.md"
+            assert skill.is_file()
+        restarts.append(service)
 
     result = refresh.refresh_managed_skills(
         mapping_path=mapping,
@@ -187,7 +216,7 @@ def test_apply_replaces_only_managed_category_and_restarts_only_active(
         unit_dir=unit_dir,
         password_lookup=_password_lookup(entries),
         service_active=lambda service: service == "hermes-alice.service",
-        service_restart=restarts.append,
+        service_restart=restart,
         require_deployed_source=False,
     )
 
@@ -208,14 +237,97 @@ def test_apply_replaces_only_managed_category_and_restarts_only_active(
                 hermes_home / "skills" / "custom-skill" / "SKILL.md"
             ).read_text(encoding="utf-8"),
         )
-        assert (hermes_home / "skills" / "plan-mode" / "SKILL.md").exists()
-        assert stat.S_IMODE(managed.stat().st_mode) == 0o700
-        assert stat.S_IMODE(
-            (managed / "general-web-search" / "SKILL.md").stat().st_mode
-        ) == 0o600
-        assert stat.S_IMODE(
-            (managed / "general-web-search" / "scripts" / "query.py").stat().st_mode
-        ) == 0o700
+        assert not (hermes_home / "skills" / "not-managed").exists()
+        for category, name in COLLECTION_SKILLS.items():
+            managed = _managed_path(tmp_path, username, category)
+            assert not (managed / "obsolete.txt").exists()
+            assert (managed / name / "SKILL.md").read_bytes() == (
+                source / category / name / "SKILL.md"
+            ).read_bytes()
+            assert stat.S_IMODE(managed.stat().st_mode) == 0o700
+            assert stat.S_IMODE((managed / name / "SKILL.md").stat().st_mode) == 0o600
+            assert stat.S_IMODE(
+                (managed / name / "scripts" / "query.py").stat().st_mode
+            ) == 0o700
+
+
+def test_apply_one_user_preserves_other_users(tmp_path) -> None:
+    source = _source(tmp_path)
+    mapping, entries, unit_dir = _mapping(tmp_path)
+    for category in COLLECTION_SKILLS:
+        marker = _managed_path(tmp_path, "bob", category) / "old.txt"
+        marker.parent.mkdir(parents=True)
+        marker.write_text("keep\n", encoding="utf-8")
+    restarts = []
+
+    result = refresh.refresh_managed_skills(
+        mapping_path=mapping,
+        source_path=source,
+        username="alice",
+        all_users=False,
+        expect_count=1,
+        apply=True,
+        unit_dir=unit_dir,
+        password_lookup=_password_lookup(entries),
+        service_active=lambda _service: False,
+        service_restart=restarts.append,
+        require_deployed_source=False,
+    )
+
+    assert result.completed == ("alice",)
+    assert restarts == []
+    for category, name in COLLECTION_SKILLS.items():
+        skill = _managed_path(tmp_path, "alice", category) / name / "SKILL.md"
+        marker = _managed_path(tmp_path, "bob", category) / "old.txt"
+        assert skill.is_file()
+        assert marker.read_text() == "keep\n"
+
+
+@pytest.mark.parametrize("category", COLLECTION_SKILLS)
+@pytest.mark.parametrize("damage", ["missing", "empty", "symlink", "nested-symlink"])
+def test_invalid_collection_prevents_all_user_writes(tmp_path, category, damage) -> None:
+    source = _source(tmp_path)
+    mapping, entries, unit_dir = _mapping(tmp_path)
+    broken = source / category
+    if damage == "nested-symlink":
+        (broken / "linked-file").symlink_to(
+            source / "potato-knowledge-bioinformatics" / "DESCRIPTION.md"
+        )
+    else:
+        shutil.rmtree(broken)
+        if damage == "empty":
+            broken.mkdir()
+        elif damage == "symlink":
+            other = tmp_path / "outside-collection"
+            other.mkdir()
+            (other / "SKILL.md").write_text("outside\n", encoding="utf-8")
+            broken.symlink_to(other, target_is_directory=True)
+    markers = []
+    for username in ("alice", "bob"):
+        for name in COLLECTION_SKILLS:
+            marker = _managed_path(tmp_path, username, name) / "old.txt"
+            marker.parent.mkdir(parents=True)
+            marker.write_text("keep\n", encoding="utf-8")
+            markers.append(marker)
+    restarts = []
+
+    with pytest.raises(refresh.ManagedSkillRefreshError, match=category):
+        refresh.refresh_managed_skills(
+            mapping_path=mapping,
+            source_path=source,
+            username=None,
+            all_users=True,
+            expect_count=2,
+            apply=True,
+            unit_dir=unit_dir,
+            password_lookup=_password_lookup(entries),
+            service_active=lambda _service: True,
+            service_restart=restarts.append,
+            require_deployed_source=False,
+        )
+
+    assert all(marker.read_text() == "keep\n" for marker in markers)
+    assert restarts == []
 
 
 def test_any_preflight_failure_leaves_every_user_unchanged(tmp_path) -> None:

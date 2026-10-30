@@ -3213,6 +3213,28 @@ Hermes 0.16.0 gateway 默认使用 180 秒 drain；生成的 unit 应为 `Timeou
 
 ## 日常运维
 
+### 刷新托管技能
+
+新用户初始化和 `refresh_managed_skills.py` 共用以下四个托管合集：
+`plan-mode`、`potato-knowledge-bioinformatics`、`potato-wet-lab-protocols`、`writing`。
+部署源码的 `skills/` 必须包含这四个目录；独立刷新脚本会在写入前检查全部合集和目标用户。
+`writing` 等合集不要求提供分类级 `DESCRIPTION.md`，但必须至少包含一个 `SKILL.md`。
+
+已有用户可单独刷新技能，无需重新运行用户初始化。以下 `alice` 是 mapping 中的 `username`：
+
+```bash
+# 预检，不写入用户目录，也不重启服务。
+sudo /opt/interface-env/bin/python /srv/potato_agent/refresh_managed_skills.py --user alice
+
+# 确认预检结果后，应用四个合集。
+sudo /opt/interface-env/bin/python /srv/potato_agent/refresh_managed_skills.py --user alice --apply
+```
+
+批量刷新使用 `--all`；应用时必须同时提供 `--expect-count`，数量应从当前 mapping 读取并核对。
+四个托管目录会按仓库来源完整替换，其中已移除的旧文件也会被删除；其他技能分类、用户配置、
+SOUL 和会话数据保持不变。每个用户的四个合集安装完成后，仅重启刷新前已在线的服务一次，
+原本离线的服务保持离线。`--apply` 必须以 root 身份从已部署的 `/srv/potato_agent` 执行。
+
 ### 查看日志
 
 ```bash
