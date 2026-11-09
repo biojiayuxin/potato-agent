@@ -22,6 +22,7 @@ SNAPSHOT_FIELDS = frozenset({
     "id", "display_name", "backend", "model", "provider", "api_mode",
     "reasoning_effort", "context_length", "config_revision",
 })
+VISION_SNAPSHOT_FIELDS = SNAPSHOT_FIELDS | {"supports_vision"}
 OPTION_FIELDS = frozenset({"display_name", "backend", "reasoning_effort", "context_length"})
 
 
@@ -74,6 +75,8 @@ def validate_catalog(config: dict[str, Any]) -> dict[str, Any]:
         _text(backend.get("api_key"), "backend credential", 8192)
         if backend.get("api_mode", "codex_responses") not in {"codex_responses", "chat_completions"}:
             raise ModelCatalogError("Invalid catalog API mode")
+        if not isinstance(backend.get("supports_vision", True), bool):
+            raise ModelCatalogError("Catalog supports_vision must be a boolean")
     for option_id, option in options.items():
         _id(option_id)
         if not isinstance(option, dict) or option.get("backend") not in backends:
@@ -106,6 +109,7 @@ def option_snapshot(config: dict, option_id: str) -> dict:
         "id": option_id, "display_name": option["display_name"], "backend": option["backend"],
         "model": backend["model"], "provider": "custom",
         "api_mode": backend.get("api_mode", "codex_responses"),
+        "supports_vision": backend.get("supports_vision", True),
         "reasoning_effort": option["reasoning_effort"], "context_length": option["context_length"],
     }
     snapshot["config_revision"] = _sign(config, _json(snapshot), backend)
@@ -134,10 +138,12 @@ def resolve_route(config: dict, route: str) -> tuple[dict, dict]:
         encoded, signature = token.rsplit(".", 1)
         body = base64.b64decode(encoded + "=" * (-len(encoded) % 4), altchars=b"-_", validate=True)
         snapshot = json.loads(body)
-        if not isinstance(snapshot, dict) or set(snapshot) != SNAPSHOT_FIELDS:
+        if not isinstance(snapshot, dict) or set(snapshot) not in (SNAPSHOT_FIELDS, VISION_SNAPSHOT_FIELDS):
             raise ValueError()
         backend = config["backends"][snapshot["backend"]]
         if not hmac.compare_digest(signature, _sign(config, body, backend)):
+            raise ValueError()
+        if not isinstance(snapshot.get("supports_vision", True), bool):
             raise ValueError()
         if prefix != snapshot["model"] or snapshot["id"] not in config["options"]:
             raise ValueError()

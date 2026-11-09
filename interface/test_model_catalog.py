@@ -105,6 +105,51 @@ def test_update_one_option_does_not_change_shared_backend_or_admitted_turn(catal
     assert resolve_route(updated, old["route"])[0]["model"] == "gpt-current"
 
 
+def test_vision_capability_is_signed_and_updates_only_selected_option(catalog):
+    catalog["backends"]["main"]["supports_vision"] = False
+    old = public_catalog(catalog)["options"][0]
+    updated = update_option(catalog, "deep", supports_vision=True)
+    assert resolve_route(updated, "deep")[0]["supports_vision"] is True
+    assert resolve_route(updated, "fast")[0]["supports_vision"] is False
+    assert resolve_route(updated, old["route"])[0]["supports_vision"] is False
+    option = model_options_from_catalog(public_catalog(updated)).primary
+    assert option.supports_vision is True
+    assert option.config_revision != old["config_revision"]
+    new_model = update_option(updated, "deep", model="different-model")
+    assert resolve_route(new_model, "deep")[0]["supports_vision"] is True
+
+
+def test_models_default_to_vision_and_can_explicitly_disable_it(catalog):
+    view = public_catalog(catalog)
+    assert all(option.supports_vision for option in model_options_from_catalog(view).options)
+    assert all(resolve_route(catalog, option["route"])[0]["supports_vision"] for option in view["options"])
+    disabled = update_option(catalog, "deep", supports_vision=False)
+    assert resolve_route(disabled, "deep")[0]["supports_vision"] is False
+    assert resolve_route(disabled, "fast")[0]["supports_vision"] is True
+    changed = update_option(disabled, "deep", model="next-multimodal-model")
+    assert resolve_route(changed, "deep")[0]["supports_vision"] is True
+    text_only = update_option(changed, "deep", model="text-only", supports_vision=False)
+    assert resolve_route(text_only, "deep")[0]["supports_vision"] is False
+
+
+def test_legacy_signed_snapshot_preserves_signature_with_default_vision(catalog):
+    from interface.model_catalog import option_snapshot, signed_route
+    old = option_snapshot(catalog, "deep")
+    old.pop("supports_vision")
+    route = signed_route(catalog, old)
+    catalog["backends"]["main"]["supports_vision"] = True
+    snapshot, _ = resolve_route(catalog, route)
+    assert "supports_vision" not in snapshot
+    assert snapshot["config_revision"] == old["config_revision"]
+
+
+@pytest.mark.parametrize("value", ["true", 1, None])
+def test_capability_must_be_a_boolean(catalog, value):
+    catalog["backends"]["main"]["supports_vision"] = value
+    with pytest.raises(ModelCatalogError, match="boolean"):
+        validate_catalog(catalog)
+
+
 
 
 def test_proxy_sends_frozen_model_and_effort_and_records_no_private_data(catalog, tmp_path, monkeypatch):

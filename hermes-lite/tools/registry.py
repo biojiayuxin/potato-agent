@@ -58,7 +58,7 @@ def _module_registers_tools(module_path: Path) -> bool:
 
 BUILTIN_TOOL_MODULES: Dict[str, tuple[str, ...]] = {
     "browser": (
-        "tools.browser_tool",
+        "potato_hermes_lite.browser_images",
         "tools.browser_cdp_tool",
         "tools.browser_dialog_tool",
     ),
@@ -89,7 +89,7 @@ BUILTIN_TOOL_MODULES: Dict[str, tuple[str, ...]] = {
     "tts": ("tools.tts_tool",),
     "video": ("tools.vision_tools",),
     "video_gen": ("tools.video_generation_tool",),
-    "vision": ("tools.vision_tools",),
+    "vision": ("potato_hermes_lite.image_tools",),
     "web": ("tools.web_tools",),
     "search": ("tools.web_tools",),
     "x_search": ("tools.x_search_tool",),

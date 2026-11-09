@@ -24,9 +24,16 @@ _EFFORTS = frozenset({"none", "minimal", "low", "medium", "high", "xhigh"})
 
 def normalize_model_config(value: Any) -> dict[str, Any]:
     """Validate the narrow, server-to-server snapshot contract."""
-    if not isinstance(value, dict) or set(value) not in (_FIELDS, _FIELDS | _IDENTITY_FIELDS):
+    if not isinstance(value, dict) or set(value) not in (
+        _FIELDS, _FIELDS | _IDENTITY_FIELDS,
+        _FIELDS | {"supports_vision"}, _FIELDS | _IDENTITY_FIELDS | {"supports_vision"},
+    ):
         raise ValueError("model_config must contain only the supported model settings")
     result = {}
+    if not isinstance(value.get("supports_vision", True), bool):
+        raise ValueError("Invalid model_config supports_vision")
+    if "supports_vision" in value:
+        result["supports_vision"] = value["supports_vision"]
     for key in ("id", "model", "provider", "api_mode", "reasoning_effort"):
         raw = value[key]
         if not isinstance(raw, str) or not raw.strip() or len(raw) > (4096 if key == "model" else 256):
@@ -62,7 +69,8 @@ def model_identity(agent: Any) -> str:
 
 
 def public_model_snapshot(config: dict) -> dict:
-    return {key: config[key] for key in ("id", "upstream_model", "display_name", "config_revision", "api_mode", "reasoning_effort", "context_length")}
+    return {**{key: config[key] for key in ("id", "upstream_model", "display_name", "config_revision", "api_mode", "reasoning_effort", "context_length")},
+            "supports_vision": config.get("supports_vision", True)}
 
 
 def record_runtime_model(agent: Any, session_id: str, turn_id: str = "") -> None:
@@ -149,6 +157,8 @@ def apply_model_config(agent: Any, value: dict[str, Any]) -> bool:
     shared environment/config file or upstream orchestration is changed.
     """
     config = normalize_model_config(value)
+    from potato_hermes_lite.native_images import install_agent_image_adapter
+    install_agent_image_adapter(agent)
     runtime_matches = all(
         getattr(agent, key, None) == config[key] for key in ("model", "provider", "api_mode")
     )

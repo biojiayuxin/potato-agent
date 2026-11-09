@@ -184,3 +184,21 @@ matching configuration and selection-ID migration as well as the old code.
 Do not restore an entire old chat database over conversations created after
 cutover. Retain the protected configuration/SQLite backups and the previous
 release until validation and the rollback retention period are complete.
+
+## Native image capability
+
+Each backend may declare `supports_vision: true` (a strict YAML boolean).
+Omitted capability defaults to true under Potato's multimodal-only model policy;
+set `supports_vision: false` explicitly to disable images. This does not use model-name heuristics.
+The value is signed into new public snapshots and sent to the Lite session
+adapter. Old signed snapshots retain their original bytes and remain valid for
+requests. A missing capability uses the same default true after signature
+verification, without rewriting the original signed snapshot.
+
+`configure_model_catalog.py --option ID --supports-vision` previews a capability
+update; `--no-supports-vision` disables it. Updating one option copies a shared
+backend so other options and admitted routes keep their capability. Changing the
+upstream model defaults capability to true unless explicitly disabled. Publishing
+configuration with `--apply` and deploying/restarting production still require
+owner authorization. Deploy the compatible proxy and Lite before Interface emits
+new snapshots. Keep old backend IDs and the signing key for existing routes.

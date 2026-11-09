@@ -76,6 +76,13 @@ def wait_until(predicate, timeout=5):
     assert predicate()
 
 
+def test_legacy_parent_child_uses_default_native_vision(runtime_paths):
+    child = Child()
+    child.release.set()
+    runner.wait_for_child(child, "inspect", "image-child", parent(child), timeout=2)
+    assert child._model_supports_vision()
+
+
 def test_activity_renews_budget_and_frozen_child_preserves_output(runtime_paths, monkeypatch):
     monkeypatch.setattr(runner, "POLL_SECONDS", 0.01)
     monkeypatch.setattr(runner, "STOP_GRACE_SECONDS", 0.04)

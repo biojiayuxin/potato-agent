@@ -16,20 +16,43 @@ Supported surfaces are:
 - the sealed Potato profile and custom model provider;
 - bundled, optional, managed, and user skills.
 
-The profile contains a logical allowlist of 27 model tools. This is a maximum,
-not a promise that every request contains all 27. Availability checks may hide
-tools whose local backend is unavailable, including `vision_analyze`,
-`browser_cdp`, and `browser_dialog`. A request may contain only a subset of the
-allowlist and can never add tools outside it.
+The profile contains an explicit allowlist of model tools. Availability checks
+may hide tools whose local backend is unavailable, including browser tools.
+`read_image` has no auxiliary-model dependency. Requests cannot add tools
+outside the allowlist.
 
 Classic Hermes CLI/TUI, dashboard, ACP, cron, MCP, messaging platforms,
 external provider adapters, media generation, voice, web search, and automatic
 dependency installation are outside this runtime.
 
-Existing image attachments and the model's existing vision path remain in
-place. Lite does not add a new native-image protocol or image attachment tool.
-It also does not add `clarify`, `sudo`, or `secret` Web interactions. Approval
-and interrupt remain part of the Potato session contract.
+Image attachments are sent as native image content to a model whose trusted
+catalog snapshot has `supports_vision: true` (the default). An explicit
+`supports_vision: false` rejects image inputs. `read_image` reads original PNG/JPEG/WebP/GIF
+bytes from local paths or safe HTTP(S) sources, including rendered PDF pages.
+`browser_vision` captures original screenshot pixels without auxiliary inference.
+The old `vision_analyze` registration and image inference implementation are
+retired. Its Python compatibility import only returns an error directing callers
+to `read_image`; it cannot make model requests. Remaining names in inherited
+core code describe historical behavior or format old tool records. The instance
+adapter bypasses the old image preprocessing path. `hermes-agent/` and
+`packaging/hermes/` retain the upstream rollback baseline and are not deployed.
+Chat Completions serializes tool images as user observations after the complete
+tool-result batch; Responses uses native image parts in function outputs.
+
+The internal `prompt.submit` RPC accepts optional
+`attachments: [{path, name?, content_type?, size?}]`. Attachments and pending
+images are frozen at turn admission. Reads occur in the user's runtime and
+are limited to 50 MiB per image. All images must load before inference starts.
+Image bytes never become plain display/export/share text. PDF skills render
+only relevant physical pages (1-based); use higher-DPI crops for small labels,
+then call `read_image`. Retain the PDF if a temporary page image will be deleted.
+
+The inherited error recovery remains unchanged: an upstream refusal may strip
+images or shrink and retry. Normal persistence and compression may remove image
+bytes; source hints allow `read_image` to reload while the file still exists.
+There is no new permanent image store or retention exemption.
+
+Approval and interrupt remain part of the Potato session contract.
 
 Local terminal commands, background tasks, helpers, and `execute_code` inherit
 the user's `HOME` supplied by Interface. `HERMES_HOME` remains the directory for

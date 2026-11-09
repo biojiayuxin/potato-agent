@@ -2484,6 +2484,9 @@ def _make_agent(
     )
     if model_config is not None:
         apply_model_config(agent, model_config)
+    else:
+        from potato_hermes_lite.native_images import install_agent_image_adapter
+        install_agent_image_adapter(agent)
     return agent
 
 
@@ -2588,43 +2591,6 @@ def _resolve_checkpoint_hash(mgr, cwd: str, ref: str) -> str:
     raise ValueError(f"Invalid checkpoint number. Use 1-{len(checkpoints)}.")
 
 
-def _enrich_with_attached_images(user_text: str, image_paths: list[str]) -> str:
-    """Pre-analyze attached images via vision and prepend descriptions to user text."""
-    import asyncio, json as _json
-    from tools.vision_tools import vision_analyze_tool
-
-    prompt = (
-        "Describe everything visible in this image in thorough detail. "
-        "Include any text, code, data, objects, people, layout, colors, "
-        "and any other notable visual information."
-    )
-
-    parts: list[str] = []
-    for path in image_paths:
-        p = Path(path)
-        if not p.exists():
-            continue
-        hint = f"[You can examine it with vision_analyze using image_url: {p}]"
-        try:
-            r = _json.loads(
-                asyncio.run(vision_analyze_tool(image_url=str(p), user_prompt=prompt))
-            )
-            desc = r.get("analysis", "") if r.get("success") else None
-            parts.append(
-                f"[The user attached an image:\n{desc}]\n{hint}"
-                if desc
-                else f"[The user attached an image but analysis failed.]\n{hint}"
-            )
-        except Exception:
-            parts.append(f"[The user attached an image but analysis failed.]\n{hint}")
-
-    text = user_text or ""
-    prefix = "\n\n".join(parts)
-    if prefix:
-        return f"{prefix}\n\n{text}" if text else prefix
-    return text or "What do you see in this image?"
-
-
 def _content_display_text(content: Any) -> str:
     if content is None:
         return ""
@@ -2656,90 +2622,11 @@ def _content_display_text(content: Any) -> str:
 
 
 def _coerce_message_text(content: Any) -> str:
-    """Render ``message['content']`` as a plain string for transport.
+    """Display projection: keep source hints, never embed image bytes in text."""
+    import re
 
-    Provider-side, ``content`` may be a string (most common), a list of
-    multimodal parts (e.g. ``[{"type": "text", "text": "..."},
-    {"type": "image_url", "image_url": {...}}]``), or a single structured
-    dict. Calling ``.strip()`` on a list raises ``'list' object has no
-    attribute 'strip'`` and breaks session resume entirely.
-
-    Image parts (``image_url``) are preserved by appending the underlying
-    URL (data: or http:) into the text. The desktop renderer pulls these
-    back out via ``extractEmbeddedImages`` so the user sees the image
-    instead of the URL — and it stops the resume payload from disagreeing
-    with the cached message (which would otherwise cause the inline image
-    to flash, then disappear when the resume payload overwrites the cache).
-
-    Other structured dict shapes (audio, unknown types) fall back to a
-    bracketed placeholder so resume doesn't drop the message entirely.
-    """
-    if content is None:
-        return ""
-    if isinstance(content, str):
-        return content
-    if isinstance(content, (int, float)):
-        return str(content)
-    if isinstance(content, list):
-        chunks: list[str] = []
-        for part in content:
-            if isinstance(part, str):
-                chunks.append(part)
-                continue
-            if not isinstance(part, dict):
-                continue
-            text = part.get("text")
-            if isinstance(text, str):
-                chunks.append(text)
-                continue
-            kind = part.get("type")
-            if kind in {"text", "input_text", "output_text"}:
-                t = part.get("text") or part.get("content") or ""
-                if t:
-                    chunks.append(str(t))
-                continue
-            if kind in {"image_url", "input_image", "image"}:
-                image_url = part.get("image_url")
-                url = ""
-                if isinstance(image_url, dict):
-                    candidate = image_url.get("url")
-                    if isinstance(candidate, str):
-                        url = candidate
-                elif isinstance(image_url, str):
-                    url = image_url
-                if url:
-                    chunks.append(f"\n{url}")
-                else:
-                    chunks.append("\n[image]")
-                continue
-            if kind in {"input_audio", "audio"}:
-                chunks.append("\n[audio]")
-                continue
-            if kind:
-                chunks.append(f"\n[{kind}]")
-        return "".join(chunks)
-    if isinstance(content, dict):
-        kind = content.get("type")
-        if kind in {"text", "input_text", "output_text"}:
-            return str(content.get("text") or content.get("content") or "")
-        if kind in {"image_url", "input_image", "image"}:
-            image_url = content.get("image_url")
-            url = ""
-            if isinstance(image_url, dict):
-                candidate = image_url.get("url")
-                if isinstance(candidate, str):
-                    url = candidate
-            elif isinstance(image_url, str):
-                url = image_url
-            return url or "[image]"
-        if kind in {"input_audio", "audio"}:
-            return "[audio]"
-        if kind:
-            return f"[{kind}]"
-        if "text" in content:
-            return str(content.get("text") or "")
-        return "[structured content]"
-    return str(content)
+    text = _content_display_text(content)
+    return re.sub(r"data:image/[a-zA-Z0-9.+-]+;base64,[a-zA-Z0-9+/=_-]+", "[image]", text)
 
 
 def _history_to_messages(history: list[dict]) -> list[dict]:
@@ -4347,6 +4234,8 @@ def _(rid, params: dict) -> dict:
     if err:
         return err
     try:
+        from potato_hermes_lite.attachments import normalize_attachments
+        attachments = normalize_attachments(params.get("attachments", []))
         model_config = (
             normalize_model_config(params["model_config"])
             if "model_config" in params else None
@@ -4398,6 +4287,8 @@ def _(rid, params: dict) -> dict:
                     print(f"[tui_gateway] prompt.submit: replace_messages failed: {exc}", file=sys.stderr)
         if model_config is not None:
             session["model_config"] = model_config
+        images = list(session.get("attached_images", []))
+        session["attached_images"] = []
         session["running"] = True
         session["last_active"] = time.time()
         session["interface_turn_state"] = {
@@ -4414,7 +4305,8 @@ def _(rid, params: dict) -> dict:
             err = _wait_agent(session, rid)
             if err:
                 raise RuntimeError(err.get("error", {}).get("message", "agent initialization failed"))
-            _run_prompt_submit(rid, sid, session, text, turn_id=turn_id)
+            _run_prompt_submit(rid, sid, session, text, turn_id=turn_id,
+                               attachments=attachments, images=images)
         except BaseException as exc:
             try:
                 _emit_turn_outcome(session, sid, turn_id, "error", {"message": str(exc)})
@@ -4622,13 +4514,12 @@ def _start_notification_poller(sid: str, session: dict) -> threading.Event:
     return stop
 
 
-def _run_prompt_submit(rid, sid: str, session: dict, text: Any, *, turn_id: str = "") -> None:
+def _run_prompt_submit(rid, sid: str, session: dict, text: Any, *, turn_id: str = "",
+                       attachments: list[dict] | None = None, images: list[str] | None = None) -> None:
     with session["history_lock"]:
         model_config = copy.deepcopy(session.get("model_config"))
         history = list(session["history"])
         history_version = int(session.get("history_version", 0))
-        images = list(session.get("attached_images", []))
-        session["attached_images"] = []
         if not isinstance(session.get("inflight_turn"), dict):
             _start_inflight_turn(session, text)
     agent = session["agent"]
@@ -4705,58 +4596,11 @@ def _run_prompt_submit(rid, sid: str, session: dict, text: Any, *, turn_id: str 
                     return
                 prompt = ctx.message
 
-            # Decide image routing per-turn based on active provider/model.
-            # "native" → pass pixels to the main model as OpenAI-style content
-            # parts (adapters translate for Anthropic/Gemini/Bedrock/etc.).
-            # "text"   → pre-analyze with vision_analyze and prepend the text.
-            # See agent/image_routing.py for the full decision table.
-            run_message: Any = prompt
-            if images:
-                try:
-                    from agent.image_routing import (
-                        decide_image_input_mode,
-                        build_native_content_parts,
-                    )
-                    from hermes_cli.config import load_config as _tui_load_config
-
-                    _cfg = _tui_load_config()
-                    _mode = decide_image_input_mode(
-                        agent.provider,
-                        agent.model,
-                        _cfg,
-                    )
-                    if getattr(agent, "api_mode", "") == "codex_app_server":
-                        _mode = "text"
-                except Exception as _img_exc:
-                    print(
-                        f"[tui_gateway] image_routing decision failed, defaulting to text: {_img_exc}",
-                        file=sys.stderr,
-                    )
-                    _mode = "text"
-
-                if _mode == "native":
-                    try:
-                        _parts, _skipped = build_native_content_parts(
-                            prompt,
-                            images,
-                        )
-                        if _skipped:
-                            print(
-                                f"[tui_gateway] native image attachment skipped {len(_skipped)} unreadable path(s)",
-                                file=sys.stderr,
-                            )
-                        if any(p.get("type") == "image_url" for p in _parts):
-                            run_message = _parts
-                        else:
-                            run_message = _enrich_with_attached_images(prompt, images)
-                    except Exception as _img_exc:
-                        print(
-                            f"[tui_gateway] native attach failed, falling back to text: {_img_exc}",
-                            file=sys.stderr,
-                        )
-                        run_message = _enrich_with_attached_images(prompt, images)
-                else:
-                    run_message = _enrich_with_attached_images(prompt, images)
+            from potato_hermes_lite.attachments import build_image_prompt
+            run_message = build_image_prompt(
+                prompt, attachments or [], images or [],
+                supports_vision=(model_config or {}).get("supports_vision", True) is True,
+            )
 
             def _stream(delta):
                 with session["history_lock"]:

@@ -892,20 +892,9 @@ DEFAULT_CONFIG = {
         # default is 1800s) plus runtime slack.  Set to 0 to disable the
         # gate and restore pre-fix behaviour (always inject).
         "gateway_auto_continue_freshness": 3600,
-        # How user-attached images are presented to the main model on each turn.
-        #   "auto"   — attach natively when the active model reports
-        #              supports_vision=True AND the user hasn't explicitly
-        #              configured auxiliary.vision.provider.  Otherwise fall
-        #              back to text (vision_analyze pre-analysis).
-        #   "native" — always attach natively; non-vision models will either
-        #              error at the provider or get a last-chance text fallback
-        #              (see run_agent._prepare_messages_for_api).
-        #   "text"   — always pre-analyze with vision_analyze and prepend the
-        #              description as text; the main model never sees pixels.
-        # Affects gateway platforms, the TUI, and CLI /attach.  vision_analyze
-        # remains available as a tool regardless of this setting — the routing
-        # only controls how inbound user images are presented.
-        "image_input_mode": "auto",
+        # Potato loads image attachments and read_image results as native pixels.
+        # Capability comes from the trusted catalog and defaults to enabled.
+        "image_input_mode": "native",
         "disabled_toolsets": [],
     },
     
@@ -2477,7 +2466,7 @@ OPTIONAL_ENV_VARS = {
         "prompt": "OpenRouter API key",
         "url": "https://openrouter.ai/keys",
         "password": True,
-        "tools": ["vision_analyze", "mixture_of_agents"],
+        "tools": ["mixture_of_agents"],
         "category": "provider",
         "advanced": True,
     },

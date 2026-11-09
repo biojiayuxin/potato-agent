@@ -66,6 +66,25 @@ def _turn(bridge: _Bridge, session_id: str = "one", **extra) -> dict[str, Any]:
 
 
 @pytest.mark.parametrize("mode", ["chat", "plan"])
+def test_image_attachments_are_submitted_structurally_in_the_same_rpc(tmp_path, mode):
+    from interface.session_run_manager import SessionRunManager
+
+    async def scenario():
+        manager = SessionRunManager(db_path=tmp_path / "interface.db")
+        bridge = _Bridge()
+        try:
+            await manager.submit_turn(**_turn(bridge, mode=mode, attachments=[{
+                "localPath": "/workspace/page.png", "name": "page.png", "content_type": "image/png", "size": 12,
+            }]))
+            submitted = await asyncio.wait_for(bridge.submitted.get(), 2)
+            assert submitted["attachments"] == [{"path": "/workspace/page.png", "name": "page.png", "content_type": "image/png", "size": 12}]
+            assert all(method != "image.attach" for method, _ in bridge.calls)
+        finally:
+            await manager.shutdown()
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("mode", ["chat", "plan"])
 def test_queued_turn_keeps_a_copy_of_selected_model(tmp_path: Path, mode: str) -> None:
     from interface.session_run_manager import SessionRunManager
 

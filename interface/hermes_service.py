@@ -396,6 +396,7 @@ def build_config_data(
     model = {
         "default": option.id, "provider": option.provider,
         "api_mode": option.api_mode, "context_length": option.context_length,
+        "supports_vision": option.supports_vision,
         "base_url": get_model_proxy_base_url(config),
         "api_key": local_model_proxy_token(user.username, user.model_proxy_token),
     }

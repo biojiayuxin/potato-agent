@@ -64,7 +64,9 @@ def activity(child) -> tuple:
 def wait_for_child(child, goal: str, task_id: str, parent, timeout: float | None):
     """Return (conversation result, failure entry, still-running future)."""
     from tools.delegate_tool import _get_subagent_approval_callback, _set_subagent_approval_cb
+    from potato_hermes_lite.native_images import install_agent_image_adapter
 
+    install_agent_image_adapter(child)
     model_config = getattr(parent, "_potato_model_config", None)
     if model_config and getattr(child, "model", None) == model_config["model"]:
         from potato_hermes_lite.session_models import apply_model_config, record_runtime_model

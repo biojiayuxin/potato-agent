@@ -230,6 +230,7 @@ def test_build_config_data_disables_fallbacks_and_uses_proxy_credentials() -> No
         "api_key": "pmp_alice_0123456789abcdefghijklmnopqrstuvwxyz",
         "api_mode": "chat_completions",
         "context_length": 200000,
+        "supports_vision": True,
     }
     assert "fallback_providers" not in data
     assert "fallback_model" not in data

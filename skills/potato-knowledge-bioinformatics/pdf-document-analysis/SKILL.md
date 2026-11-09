@@ -69,8 +69,8 @@ the confirmed quoted absolute paths.
 | Metadata, pages, restrictions | `pdfinfo` | The file is damaged or protected |
 | Facts, summaries, captions | `pdftotext -layout` | Reading order is corrupted |
 | Word positions | `pdftotext -tsv` | Visual inspection remains ambiguous |
-| Figures, equations, structured tables | `pdftocairo` + `vision_analyze` | Labels need a higher-DPI crop |
-| A few scanned pages | Render + `vision_analyze` | Searchable text across many pages is needed |
+| Figures, equations, structured tables | `pdftocairo` + `read_image` | Labels need a higher-DPI crop |
+| A few scanned pages | Render + `read_image` | Searchable text across many pages is needed |
 | Full-document OCR | `ocr-and-documents` | OCR dependencies need installation |
 
 Use 150-200 DPI for page reconnaissance, about 300 DPI for normal Figure or
@@ -82,7 +82,7 @@ table inspection, and 600 DPI only for small or ambiguous labels.
 
 - Textual question: extract and search text first.
 - Figure, chart, equation, or visually structured table: locate its page,
-  render it, and use `vision_analyze`.
+  render it, and use `read_image`.
 - Mixed question: combine text evidence with only the relevant rendered pages.
 - Image-only page: render and inspect it; use OCR only when searchable text
   across many pages is necessary.
@@ -135,9 +135,15 @@ pdftocairo -f PAGE -l PAGE -singlefile -png -r DPI \
   "INPUT.pdf" "WORKDIR/region"
 ```
 
-Pass the PNG to `vision_analyze` with a focused question. Use whole pages to
+Pass the PNG to `read_image` with a focused question. Use whole pages to
 locate content and high-resolution crops to read small labels. Independently
 inspect every crop before relying on it.
+
+Rendering a PNG with `terminal` does not put its pixels into model context.
+Always call `read_image` with the generated path; inspect the returned image
+yourself. Keep the source PDF and record its physical page number, DPI, and
+crop coordinates when a later reinspection may be needed: after temporary
+images are cleaned up, regenerate them from the PDF before calling `read_image`.
 
 `pdftocairo` crop coordinates are output pixels at the chosen DPI. Convert
 coordinates measured on another preview with:
@@ -173,7 +179,7 @@ For tables, equations, and scans:
   letters, or operators.
 - If text is empty or sparse, render a representative page and determine
   whether it is scanned, vector-heavy, unusually encoded, or mainly a Figure.
-- Use `vision_analyze` for a few relevant scanned pages. Load
+- Use `read_image` for a few relevant scanned pages. Load
   `ocr-and-documents` when a long scan needs searchable full text.
 - Treat OCR as uncertain for gene IDs, equations, superscripts, and numerical
   tables. Do not install OCR software without permission.
@@ -204,7 +210,7 @@ Do not use `pdfimages` for complete scientific Figures. A Figure can combine
 vector paths, live text, raster objects, masks, axes, legends, and annotations;
 `pdfimages` extracts embedded raster objects rather than the complete visual
 composition. Render the page with `pdftocairo`, crop the Figure, and inspect it
-with `vision_analyze`. Use `pdfimages` only when the user explicitly requests
+with `read_image`. Use `pdfimages` only when the user explicitly requests
 raw embedded raster assets and accepts that they may be incomplete.
 
 Also avoid:

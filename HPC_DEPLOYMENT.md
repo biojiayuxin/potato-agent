@@ -91,7 +91,7 @@ Lite 源码中的主要边界如下：
 - user/project/entry-point plugin，以及 Lite 不支持的 Codex App Server 运行面。
 
 profile 最多允许 27 个模型工具。27 是逻辑上限，不是每次请求的固定数量：availability check 可以隐藏
-当前不可用的 `vision_analyze`、`browser_cdp`、`browser_dialog` 等工具，但请求不能增加清单外工具。在线
+当前不可用的 `browser_cdp`、`browser_dialog` 等工具，但请求不能增加清单外工具。在线
 runtime 在 `HERMES_RUNTIME_PROFILE_PATH` 缺失或 provider/API mode 不在 allowlist 时 fail closed，不回退到
 完整 Hermes。source/wheel inventory 漂移和 forbidden path/import 则由 verifier/build 门禁阻止候选 release
 生成；它们不是在线进程的持续完整性监控。
@@ -118,7 +118,8 @@ mapping 动态读取。构建、切换、验收和回滚流程见
 本文第 6.3 至 6.7 小节及 [`hermes-lite/README.md`](hermes-lite/README.md)。
 
 `0.19.0+potato.lite.2` 修复辅助请求参数构造器对已裁剪 `agent.anthropic_adapter` 的无条件导入；
-`vision_analyze` 和 `browser_vision` 在允许的 `custom` Codex/OpenAI-wire 路径上不再于 API 调用前报模块缺失。
+该历史辅助图片入口已退役；当前 `read_image` 和 `browser_vision` 直接向主模型提供图片，
+模型目录默认 `supports_vision: true`。
 
 `0.19.0+potato.lite.3` 已于 2026-07-29 完成安全切换，包含私有 runtime 临时目录、命令正文移出 argv、
 `processes.json` 私有化、模型代理凭据隔离和 Interface credential 边界修复。新部署仍必须完成本文列出的
@@ -1413,7 +1414,7 @@ hermes:
 
 `browser_cdp_url` 只接受无认证、无 query、使用字面量 loopback IP 的 `ws://`/`wss://` DevTools endpoint；
 `localhost` 不会触发 DNS 或 hosts 解析。未配置时保持为空，因此 `browser_cdp` 和 `browser_dialog` 不会通过
-真实 availability check。它们与 `vision_analyze` 等工具允许按运行环境动态隐藏；27 项始终只是逻辑上限。
+真实 availability check。这些浏览器工具允许按运行环境动态隐藏；27 项始终只是逻辑上限。
 
 新的每用户 Hermes service 默认使用 `/opt/potato-hermes-lite/current/venv/bin/hermes`。现有生产 mapping 保留
 `/usr/local/bin/hermes` 兼容入口，但该 symlink 必须解析到 Lite current venv，不能再指向 legacy venv。

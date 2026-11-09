@@ -12,6 +12,63 @@ IMAGE_EXTENSIONS = frozenset(
 )
 
 
+def normalize_attachments(value) -> list[dict]:
+    """Validate the internal RPC contract before admitting a turn."""
+    if not isinstance(value, list) or len(value) > 100:
+        raise ValueError("attachments must be a list of at most 100 files")
+    result = []
+    for item in value:
+        if not isinstance(item, dict) or set(item) - {"path", "name", "content_type", "size"}:
+            raise ValueError("Invalid attachment fields")
+        path = item.get("path")
+        if not isinstance(path, str) or not path.strip() or len(path) > 4096 or "\0" in path:
+            raise ValueError("Invalid attachment path")
+        if any(not isinstance(item.get(key, ""), str) for key in ("name", "content_type")):
+            raise ValueError("Invalid attachment metadata")
+        size = item.get("size", 0)
+        if type(size) is not int or size < 0:
+            raise ValueError("Invalid attachment size")
+        result.append(dict(item, path=path.strip()))
+    return result
+
+
+def build_image_prompt(text, attachments: list[dict], images: list[str], *, supports_vision: bool):
+    """Read all declared images before submitting any of them to the agent."""
+    from potato_hermes_lite.image_tools import load_image
+
+    paths = list(images)
+    for item in attachments:
+        raw = item["path"]
+        # Type/name hints only classify candidates. load_image validates bytes.
+        if (item.get("content_type", "").lower().startswith("image/")
+                or Path(raw).suffix.lower() in IMAGE_EXTENSIONS
+                or Path(item.get("name", "")).suffix.lower() in IMAGE_EXTENSIONS):
+            paths.append(raw)
+    paths = list(dict.fromkeys(paths))
+    if not paths:
+        return text
+    if not supports_vision:
+        raise ValueError("The selected model has no declared image capability. Select a vision-enabled model.")
+    parts = []
+    sources = []
+    for raw in paths:
+        try:
+            path = resolve_attachment_path(raw)
+            if path is None:
+                raise ValueError("Unavailable image")
+            loaded = load_image(path)
+        except Exception:
+            raise ValueError("An attached image could not be read or validated. Regenerate it or upload it again.") from None
+        sources.append(str(path))
+        parts.append({"type": "image_url", "image_url": {"url": loaded["url"]}})
+    if not isinstance(text, str):
+        raise ValueError("Image attachments require a text prompt")
+    caption = text.strip() or "Describe the attached image(s)."
+    caption += "\n\n" + "\n".join(f"[Image source: {source}]" for source in sources)
+    caption += "\nUse read_image to reload a source if its pixels are no longer in context."
+    return [{"type": "text", "text": caption}, *parts]
+
+
 def split_path_input(raw: str) -> tuple[str, str]:
     raw = str(raw or "").strip()
     if not raw:

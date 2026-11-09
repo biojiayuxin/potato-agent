@@ -986,8 +986,8 @@ class ShellFileOperations(FileOperations):
                 is_binary=True,
                 file_size=file_size,
                 hint=(
-                    "Image file detected. Automatically redirected to vision_analyze tool. "
-                    "Use vision_analyze with this file path to inspect the image contents."
+                    "Image file detected. "
+                    "Use read_image with this file path to inspect the image contents."
                 ),
             )
         

@@ -4,6 +4,7 @@ import json
 import os
 import queue
 import subprocess
+import sys
 import threading
 import time
 from contextlib import AbstractContextManager
@@ -675,6 +676,99 @@ def _create_session(gateway: GatewayProcess) -> dict[str, Any]:
     return result
 
 
+def _image_urls(value):
+    if isinstance(value, dict):
+        if value.get("type") in {"image_url", "input_image"}:
+            source = value.get("image_url")
+            return [source.get("url") if isinstance(source, dict) else source]
+        return [url for child in value.values() for url in _image_urls(child)]
+    if isinstance(value, list):
+        return [url for child in value for url in _image_urls(child)]
+    return []
+
+
+@pytest.mark.parametrize("api_mode", ["chat_completions", "codex_responses"])
+def test_native_upload_and_read_image_reach_main_model_and_reload_after_resume(tmp_path, api_mode):
+    import base64
+    from PIL import Image
+
+    path = tmp_path / "page.png"
+    Image.new("RGB", (64, 48), (5, 120, 230)).save(path)
+    expected = "data:image/png;base64," + base64.b64encode(path.read_bytes()).decode()
+    config = {"id": "vision", "model": "mock-model", "provider": "custom", "api_mode": api_mode,
+              "context_length": 128000, "reasoning_effort": "low", "supports_vision": True}
+    if api_mode == "chat_completions":
+        config.pop("supports_vision")  # Existing snapshots follow the default multimodal policy.
+    plans = [{"kind": "tool", "name": "read_image", "arguments": {"image_url": str(path)}},
+             {"kind": "text", "text": "Pixels inspected"}] * 2
+    with MockProvider(plans) as provider:
+        with GatewayProcess(tmp_path / "gateway", provider, api_mode=api_mode) as gateway:
+            created = gateway.rpc("session.create", {"cwd": str(gateway.work), "model_config": config})
+            sid = created["session_id"]
+            gateway.rpc("prompt.submit", {"session_id": sid, "text": "Inspect this image",
+                                          "attachments": [{"path": str(path), "content_type": "image/png"}]})
+            completed = _payload(gateway.wait_event("message.complete", session_id=sid))
+            assert completed["status"] == "complete", gateway.diagnostics()
+            assert completed["text"] == "Pixels inspected"
+            calls = [r for r in provider.state.requests if r.get("stream")]
+            assert len(calls) == 2
+            assert _image_urls(calls[0]) == [expected]
+            assert _image_urls(calls[1]).count(expected) == 2
+            names = {tool.get("name") or tool.get("function", {}).get("name") for tool in calls[0]["tools"]}
+            assert "read_image" in names and "vision_analyze" not in names
+            if api_mode == "chat_completions":
+                tool_index = next(i for i, m in enumerate(calls[1]["messages"]) if m.get("role") == "tool")
+                assert isinstance(calls[1]["messages"][tool_index]["content"], str)
+                assert calls[1]["messages"][tool_index + 1]["role"] == "user"
+            else:
+                output = next(m for m in calls[1]["input"] if m.get("type") == "function_call_output")
+                assert expected in _image_urls(output["output"])
+        with GatewayProcess(tmp_path / "gateway", provider, api_mode=api_mode) as gateway:
+            resumed = gateway.rpc("session.resume", {"session_id": created["stored_session_id"], "model_config": config})
+            assert "base64," not in json.dumps(resumed)
+            sid = resumed["session_id"]
+            gateway.rpc("prompt.submit", {"session_id": sid, "text": "Reload the source image and inspect it again"})
+            completed = _payload(gateway.wait_event("message.complete", session_id=sid))
+            assert completed["status"] == "complete", gateway.diagnostics()
+            calls = [r for r in provider.state.requests if r.get("stream")]
+            assert len(calls) == 4
+            assert _image_urls(calls[2]) == []
+            assert _image_urls(calls[3]) == [expected]
+        assert not any(_image_urls(r) for r in provider.state.requests if not r.get("stream"))
+
+
+def test_pdf_selected_page_render_then_native_read_image(tmp_path):
+    import base64
+    import io
+    import shlex
+    import shutil
+    from PIL import Image
+
+    if not shutil.which("pdftocairo"):
+        pytest.skip("pdftocairo is required for PDF rendering")
+    pdf = tmp_path / "two-pages.pdf"
+    Image.new("RGB", (64, 48), "red").save(pdf, save_all=True, append_images=[Image.new("RGB", (64, 48), "blue")])
+    png = tmp_path / "second-page.png"
+    command = "pdftocairo -f 2 -l 2 -singlefile -png -r 180 " + shlex.quote(str(pdf)) + " " + shlex.quote(str(png.with_suffix("")))
+    plans = [{"kind": "tool", "name": "terminal", "arguments": {"command": command}},
+             {"kind": "tool", "name": "read_image", "arguments": {"image_url": str(png)}},
+             {"kind": "text", "text": "Second page inspected"}]
+    config = {"id": "vision", "model": "mock-model", "provider": "custom", "api_mode": "chat_completions",
+              "context_length": 128000, "reasoning_effort": "low", "supports_vision": True}
+    with MockProvider(plans) as provider, GatewayProcess(tmp_path / "gateway", provider) as gateway:
+        sid = gateway.rpc("session.create", {"cwd": str(gateway.work), "model_config": config})["session_id"]
+        gateway.rpc("prompt.submit", {"session_id": sid, "text": f"Render physical page 2 of {pdf} and inspect it"})
+        completed = _payload(gateway.wait_event("message.complete", session_id=sid))
+        assert completed["status"] == "complete", gateway.diagnostics()
+        calls = [r for r in provider.state.requests if r.get("stream")]
+        assert len(calls) == 3
+        data = base64.b64decode(_image_urls(calls[-1])[0].split(",", 1)[1])
+        assert data == png.read_bytes()
+        with Image.open(io.BytesIO(data)) as img:
+            red, green, blue = img.convert("RGB").getpixel((img.width // 2, img.height // 2))
+            assert blue > 200 and red < 30 and green < 30
+
+
 def test_prompt_submit_and_resume_use_only_lite_runtime(tmp_path: Path) -> None:
     with MockProvider(
         [
@@ -1012,7 +1106,7 @@ def test_catalog_snapshot_proxy_identity_and_hot_upgrade(tmp_path: Path) -> None
                        "POTATO_MODEL_PROXY_USAGE_DB": str(tmp_path / "usage.db"),
                        "NO_PROXY": "127.0.0.1,localhost"}
         log = (tmp_path / "proxy.log").open("w")
-        proxy = subprocess.Popen([str(_test_python()), "-m", "uvicorn", "interface.model_proxy:app",
+        proxy = subprocess.Popen([sys.executable, "-m", "uvicorn", "interface.model_proxy:app",
                                   "--host", "127.0.0.1", "--port", str(port)],
                                  env=environment, cwd=LITE_ROOT.parent, stdout=log, stderr=log)
         try:

@@ -42,6 +42,7 @@ class ModelOption:
     display_name: str
     route: str
     config_revision: str
+    supports_vision: bool = True
 
     def to_public(self, *, is_primary: bool) -> dict[str, Any]:
         data: dict[str, Any] = {
@@ -50,6 +51,7 @@ class ModelOption:
             "provider": self.provider,
             "model": self.model,
             "is_primary": is_primary,
+            "supports_vision": self.supports_vision,
         }
         if self.context_length is not None:
             data["context_length"] = self.context_length
@@ -119,6 +121,7 @@ def model_options_from_catalog(catalog: dict[str, Any]) -> ModelOptions:
             context_length=item["context_length"], api_mode=item["api_mode"],
             reasoning_effort=item["reasoning_effort"], display_name=item["display_name"],
             route=item["route"], config_revision=item["config_revision"],
+            supports_vision=item.get("supports_vision", True),
         ) for item in catalog["options"])
         result = ModelOptions(primary_id=catalog["primary"], default_id=catalog["default"], options=options)
         result.primary

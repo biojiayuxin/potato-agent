@@ -82,7 +82,7 @@ POTATO_EXPECTED_TOOLS = (
     "write_file",
     "patch",
     "search_files",
-    "vision_analyze",
+    "read_image",
     "browser_navigate",
     "browser_snapshot",
     "browser_click",

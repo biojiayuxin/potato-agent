@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from interface.image_content import display_content
+
 import asyncio
 import contextlib
 import inspect
@@ -72,7 +74,7 @@ def _normalize_display_message(message: dict[str, Any]) -> dict[str, Any]:
     normalized = {
         "id": str(message.get("id") or uuid.uuid4().hex),
         "role": str(message.get("role") or "assistant"),
-        "content": str(message.get("content") or ""),
+        "content": display_content(message.get("content")),
         "reasoningContent": str(message.get("reasoningContent") or ""),
         "toolCalls": [
             _normalize_tool_call(item)
@@ -566,6 +568,7 @@ class SessionRunManager:
                 context=context,
                 live_session_id=live_session_id,
                 text=submission_text,
+                attachments=_serialize_attachments_for_hermes(attachments),
                 mode=normalized_mode,
                 delegation_ids=delegation_ids,
                 model_config=model_config,
@@ -593,6 +596,7 @@ class SessionRunManager:
         mode: str = "chat",
         delegation_ids: list[str] | None = None,
         model_config: dict[str, Any] | None = None,
+        attachments: list[dict[str, Any]] | None = None,
     ) -> None:
         approval_lock = self._approval_state_locks.setdefault(
             (context.user_id, context.session_id), asyncio.Lock()
@@ -639,6 +643,7 @@ class SessionRunManager:
                 {
                     "session_id": live_session_id,
                     "text": submission_text,
+                    **({"attachments": attachments} if attachments else {}),
                     **({"model_config": model_config} if model_config is not None else {}),
                     **({"delegation_ids": delegation_ids} if delegation_ids else {}),
                 },

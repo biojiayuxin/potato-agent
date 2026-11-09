@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from interface.image_content import display_content
+
 import contextlib
 import asyncio
 import hashlib
@@ -1863,7 +1865,7 @@ def _normalize_display_message(message: dict[str, Any]) -> dict[str, Any]:
     normalized = {
         "id": message_id,
         "role": str(message.get("role") or "assistant"),
-        "content": str(message.get("content") or ""),
+        "content": display_content(message.get("content")),
         "reasoningContent": str(message.get("reasoningContent") or ""),
         "toolCalls": message.get("toolCalls")
         if isinstance(message.get("toolCalls"), list)
@@ -1936,7 +1938,7 @@ def _build_fallback_display_messages(
 
     def has_payload(message: dict[str, Any]) -> bool:
         return bool(
-            str(message.get("content") or "").strip()
+            display_content(message.get("content")).strip()
             or str(message.get("reasoningContent") or "").strip()
             or message.get("toolCalls")
             or message.get("progressLines")
@@ -1956,7 +1958,7 @@ def _build_fallback_display_messages(
 
         if role == "user":
             flush_pending()
-            content = str(raw_message.get("content") or "")
+            content = display_content(raw_message.get("content"))
             normalized.append(
                 {
                     "id": f"fallback-{raw_message.get('id') or uuid.uuid4().hex}",
@@ -1976,7 +1978,7 @@ def _build_fallback_display_messages(
         if role != "assistant":
             continue
 
-        raw_content = str(raw_message.get("content") or "")
+        raw_content = display_content(raw_message.get("content"))
         progress_lines = _extract_progress_lines(raw_content)
         display_message = {
             "id": f"fallback-{raw_message.get('id') or uuid.uuid4().hex}",
@@ -2056,7 +2058,7 @@ def _strip_export_progress_content(content: str) -> str:
 def _parse_stored_user_content_for_export(
     content: Any,
 ) -> tuple[str, list[dict[str, Any]]]:
-    source = str(content or "")
+    source = display_content(content)
     start = source.find(ATTACHMENT_BLOCK_START)
     end = source.find(ATTACHMENT_BLOCK_END)
     if start != 0 or end < 0:
@@ -2281,7 +2283,7 @@ def _sanitize_chat_share_display_messages(
         if role not in {"user", "assistant"}:
             continue
 
-        raw_content = str(message.get("content") or "")
+        raw_content = display_content(message.get("content"))
         if role == "user":
             content, _ = _parse_stored_user_content_for_export(raw_content)
             if (
@@ -2430,7 +2432,7 @@ def _fresh_shared_display_messages(
         {
             "id": uuid.uuid4().hex,
             "role": str(message.get("role") or ""),
-            "content": str(message.get("content") or ""),
+            "content": display_content(message.get("content")),
             "reasoningContent": "",
             "toolCalls": [],
             "progressLines": [],
@@ -3863,6 +3865,7 @@ def _session_model_config(option: ModelOption) -> dict[str, Any]:
     return {
         "id": option.id,
         "model": option.route or option.name,
+        "supports_vision": option.supports_vision,
         "provider": option.provider,
         "api_mode": option.api_mode,
         "context_length": option.context_length,
@@ -5731,7 +5734,7 @@ def _fork_display_prefix(
         display_turns.append(
             {
                 "user": user_content,
-                "assistant": str(message.get("content") or ""),
+                "assistant": display_content(message.get("content")),
                 "user_message_index": pending_user_index,
                 "assistant_message_index": index,
                 "user_timestamp": int(pending_user.get("timestamp") or 0),

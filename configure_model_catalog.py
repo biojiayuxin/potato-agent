@@ -27,14 +27,23 @@ from interface.user_private_files import read_user_private_text
 
 
 def update_option(config: dict, option_id: str, *, model: str | None = None, display_name: str | None = None,
-                  reasoning_effort: str | None = None, context_length: int | None = None) -> dict:
+                  reasoning_effort: str | None = None, context_length: int | None = None,
+                  supports_vision: bool | None = None) -> dict:
+    if supports_vision is not None and not isinstance(supports_vision, bool):
+        raise ModelCatalogError("supports_vision must be a boolean")
     result = deepcopy(validate_catalog(config))
     if option_id not in result["options"]:
         raise ModelCatalogError("Unknown stable model option ID")
     option = result["options"][option_id]
-    if model is not None and model != result["backends"][option["backend"]]["model"]:
+    current = result["backends"][option["backend"]]
+    model_changed = model is not None and model != current["model"]
+    if model_changed or (supports_vision is not None and supports_vision != current.get("supports_vision", True)):
         backend = deepcopy(result["backends"][option["backend"]])
-        backend["model"] = model
+        if model_changed:
+            backend["model"] = model
+            backend["supports_vision"] = True
+        if supports_vision is not None:
+            backend["supports_vision"] = supports_vision
         backend_id = f"{option_id}-{len(result['backends']) + 1}"
         while backend_id in result["backends"]:
             backend_id += "x"
@@ -144,6 +153,8 @@ def main() -> int:
     parser.add_argument("--display-name")
     parser.add_argument("--reasoning-effort")
     parser.add_argument("--context-length", type=int)
+    parser.add_argument("--supports-vision", action=argparse.BooleanOptionalAction, default=None,
+                        help="Override native image support (enabled by default for new models)")
     parser.add_argument("--apply", action="store_true")
     args = parser.parse_args()
     require_root()
@@ -164,8 +175,9 @@ def main() -> int:
             validate_user_model_routes(catalog, args.mapping)
         if args.option:
             catalog = update_option(catalog, args.option, model=args.model, display_name=args.display_name,
-                                    reasoning_effort=args.reasoning_effort, context_length=args.context_length)
-        elif any(value is not None for value in (args.model, args.display_name, args.reasoning_effort, args.context_length)):
+                                    reasoning_effort=args.reasoning_effort, context_length=args.context_length,
+                                    supports_vision=args.supports_vision)
+        elif any(value is not None for value in (args.model, args.display_name, args.reasoning_effort, args.context_length, args.supports_vision)):
             raise ModelCatalogError("Option updates require --option")
         print(json.dumps(public_catalog(catalog, include_routes=False), ensure_ascii=False, indent=2))
         if args.apply:
