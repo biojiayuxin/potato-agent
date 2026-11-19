@@ -340,9 +340,6 @@ def build_turn_context(
     except Exception as exc:
         logger.warning("pre_llm_call hook failed: %s", exc)
 
-    # Per-turn file-mutation verifier state.
-    agent._turn_failed_file_mutations = {}
-
     # Record the execution thread so interrupt()/clear_interrupt() can scope
     # the tool-level interrupt signal to THIS agent's thread only.
     agent._execution_thread_id = threading.current_thread().ident

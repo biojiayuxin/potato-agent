@@ -1,6 +1,13 @@
 {
   "updates": [
     {
+      "version": "2026-11-19-001",
+      "title": "Bug fixes",
+      "date": "November 19, 2026",
+      "summary": "Fixed a bug that caused misleading warnings to appear in some replies.",
+      "items": []
+    },
+    {
       "version": "2026-11-09-001",
       "title": "Image recognition improvements",
       "date": "November 9, 2026",

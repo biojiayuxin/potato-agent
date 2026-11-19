@@ -682,17 +682,6 @@ def execute_tool_calls_concurrent(agent, assistant_message, messages: list, effe
                 result_preview = _err_text[:200] if len(_err_text) > 200 else _err_text
                 logger.warning("Tool %s returned error (%.2fs): %s", function_name, tool_duration, result_preview)
 
-            # Track file-mutation outcome for the turn-end verifier.
-            # `blocked` calls never actually ran — don't let a guardrail
-            # block count as either a failure or a success.
-            if not blocked:
-                try:
-                    agent._record_file_mutation_result(
-                        function_name, function_args, function_result, is_error,
-                    )
-                except Exception as _ver_err:
-                    logging.debug("file-mutation verifier record failed: %s", _ver_err)
-
             if not blocked and agent.tool_progress_callback:
                 try:
                     agent.tool_progress_callback(
@@ -1326,18 +1315,6 @@ def execute_tool_calls_sequential(agent, assistant_message, messages: list, effe
             logger.warning("Tool %s returned error (%.2fs): %s", function_name, tool_duration, result_preview)
         else:
             logger.info("tool %s completed (%.2fs, %d chars)", function_name, tool_duration, _result_len)
-
-        # Track file-mutation outcome for the turn-end verifier.  See
-        # the concurrent path for the rationale; both paths must feed
-        # the same state so the footer reflects every tool call in the
-        # turn, not just the parallel ones.
-        if not _execution_blocked:
-            try:
-                agent._record_file_mutation_result(
-                    function_name, function_args, function_result, _is_error_result,
-                )
-            except Exception as _ver_err:
-                logging.debug("file-mutation verifier record failed: %s", _ver_err)
 
         if not _execution_blocked and agent.tool_progress_callback:
             try:

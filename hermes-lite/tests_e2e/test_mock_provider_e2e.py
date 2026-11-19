@@ -769,6 +769,37 @@ def test_pdf_selected_page_render_then_native_read_image(tmp_path):
             assert blue > 200 and red < 30 and green < 30
 
 
+def test_patch_retry_preserves_model_reply(tmp_path: Path) -> None:
+    root = tmp_path / "gateway"
+    target = root / "work" / "example.txt"
+    reply = "Updated example.txt."
+    plans = [
+        {
+            "kind": "tool",
+            "name": "patch",
+            "arguments": {"path": path, "old_string": "before", "new_string": "after"},
+        }
+        for path in ("work/example.txt", str(target))
+    ]
+    plans.append({"kind": "text", "text": reply})
+
+    with MockProvider(plans) as provider, GatewayProcess(root, provider) as gateway:
+        target.write_text("before\n", encoding="utf-8")
+        sid = _create_session(gateway)["session_id"]
+        gateway.rpc("prompt.submit", {"session_id": sid, "text": "Update example.txt."})
+        completed = _payload(gateway.wait_event("message.complete", session_id=sid))
+
+        requests = [r for r in provider.state.requests if r.get("stream")]
+        _, retry, final = requests
+        failure = json.loads(retry["messages"][-1]["content"])
+        assert failure["success"] is False
+        assert "Failed to read file" in failure["error"]
+        assert json.loads(final["messages"][-1]["content"])["success"] is True
+        assert target.read_text(encoding="utf-8") == "after\n"
+        assert completed["status"] == "complete"
+        assert completed["text"] == reply
+
+
 def test_prompt_submit_and_resume_use_only_lite_runtime(tmp_path: Path) -> None:
     with MockProvider(
         [

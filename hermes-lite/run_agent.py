@@ -176,10 +176,6 @@ from agent.tool_guardrails import (
     append_toolguard_guidance,
     toolguard_synthetic_result,
 )
-from agent.tool_result_classification import (
-    FILE_MUTATING_TOOL_NAMES as _FILE_MUTATING_TOOLS,
-    file_mutation_result_landed,
-)
 from agent.trajectory import (
     convert_scratchpad_to_think,
     save_trajectory as _save_trajectory_to_file,
@@ -192,8 +188,6 @@ from agent.tool_dispatch_helpers import (
     _is_multimodal_tool_result,
     _multimodal_text_summary,
     _append_subdir_hint_to_multimodal,  # noqa: F401  # re-exported for tests that `from run_agent import _append_subdir_hint_to_multimodal`
-    _extract_file_mutation_targets,
-    _extract_error_preview,
     _trajectory_normalize_msg,  # noqa: F401  # re-exported for tests that `from run_agent import _trajectory_normalize_msg`
 )
 from utils import atomic_json_write, base_url_host_matches, base_url_hostname, is_truthy_value
@@ -2413,149 +2407,12 @@ class AIAgent:
             self._pending_steer = None
         return text
 
-    def _record_file_mutation_result(
-        self,
-        tool_name: str,
-        args: Dict[str, Any],
-        result: Any,
-        is_error: bool,
-    ) -> None:
-        """Record a ``write_file`` / ``patch`` outcome for the turn-end verifier.
-
-        On failure, store ``{path: {error_preview, tool}}`` entries.  On
-        success, remove any prior failure entries for the same paths (the
-        model recovered within the turn).  Silently no-ops if the per-turn
-        state dict hasn't been initialised yet (e.g. a tool dispatched
-        outside ``run_conversation``).
-        """
-        if tool_name not in _FILE_MUTATING_TOOLS:
-            return
-        state = getattr(self, "_turn_failed_file_mutations", None)
-        if state is None:
-            return
-        targets = _extract_file_mutation_targets(tool_name, args)
-        if not targets:
-            return
-        landed = file_mutation_result_landed(tool_name, result)
-        if is_error and not landed:
-            preview = _extract_error_preview(result)
-            for path in targets:
-                # Keep the FIRST error we saw for a given path unless we
-                # later see success.  A repeated failure with a different
-                # message shouldn't silently overwrite the original.
-                if path not in state:
-                    state[path] = {
-                        "tool": tool_name,
-                        "error_preview": preview,
-                    }
-        else:
-            for path in targets:
-                state.pop(path, None)
-
-    def _file_mutation_verifier_enabled(self) -> bool:
-        """Check whether the per-turn file-mutation verifier footer is on.
-
-        Config path: ``display.file_mutation_verifier`` (bool, default True).
-        ``HERMES_FILE_MUTATION_VERIFIER`` env var overrides config.  Exposed
-        as a method so tests can patch a single seam without reaching into
-        the private ``_turn_failed_file_mutations`` state dict.
-        """
-        try:
-            import os as _os
-            env = _os.environ.get("HERMES_FILE_MUTATION_VERIFIER")
-            if env is not None:
-                return env.strip().lower() not in {"0", "false", "no", "off"}
-            # Read from the persisted config.yaml so gateway and CLI share
-            # the same setting.  Import lazily to avoid a startup-time cycle.
-            try:
-                from hermes_cli.config import load_config as _load_config
-                _cfg = _load_config() or {}
-            except Exception:
-                _cfg = {}
-            _display = _cfg.get("display") if isinstance(_cfg, dict) else None
-            if isinstance(_display, dict) and "file_mutation_verifier" in _display:
-                return bool(_display.get("file_mutation_verifier"))
-        except Exception:
-            pass
-        return True  # safe default: verifier on
-
-    # Bare absolute / home / Windows-drive file paths in a footer line.
-    # Anchors mirror the gateway's ``extract_local_files`` bare-path
-    # detector so that anything the gateway WOULD auto-attach is wrapped
-    # in inline-code backticks here first (the extractor skips paths inside
-    # `code` spans).  Defense-in-depth: even if a future error message
-    # echoes a credential path (config.yaml, .env, auth.json) into the
-    # user-facing footer, it can never be matched as a deliverable bare
-    # path and silently uploaded to a messaging channel (#35584).
-    _FOOTER_PATH_RE = re.compile(
-        r"(?<![/:\w.`])(?:~/|/|[A-Za-z]:[/\\])(?:[\w.\-]+[/\\])*[\w.\-]+\.[\w]+",
-    )
-
-    @classmethod
-    def _neutralize_footer_paths(cls, text: str) -> str:
-        """Wrap bare file paths in backticks so they aren't auto-delivered.
-
-        The gateway's ``extract_local_files`` scans response text for bare
-        absolute/home paths ending in a deliverable extension and uploads
-        any that exist on disk as native attachments — but it explicitly
-        skips paths inside inline-code (`` `...` ``) spans.  Backticking
-        every path the footer renders defeats that auto-detection while
-        keeping the path fully human-readable.  Paths already wrapped in a
-        backtick (the negative lookbehind excludes a preceding `` ` ``) are
-        left untouched so we never double-wrap.
-        """
-        if not text:
-            return text
-        return cls._FOOTER_PATH_RE.sub(lambda m: f"`{m.group(0)}`", text)
-
-    @classmethod
-    def _format_file_mutation_failure_footer(cls, failed: Dict[str, Dict[str, Any]]) -> str:
-        """Render the per-turn failed-mutation dict as a user-facing footer.
-
-        Displays up to 10 paths with their first error preview, then a
-        count of any additional failures.  Returns an empty string when
-        the dict is empty so callers can concatenate unconditionally.
-
-        Every file path that reaches the user-facing text — both the bullet
-        path and any path echoed inside the tool's error preview — is
-        backtick-wrapped via ``_neutralize_footer_paths`` so the gateway's
-        bare-path media extractor can never auto-attach a protected file
-        (e.g. ``~/.hermes/config.yaml``) to a messaging channel (#35584).
-        """
-        if not failed:
-            return ""
-        lines = [
-            "⚠️ File-mutation verifier: "
-            f"{len(failed)} file(s) were NOT modified this turn despite any "
-            "wording above that may suggest otherwise. Run `git status` or "
-            "`read_file` to confirm."
-        ]
-        shown = 0
-        for path, info in failed.items():
-            if shown >= 10:
-                break
-            preview = (info.get("error_preview") or "").strip()
-            tool = info.get("tool") or "patch"
-            if preview:
-                lines.append(f"  • `{path}` — [{tool}] {preview}")
-            else:
-                lines.append(f"  • `{path}` — [{tool}] failed")
-            shown += 1
-        remaining = len(failed) - shown
-        if remaining > 0:
-            lines.append(f"  • … and {remaining} more")
-        # Neutralize any path the preview text echoed (the bullet path is
-        # already backticked above; the lookbehind keeps it from being
-        # double-wrapped).
-        return cls._neutralize_footer_paths("\n".join(lines))
-
     def _turn_completion_explainer_enabled(self) -> bool:
         """Check whether the end-of-turn completion explainer footer is on.
 
         Config path: ``display.turn_completion_explainer`` (bool, default
         True).  ``HERMES_TURN_COMPLETION_EXPLAINER`` env var overrides
-        config.  Exposed as a method so tests can patch a single seam,
-        mirroring ``_file_mutation_verifier_enabled``.
+        config.
         """
         try:
             import os as _os

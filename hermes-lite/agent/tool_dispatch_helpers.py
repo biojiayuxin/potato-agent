@@ -1,4 +1,4 @@
-"""Tool-dispatch helpers — parallelism gating, multimodal envelopes, mutation tracking.
+"""Tool-dispatch helpers for parallelism gating and multimodal envelopes.
 
 Pure module-level utilities extracted from ``run_agent.py``:
 
@@ -11,8 +11,6 @@ Pure module-level utilities extracted from ``run_agent.py``:
   ``_append_subdir_hint_to_multimodal`` — envelope helpers for the
   ``{"_multimodal": True, "content": [...], "text_summary": ...}`` dict
   shape returned by tools like ``computer_use``.
-* ``_extract_file_mutation_targets`` / ``_extract_error_preview`` —
-  per-turn file-mutation verifier inputs.
 * ``_trajectory_normalize_msg`` — strip image blobs from a message for
   trajectory saving.
 
@@ -28,11 +26,7 @@ import logging
 import os
 import re
 from pathlib import Path
-from typing import Any, Dict, List, Optional
-
-from agent.tool_result_classification import (
-    FILE_MUTATING_TOOL_NAMES as _FILE_MUTATING_TOOLS,
-)
+from typing import Any, Dict, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -241,66 +235,6 @@ def _append_subdir_hint_to_multimodal(value: Dict[str, Any], hint: str) -> None:
         value["text_summary"] = value["text_summary"] + hint
 
 
-def _extract_file_mutation_targets(tool_name: str, args: Dict[str, Any]) -> List[str]:
-    """Return the file paths a ``write_file`` or ``patch`` call is targeting.
-
-    For ``write_file`` and ``patch`` in replace mode this is just ``args["path"]``.
-    For ``patch`` in V4A patch mode we parse the patch content for
-    ``*** Update File:`` / ``*** Add File:`` / ``*** Delete File:`` headers so
-    the verifier can track each file in a multi-file patch separately.
-    """
-    if tool_name not in _FILE_MUTATING_TOOLS:
-        return []
-    if tool_name == "write_file":
-        p = args.get("path")
-        return [str(p)] if p else []
-    # tool_name == "patch"
-    mode = args.get("mode") or "replace"
-    if mode == "replace":
-        p = args.get("path")
-        return [str(p)] if p else []
-    if mode == "patch":
-        body = args.get("patch") or ""
-        if not isinstance(body, str) or not body:
-            return []
-        paths: List[str] = []
-        for _m in re.finditer(
-            r'^\*\*\*\s+(?:Update|Add|Delete)\s+File:\s*(.+)$',
-            body,
-            re.MULTILINE,
-        ):
-            p = _m.group(1).strip()
-            if p:
-                paths.append(p)
-        return paths
-    return []
-
-
-def _extract_error_preview(result: Any, max_len: int = 180) -> str:
-    """Pull a one-line error summary out of a tool result for footer display."""
-    text = _multimodal_text_summary(result) if result is not None else ""
-    if not isinstance(text, str):
-        try:
-            text = str(text)
-        except Exception:
-            return ""
-    # Try to parse JSON and pull the ``error`` field — tool handlers return
-    # ``{"success": false, "error": "..."}``; raw string wins if parse fails.
-    stripped = text.strip()
-    if stripped.startswith("{"):
-        try:
-            data = json.loads(stripped)
-            if isinstance(data, dict) and isinstance(data.get("error"), str):
-                text = data["error"]
-        except Exception:
-            pass
-    # Collapse whitespace, trim to max_len.
-    text = " ".join(text.split())
-    if len(text) > max_len:
-        text = text[: max_len - 1] + "…"
-    return text
-
-
 def _trajectory_normalize_msg(msg: Dict[str, Any]) -> Dict[str, Any]:
     """Strip image blobs from a message for trajectory saving.
 
@@ -417,8 +351,6 @@ __all__ = [
     "_is_multimodal_tool_result",
     "_multimodal_text_summary",
     "_append_subdir_hint_to_multimodal",
-    "_extract_file_mutation_targets",
-    "_extract_error_preview",
     "_trajectory_normalize_msg",
     "make_tool_result_message",
 ]
